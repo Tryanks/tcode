@@ -929,6 +929,17 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-provider-diff-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.deliver(
+        cx,
+        1000,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::Providers,
+            after: None,
+            known_index: None,
+        }),
+    );
+    cx.run_until_parked();
+    cx.drain_outgoing();
     let command = Command::SetProfileSecret {
         profile_id: "codex".into(),
         name: "OPENAI_API_KEY".into(),
@@ -1476,6 +1487,17 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             state.set_provider_launcher_for_test(scripted.launcher);
             state
         });
+        state.deliver(
+            cx,
+            1000,
+            tcode_protocol::ClientPayload::Subscribe(Subscription {
+                topic: Topic::Index,
+                after: None,
+                known_index: None,
+            }),
+        );
+        cx.run_until_parked();
+        cx.drain_outgoing();
         if outcome == "cached" {
             state.update(cx, |state, cx| {
                 state.record_event(
@@ -8408,6 +8430,15 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
         store.upsert_meta(&meta).unwrap();
     }
     let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.deliver(
+        cx,
+        1000,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::Index,
+            after: None,
+            known_index: None,
+        }),
+    );
     cx.run_until_parked();
     cx.drain_outgoing();
 

@@ -11,7 +11,7 @@ pub(crate) struct DomainDiff {
     index: IndexSnapshot,
     space_indexes: HashMap<String, IndexSnapshot>,
     settings: Settings,
-    providers: ProvidersStatus,
+    providers: Option<ProvidersStatus>,
     git_status: HashMap<String, GitStatusStatus>,
     session_statuses: HashMap<String, SessionStatus>,
     session_plans: HashMap<String, SessionPlan>,
@@ -21,10 +21,21 @@ impl DomainDiff {
     pub(crate) fn new(state: &AppState) -> Self {
         Self {
             subscriptions: state.subscriptions.clone(),
-            index: state.index_snapshot(),
+            index: if state.subscriptions.contains(&Topic::Index) {
+                state.index_snapshot()
+            } else {
+                IndexSnapshot {
+                    summary: IndexSummary::default(),
+                    sessions: Vec::new(),
+                    projects: state.projects.clone(),
+                }
+            },
             space_indexes: HashMap::new(),
             settings: state.settings_snapshot(),
-            providers: state.providers_status_snapshot(),
+            providers: state
+                .subscriptions
+                .contains(&Topic::Providers)
+                .then(|| state.providers_status_snapshot()),
             git_status: HashMap::new(),
             session_statuses: state.subscribed_session_status_snapshots(),
             session_plans: state.subscribed_session_plan_snapshots(),
@@ -36,19 +47,34 @@ impl DomainDiff {
             state.space_archives_revision = None;
         }
         state.refresh_space_archives();
-        let summary = state.index_summary();
-        if self.index.summary != summary
-            || self.index.projects != state.projects
-            || !self.index.sessions.iter().eq(state
-                .sessions
-                .iter()
-                .filter(|meta| meta.archived_at.is_none()))
-        {
-            let index = state.index_snapshot_with_summary(summary);
-            for event in index_changes(&self.index, &index) {
-                emit_replacement(Topic::Index, event, cx);
+        if state.subscriptions.contains(&Topic::Index) {
+            if !self.subscriptions.contains(&Topic::Index) {
+                self.index = state.index_snapshot();
+            } else {
+                let summary = state.index_summary();
+                if self.index.summary != summary
+                    || self.index.projects != state.projects
+                    || !self.index.sessions.iter().eq(state
+                        .sessions
+                        .iter()
+                        .filter(|meta| meta.archived_at.is_none()))
+                {
+                    let index = state.index_snapshot_with_summary(summary);
+                    for event in index_changes(&self.index, &index) {
+                        emit_replacement(Topic::Index, event, cx);
+                    }
+                    self.index = index;
+                }
             }
-            self.index = index;
+        } else {
+            if self.subscriptions.contains(&Topic::Index) {
+                self.index.sessions = Vec::new();
+                self.index.summary = IndexSummary::default();
+            }
+            // Project changes also invalidate scoped archives without a global subscriber.
+            if self.index.projects != state.projects {
+                self.index.projects.clone_from(&state.projects);
+            }
         }
 
         self.space_indexes.retain(|id, _| {
@@ -81,14 +107,20 @@ impl DomainDiff {
             self.settings = settings;
         }
 
-        let providers = state.providers_status_snapshot();
-        if self.providers != providers {
-            self.providers = providers.clone();
-            emit_replacement(
-                Topic::Providers,
-                ServerEvent::ProvidersReplaced(providers),
-                cx,
-            );
+        if state.subscriptions.contains(&Topic::Providers) {
+            let providers = state.providers_status_snapshot();
+            if self.providers.as_ref() != Some(&providers) {
+                if self.providers.is_some() {
+                    emit_replacement(
+                        Topic::Providers,
+                        ServerEvent::ProvidersReplaced(providers.clone()),
+                        cx,
+                    );
+                }
+                self.providers = Some(providers);
+            }
+        } else {
+            self.providers = None;
         }
 
         let git_status: HashMap<_, _> = state
