@@ -429,7 +429,7 @@ impl AppState {
             archived_revision: self.archived_revision,
             ..IndexSummary::default()
         };
-        let sharing = self.worktree_sharing();
+        let sharing = std::cell::OnceCell::new();
         for meta in &self.sessions {
             if meta.archived_at.is_none() {
                 let resident = self.resident(&meta.id);
@@ -438,7 +438,11 @@ impl AppState {
                     activity
                         .session_activity(resident.map_or(meta, |session| &session.meta), resident),
                 );
-                if sharing.is_shared(meta) {
+                if meta.worktree.is_some()
+                    && sharing
+                        .get_or_init(|| self.worktree_sharing())
+                        .is_shared(meta)
+                {
                     summary.worktree_shared.insert(meta.id.clone());
                 }
                 continue;
@@ -459,7 +463,11 @@ impl AppState {
                     id.to_string(),
                     activity.session_activity(&session.meta, Some(session)),
                 );
-                if sharing.is_shared(&session.meta) {
+                if session.meta.worktree.is_some()
+                    && sharing
+                        .get_or_init(|| self.worktree_sharing())
+                        .is_shared(&session.meta)
+                {
                     summary.worktree_shared.insert(id.to_string());
                 }
             }
