@@ -103,6 +103,9 @@ impl MarkdownState {
         parsed_document: super::parse::ParsedDocument,
         cx: &mut Context<Self>,
     ) -> Self {
+        let owner = cx.entity_id();
+        cx.on_release(move |_, cx| render::clear_code_measurements(owner, cx))
+            .detach();
         let parsed = parsed_document.root;
         let items = root_items(&parsed);
         let selection_adapter = MarkdownSelectionAdapter::new(cx.entity().downgrade(), cx);
@@ -416,6 +419,7 @@ impl MarkdownState {
     }
 
     fn reparse_reset(&mut self, cx: &mut Context<Self>) {
+        render::clear_code_measurements(cx.entity_id(), cx);
         self.prepare_reparse(cx);
         let parsed_document = super::parse::parse_document(&self.text);
         self.items = root_items(&parsed_document.root);
