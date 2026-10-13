@@ -16,11 +16,12 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::copy::copy_button;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
-    GlobalElementId, HighlightStyle, Image, ImageSource, InspectorElementId,
+    AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, EntityId, FontStyle,
+    FontWeight, Global, GlobalElementId, HighlightStyle, Image, ImageSource, InspectorElementId,
     InteractiveElement as _, IntoElement, LayoutId, ListState, MouseButton, ObjectFit,
     ParentElement as _, Pixels, Rems, Role, SharedString, StatefulInteractiveElement as _, Style,
-    Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px, rems, size,
+    Styled as _, StyledImage as _, StyledText, TextLayout, Window, div, img,
+    prelude::FluentBuilder as _, px, rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -93,6 +94,13 @@ impl<K: Clone + Eq + Hash, V: Clone> RecentCache<K, V> {
         }
     }
 
+    fn remove(&mut self, key: &K) {
+        if let Some(value) = self.entries.remove(key) {
+            self.weight -= (self.weigh)(key, &value);
+            self.order.retain(|entry| entry != key);
+        }
+    }
+
     pub(super) fn get_or_insert_with(&mut self, key: K, compute: impl FnOnce() -> V) -> V {
         if let Some(value) = self.entries.get(&key) {
             return value.clone();
@@ -119,6 +127,35 @@ impl<K: Clone + Eq + Hash, V: Clone> RecentCache<K, V> {
     }
 }
 
+// These are input-size weights, not a claim about GPUI's allocation size.
+const CODE_MEASUREMENT_WEIGHT_LIMIT: usize = 8 * 1024 * 1024;
+#[derive(Default)]
+struct CodeMeasurement {
+    layouts: Vec<TextLayout>,
+    source_bytes: usize,
+    logical_lines: usize,
+}
+impl CodeMeasurement {
+    fn weight(&self) -> usize {
+        self.source_bytes
+            .saturating_add(self.logical_lines.saturating_mul(128))
+    }
+}
+struct CodeMeasurements(RecentCache<EntityId, Rc<RefCell<CodeMeasurement>>>);
+impl Global for CodeMeasurements {}
+impl Default for CodeMeasurements {
+    fn default() -> Self {
+        Self(RecentCache::with_weight_limit(
+            4,
+            CODE_MEASUREMENT_WEIGHT_LIMIT,
+            |_, value| value.borrow().weight(),
+        ))
+    }
+}
+pub(super) fn clear_code_measurements(owner: EntityId, cx: &mut App) {
+    cx.default_global::<CodeMeasurements>().0.remove(&owner);
+}
+
 #[derive(Clone)]
 struct RenderOptions {
     path: String,
@@ -127,6 +164,7 @@ struct RenderOptions {
     list_start: u32,
     depth: usize,
     is_last: bool,
+    measurement: Option<Rc<RefCell<CodeMeasurement>>>,
 }
 
 impl Default for RenderOptions {
@@ -138,6 +176,7 @@ impl Default for RenderOptions {
             list_start: 1,
             depth: 0,
             is_last: true,
+            measurement: None,
         }
     }
 }
@@ -318,11 +357,16 @@ pub(super) fn render_root(
         .into_any_element()
 }
 
+enum RootItemLayout {
+    Measure(Rc<RefCell<CodeMeasurement>>),
+    Visible(Pixels),
+}
+
 fn render_root_item(
     root: &BlockNode,
     items: &[RootItem],
     ix: usize,
-    width: Pixels,
+    layout: RootItemLayout,
     state: &Entity<MarkdownState>,
     window: &mut Window,
     cx: &mut App,
@@ -331,7 +375,14 @@ fn render_root_item(
         unreachable!("the root list renders the children of a root")
     };
     let item = &items[ix];
-    let options = RenderOptions::default().child(item.block, item.block + 1 == children.len());
+    let mut options = RenderOptions::default().child(item.block, item.block + 1 == children.len());
+    let width = match layout {
+        RootItemLayout::Measure(measurement) => {
+            options.measurement = Some(measurement);
+            px(0.)
+        }
+        RootItemLayout::Visible(width) => width,
+    };
     let content = match (&children[item.block], item.span.clone()) {
         (BlockNode::CodeBlock(code), Some(span)) => {
             render_code_block(code, Some(span), &options, state, window, cx)
@@ -404,16 +455,33 @@ impl Element for VirtualizedBlockList {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let Some(content_height) = self.content_height else {
+            clear_code_measurements(self.state.entity_id(), cx);
+            let measurement = Rc::new(RefCell::new(CodeMeasurement::default()));
             // Outer-list overdraw lays out rows without prepainting them. A
             // regular column measures cold blocks at the actual parent width;
             // an Infer list would cache their min-content heights instead.
             let mut column = v_flex()
                 .w_full()
                 .children((0..self.items.len()).map(|ix| {
-                    render_root_item(&self.root, &self.items, ix, px(0.), &self.state, window, cx)
+                    render_root_item(
+                        &self.root,
+                        &self.items,
+                        ix,
+                        RootItemLayout::Measure(measurement.clone()),
+                        &self.state,
+                        window,
+                        cx,
+                    )
                 }))
                 .into_any_element();
             let layout = column.request_layout(window, cx);
+            if !measurement.borrow().layouts.is_empty()
+                && measurement.borrow().weight() <= CODE_MEASUREMENT_WEIGHT_LIMIT
+            {
+                cx.default_global::<CodeMeasurements>()
+                    .0
+                    .get_or_insert_with(self.state.entity_id(), || measurement);
+            }
             return (layout, Some(column));
         };
         let layout_id = window.request_measured_layout(
@@ -464,7 +532,15 @@ impl Element for VirtualizedBlockList {
         let state = self.state.clone();
         let width = viewport.size.width;
         let mut list = gpui::list(self.list_state.clone(), move |ix, window, cx| {
-            render_root_item(&root, &items, ix, width, &state, window, cx)
+            render_root_item(
+                &root,
+                &items,
+                ix,
+                RootItemLayout::Visible(width),
+                &state,
+                window,
+                cx,
+            )
         })
         .size_full()
         .into_any_element();
@@ -1140,25 +1216,15 @@ fn code_lines(code: &str) -> Vec<&str> {
     lines
 }
 
-fn render_code_block(
+fn render_code_lines(
     code: &CodeBlock,
-    span: Option<Range<usize>>,
-    options: &RenderOptions,
+    span: Range<usize>,
     view: &Entity<MarkdownState>,
-    window: &Window,
     cx: &mut App,
 ) -> AnyElement {
     let prepared = code.prepared();
-    let code_text = prepared.text.as_ref();
-    if mermaid::is_mermaid(code.lang.as_deref())
-        && let Some(image) = mermaid::diagram(code_text, cx.theme().mode.is_dark())
-    {
-        return render_diagram(image, code_text, options, view, cx);
-    }
     let highlighted = cached_highlights(code, &cx.theme().highlight_theme);
     let all_runs = &highlighted.runs;
-    let span = span.unwrap_or(0..prepared.lines.len());
-    let (first, last) = (span.start == 0, span.end == prepared.lines.len());
     let states = code.states_for_lines(prepared, span.clone());
     let mut offset = prepared.lines.get(span.start).map_or(0, |line| line.start);
     let span_end = span
@@ -1193,6 +1259,145 @@ fn render_code_block(
         rendered_lines.push(line);
         offset = end.saturating_add(1);
     }
+    v_flex()
+        .w_full()
+        .children(rendered_lines)
+        .into_any_element()
+}
+
+// Cold outer-list measurement never paints; use GPUI's multiline text layout
+// without allocating selection state for every offscreen code line.
+struct CodeSliceMeasure {
+    measurement: Rc<RefCell<CodeMeasurement>>,
+    code: CodeBlock,
+    span: Range<usize>,
+    view: Entity<MarkdownState>,
+}
+
+impl IntoElement for CodeSliceMeasure {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for CodeSliceMeasure {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, AnyElement) {
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.pixel_snap(
+            style
+                .line_height
+                .to_pixels(font_size.into(), window.rem_size()),
+        );
+        let prepared = self.code.prepared();
+        let mut text_layout = None;
+        let mut content = if line_height >= px(18.)
+            && style.line_clamp.is_none()
+            && style.text_overflow.is_none()
+            && !self.span.is_empty()
+        {
+            let start = prepared.lines[self.span.start].start;
+            let end = prepared.lines[self.span.end - 1].end;
+            let highlighted = cached_highlights(&self.code, &cx.theme().highlight_theme);
+            let all_runs = &highlighted.runs;
+            let runs = &all_runs[all_runs.partition_point(|(range, _)| range.end <= start)
+                ..all_runs.partition_point(|(range, _)| range.start < end)];
+            let runs = sub_runs(runs, start, end);
+            let text = StyledText::new(prepared.text[start..end].to_string()).with_highlights(runs);
+            text_layout = Some((text.layout().clone(), end - start));
+            text.into_any_element()
+        } else {
+            render_code_lines(&self.code, self.span.clone(), &self.view, cx)
+        };
+        let layout = content.request_layout(window, cx);
+        if let Some((text_layout, source_bytes)) = text_layout {
+            // GPUI retains shaped lines while a TextLayout owns them. Cold
+            // measurement nodes disappear on warm frames; keep one generation
+            // alive so the next append can reuse unchanged line shapes.
+            let mut measurement = self.measurement.borrow_mut();
+            measurement.source_bytes = measurement.source_bytes.saturating_add(source_bytes);
+            measurement.logical_lines = measurement.logical_lines.saturating_add(self.span.len());
+            if measurement.weight() <= CODE_MEASUREMENT_WEIGHT_LIMIT {
+                measurement.layouts.push(text_layout);
+            } else {
+                measurement.layouts.clear();
+            }
+        }
+        (layout, content)
+    }
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        content: &mut AnyElement,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        content.prepaint_at(bounds.origin, window, cx);
+    }
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        content: &mut AnyElement,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        content.paint(window, cx);
+    }
+}
+
+fn render_code_block(
+    code: &CodeBlock,
+    span: Option<Range<usize>>,
+    options: &RenderOptions,
+    view: &Entity<MarkdownState>,
+    window: &Window,
+    cx: &mut App,
+) -> AnyElement {
+    let prepared = code.prepared();
+    let code_text = prepared.text.as_ref();
+    if mermaid::is_mermaid(code.lang.as_deref())
+        && let Some(image) = mermaid::diagram(code_text, cx.theme().mode.is_dark())
+    {
+        return render_diagram(image, code_text, options, view, cx);
+    }
+    let span = span.unwrap_or(0..prepared.lines.len());
+    let (first, last) = (span.start == 0, span.end == prepared.lines.len());
+    let lines = if let Some(measurement) = &options.measurement {
+        div()
+            .w_full()
+            .whitespace_normal()
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_size(INLINE_CODE_FONT_SIZE)
+            .child(CodeSliceMeasure {
+                measurement: measurement.clone(),
+                code: code.clone(),
+                span: span.clone(),
+                view: view.clone(),
+            })
+            .into_any_element()
+    } else {
+        render_code_lines(code, span.clone(), view, cx)
+    };
     let radius = cx.theme().tokens.radius.md;
     // The whole fence, not the painted span: a long block is split across
     // list items and the menu copies the code a reader sees as one block.
@@ -1261,7 +1466,7 @@ fn render_code_block(
                 .when(last, |block| block.pb_3().rounded_b(radius))
                 .bg(cx.theme().tokens.colors.muted)
                 .relative()
-                .child(v_flex().w_full().children(rendered_lines))
+                .child(lines)
                 .children(copy),
         )
         .into_any_element();
