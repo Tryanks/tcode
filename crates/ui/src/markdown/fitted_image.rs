@@ -7,10 +7,12 @@
 //! width itself.
 
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, ImageSource,
-    InspectorElementId, IntoElement, LayoutId, ObjectFit, Pixels, Size, Style, Styled,
-    StyledImage as _, Window, img, px, relative, size,
+    AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, GlobalElementId,
+    ImageSource, InspectorElementId, IntoElement, LayoutId, ObjectFit, Pixels, Size, Style, Styled,
+    StyledImage as _, WeakEntity, Window, img, px, relative, size,
 };
+
+use super::state::MarkdownState;
 
 const MAX_HEIGHT: Pixels = px(720.);
 const MIN_SIDE: Pixels = px(15.);
@@ -18,15 +20,30 @@ const MIN_SIDE: Pixels = px(15.);
 pub(super) struct FittedImage<E> {
     source: ImageSource,
     image: Option<E>,
+    owner: WeakEntity<MarkdownState>,
+    path: String,
+    revision: usize,
+    previous_size: Option<Size<Pixels>>,
 }
 
 impl<E: IntoElement + Styled + 'static> FittedImage<E> {
     /// `image` is the styled `img` of `source` that is painted; its width
     /// and height are set here.
-    pub(super) fn new(source: ImageSource, image: E) -> Self {
+    pub(super) fn new(
+        source: ImageSource,
+        image: E,
+        owner: &Entity<MarkdownState>,
+        path: String,
+        cx: &App,
+    ) -> Self {
+        let (revision, previous_size) = owner.read(cx).image_layout(&path);
         Self {
             source,
             image: Some(image),
+            owner: owner.downgrade(),
+            path,
+            revision,
+            previous_size,
         }
     }
 }
@@ -40,7 +57,7 @@ impl<E: IntoElement + Styled + 'static> IntoElement for FittedImage<E> {
 }
 
 impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
-    type RequestLayoutState = ();
+    type RequestLayoutState = Size<Pixels>;
     type PrepaintState = Option<AnyElement>;
 
     fn id(&self) -> Option<ElementId> {
@@ -62,6 +79,18 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
             .object_fit(ObjectFit::Contain)
             .into_any_element()
             .layout_as_root(AvailableSpace::min_size(), window, cx);
+        if self.previous_size != Some(intrinsic) {
+            let owner = self.owner.clone();
+            let path = self.path.clone();
+            let revision = self.revision;
+            // ListState can be borrowed while its children lay out. Invalidate
+            // its cached heights after this frame, not from inside that borrow.
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |state, cx| {
+                    state.image_resized(path, revision, intrinsic, cx)
+                });
+            });
+        }
         let mut style = Style::default();
         style.max_size.width = relative(1.).into();
         let layout_id = window.request_measured_layout(
@@ -74,7 +103,7 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
                 fit(intrinsic, available_width)
             },
         );
-        (layout_id, ())
+        (layout_id, intrinsic)
     }
 
     fn prepaint(
@@ -82,21 +111,22 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
+        intrinsic: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let fitted = fit(*intrinsic, Some(bounds.size.width));
         let mut image = self
             .image
             .take()?
-            .w(bounds.size.width)
-            .h(bounds.size.height)
+            .w(fitted.width)
+            .h(fitted.height)
             .into_any_element();
         image.prepaint_as_root(
             bounds.origin,
             size(
-                AvailableSpace::Definite(bounds.size.width),
-                AvailableSpace::Definite(bounds.size.height),
+                AvailableSpace::Definite(fitted.width),
+                AvailableSpace::Definite(fitted.height),
             ),
             window,
             cx,

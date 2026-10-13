@@ -597,7 +597,7 @@ fn render_block(
             .pb(gap)
             .whitespace_normal()
             .child(
-                pending_images(paragraph, state, window, cx)
+                pending_images(paragraph, &options.path, state, window, cx)
                     .unwrap_or_else(|| render_paragraph(paragraph, &options.path, state, cx)),
             )
             .into_any_element(),
@@ -681,6 +681,7 @@ fn render_block(
 /// stand-in until it can be drawn, and as the image once it can.
 fn pending_images(
     paragraph: &Paragraph,
+    path: &str,
     state: &Entity<MarkdownState>,
     window: &mut Window,
     cx: &mut App,
@@ -709,13 +710,25 @@ fn pending_images(
         v_flex()
             .w_full()
             .gap_1()
-            .children(images.into_iter().zip(pending).map(|(image, pending)| {
-                pending.unwrap_or_else(|| {
-                    let source = state.read(cx).image_source(&image.url);
-                    FittedImage::new(source.clone(), img(source).object_fit(ObjectFit::Contain))
-                        .into_any_element()
-                })
-            }))
+            .children(
+                images
+                    .into_iter()
+                    .zip(pending)
+                    .enumerate()
+                    .map(|(ix, (image, pending))| {
+                        pending.unwrap_or_else(|| {
+                            let source = state.read(cx).image_source(&image.url);
+                            FittedImage::new(
+                                source.clone(),
+                                img(source).object_fit(ObjectFit::Contain),
+                                state,
+                                format!("{path}/image/{ix}"),
+                                cx,
+                            )
+                            .into_any_element()
+                        })
+                    }),
+            )
             .into_any_element(),
     )
 }
@@ -762,6 +775,7 @@ fn render_paragraph(
                 let view = view.clone();
                 let source = view.read(cx).image_source(&image.url);
                 let image_source = source.clone();
+                let image_owner = view.clone();
                 let link = image.link.clone();
                 let context_view = view.clone();
                 let context_url = image.url.clone();
@@ -814,7 +828,13 @@ fn render_paragraph(
                                 );
                             }
                         });
-                FittedImage::new(image_source, image)
+                FittedImage::new(
+                    image_source,
+                    image,
+                    &image_owner,
+                    format!("{id}/image/{ix}"),
+                    cx,
+                )
             }))
             .into_any_element();
     }
@@ -1534,7 +1554,13 @@ fn render_diagram(
                 .p_3()
                 .rounded(cx.theme().tokens.radius.md)
                 .bg(cx.theme().tokens.colors.muted)
-                .child(FittedImage::new(source, diagram)),
+                .child(FittedImage::new(
+                    source,
+                    diagram,
+                    view,
+                    options.path.clone(),
+                    cx,
+                )),
         );
     #[cfg(test)]
     let block = {
