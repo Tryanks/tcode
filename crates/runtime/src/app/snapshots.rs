@@ -7,6 +7,7 @@ use tcode_protocol::AgentStatus;
 /// The host turn is the single seam that reconciles these projections. Timeline
 /// appends and one-shot events deliberately remain on their existing paths.
 pub(crate) struct DomainDiff {
+    subscriptions: HashSet<Topic>,
     index: IndexSnapshot,
     space_indexes: HashMap<String, IndexSnapshot>,
     settings: Settings,
@@ -19,13 +20,14 @@ pub(crate) struct DomainDiff {
 impl DomainDiff {
     pub(crate) fn new(state: &AppState) -> Self {
         Self {
+            subscriptions: state.subscriptions.clone(),
             index: state.index_snapshot(),
             space_indexes: HashMap::new(),
             settings: state.settings_snapshot(),
             providers: state.providers_status_snapshot(),
             git_status: HashMap::new(),
-            session_statuses: state.resident_session_status_snapshots(),
-            session_plans: state.resident_session_plan_snapshots(),
+            session_statuses: state.subscribed_session_status_snapshots(),
+            session_plans: state.subscribed_session_plan_snapshots(),
         }
     }
 
@@ -83,12 +85,20 @@ impl DomainDiff {
         }
 
         let git_status: HashMap<_, _> = state
-            .residents
-            .ids()
-            .map(|id| (id.to_string(), state.git_status_snapshot(id)))
+            .subscriptions
+            .iter()
+            .filter_map(|topic| match topic {
+                Topic::GitStatus { session_id } => {
+                    Some((session_id.clone(), state.git_status_snapshot(session_id)))
+                }
+                _ => None,
+            })
             .collect();
         for (id, status) in &git_status {
-            if self.git_status.get(id) != Some(status) {
+            if self.subscriptions.contains(&Topic::GitStatus {
+                session_id: id.clone(),
+            }) && self.git_status.get(id) != Some(status)
+            {
                 emit_replacement(
                     Topic::GitStatus {
                         session_id: id.clone(),
@@ -100,11 +110,14 @@ impl DomainDiff {
         }
         self.git_status = git_status;
 
-        let session_statuses = state.resident_session_status_snapshots();
+        let session_statuses = state.subscribed_session_status_snapshots();
         let mut changed_ids: Vec<_> = session_statuses
             .iter()
             .filter_map(|(id, status)| {
-                (self.session_statuses.get(id) != Some(status)).then_some(id.as_str())
+                (self.subscriptions.contains(&Topic::SessionStatus {
+                    session_id: id.clone(),
+                }) && self.session_statuses.get(id) != Some(status))
+                .then_some(id.as_str())
             })
             .collect();
         changed_ids.sort_unstable();
@@ -119,11 +132,14 @@ impl DomainDiff {
             );
         }
         self.session_statuses = session_statuses;
-        let session_plans = state.resident_session_plan_snapshots();
+        let session_plans = state.subscribed_session_plan_snapshots();
         let mut changed_ids: Vec<_> = session_plans
             .iter()
             .filter_map(|(id, plan)| {
-                (self.session_plans.get(id) != Some(plan)).then_some(id.as_str())
+                (self.subscriptions.contains(&Topic::SessionPlan {
+                    session_id: id.clone(),
+                }) && self.session_plans.get(id) != Some(plan))
+                .then_some(id.as_str())
             })
             .collect();
         changed_ids.sort_unstable();
@@ -137,6 +153,10 @@ impl DomainDiff {
             );
         }
         self.session_plans = session_plans;
+        // The first subscribed turn already replies with a correlated snapshot.
+        // Retain its projection as the baseline; subsequent turns emit changes,
+        // including late adoption when no status was available in that reply.
+        self.subscriptions.clone_from(&state.subscriptions);
     }
 }
 
@@ -785,10 +805,15 @@ impl AppState {
         })
     }
 
-    fn resident_session_plan_snapshots(&self) -> HashMap<String, SessionPlan> {
-        self.residents
-            .ids()
-            .filter_map(|id| Some((id.to_string(), self.session_plan_snapshot(id)?)))
+    fn subscribed_session_plan_snapshots(&self) -> HashMap<String, SessionPlan> {
+        self.subscriptions
+            .iter()
+            .filter_map(|topic| match topic {
+                Topic::SessionPlan { session_id } => {
+                    Some((session_id.clone(), self.session_plan_snapshot(session_id)?))
+                }
+                _ => None,
+            })
             .collect()
     }
 
@@ -966,15 +991,21 @@ impl AppState {
         })
     }
 
-    fn resident_session_status_snapshots(&self) -> HashMap<String, SessionStatus> {
-        let activity = ActivityProjection::new(self);
-        let mut statuses = HashMap::new();
-        for id in self.residents.ids() {
-            if let Some(status) = self.session_status_with_activity(id, &activity) {
-                statuses.insert(id.to_string(), status);
-            }
-        }
-        statuses
+    fn subscribed_session_status_snapshots(&self) -> HashMap<String, SessionStatus> {
+        let mut activity = None;
+        self.subscriptions
+            .iter()
+            .filter_map(|topic| {
+                let Topic::SessionStatus { session_id } = topic else {
+                    return None;
+                };
+                let activity = activity.get_or_insert_with(|| ActivityProjection::new(self));
+                Some((
+                    session_id.clone(),
+                    self.session_status_with_activity(session_id, activity)?,
+                ))
+            })
+            .collect()
     }
 
     pub(super) fn upsert_session_in_memory(&mut self, meta: SessionMeta) {
