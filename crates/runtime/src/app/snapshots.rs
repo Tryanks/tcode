@@ -416,7 +416,9 @@ impl<'a> ActivityProjection<'a> {
                         .iter()
                         .any(|message| message.origin == MessageOrigin::Human)
             }),
-            turn_running: resident.is_some_and(|session| session.turn_in_flight),
+            turn_running: resident.is_some_and(|session| {
+                session.turn_in_flight && session.timeline.turn_retry.is_none()
+            }),
             waiting: resident.is_some_and(|session| session.background_task_count > 0)
                 || self.children_hold(&meta.id)
                 || tcode_core::pull_request::watched(&meta.pull_requests)
@@ -1050,6 +1052,9 @@ impl AppState {
             delivery_in_flight: session.delivery_in_flight,
             activity: activity.session_activity(meta, Some(session)),
             stopping: session.interrupt_requested,
+            turn_retry: matches!(session.runtime, Runtime::Live(_))
+                .then(|| session.timeline.turn_retry.clone())
+                .flatten(),
             native_rewind_blocked: self.native_rewind_blocked(session),
             checkout_blocked: Self::checkout_blocked(session),
             conversation_read_only: Self::conversation_read_only(meta),

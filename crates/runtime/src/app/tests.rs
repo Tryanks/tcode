@@ -4503,6 +4503,92 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
 }
 
 #[test]
+fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
+    for automatic in [true, false] {
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("native-retry-queue");
+        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+        let (commands, receiver) = smol::channel::unbounded();
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "retry".into();
+            if automatic {
+                active.push_queued("queued user message".into(), Vec::new());
+            }
+            state.install_selected(active);
+            state.on_event(
+                "retry",
+                AgentEvent::TurnStarted {
+                    turn_id: "failed".into(),
+                },
+                cx,
+            );
+            let retry = agent::TurnRetry {
+                turn_id: "failed".into(),
+                retry_at: automatic.then(|| now_secs() + 10),
+            };
+            state.on_event(
+                "retry",
+                AgentEvent::TurnRetry {
+                    retry: Some(retry.clone()),
+                },
+                cx,
+            );
+            state.on_event(
+                "retry",
+                AgentEvent::TurnCompleted {
+                    turn_id: "failed".into(),
+                    status: TurnStatus::Failed,
+                    usage: None,
+                },
+                cx,
+            );
+            let status = state.session_status_snapshot("retry").unwrap();
+            assert_eq!(status.activity.working, automatic);
+            assert!(!status.activity.turn_running);
+            assert_eq!(status.turn_retry, Some(retry));
+            assert!(
+                receiver.try_recv().is_err(),
+                "queued text must not race the native retry"
+            );
+            if automatic {
+                state.interrupt("retry", cx).unwrap();
+                assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Interrupt)));
+                state.on_event("retry", AgentEvent::TurnRetry { retry: None }, cx);
+            } else {
+                state
+                    .selected_session_mut()
+                    .unwrap()
+                    .push_queued("queued user message".into(), Vec::new());
+                state.dispatch_next_queued("retry", cx).unwrap();
+            }
+            let Ok(SessionCommand::SendTurn {
+                delivery_id, text, ..
+            }) = receiver.try_recv()
+            else {
+                panic!("queued message was not sent")
+            };
+            assert_eq!(text, "queued user message");
+            state.on_event("retry", AgentEvent::TurnAccepted { delivery_id }, cx);
+            // A rejected new start has no TurnStarted to clear the previous offer.
+            state.on_event(
+                "retry",
+                AgentEvent::TurnCompleted {
+                    turn_id: String::new(),
+                    status: TurnStatus::Failed,
+                    usage: None,
+                },
+                cx,
+            );
+            let status = state.session_status_snapshot("retry").unwrap();
+            assert!(status.turn_retry.is_none());
+            assert!(!status.activity.working);
+            assert!(state.retry_turn("retry", "failed".into()).is_err());
+        });
+    }
+}
+
+#[test]
 fn usage_limit_event_schedules_resume_when_enabled_only() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-usage-limit-resume-test");

@@ -9,6 +9,7 @@ impl AppState {
                 | AgentEvent::SessionClosed { .. }
                 | AgentEvent::ProviderStartFailed { .. }
                 | AgentEvent::BackgroundTasksChanged { count: 0 }
+                | AgentEvent::TurnRetry { retry: None }
         ) {
             let id = session_id.to_owned();
             cx.enqueue(move |state, cx| state.evaluate_thread_settlement(&id, cx));
@@ -262,6 +263,14 @@ impl AppState {
                 }
                 if filled_default_model && let Some(resident) = self.resident_mut(session_id) {
                     resident.live_model = model.clone();
+                }
+            }
+            AgentEvent::TurnRetry { retry } => {
+                if retry.is_none()
+                    && let Some(resident) = self.resident_mut(session_id)
+                {
+                    resident.turn_in_flight = false;
+                    resident.interrupt_requested = false;
                 }
             }
             AgentEvent::TurnCompleted { .. } => {
@@ -519,6 +528,25 @@ impl AppState {
         self.record_approval_event(session_id, &event);
         self.record_event(session_id, &event, cx);
 
+        let retry_pending = self.resident(session_id).is_some_and(|resident| {
+            resident
+                .timeline
+                .turn_retry
+                .as_ref()
+                .is_some_and(|retry| retry.retry_at.is_some())
+        });
+        if matches!(event, AgentEvent::TurnCompleted { .. }) && retry_pending {
+            return;
+        }
+        if matches!(event, AgentEvent::TurnRetry { retry: None }) {
+            if let Some(status) = self
+                .resident(session_id)
+                .and_then(|resident| resident.timeline.last_turn_status)
+            {
+                self.deliver_child_callback(session_id, status, cx);
+            }
+            let _ = self.dispatch_next_queued(session_id, cx);
+        }
         if let AgentEvent::TurnCompleted { status, .. } = &event {
             self.cancel_computer_use_feedback(session_id);
             self.deliver_child_callback(session_id, *status, cx);
