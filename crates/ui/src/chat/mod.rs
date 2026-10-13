@@ -5827,7 +5827,11 @@ mod tests {
                 cx: &mut gpui::Context<Self>,
             ) -> impl gpui::IntoElement {
                 if let gpui::ImageSource::Custom(load) = &self.source {
-                    self.ready.set(matches!(load(window, cx), Some(Ok(_))));
+                    match load(window, cx) {
+                        Some(Ok(_)) => self.ready.set(true),
+                        Some(Err(error)) => panic!("inline host image load failed: {error:?}"),
+                        None => {}
+                    }
                 }
                 self.chat.clone()
             }
