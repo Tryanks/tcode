@@ -139,7 +139,7 @@ impl HostLink {
         to_host: impl Into<outgoing::Outgoing>,
         from_host: async_channel::Receiver<String>,
     ) -> Self {
-        let (events_tx, events_rx) = async_channel::unbounded();
+        let (events_tx, events_rx) = async_channel::bounded(1);
         let (connection_state_tx, connection_state_rx) = async_channel::unbounded();
         Self {
             inner: Arc::new(HostLinkInner {
@@ -194,7 +194,31 @@ impl HostLink {
                         .unwrap()
                         .contains_key(&envelope.topic)
                     {
-                        let _ = self.inner.events_tx.send(envelope).await;
+                        match self.inner.events_tx.try_send(envelope) {
+                            Ok(()) => {}
+                            Err(async_channel::TrySendError::Closed(_)) => break,
+                            Err(async_channel::TrySendError::Full(envelope)) => {
+                                let blocked = web_time::Instant::now();
+                                if self.inner.events_tx.send(envelope).await.is_err() {
+                                    break;
+                                }
+                                // Local consumer backpressure is not time spent waiting for the host.
+                                let resumed = web_time::Instant::now();
+                                let resume = |started: &mut web_time::Instant| {
+                                    if *started < resumed {
+                                        *started += resumed.duration_since((*started).max(blocked));
+                                    }
+                                };
+                                for waiter in self.inner.pending.lock().unwrap().values_mut() {
+                                    resume(&mut waiter.started);
+                                }
+                                for write in &mut self.inner.delivery.lock().unwrap().writes {
+                                    if let Some(sent) = &mut write.sent {
+                                        resume(sent);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(
@@ -868,6 +892,7 @@ impl HostLink {
     pub fn close(&self) {
         self.inner.to_host.close();
         self.inner.from_host.close();
+        self.inner.events_tx.close();
         self.inner.connection_state_tx.close();
         self.inner.delivery_changes.0.close();
     }

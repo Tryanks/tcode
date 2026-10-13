@@ -7499,11 +7499,24 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
     }))
     .unwrap();
     for (link, id) in [(&one, &id_one), (&two, &id_two)] {
-        // An ack is a FIFO fence through both the host and mux.
-        link.command_blocking(Command::ClearRelaunchMarker).unwrap();
         let events = link.events();
-        let mut records = 0;
+        let mut received = Vec::new();
+        // The app consumes events while commands await their FIFO acknowledgement.
+        smol::block_on(smol::future::race(
+            async {
+                link.command(Command::ClearRelaunchMarker).await.unwrap();
+            },
+            async {
+                loop {
+                    received.push(events.recv().await.unwrap());
+                }
+            },
+        ));
         while let Ok(event) = events.try_recv() {
+            received.push(event);
+        }
+        let mut records = 0;
+        for event in received {
             assert_eq!(
                 event.topic,
                 Topic::SessionEvents {
