@@ -29,23 +29,6 @@ fn wire_len(record: &SessionEventRecord) -> usize {
     count.0
 }
 
-/// Keep [`OUTPUT_PREVIEW_BYTES`] of `text`, returning its full length when it
-/// was longer. A command keeps its tail: the end of a run is what its panel
-/// shows, and the host renders the whole output on request.
-fn shorten(text: &mut String, keep_tail: bool) -> Option<u64> {
-    if text.len() <= OUTPUT_PREVIEW_BYTES {
-        return None;
-    }
-    let full = text.len() as u64;
-    if keep_tail {
-        let start = text.len() - output_tail(text).len();
-        text.drain(..start);
-    } else {
-        text.truncate(text.floor_char_boundary(OUTPUT_PREVIEW_BYTES));
-    }
-    Some(full)
-}
-
 fn output_tail(text: &str) -> &str {
     let mut start = text.len().saturating_sub(OUTPUT_PREVIEW_BYTES);
     while !text.is_char_boundary(start) {
@@ -111,79 +94,115 @@ pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRe
             elided: Some(text.len() as u64),
         });
     }
-    if let AgentEvent::ItemStarted(item)
-    | AgentEvent::ItemUpdated(item)
-    | AgentEvent::ItemCompleted(item) = &record.event
-        && let ItemContent::CommandExecution {
+    let item = match &record.event {
+        AgentEvent::ItemStarted(item)
+        | AgentEvent::ItemUpdated(item)
+        | AgentEvent::ItemCompleted(item) => item,
+        _ => return Cow::Borrowed(record),
+    };
+    let (content, elided) = match &item.content {
+        ItemContent::CommandExecution {
             command,
             output,
             exit_code,
             status,
-        } = &item.content
-    {
-        let preview = agent::ThreadItem {
-            id: item.id.clone(),
-            parent_item_id: item.parent_item_id.clone(),
-            content: ItemContent::CommandExecution {
+        } => (
+            ItemContent::CommandExecution {
                 command: command.clone(),
                 output: output_tail(output).to_owned(),
                 exit_code: *exit_code,
                 status: *status,
             },
-        };
-        let event = match &record.event {
-            AgentEvent::ItemStarted(_) => AgentEvent::ItemStarted(preview),
-            AgentEvent::ItemUpdated(_) => AgentEvent::ItemUpdated(preview),
-            _ => AgentEvent::ItemCompleted(preview),
-        };
-        return Cow::Owned(SessionEventRecord {
-            origin: record.origin,
-            author: record.author.clone(),
-            ts: record.ts,
-            event,
-            elided: Some(output.len() as u64),
-        });
-    }
-    let mut record = record.clone();
-    record.elided = match &mut record.event {
-        AgentEvent::ItemStarted(item)
-        | AgentEvent::ItemUpdated(item)
-        | AgentEvent::ItemCompleted(item) => match &mut item.content {
-            ItemContent::ToolCall {
-                output,
-                image_reads,
-                ..
-            } => {
-                let full = output.as_ref().map(|output| output.len() as u64);
-                let mut removed = false;
-                for image in image_reads {
-                    if !image.data_base64.is_empty() {
-                        if let Some(output) = output {
-                            let preview = output.replace(&image.data_base64, "[image]");
-                            removed |= preview.len() != output.len();
-                            *output = preview;
+            Some(output.len() as u64),
+        ),
+        ItemContent::ToolCall {
+            image_reads,
+            name,
+            input,
+            output,
+            status,
+        } => {
+            let full = output.as_ref().map(|output| output.len() as u64);
+            let mut preview = output.as_deref().map(Cow::Borrowed);
+            let mut removed = false;
+            for image in image_reads {
+                if !image.data_base64.is_empty()
+                    && let Some(text) = &mut preview
+                {
+                    let mut matches = text.match_indices(image.data_base64.as_str());
+                    if let Some((first, matched)) = matches.next() {
+                        let mut replaced = String::with_capacity(text.len() - matched.len() + 7);
+                        replaced.push_str(&text[..first]);
+                        replaced.push_str("[image]");
+                        let mut end = first + matched.len();
+                        for (start, matched) in matches {
+                            replaced.push_str(&text[end..start]);
+                            replaced.push_str("[image]");
+                            end = start + matched.len();
                         }
-                        image.data_base64.clear();
+                        replaced.push_str(&text[end..]);
+                        removed |= replaced.len() != text.len();
+                        *text = Cow::Owned(replaced);
                     }
                 }
-                let shortened = output.as_mut().and_then(|output| shorten(output, false));
-                if removed || shortened.is_some() {
-                    full
+            }
+            let mut elided = if removed { full } else { None };
+            let output = preview.map(|text| {
+                if text.len() > OUTPUT_PREVIEW_BYTES {
+                    elided = full;
+                    text[..text.floor_char_boundary(OUTPUT_PREVIEW_BYTES)].to_owned()
                 } else {
-                    None
+                    text.into_owned()
                 }
-            }
+            });
+            (
+                ItemContent::ToolCall {
+                    image_reads: image_reads.iter().map(wire_image).collect(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    output,
+                    status: *status,
+                },
+                elided,
+            )
+        }
+        ItemContent::ImageRead {
+            path,
+            image: Some(image),
+        } => (
             ItemContent::ImageRead {
-                image: Some(image), ..
-            } => {
-                image.data_base64.clear();
-                None
-            }
-            _ => None,
-        },
-        _ => None,
+                path: path.clone(),
+                image: Some(wire_image(image)),
+            },
+            None,
+        ),
+        _ => return Cow::Borrowed(record),
     };
-    Cow::Owned(record)
+    let preview = agent::ThreadItem {
+        id: item.id.clone(),
+        parent_item_id: item.parent_item_id.clone(),
+        content,
+    };
+    let event = match &record.event {
+        AgentEvent::ItemStarted(_) => AgentEvent::ItemStarted(preview),
+        AgentEvent::ItemUpdated(_) => AgentEvent::ItemUpdated(preview),
+        _ => AgentEvent::ItemCompleted(preview),
+    };
+    Cow::Owned(SessionEventRecord {
+        origin: record.origin,
+        author: record.author.clone(),
+        ts: record.ts,
+        event,
+        elided,
+    })
+}
+
+fn wire_image(image: &agent::Attachment) -> agent::Attachment {
+    agent::Attachment {
+        media_type: image.media_type.clone(),
+        data_base64: String::new(),
+        source_path: image.source_path.clone(),
+    }
 }
 
 /// The records that stand for the log cursors in `range`.
@@ -257,7 +276,8 @@ fn wire_window(
                     last_text.push_str(output_tail(text));
                 } else {
                     last_text.push_str(text);
-                    shorten(last_text, true);
+                    let start = last_text.len() - output_tail(last_text).len();
+                    last_text.drain(..start);
                 }
                 last.elided = (full > OUTPUT_PREVIEW_BYTES as u64).then_some(full);
             } else {
