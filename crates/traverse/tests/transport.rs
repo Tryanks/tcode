@@ -773,15 +773,30 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     let minted = host.new_invitation();
     let paired = pair(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, syncing_directly);
-    client.to_host.send_blocking(subscribe(1)).unwrap();
+    // Drive the same subscription owner as the app, while observing raw replies
+    // here so the disconnected command still exercises the native write buffer.
+    let link = tcode_client::HostLink::new(client.to_host.clone(), client.from_host.clone());
+    wait_state(&client, |state| {
+        link.set_connection_state(state.clone());
+        syncing_directly(state)
+    });
+    link.subscribe(tcode_protocol::Subscription {
+        topic: tcode_protocol::Topic::Index,
+        after: None,
+        known_index: None,
+    })
+    .unwrap();
     recv_type(&client, "event", None);
-    wait_state(&client, connected_directly);
+    wait_state(&client, |state| {
+        link.set_connection_state(state.clone());
+        connected_directly(state)
+    });
     let endpoint_id = host.endpoint_id();
 
     host.set_pairing_enabled(false);
     host.shutdown();
     wait_state(&client, |state| {
+        link.set_connection_state(state.clone());
         state
             == &ConnectionState::Reconnecting {
                 // This link lived less than 30 seconds, so it must not reset retry history.
@@ -792,7 +807,7 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     client
         .to_host
         .send_blocking(
-            json!({"id": 2, "payload": {"type":"command", "content":{"type":"open_latest_session"}}})
+            json!({"id": 0, "payload": {"type":"command", "content":{"type":"open_latest_session"}}})
                 .to_string(),
         )
         .unwrap();
@@ -828,14 +843,17 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
-    wait_state(&client, connected_directly);
+    wait_state(&client, |state| {
+        link.set_connection_state(state.clone());
+        connected_directly(state)
+    });
     let deadline = Instant::now() + Duration::from_secs(5);
     while subscribe_count.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(subscribe_count.load(Ordering::Relaxed), 2);
-    recv_type(&client, "ack", Some(2));
-    client.to_host.close();
+    recv_type(&client, "ack", Some(0));
+    link.close();
     restarted.shutdown();
 }
 

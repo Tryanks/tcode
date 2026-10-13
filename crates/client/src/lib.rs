@@ -754,22 +754,36 @@ impl HostLink {
         self.send_payload(self.next_id(), ClientPayload::Unsubscribe(subscription))
     }
 
-    /// Advance replay memory only after the store has applied these records. Sending
-    /// the latest subscription also updates native/browser transport replay caches.
-    /// The host returns an empty tail when the store is already up to date.
+    /// Request another history window, advancing the cursor already applied locally.
     pub fn update_after(&self, topic: &Topic, after: u64) -> Result<(), ProtocolError> {
-        let subscription = {
-            let mut topics = self.inner.subscribed_topics.lock().unwrap();
-            let Some(subscription) = topics.get_mut(topic) else {
-                return Ok(());
-            };
-            if subscription.after == Some(after) {
-                return Ok(());
-            }
-            subscription.after = Some(after);
-            subscription.clone()
+        if let Some(subscription) = self.advance_after(topic, after) {
+            self.send_subscription(subscription)?;
+        }
+        Ok(())
+    }
+
+    /// Advance recovery memory without asking the host to resend an empty tail.
+    pub fn remember_after(&self, topic: &Topic, after: u64) {
+        let Some(subscription) = self.advance_after(topic, after) else {
+            return;
         };
-        self.send_subscription(subscription)
+        // Supersede already queued replies without creating another wire request.
+        let id = self.next_id();
+        self.inner
+            .subscription_requests
+            .lock()
+            .unwrap()
+            .insert(subscription.topic.clone(), id);
+    }
+
+    fn advance_after(&self, topic: &Topic, after: u64) -> Option<Subscription> {
+        let mut topics = self.inner.subscribed_topics.lock().unwrap();
+        let subscription = topics.get_mut(topic)?;
+        if subscription.after == Some(after) {
+            return None;
+        }
+        subscription.after = Some(after);
+        Some(subscription.clone())
     }
 
     pub fn subscriptions(&self) -> Vec<Subscription> {
