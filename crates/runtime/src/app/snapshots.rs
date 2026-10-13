@@ -93,6 +93,32 @@ impl DomainDiff {
             if !state.subscriptions.contains(&topic) {
                 continue;
             }
+            let visible_projects: HashSet<_> = state
+                .projects
+                .iter()
+                .filter(|p| projects.contains(&p.id))
+                .map(|p| p.id.as_str())
+                .collect();
+            if let Some(old) = self.space_indexes.get_mut(id)
+                && old
+                    .projects
+                    .iter()
+                    .eq(state.projects.iter().filter(|p| projects.contains(&p.id)))
+                && old.sessions.iter().eq(state.sessions.iter().filter(|meta| {
+                    meta.archived_at.is_none()
+                        && meta
+                            .project_id
+                            .as_deref()
+                            .is_some_and(|id| visible_projects.contains(id))
+                }))
+            {
+                let summary = state.space_index_summary(id, &old.projects);
+                for event in index_summary_changes(&old.summary, &summary) {
+                    emit_replacement(topic.clone(), event, cx);
+                }
+                old.summary = summary;
+                continue;
+            }
             let index = state.space_index_snapshot(id, projects);
             if let Some(old) = self.space_indexes.get(id) {
                 for event in index_changes(old, &index) {
@@ -522,8 +548,30 @@ impl AppState {
     }
 
     fn space_index_snapshot(&self, space_id: &str, ids: &BTreeSet<String>) -> IndexSnapshot {
-        let activity = ActivityProjection::new(self);
         let projects = self.space_projects(ids);
+        let summary = self.space_index_summary(space_id, &projects);
+        let ids: HashSet<_> = projects.iter().map(|p| p.id.as_str()).collect();
+        let sessions = self
+            .sessions
+            .iter()
+            .filter(|meta| {
+                meta.archived_at.is_none()
+                    && meta
+                        .project_id
+                        .as_deref()
+                        .is_some_and(|id| ids.contains(id))
+            })
+            .cloned()
+            .collect();
+        IndexSnapshot {
+            projects,
+            sessions,
+            summary,
+        }
+    }
+
+    fn space_index_summary(&self, space_id: &str, projects: &[Project]) -> IndexSummary {
+        let activity = ActivityProjection::new(self);
         let ids: HashSet<_> = projects.iter().map(|p| p.id.as_str()).collect();
         let in_scope = |meta: &&SessionMeta| {
             meta.project_id
@@ -576,15 +624,7 @@ impl AppState {
             .space_archives
             .get(space_id)
             .map_or(0, |archive| archive.revision);
-        IndexSnapshot {
-            projects,
-            sessions: metas
-                .into_iter()
-                .filter(|m| m.archived_at.is_none())
-                .cloned()
-                .collect(),
-            summary,
-        }
+        summary
     }
 
     pub(crate) fn refresh_space_archives(&mut self) {
