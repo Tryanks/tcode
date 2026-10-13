@@ -7,7 +7,7 @@ pub mod outgoing;
 pub mod pairing;
 pub mod recovery;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,7 +106,7 @@ struct HostLinkInner {
     delivery_changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
     next_id: AtomicU64,
     subscribed_topics: Mutex<HashMap<Topic, Subscription>>,
-    retired_topics: Mutex<HashSet<Topic>>,
+    retired_topics: Mutex<HashMap<u64, Topic>>,
     subscription_requests: Mutex<HashMap<Topic, u64>>,
     connection_state: Mutex<ConnectionState>,
     connection_state_tx: async_channel::Sender<ConnectionState>,
@@ -152,7 +152,7 @@ impl HostLink {
                 delivery_changes: async_channel::bounded(1),
                 next_id: AtomicU64::new(1),
                 subscribed_topics: Mutex::new(HashMap::new()),
-                retired_topics: Mutex::new(HashSet::new()),
+                retired_topics: Mutex::new(HashMap::new()),
                 subscription_requests: Mutex::new(HashMap::new()),
                 connection_state: Mutex::new(ConnectionState::Connected { path: None }),
                 connection_state_tx,
@@ -204,6 +204,9 @@ impl HostLink {
                 Ok(
                     message @ (HostMessage::Ack { id, .. } | HostMessage::QueryResult { id, .. }),
                 ) => {
+                    if matches!(&message, HostMessage::Ack { result: Ok(_), .. }) {
+                        self.inner.retired_topics.lock().unwrap().remove(&id);
+                    }
                     if matches!(message, HostMessage::Ack { .. }) {
                         let mut delivery = self.inner.delivery.lock().unwrap();
                         if let Some(index) = delivery.writes.iter().position(|write| write.id == id)
@@ -678,7 +681,7 @@ impl HostLink {
             .retired_topics
             .lock()
             .unwrap()
-            .remove(&subscription.topic);
+            .retain(|_, topic| topic != &subscription.topic);
         self.inner
             .subscribed_topics
             .lock()
@@ -726,12 +729,13 @@ impl HostLink {
         if removed.is_none() {
             return Ok(());
         }
+        let id = self.next_id();
         self.inner
             .retired_topics
             .lock()
             .unwrap()
-            .insert(subscription.topic.clone());
-        self.send_payload(self.next_id(), ClientPayload::Unsubscribe(subscription))
+            .insert(id, subscription.topic.clone());
+        self.send_payload(id, ClientPayload::Unsubscribe(subscription))
     }
 
     /// Request another history window, advancing the cursor already applied locally.
@@ -851,15 +855,22 @@ impl HostLink {
         if restores_subscriptions {
             // Replay the store's applied cursor once per recovery, before the
             // first reply changes Syncing to Connected.
-            for topic in self.inner.retired_topics.lock().unwrap().iter() {
-                let _ = self.send_payload(
-                    self.next_id(),
-                    ClientPayload::Unsubscribe(Subscription {
-                        known_index: None,
-                        topic: topic.clone(),
-                        after: None,
-                    }),
-                );
+            {
+                let mut retired = self.inner.retired_topics.lock().unwrap();
+                let topics: Vec<_> = retired.drain().map(|(_, topic)| topic).collect();
+                for topic in topics {
+                    let id = self.next_id();
+                    // An ACK from the previous connection must not retire this retry.
+                    retired.insert(id, topic.clone());
+                    let _ = self.send_payload(
+                        id,
+                        ClientPayload::Unsubscribe(Subscription {
+                            known_index: None,
+                            topic,
+                            after: None,
+                        }),
+                    );
+                }
             }
             for subscription in self.subscriptions() {
                 let _ = self.send_subscription(subscription);
