@@ -728,7 +728,7 @@ impl AppState {
         match self.store.load_index() {
             Ok(sessions) => {
                 let archived = self.archived_sessions();
-                self.sessions = sessions;
+                self.sessions = sessions.into();
                 if self.archived_sessions() != archived {
                     self.archived_revision += 1;
                 }

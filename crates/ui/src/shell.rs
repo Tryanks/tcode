@@ -5376,7 +5376,7 @@ mod tests {
                 .unwrap();
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.projects = vec![project];
-            state.sessions = vec![meta];
+            state.sessions = vec![meta].into();
         }))
         .unwrap();
         let (shell, _transport, cx) = mount(cx);
@@ -5443,7 +5443,7 @@ mod tests {
         ));
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         let project = tcode_core::project::Project::from_root(root.join("project"));
-        let sessions = [("third", 10), ("first", 30), ("second", 20)]
+        let sessions: Vec<_> = [("third", 10), ("first", 30), ("second", 20)]
             .into_iter()
             .map(|(id, updated_at)| {
                 let mut meta = tcode_core::project::SessionMeta::new(
@@ -5462,7 +5462,7 @@ mod tests {
                 .unwrap();
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.projects = vec![project];
-            state.sessions = sessions;
+            state.sessions = sessions.into();
         }))
         .unwrap();
         let (shell, _transport, cx) = mount(cx);

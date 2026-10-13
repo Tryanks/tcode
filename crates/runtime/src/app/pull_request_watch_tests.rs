@@ -215,9 +215,9 @@ impl Harness {
         let store = SessionStore::open_at(dir.root().clone()).unwrap();
         let mut restarted = Self::open(dir, store, host);
         let sessions = restarted.store.load_index().unwrap();
-        restarted
-            .state
-            .update(&mut restarted.cx, |state, _| state.sessions = sessions);
+        restarted.state.update(&mut restarted.cx, |state, _| {
+            state.sessions = sessions.into()
+        });
         restarted
     }
 
