@@ -25,11 +25,13 @@ pub(super) struct Outbox {
     pending: Arc<Mutex<Pending>>,
     wake: Sender<()>,
     input: Receiver<String>,
+    bounded: bool,
 }
 
 impl Outbox {
     pub(super) fn new(
         input: Receiver<String>,
+        bounded: bool,
     ) -> (Self, impl Future<Output = ()> + Send, Receiver<String>) {
         let pending = Arc::new(Mutex::new(Pending::default()));
         let (wake, awakened) = async_channel::bounded(1);
@@ -38,6 +40,7 @@ impl Outbox {
             pending: pending.clone(),
             wake,
             input,
+            bounded,
         };
         let forward = async move {
             loop {
@@ -67,6 +70,18 @@ impl Outbox {
         (outbox, forward, received)
     }
 
+    pub(super) fn file_bytes_limit(&self) -> Option<u64> {
+        self.bounded.then(|| {
+            let empty = tcode_protocol::HostMessage::QueryResult {
+                id: u64::MAX,
+                result: Ok(tcode_protocol::QueryResponse::FileBytes(Vec::new())),
+            };
+            let envelope = tcode_protocol::encode_line(&empty).unwrap().len();
+            // Reserve the largest reply id and base64's four bytes per three.
+            (MAX_LINE_BYTES.saturating_sub(envelope) / 4 * 3) as u64
+        })
+    }
+
     pub(super) fn try_send(&self, text: String, replace: Option<String>) -> Result<(), ()> {
         let mut pending = self.pending.lock().unwrap();
         if pending.closed || self.input.is_closed() {
@@ -85,9 +100,10 @@ impl Outbox {
                 pending.bytes -= old.text.len();
             }
         }
-        if text.len() > MAX_LINE_BYTES
-            || pending.bytes + text.len() > MAX_QUEUED_BYTES
-            || pending.lines.len() >= MAX_QUEUED_MESSAGES
+        if self.bounded
+            && (text.len() > MAX_LINE_BYTES
+                || pending.bytes + text.len() > MAX_QUEUED_BYTES
+                || pending.lines.len() >= MAX_QUEUED_MESSAGES)
         {
             drop(pending);
             self.close();
@@ -112,6 +128,7 @@ impl Outbox {
 
 impl Drop for Outbox {
     fn drop(&mut self) {
-        self.close();
+        // Host EOF must drain accepted replies before the forwarder closes input.
+        self.wake.close();
     }
 }

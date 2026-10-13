@@ -45,9 +45,11 @@ pub enum Query {
         /// Physical display size, from 1 through 128 pixels.
         pixels: u32,
     },
-    /// Complete file contents whose base64 reply fits the transport line limit.
+    /// Complete file contents; network bridges cap the optional read budget.
     ReadFileBytes {
         path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<u64>,
     },
     /// Complete file contents for a preview, rejected above 512 KiB.
     ReadFilePreview {
