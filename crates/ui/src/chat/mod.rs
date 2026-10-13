@@ -5870,8 +5870,9 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "inline host image finishes loading; renders={}",
-                renders.get()
+                "inline host image finishes loading; renders={}, raw_pending={}",
+                renders.get(),
+                host.from_host.len()
             );
             std::thread::sleep(Duration::from_millis(1));
         }

@@ -6003,9 +6003,15 @@ pub(crate) mod tests {
             // The real host sends from an OS thread. Route replies here so
             // asset and command futures wake on GPUI's test scheduler thread.
             let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
-            let _ = self.pump.as_mut().poll(&mut task_cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            cx.run_until_parked();
+            loop {
+                let _ = self.pump.as_mut().poll(&mut task_cx);
+                let delivered = !self.link.events().is_empty();
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                cx.run_until_parked();
+                if !delivered {
+                    break;
+                }
+            }
         }
 
         pub(crate) fn wait_until(
