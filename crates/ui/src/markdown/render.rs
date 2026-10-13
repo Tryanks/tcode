@@ -1524,12 +1524,7 @@ fn render_diagram(
         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
             context_view.update(cx, |state, cx| {
                 state.set_pending_context(
-                    Some(PendingContextTarget::CodeBlock(
-                        whole_code
-                            .strip_suffix('\n')
-                            .unwrap_or(&whole_code)
-                            .to_string(),
-                    )),
+                    Some(PendingContextTarget::CodeBlock(whole_code.clone())),
                     cx,
                 )
             });
