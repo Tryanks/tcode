@@ -5761,6 +5761,42 @@ mod tests {
             "Text after the screenshot.\n\n".repeat(80)
         ));
         let (host, session_id, timeline) = seeded_chat_host(cx, timeline, false);
+        let seeded_id = session_id.clone();
+        smol::block_on(host.update_state_for_test(move |state, cx| {
+            state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
+            let mut ts = 0;
+            for turn in 0..timeline.turns.len() {
+                let mut events = vec![agent::AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                }];
+                events.extend(
+                    timeline
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.turn == turn)
+                        .map(|entry| {
+                            let EntryContent::Item(content) = &entry.content else {
+                                panic!("image fixture contains provider items");
+                            };
+                            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                                id: entry.id.clone(),
+                                parent_item_id: None,
+                                content: content.clone(),
+                            })
+                        }),
+                );
+                events.push(agent::AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                });
+                for event in events {
+                    state.record_event_for_replica_test(&seeded_id, ts, &event, cx);
+                    ts += 1;
+                }
+            }
+        }))
+        .expect("record inline image conversation");
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -5777,9 +5813,6 @@ mod tests {
             store.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.chat_loading()
             })
-        });
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx)
         });
         let window_state = cx.new(|_| WindowState::new(false));
         struct LoadedImageChat {
