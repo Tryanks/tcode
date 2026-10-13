@@ -448,6 +448,8 @@ impl WorkspaceStore {
     }
 
     pub fn select_session(&mut self, session_id: String) {
+        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
+        self.draft_fallback_pending = false;
         if self.selected_session_id.as_ref() == Some(&session_id) {
             return;
         }
@@ -667,20 +669,25 @@ impl WorkspaceStore {
         self.create_and_select(Command::StartScratchDraft, cx);
     }
     fn create_and_select(&mut self, command: Command, cx: &mut Context<Self>) {
+        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
+        let request_generation = self.creation_request_generation;
+        let selection_generation = self.selection_generation;
         self.draft_fallback_pending = true;
         let request = self.command(command, cx);
-        let selected = self.selected_session_id.clone();
         cx.spawn(async move |this, cx| {
             let response = request.await;
-            let _ = this.update(cx, |store, _| store.draft_fallback_pending = false);
-            if let Ok(CommandResponse::SessionId(Some(id))) = response {
-                let _ = this.update(cx, |store, cx| {
-                    if store.selected_session_id == selected {
-                        store.select_session(id);
-                        cx.notify();
-                    }
-                });
-            }
+            let _ = this.update(cx, |store, cx| {
+                if store.creation_request_generation != request_generation {
+                    return;
+                }
+                store.draft_fallback_pending = false;
+                if store.selection_generation == selection_generation
+                    && let Ok(CommandResponse::SessionId(Some(id))) = response
+                {
+                    store.select_session(id);
+                    cx.notify();
+                }
+            });
         })
         .detach();
     }

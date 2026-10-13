@@ -235,6 +235,7 @@ pub struct WorkspaceStore {
     /// A project-draft fallback is in flight, so the reconcile step does not
     /// ask for one more draft per index event while it resolves.
     draft_fallback_pending: bool,
+    creation_request_generation: u64,
 }
 
 /// How many threads the user left keep their replicas besides the selected
@@ -433,6 +434,7 @@ impl WorkspaceStore {
             conversation_ui: HashMap::new(),
             open_pull_requests: HashMap::new(),
             draft_fallback_pending: false,
+            creation_request_generation: 0,
         };
         let mut store = store;
 
