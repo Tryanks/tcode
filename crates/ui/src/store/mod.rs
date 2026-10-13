@@ -1295,6 +1295,18 @@ impl WorkspaceStore {
             (Topic::Index, ServerEvent::IndexSummaryReplaced(summary)) => {
                 self.apply_index_summary(summary, cx);
             }
+            (Topic::Index, ServerEvent::IndexActivitiesChanged { upserts, removed }) => {
+                if self.baseline_topics.contains(&index_topic) {
+                    for id in removed {
+                        self.index_summary.activity.remove(id);
+                    }
+                    self.index_summary.activity.extend(
+                        upserts
+                            .iter()
+                            .map(|(id, activity)| (id.clone(), activity.clone())),
+                    );
+                }
+            }
             (Topic::Settings, ServerEvent::LastVisitedChanged(visits)) => {
                 self.settings_replica
                     .last_visited

@@ -80,6 +80,10 @@ pub enum ServerEvent {
     IndexUpsertSession(SessionMeta),
     IndexUpsertProject(Project),
     IndexSummaryReplaced(IndexSummary),
+    IndexActivitiesChanged {
+        upserts: HashMap<String, SessionActivity>,
+        removed: Vec<String>,
+    },
     IndexUnchanged {
         fingerprint: String,
         archived_revision: u64,
