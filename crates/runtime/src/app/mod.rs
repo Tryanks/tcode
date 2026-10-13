@@ -92,6 +92,7 @@ const RESIDENT_IDLE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// the primary bound, while this comfortably preserves typical orchestrate
 /// fleets whose idle children may be re-messaged.
 const MAX_IDLE_RESIDENTS: usize = 16;
+const MAX_IDLE_LOG_BYTES: usize = 128 << 20;
 
 type ProviderLaunchFuture =
     Pin<Box<dyn Future<Output = Result<SessionHandle, AgentError>> + Send + 'static>>;
@@ -397,6 +398,7 @@ pub struct AppState {
     /// changes; stale timers must never fire or reschedule superseded work.
     scheduler_generation: u64,
     resident_idle_grace: Duration,
+    idle_budget_check: lifecycle::IdleBudgetCheck,
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
@@ -580,6 +582,7 @@ impl AppState {
             next_start_generation: 0,
             scheduler_generation: 0,
             resident_idle_grace: RESIDENT_IDLE_GRACE,
+            idle_budget_check: lifecycle::IdleBudgetCheck::default(),
             ai_title_generation_enabled,
             title_generating: HashSet::new(),
             provider_launcher: ProviderLauncher::default(),

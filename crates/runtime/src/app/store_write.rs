@@ -18,6 +18,7 @@ pub(super) enum StoreWrite {
         origin: Option<MessageOrigin>,
         event: Box<AgentEvent>,
         joined: Joined,
+        input_bytes: Option<history::LogBytes>,
     },
     /// The turn index of a log the host just read and folded whole.
     SetTurnIndex {
@@ -80,6 +81,8 @@ pub(super) enum StoreWrite {
     /// first store failure since the writer started: a write that failed is
     /// never certified by a later flush.
     Flush(smol::channel::Sender<Result<(), String>>),
+    /// Prior event sizes are known, but their transaction need not be committed.
+    Serialized(smol::channel::Sender<()>),
 }
 
 /// What the writer reports back to the host.
@@ -117,12 +120,23 @@ impl StoreWrite {
                 origin,
                 event,
                 joined,
+                input_bytes,
             } => {
                 let mut mutations =
                     match Mutation::append_authored_event(id, *ts, event, author.as_ref(), *origin)
                     {
-                        Ok(mutation) => vec![mutation],
-                        Err(error) => return Some(Err(error.to_string())),
+                        Ok(mutation) => {
+                            if let Some(bytes) = input_bytes {
+                                bytes.add(mutation.payload_len());
+                            }
+                            vec![mutation]
+                        }
+                        Err(error) => {
+                            if let Some(bytes) = input_bytes {
+                                bytes.add(usize::MAX);
+                            }
+                            return Some(Err(error.to_string()));
+                        }
                     };
                 match joined {
                     Joined::Folded {
@@ -203,9 +217,9 @@ impl StoreWrite {
                 |error| RuntimeError::PersistEvent { error },
                 Some(completion),
             ),
-            StoreWrite::DropSupersededDiffs { .. } | StoreWrite::SnapshotLog { .. } => {
-                (|error| RuntimeError::PersistEvent { error }, None)
-            }
+            StoreWrite::DropSupersededDiffs { .. }
+            | StoreWrite::SnapshotLog { .. }
+            | StoreWrite::Serialized(_) => (|error| RuntimeError::PersistEvent { error }, None),
             StoreWrite::SaveCommands { .. }
             | StoreWrite::InvalidateCommands(_)
             | StoreWrite::WriteTerminalUi(_)
@@ -225,6 +239,7 @@ impl StoreWrite {
     /// anything else is reported like a failed write.
     pub(super) fn reject(self, reason: &str) -> Option<StoreWriteFailure> {
         match self {
+            StoreWrite::Serialized(_) => return None,
             StoreWrite::DropSupersededDiffs { completion, .. } => {
                 let _ = completion.try_send(Err(reason.to_owned()));
                 return None;
@@ -289,11 +304,15 @@ impl StoreWriter {
         }
     }
 
-    /// Database writes accumulate into one transaction; any other write is an
-    /// ordered boundary that commits what came before it first.
+    /// Database writes share a transaction. Non-database operations commit it
+    /// first, except Serialized, which observes encoding without forcing I/O.
     fn process(&mut self, queue: Vec<StoreWrite>) {
         let mut batch = Batch::default();
         for write in queue {
+            if let StoreWrite::Serialized(completion) = &write {
+                let _ = completion.try_send(());
+                continue;
+            }
             match write.mutations() {
                 Some(Ok(mutations)) => {
                     batch.bytes += mutations.iter().map(Mutation::payload_len).sum::<usize>();
@@ -448,6 +467,7 @@ impl StoreWriter {
                 });
                 None
             }
+            StoreWrite::Serialized(_) => unreachable!("serialization does not flush a batch"),
             StoreWrite::AppendEvent { .. }
             | StoreWrite::SetTurnIndex { .. }
             | StoreWrite::UpsertMeta { .. }

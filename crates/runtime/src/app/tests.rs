@@ -9306,6 +9306,7 @@ fn session_log(records: impl IntoIterator<Item = SessionEventRecord>) -> Session
     let records: Vec<_> = records.into_iter().collect();
     let rows = (0..records.len() as u64).collect();
     SessionLog::new(tcode_services::store::EventLog {
+        input_bytes: 0,
         next_row: records.len() as u64,
         records,
         rows,

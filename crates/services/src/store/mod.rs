@@ -968,6 +968,7 @@ impl SessionStore {
                         let position = integer(row, 0)?;
                         let line = blob(row, 1)?;
                         log.next_row = position as u64 + 1;
+                        log.input_bytes = log.input_bytes.saturating_add(line.len());
                         match decode_row(&line) {
                             Ok(Some(record)) => {
                                 if record.legacy_file_diff && provider.is_none() {
@@ -1217,6 +1218,8 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
 /// A session's event log as one read of its rows saw it.
 #[derive(Debug, Default)]
 pub struct EventLog {
+    /// Serialized bytes fetched, including undecodable rows.
+    pub input_bytes: usize,
     pub records: Vec<StoredEvent>,
     /// The position of the row each record was read from.
     pub rows: Vec<u64>,

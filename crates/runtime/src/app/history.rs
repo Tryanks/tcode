@@ -9,6 +9,25 @@ use tcode_protocol::{
 };
 use tcode_services::store::{EventLog, TurnIndex};
 
+/// Input weight is conservative: superseded payloads remain counted until
+/// the log is released. It is not the size of its decoded allocations.
+#[derive(Clone, Default)]
+pub(super) struct LogBytes(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl LogBytes {
+    pub(super) fn add(&self, bytes: usize) {
+        let _ = self.0.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |total| Some(total.saturating_add(bytes)),
+        );
+    }
+
+    pub(super) fn get(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Count serialized bytes without allocating a copy of a large record.
 struct ByteCount(usize);
 
@@ -436,8 +455,8 @@ const BASELINE_RECORDS: u64 = 400;
 ///
 /// A turn-changes snapshot that a later one supersedes is held without its
 /// diffs, as the store keeps it, so no window sends them.
-#[derive(Clone)]
 pub(super) struct SessionLog {
+    pub(super) input_bytes: LogBytes,
     records: Vec<SessionEventRecord>,
     /// The stored row each record is in, ascending.
     rows: Vec<u64>,
@@ -461,7 +480,10 @@ pub(super) struct SessionLog {
 
 impl SessionLog {
     pub(super) fn new(log: EventLog) -> Self {
+        let input_bytes = LogBytes::default();
+        input_bytes.add(log.input_bytes);
         let mut session_log = Self {
+            input_bytes,
             records: Vec::new(),
             rows: Vec::new(),
             turn_starts: Vec::new(),
@@ -726,6 +748,7 @@ impl Tail {
 /// accepts go out as they arrive, and a subscription that has to wait gets a
 /// window that ends after them.
 pub(super) struct Hydration {
+    pub(super) input_bytes: LogBytes,
     tail: Option<Tail>,
     live: bool,
     pending: Vec<SessionEventRecord>,
@@ -944,6 +967,7 @@ impl AppState {
             self.log_hydrations.insert(
                 session_id.to_string(),
                 Hydration {
+                    input_bytes: LogBytes::default(),
                     tail: None,
                     live: false,
                     pending: Vec::new(),
@@ -1027,6 +1051,8 @@ impl AppState {
                 return;
             }
         };
+        hydration.input_bytes.add(log.input_bytes.get());
+        log.input_bytes = hydration.input_bytes;
         let retained = self.resident(&session_id).is_some();
         let topic = Topic::SessionEvents {
             session_id: session_id.clone(),
@@ -1088,6 +1114,7 @@ impl AppState {
         if let Some((load, cursor, fold)) = folded {
             self.fold_timeline(session_id, load, cursor, fold, cx);
         }
+        self.enforce_idle_resident_budget(cx);
     }
 
     fn reply_from_log(

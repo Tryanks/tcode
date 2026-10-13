@@ -695,9 +695,27 @@ impl AppState {
                 origin,
                 event: Box::new(event.clone()),
                 joined,
+                input_bytes: self
+                    .event_records
+                    .get(session_id)
+                    .map(|log| log.input_bytes.clone())
+                    .or_else(|| {
+                        self.log_hydrations
+                            .get(session_id)
+                            .map(|hydration| hydration.input_bytes.clone())
+                    }),
             },
             cx,
         );
+        if self
+            .residents
+            .parked
+            .get(session_id)
+            .is_some_and(|session| session.idle_since.is_some())
+            && self.resident_is_fully_idle(session_id)
+        {
+            self.schedule_idle_budget_check(cx);
+        }
         if let Some(session) = self.resident_mut(session_id) {
             session.timeline.apply_at(Some(ts), event);
         } else {

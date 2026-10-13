@@ -1,5 +1,15 @@
 use super::*;
 
+#[derive(Default)]
+pub(super) enum IdleBudgetCheck {
+    #[default]
+    Idle,
+    Scheduled,
+    Waiting {
+        dirty: bool,
+    },
+}
+
 impl AppState {
     /// Request a provider-owned restore point. No local Git or transcript
     /// operation is performed: the canonical timeline changes only after the
@@ -497,18 +507,7 @@ impl AppState {
     /// Start a fresh idle grace period, enforce the resident LRU bound, and
     /// reap only if no intervening work or re-adoption made the timer stale.
     pub(super) fn mark_resident_idle(&mut self, session_id: &str, cx: &mut HostCx) {
-        let fully_idle = self
-            .residents
-            .parked
-            .get(session_id)
-            .is_some_and(|session| {
-                session.queue.is_empty()
-                    && !session.turn_in_flight
-                    && session.delivery_in_flight.is_none()
-                    && session.background_task_count == 0
-            })
-            && !self.pending_native_rewinds.contains_key(session_id);
-        if !fully_idle {
+        if !self.resident_is_fully_idle(session_id) {
             return;
         }
 
@@ -519,31 +518,8 @@ impl AppState {
             .unwrap()
             .idle_since = Some(idle_since);
 
-        let oldest = {
-            let mut residents: Vec<_> = self
-                .residents
-                .parked
-                .iter()
-                .filter(|(id, session)| {
-                    session.queue.is_empty()
-                        && !session.turn_in_flight
-                        && session.delivery_in_flight.is_none()
-                        && session.background_task_count == 0
-                        && !self.pending_native_rewinds.contains_key(id.as_str())
-                })
-                .filter_map(|(id, session)| session.idle_since.map(|idle| (id.clone(), idle)))
-                .collect();
-            if residents.len() > MAX_IDLE_RESIDENTS {
-                residents.sort_unstable_by_key(|(_, idle)| *idle);
-                residents.first().map(|(id, _)| id.clone())
-            } else {
-                None
-            }
-        };
-        if let Some(oldest) = oldest {
-            log::info!("evicting idle resident {oldest}");
-            self.drop_background(&oldest, cx);
-        }
+        self.enforce_idle_resident_budget(cx);
+        self.schedule_idle_budget_check(cx);
 
         let session_id = session_id.to_string();
         let resident_idle_grace = self.resident_idle_grace;
@@ -551,6 +527,101 @@ impl AppState {
         HostCx::spawn_detached(cx, async move {
             smol::Timer::after(resident_idle_grace).await;
             host_cx.enqueue(move |state, cx| state.reap_idle_resident(&session_id, idle_since, cx));
+        });
+    }
+
+    pub(super) fn resident_is_fully_idle(&self, id: &str) -> bool {
+        self.residents.parked.get(id).is_some_and(|session| {
+            session.queue.is_empty()
+                && !session.turn_in_flight
+                && session.delivery_in_flight.is_none()
+                && session.background_task_count == 0
+        }) && !self.pending_native_rewinds.contains_key(id)
+    }
+
+    fn has_idle_budget_candidates(&self) -> bool {
+        self.residents
+            .parked
+            .iter()
+            .any(|(id, session)| session.idle_since.is_some() && self.resident_is_fully_idle(id))
+    }
+
+    pub(super) fn enforce_idle_resident_budget(&mut self, cx: &mut HostCx) {
+        let mut residents: Vec<_> = self
+            .residents
+            .parked
+            .iter()
+            .filter(|(id, _)| self.resident_is_fully_idle(id))
+            .filter_map(|(id, session)| {
+                session.idle_since.map(|idle| {
+                    let bytes = self
+                        .event_records
+                        .get(id)
+                        .map_or(0, |log| log.input_bytes.get());
+                    (id.clone(), idle, bytes)
+                })
+            })
+            .collect();
+        let mut total: u128 = residents.iter().map(|(_, _, bytes)| *bytes as u128).sum();
+        let mut remaining = residents.len();
+        if remaining <= MAX_IDLE_RESIDENTS && total <= MAX_IDLE_LOG_BYTES as u128 {
+            return;
+        }
+        residents.sort_unstable_by_key(|(_, idle, _)| *idle);
+        for (id, _, bytes) in residents {
+            if remaining <= MAX_IDLE_RESIDENTS && total <= MAX_IDLE_LOG_BYTES as u128 {
+                break;
+            }
+            remaining -= 1;
+            total -= bytes as u128;
+            log::info!("evicting idle resident {id} ({bytes} input bytes)");
+            self.drop_background(&id, cx);
+        }
+    }
+
+    pub(super) fn schedule_idle_budget_check(&mut self, cx: &mut HostCx) {
+        if self.store_failed || !self.has_idle_budget_candidates() {
+            return;
+        }
+        match &mut self.idle_budget_check {
+            IdleBudgetCheck::Waiting { dirty } => {
+                *dirty = true;
+                return;
+            }
+            IdleBudgetCheck::Scheduled => return,
+            IdleBudgetCheck::Idle => self.idle_budget_check = IdleBudgetCheck::Scheduled,
+        }
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            smol::Timer::after(Duration::from_millis(250)).await;
+            host_cx.enqueue(|state, cx| {
+                if state.store_failed || !state.has_idle_budget_candidates() {
+                    state.idle_budget_check = IdleBudgetCheck::Idle;
+                    return;
+                }
+                state.idle_budget_check = IdleBudgetCheck::Waiting { dirty: false };
+                // Observe writer-owned lengths without splitting a transaction.
+                // Actual log release still requires its own successful Flush.
+                let (serialized, ready) = smol::channel::bounded(1);
+                state.enqueue_store_write(StoreWrite::Serialized(serialized), cx);
+                let host_cx = cx.clone();
+                HostCx::spawn_detached(cx, async move {
+                    let observed = ready.recv().await.is_ok();
+                    host_cx.enqueue(move |state, cx| {
+                        let dirty = matches!(
+                            state.idle_budget_check,
+                            IdleBudgetCheck::Waiting { dirty: true }
+                        );
+                        state.idle_budget_check = IdleBudgetCheck::Idle;
+                        if observed {
+                            state.enforce_idle_resident_budget(cx);
+                            if dirty {
+                                state.schedule_idle_budget_check(cx);
+                            }
+                        }
+                    });
+                });
+            });
         });
     }
 
