@@ -134,7 +134,9 @@ pub struct Composer {
     fallback_review_input: Entity<TextareaState>,
     fallback_review_seeded: Option<String>,
     /// Unsent text is isolated by persisted thread or project New thread page.
-    text_cache: ComposerTextCache,
+    input_destination: Option<ComposerDestination>,
+    input_cache: std::collections::HashMap<ComposerDestination, Entity<TextareaState>>,
+    input_subscription: Subscription,
     model_search: Entity<InputState>,
     /// `None` = follow the active session's provider (set on first open).
     picker_rail: Option<PickerRail>,
@@ -283,6 +285,7 @@ impl Composer {
             cx.new(|cx| TextareaState::new(window, cx).rows(1).submit_on_enter(true));
         let fallback_review_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6));
 
+        let input_subscription = cx.subscribe_in(&input, window, Self::on_input_event);
         let subscriptions = vec![
             // Re-render when app state changes (e.g. the provider's commands /
             // skills feed arrives after session start, feeding the `/`+`$` menus).
@@ -299,41 +302,6 @@ impl Composer {
                 ],
                 cx,
             ),
-            cx.subscribe_in(&input, window, |this, input, event, window, cx| {
-                match event {
-                    InputEvent::PressEnter {
-                        shift: false,
-                        secondary,
-                    } => {
-                        // Enter accepts the highlighted trigger-menu row when the
-                        // menu is open, otherwise submits the turn.
-                        //
-                        // The platform modifier (⌘ on macOS, Ctrl elsewhere)
-                        // makes it a STEER instead of a QUEUE: the message is
-                        // injected into the turn that is already running rather
-                        // than held until it finishes. With no turn running the
-                        // two are equivalent (there is nothing to steer into).
-                        if this.menu_visible(cx) {
-                            this.accept_menu(this.menu_highlight, window, cx);
-                        } else {
-                            let input = input.clone();
-                            this.submit(&input, *secondary, window, cx);
-                        }
-                    }
-                    // Recompute the active `@`/`/`/`$` trigger and re-render (also
-                    // refreshes the send button's has-text state).
-                    InputEvent::Change => {
-                        this.queued_refill = None;
-                        // An edit that did not come from the transcript writer
-                        // ends dictation (see `components::voice`).
-                        #[cfg(feature = "voice")]
-                        this.stop_dictation_on_user_edit(cx);
-                        this.recompute_trigger(cx);
-                        cx.notify();
-                    }
-                    _ => {}
-                }
-            }),
             cx.subscribe_in(
                 &user_input_custom,
                 window,
@@ -371,7 +339,9 @@ impl Composer {
             user_input_custom,
             fallback_review_input,
             fallback_review_seeded: None,
-            text_cache: ComposerTextCache::default(),
+            input_destination: None,
+            input_cache: Default::default(),
+            input_subscription,
             model_search,
             picker_rail: None,
             approval_expanded: compact,
@@ -402,27 +372,70 @@ impl Composer {
         }
     }
 
-    /// Save the outgoing destination's text before replacing the shared input
-    /// with the incoming destination's cached text. The cache's `current` key
-    /// is updated before `set_value`, so the resulting recursive Change event
-    /// cannot be attributed to the destination being left.
+    fn on_input_event(
+        &mut self,
+        input: &Entity<TextareaState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::PressEnter {
+                shift: false,
+                secondary,
+            } => {
+                if self.menu_visible(cx) {
+                    self.accept_menu(self.menu_highlight, window, cx);
+                } else {
+                    self.submit(input, *secondary, window, cx);
+                }
+            }
+            InputEvent::Change => {
+                self.queued_refill = None;
+                // An edit that did not come from the transcript writer
+                // ends dictation (see `components::voice`).
+                #[cfg(feature = "voice")]
+                self.stop_dictation_on_user_edit(cx);
+                self.recompute_trigger(cx);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
     fn sync_text_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let destination = self
             .workspace_store
             .read(cx)
             .with_composer_destination(composer_destination)
             .flatten();
-        let outgoing_text = self.input.read(cx).value().to_string();
-        let Some(incoming_text) = self.text_cache.switch_to(destination, &outgoing_text) else {
+        if self.input_destination == destination {
             return;
-        };
-        // The dictation anchor belongs to the text we are about to swap out.
+        }
         #[cfg(feature = "voice")]
         self.abort_dictation(cx);
-        let cursor = incoming_text.len();
+        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        if let Some(outgoing) = self.input_destination.take() {
+            self.input_cache.insert(outgoing, self.input.clone());
+        }
+        let (min_rows, max_rows) = auto_grow_rows(self.compact);
+        self.input = destination
+            .as_ref()
+            .and_then(|key| self.input_cache.remove(key))
+            .unwrap_or_else(|| {
+                cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .auto_grow(min_rows, max_rows)
+                        .submit_on_enter(!gpui_base::is_mobile())
+                })
+            });
+        self.input_destination = destination;
+        self.input_subscription = cx.subscribe_in(&self.input, window, Self::on_input_event);
         self.input.update(cx, |state, cx| {
-            state.set_value(incoming_text, window, cx);
-            state.set_selected_range(cursor..cursor, cx);
+            state.set_auto_grow(min_rows, max_rows, cx);
+            if focused {
+                state.focus(window, cx);
+            }
         });
         self.recompute_trigger(cx);
     }
@@ -462,7 +475,7 @@ impl Composer {
     fn set_input_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let cursor = text.len();
         self.input.update(cx, |state, cx| {
-            state.set_value(text, window, cx);
+            state.replace_all(text, window, cx);
             state.set_selected_range(cursor..cursor, cx);
             if !crate::window_seam::is_mobile(cx) {
                 state.focus(window, cx);
@@ -544,7 +557,7 @@ impl Composer {
         let (_, _, text) = self.queued_refill.take().unwrap();
         let selection = 0..text.len();
         self.input.update(cx, |state, cx| {
-            state.set_value(text, window, cx);
+            state.replace_all(text, window, cx);
             state.set_selected_range(selection, cx);
             if !crate::window_seam::is_mobile(cx) {
                 state.focus(window, cx);
@@ -628,8 +641,7 @@ impl Composer {
                 .iter()
                 .map(|image| image.path.clone())
                 .collect();
-            self.text_cache.clear_current();
-            input.update(cx, |state, cx| state.set_value("", window, cx));
+            input.update(cx, |state, cx| state.replace_all("", window, cx));
             self.pending_images.clear();
             self.image_load_generation = self.image_load_generation.wrapping_add(1);
             self.pending_image_loads = 0;
@@ -644,8 +656,7 @@ impl Composer {
         if terminal_contexts.is_empty()
             && let Some(command) = slash_command(&text)
         {
-            self.text_cache.clear_current();
-            input.update(cx, |state, cx| state.set_value("", window, cx));
+            input.update(cx, |state, cx| state.replace_all("", window, cx));
             match command {
                 SlashIntent::Model => {
                     self.model_picker_token = self.model_picker_token.wrapping_add(1);
@@ -733,8 +744,7 @@ impl Composer {
     ) {
         #[cfg(feature = "voice")]
         self.abort_dictation(cx);
-        self.text_cache.clear_current();
-        input.update(cx, |state, cx| state.set_value("", window, cx));
+        input.update(cx, |state, cx| state.replace_all("", window, cx));
         self.pending_images.clear();
         self.image_load_generation = self.image_load_generation.wrapping_add(1);
         self.pending_image_loads = 0;
@@ -1416,10 +1426,12 @@ mod replica_tests {
     ) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
+        static NEXT_STORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "tcode-composer-replica-{}-{}",
+            "tcode-composer-replica-{}-{}-{}",
             std::process::id(),
-            tcode_services::store::now_millis()
+            tcode_services::store::now_millis(),
+            NEXT_STORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
@@ -1472,6 +1484,127 @@ mod replica_tests {
                 .unwrap(),
             )
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn composer_history_survives_submission_and_destination_switches(cx: &mut TestAppContext) {
+        for is_draft in [false, true] {
+            let (store, incoming, outgoing, mut status) = attach(cx);
+            status.draft = is_draft;
+            status.project_id = Some("project-a".into());
+            let mut restored_status = status.clone();
+            replace(
+                &incoming,
+                Topic::SessionStatus {
+                    session_id: status.session_id.clone(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+            );
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            let (composer, cx) =
+                cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                composer.update(cx, |composer, cx| composer.focus(window, cx));
+            });
+            cx.simulate_input("Keep this prompt");
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let send = cx.debug_bounds("send-message").expect("send button");
+            cx.simulate_click(send.center(), Modifiers::default());
+            cx.update(|window, cx| {
+                composer.update(cx, |composer, cx| composer.focus(window, cx));
+                window.draw(cx).clear(cx);
+            });
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                ""
+            );
+            assert!(
+                std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
+                    tcode_protocol::decode_client_line(&line).unwrap().payload,
+                    tcode_protocol::ClientPayload::Command(
+                        tcode_protocol::Command::SendTurn { .. }
+                    )
+                ))
+            );
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+                "cmd-z"
+            } else {
+                "ctrl-z"
+            });
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                "Keep this prompt"
+            );
+            status.session_id = "other-thread".into();
+            status.project_id = Some("project-b".into());
+            store.update(cx, |store, _| {
+                store.select_session(status.session_id.clone())
+            });
+            replace(
+                &incoming,
+                Topic::SessionStatus {
+                    session_id: status.session_id.clone(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+            );
+            cx.run_until_parked();
+            store.update(cx, |store, cx| {
+                store.drain_host_events_for_test(cx);
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                ""
+            );
+            cx.update(|window, cx| composer.update(cx, |composer, cx| composer.focus(window, cx)));
+            cx.simulate_input("Other destination draft");
+            if is_draft {
+                restored_status.session_id = "reopened-project-draft".into();
+            }
+            store.update(cx, |store, _| {
+                store.select_session(restored_status.session_id.clone())
+            });
+            replace(
+                &incoming,
+                Topic::SessionStatus {
+                    session_id: restored_status.session_id.clone(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(restored_status.clone())),
+            );
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                composer.update(cx, |composer, cx| composer.focus(window, cx));
+            });
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                "Keep this prompt"
+            );
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+                "cmd-shift-z"
+            } else {
+                "ctrl-y"
+            });
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                ""
+            );
+            for (destination, expected) in
+                [(status, "Other destination draft"), (restored_status, "")]
+            {
+                store.update(cx, |store, _| {
+                    store.select_session(destination.session_id.clone())
+                });
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                assert_eq!(
+                    composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                    expected
+                );
+            }
+        }
     }
 
     /// A value the provider reports as unavailable is shown but never sent.

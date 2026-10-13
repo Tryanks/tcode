@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use agent::{
     FileChangeKind, ModelSpec, OptionDescriptor, ProviderCommand, ProviderCommandKind, TokenUsage,
     UserInputQuestion,
@@ -147,51 +145,6 @@ pub(crate) fn composer_destination(
         project_id.map(|id| ComposerDestination::ProjectDraft(id.to_string()))
     } else {
         Some(ComposerDestination::Thread(session_id.to_string()))
-    }
-}
-
-#[derive(Default)]
-/// In-memory text drafts plus the destination currently represented by the
-/// shared [`crate::widgets::input::TextareaState`]. Keeping switching in this
-/// small state machine makes it explicit that the outgoing value is saved before
-/// the incoming one is restored.
-pub(super) struct ComposerTextCache {
-    current: Option<ComposerDestination>,
-    drafts: HashMap<ComposerDestination, String>,
-}
-
-impl ComposerTextCache {
-    /// Change destinations, returning the text that should replace the shared
-    /// input. `None` means the input already represents this destination.
-    pub(super) fn switch_to(
-        &mut self,
-        incoming: Option<ComposerDestination>,
-        outgoing_text: &str,
-    ) -> Option<String> {
-        if self.current == incoming {
-            return None;
-        }
-
-        if let Some(outgoing) = self.current.take() {
-            if outgoing_text.is_empty() {
-                self.drafts.remove(&outgoing);
-            } else {
-                self.drafts.insert(outgoing, outgoing_text.to_string());
-            }
-        }
-
-        self.current = incoming.clone();
-        Some(
-            incoming
-                .and_then(|key| self.drafts.get(&key).cloned())
-                .unwrap_or_default(),
-        )
-    }
-
-    pub(super) fn clear_current(&mut self) {
-        if let Some(current) = self.current.as_ref() {
-            self.drafts.remove(current);
-        }
     }
 }
 
@@ -485,46 +438,6 @@ pub(super) fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
 mod tests {
     use super::*;
     use chrono::Timelike as _;
-
-    #[test]
-    fn composer_drafts_are_isolated_reused_and_cleared_only_after_submission() {
-        for (is_draft, project_a, project_b) in [
-            (false, None, None),
-            (true, Some("project-a"), Some("project-b")),
-        ] {
-            let a = composer_destination(is_draft, "thread-a", project_a);
-            let b = composer_destination(is_draft, "thread-b", project_b);
-            let mut cache = ComposerTextCache::default();
-            assert_eq!(cache.switch_to(a.clone(), ""), Some(String::new()));
-            assert_eq!(cache.switch_to(a.clone(), "typed"), None);
-            assert_eq!(
-                cache.switch_to(b.clone(), "text for a"),
-                Some(String::new())
-            );
-            assert_eq!(
-                cache.switch_to(a.clone(), "text for b"),
-                Some("text for a".into())
-            );
-            if is_draft {
-                assert_eq!(
-                    composer_destination(true, "replacement-draft", project_a),
-                    a
-                );
-            }
-            cache.clear_current();
-            assert_eq!(cache.switch_to(b.clone(), ""), Some("text for b".into()));
-            assert_eq!(cache.switch_to(a, "text for b"), Some(String::new()));
-        }
-        let mut cache = ComposerTextCache::default();
-        let thread = composer_destination(false, "same-id", None);
-        let draft = composer_destination(true, "temporary", Some("same-id"));
-        cache.switch_to(thread.clone(), "");
-        assert_eq!(cache.switch_to(draft, "thread text"), Some(String::new()));
-        assert_eq!(
-            cache.switch_to(thread, "draft text"),
-            Some("thread text".into())
-        );
-    }
 
     #[test]
     fn orchestrate_prefix_requires_a_complete_command_token() {

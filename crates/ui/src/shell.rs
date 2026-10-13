@@ -4590,17 +4590,6 @@ mod tests {
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(250));
         draw(cx);
-        let focus = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat
-                .read(cx)
-                .composer()
-                .read(cx)
-                .input_focus_handle(cx)
-        });
         let mut selected_draft = None;
         for reopen in [false, true] {
             if reopen && compact {
@@ -4681,6 +4670,17 @@ mod tests {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
+            let focus = shell.read_with(cx, |shell, cx| {
+                shell
+                    .attachment
+                    .as_ref()
+                    .unwrap()
+                    .chat
+                    .read(cx)
+                    .composer()
+                    .read(cx)
+                    .input_focus_handle(cx)
+            });
             cx.update(|window, cx| {
                 assert_eq!(
                     focus.is_focused(window),
@@ -5435,8 +5435,6 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
-        cx.update(crate::shortcut::init);
         let root = std::env::temp_dir().join(format!(
             "tcode-thread-shortcuts-{}",
             tcode_services::store::now_millis()
@@ -5466,6 +5464,7 @@ mod tests {
         }))
         .unwrap();
         let (shell, _transport, cx) = mount(cx);
+        cx.update(|_, cx| crate::shortcut::init(cx));
         cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| {
@@ -5575,6 +5574,7 @@ mod tests {
         cx.update(|window, cx| input.focus(window, cx));
         draw(cx);
         cx.simulate_keystrokes("x");
+        draw(cx);
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "x"
