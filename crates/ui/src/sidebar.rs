@@ -4728,7 +4728,20 @@ mod tests {
             state.sessions = vec![meta].into();
         }))
         .expect("seed sidebar host");
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
 
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
@@ -4765,7 +4778,7 @@ mod tests {
                 .expect("read host title");
         assert_eq!(title, "Original title");
 
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4792,7 +4805,20 @@ mod tests {
             state.sessions = vec![codex, claude].into();
         }))
         .unwrap();
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (_, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
@@ -4810,48 +4836,53 @@ mod tests {
                 "sidebar-provider-mark-claude-thread",
             ),
         ];
-        let wait_for_rows = |cx: &mut VisualTestContext| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-                draw(cx);
-                let rows: Vec<_> = selectors
-                    .iter()
-                    .filter_map(|(row, _)| cx.debug_bounds(row))
-                    .collect();
-                if rows.len() == selectors.len() {
-                    return rows;
+        let wait_for_rows =
+            |cx: &mut VisualTestContext, driver: &mut crate::store::tests::LocalHostDriver| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    driver.step(cx, &store);
+                    draw(cx);
+                    let rows: Vec<_> = selectors
+                        .iter()
+                        .filter_map(|(row, _)| cx.debug_bounds(row))
+                        .collect();
+                    if rows.len() == selectors.len() {
+                        return rows;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "thread rows never rendered"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "thread rows never rendered"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        };
+            };
 
-        let set_marks = |cx: &mut VisualTestContext, enabled: bool| {
-            store.update(cx, |store, _| store.set_sidebar_provider_marks(enabled));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while store.read_with(cx, |store, _| store.settings().sidebar_provider_marks) != enabled
-            {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "setting never replicated"
-                );
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        };
+        let set_marks =
+            |cx: &mut VisualTestContext,
+             enabled: bool,
+             driver: &mut crate::store::tests::LocalHostDriver| {
+                store.update(cx, |store, _| store.set_sidebar_provider_marks(enabled));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while store.read_with(cx, |store, _| store.settings().sidebar_provider_marks)
+                    != enabled
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "setting never replicated"
+                    );
+                    driver.step(cx, &store);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            };
 
         // Off by default: rows render without a mark.
-        wait_for_rows(cx);
+        wait_for_rows(cx, &mut driver);
         for (_, mark_selector) in selectors {
             assert!(cx.debug_bounds(mark_selector).is_none());
         }
 
-        set_marks(cx, true);
-        let rows = wait_for_rows(cx);
+        set_marks(cx, true, &mut driver);
+        let rows = wait_for_rows(cx, &mut driver);
         for ((_, mark_selector), row) in selectors.iter().zip(&rows) {
             let mark = cx
                 .debug_bounds(mark_selector)
@@ -4883,8 +4914,8 @@ mod tests {
             "the active row keeps the neutral selected surface"
         );
 
-        set_marks(cx, false);
-        let rows = wait_for_rows(cx);
+        set_marks(cx, false, &mut driver);
+        let rows = wait_for_rows(cx, &mut driver);
         for (_, mark_selector) in selectors {
             assert!(
                 cx.debug_bounds(mark_selector).is_none(),
@@ -4892,6 +4923,7 @@ mod tests {
             );
         }
         assert!(painted_active(cx, rows[0]));
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4923,7 +4955,20 @@ mod tests {
             state.sessions = sessions.into();
         }))
         .unwrap();
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
         let navigation = cx.new(|_| WindowState::new(false).with_compact(true));
         let (_, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), navigation.clone(), cx));
@@ -4931,7 +4976,7 @@ mod tests {
         draw(cx);
         // A remote host may not have sent status yet. Selection must repaint
         // from the client notification without waiting for a host event.
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        driver.shutdown(cx, &store, &host);
         draw(cx);
         let a = cx.debug_bounds("compact-row-menu-0").unwrap();
         let b = cx.debug_bounds("compact-row-menu-10").unwrap();
@@ -5035,7 +5080,20 @@ mod tests {
         }))
         .expect("seed projects");
 
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
@@ -5077,7 +5135,7 @@ mod tests {
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            driver.step(cx, &store);
             draw(cx);
             if store.read_with(cx, |store, _| store.sidebar_layout()) == SidebarLayout::Grouped {
                 break;
@@ -5095,7 +5153,7 @@ mod tests {
                 cx.simulate_click(header.center(), gpui::Modifiers::default());
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 loop {
-                    store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                    driver.step(cx, &store);
                     draw(cx);
                     let any_collapsed = store.read_with(cx, |store, _| {
                         seeded
@@ -5123,7 +5181,7 @@ mod tests {
             }
         }
 
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        driver.shutdown(cx, &store, &host);
         let persisted = tcode_services::settings::SettingsStore::new(root.clone()).load();
         assert_eq!(
             persisted.sidebar_layout,
@@ -5179,10 +5237,23 @@ mod tests {
             state.projects = vec![project];
         }))
         .unwrap();
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
         // The host sends its index from its own threads; wait for every
         // thread, as the app's event pump would, before judging the list.
-        crate::store::tests::wait_until(cx, &store, "every thread", |cx| {
+        driver.wait_until(cx, &store, "every thread", |cx| {
             store.read_with(cx, |store, _| store.flat_sessions().len() == 60)
         });
         let window_state = cx.new(|_| WindowState::new(false));
@@ -5244,7 +5315,7 @@ mod tests {
                 "dragging must not activate a thread under the scrollbar"
             );
         }
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5727,7 +5798,20 @@ mod tests {
             controller.adopt_host(traverse);
             cx.set_global(controller);
         });
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -5772,6 +5856,7 @@ mod tests {
                 controller.stop_hosting()
             });
         });
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
     #[gpui::test]
@@ -6702,16 +6787,25 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("arranged".into()));
-        // A test store blocks on each command's acknowledgement, so the host
-        // side answers from its own threads: one pumps the link, one accepts
-        // and records every lifecycle command.
-        std::thread::spawn(move || smol::block_on(link.pump()));
+        let mut driver = crate::store::tests::LocalHostDriver::from_link(link);
+        // The host records commands on its own thread; the driver routes replies
+        // while the UI awaits each acknowledgement, as in the running app.
         let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let host_recorded = recorded.clone();
         let host_incoming = incoming.clone();
         std::thread::spawn(move || {
             while let Ok(line) = outgoing.recv_blocking() {
                 let message = decode_client_line(&line).unwrap();
+                if matches!(
+                    message.payload,
+                    ClientPayload::Query(tcode_protocol::Query::Ping)
+                ) {
+                    let reply = HostMessage::QueryResult {
+                        id: message.id,
+                        result: Ok(tcode_protocol::QueryResponse::Pong),
+                    };
+                    let _ = host_incoming.send_blocking(encode_line(&reply).unwrap());
+                }
                 if let ClientPayload::Command(command) = message.payload {
                     if matches!(
                         command,
@@ -6732,7 +6826,7 @@ mod tests {
                 }
             }
         });
-        crate::store::tests::wait_until(cx, &store, "the threads", |cx| {
+        driver.wait_until(cx, &store, "the threads", |cx| {
             store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
         });
         let window_state = cx.new(|_| WindowState::new(false));
@@ -6745,11 +6839,28 @@ mod tests {
         let sidebar = sidebar.unwrap();
         cx.simulate_resize(size(px(393.), px(2000.)));
         // The lifecycle commands accepted since the last call.
-        let sent = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
+        let sent = |cx: &mut VisualTestContext,
+                    driver: &mut crate::store::tests::LocalHostDriver,
+                    expected: usize| {
+            driver.wait_until(cx, &store, "lifecycle commands reach the host", |_| {
+                recorded.lock().unwrap().len() >= expected
+            });
+            // A FIFO reply also establishes absence after a cancelled gesture.
+            let link = driver.link.clone();
+            let mut barrier = std::pin::pin!(link.query(tcode_protocol::Query::Ping));
+            driver.wait_until(cx, &store, "lifecycle command barrier", |_| {
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                match std::future::Future::poll(barrier.as_mut(), &mut task_cx) {
+                    std::task::Poll::Ready(result) => {
+                        result.expect("host barrier reply");
+                        true
+                    }
+                    std::task::Poll::Pending => false,
+                }
+            });
             std::mem::take(&mut *recorded.lock().unwrap())
         };
-        sent(cx);
+        sent(cx, &mut driver, 0);
         draw(cx);
         let order = [
             "pin-a", "pin-b", "pin-c", "pin-new", "pin-old", "busy", "reopened", "fresh",
@@ -6797,7 +6908,7 @@ mod tests {
         cx.simulate_mouse_move(over, left, none);
         draw(cx);
         cx.simulate_mouse_up(over, left, none);
-        let commands = sent(cx);
+        let commands = sent(cx, &mut driver, 1);
         let [
             Command::PinSession {
                 session_id,
@@ -6818,20 +6929,20 @@ mod tests {
         cx.simulate_mouse_move(target.center(), left, none);
         cx.simulate_keystrokes("escape");
         cx.simulate_mouse_up(target.center(), left, none);
-        assert_eq!(sent(cx), vec![], "Escape cancels the drag");
+        assert_eq!(sent(cx, &mut driver, 0), vec![], "Escape cancels the drag");
 
         sidebar.update_in(cx, |sidebar, window, cx| {
             sidebar.on_unpin(&ThreadUnpin("pin-a".into()), window, cx)
         });
         assert_eq!(
-            sent(cx),
+            sent(cx, &mut driver, 1),
             vec![Command::UnpinSession {
                 session_id: "pin-a".into()
             }]
         );
         sidebar.update_in(cx, |sidebar, window, cx| sidebar.undo_lifecycle(window, cx));
         assert_eq!(
-            sent(cx),
+            sent(cx, &mut driver, 1),
             vec![Command::PinSession {
                 session_id: "pin-a".into(),
                 order_key: Some("f".into()),
@@ -6841,7 +6952,7 @@ mod tests {
         sidebar.update_in(cx, |sidebar, window, cx| {
             sidebar.on_move(&ThreadMove("pin-a".into(), true), window, cx)
         });
-        let commands = sent(cx);
+        let commands = sent(cx, &mut driver, 1);
         let [
             Command::ReorderPinned {
                 session_id,
@@ -6861,14 +6972,14 @@ mod tests {
             sidebar.settle_thread("pin-b", window, cx)
         });
         assert_eq!(
-            sent(cx),
+            sent(cx, &mut driver, 1),
             vec![Command::SettleSession {
                 session_id: "pin-b".into()
             }]
         );
         sidebar.update_in(cx, |sidebar, window, cx| sidebar.undo_lifecycle(window, cx));
         assert_eq!(
-            sent(cx),
+            sent(cx, &mut driver, 2),
             vec![
                 Command::UnsettleSession {
                     session_id: "pin-b".into()
@@ -6879,5 +6990,6 @@ mod tests {
                 },
             ]
         );
+        driver.link.close();
     }
 }
