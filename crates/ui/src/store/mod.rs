@@ -3917,11 +3917,7 @@ pub(crate) mod tests {
         scope: std::sync::Arc<std::sync::Mutex<tcode_protocol::Scope>>,
         requests: std::sync::Arc<std::sync::Mutex<Vec<tcode_protocol::ClientMessage>>>,
         worker: Option<std::thread::JoinHandle<()>>,
-        pump_thread: Option<(async_channel::Sender<()>, std::thread::JoinHandle<()>)>,
-        scheduled_pump: Option<gpui::Task<()>>,
-        scheduled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        pending_replies: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-        replies: async_channel::Sender<String>,
+        driver: LocalHostDriver,
     }
 
     impl ScriptedSpace {
@@ -3950,18 +3946,6 @@ pub(crate) mod tests {
             let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let worker_scope = scope.clone();
             let worker_recorded = recorded.clone();
-            let scheduled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let pending_replies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let worker_scheduled = scheduled.clone();
-            let worker_replies = pending_replies.clone();
-            let fixture_replies = replies.clone();
-            let pump = link.clone();
-            let (stop_pump, stopped) = async_channel::bounded(1);
-            let pump_thread = std::thread::spawn(move || {
-                smol::block_on(futures_lite::future::race(pump.pump(), async move {
-                    let _ = stopped.recv().await;
-                }));
-            });
             let worker = std::thread::spawn(move || {
                 smol::block_on(async move {
                     while let Ok(line) = requests.recv().await {
@@ -4120,29 +4104,23 @@ pub(crate) mod tests {
                             other => panic!("unexpected member request: {other:?}"),
                         };
                         let line = tcode_protocol::encode_line(&response).unwrap();
-                        if worker_scheduled.load(std::sync::atomic::Ordering::Acquire) {
-                            worker_replies.lock().unwrap().push(line);
-                        } else if replies.send(line).await.is_err() {
+                        if replies.send(line).await.is_err() {
                             break;
                         }
                     }
                 });
             });
             Self {
+                driver: LocalHostDriver::from_link(link.clone()),
                 link,
                 scope,
                 requests: recorded,
                 worker: Some(worker),
-                pump_thread: Some((stop_pump, pump_thread)),
-                scheduled_pump: None,
-                scheduled,
-                pending_replies,
-                replies: fixture_replies,
             }
         }
 
-        fn store(&self, cx: &mut TestAppContext) -> gpui::Entity<WorkspaceStore> {
-            cx.new(|cx| {
+        fn store(&mut self, cx: &mut TestAppContext) -> gpui::Entity<WorkspaceStore> {
+            let workspace = cx.new(|cx| {
                 WorkspaceStore::new_attached(
                     self.link.clone(),
                     WorkspaceAttachment::Remote {
@@ -4151,46 +4129,27 @@ pub(crate) mod tests {
                     },
                     None,
                     None,
-                    true,
+                    false,
                     cx,
                 )
-            })
+            });
+            self.driver
+                .wait_until(cx, &workspace, "space baseline", |cx| {
+                    workspace.read_with(cx, |store, _| store.baseline_ready())
+                });
+            workspace
         }
 
-        // GPUI's test scheduler rejects wakes from OS threads; synchronous
-        // command fixtures need that thread until management queries begin.
-        fn schedule_pump(&mut self, cx: &TestAppContext) {
-            self.scheduled
-                .store(true, std::sync::atomic::Ordering::Release);
-            let (stop, pump) = self.pump_thread.take().unwrap();
-            stop.send_blocking(()).unwrap();
-            pump.join().unwrap();
-            let link = self.link.clone();
-            let executor = cx.executor();
-            self.scheduled_pump = Some(cx.executor().spawn(async move {
-                link.pump_with_timer(move || executor.timer(std::time::Duration::from_secs(1)))
-                    .await;
-            }));
-        }
-
-        fn flush_replies(&self) {
-            for line in self.pending_replies.lock().unwrap().drain(..) {
-                self.replies.try_send(line).unwrap();
-            }
-        }
-
-        fn barrier(&self, cx: &mut TestAppContext, workspace: &gpui::Entity<WorkspaceStore>) {
-            await_with_events(cx, workspace, self.link.query(tcode_protocol::Query::Ping)).unwrap();
+        fn barrier(&mut self, cx: &mut TestAppContext, workspace: &gpui::Entity<WorkspaceStore>) {
+            self.driver
+                .await_with_events(cx, workspace, self.link.query(tcode_protocol::Query::Ping))
+                .unwrap();
         }
     }
 
     impl Drop for ScriptedSpace {
         fn drop(&mut self) {
             self.link.close();
-            if let Some((stop, pump)) = self.pump_thread.take() {
-                let _ = stop.try_send(());
-                pump.join().unwrap();
-            }
             self.worker.take().unwrap().join().unwrap();
         }
     }
@@ -4201,9 +4160,10 @@ pub(crate) mod tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         let mut host = ScriptedSpace::new();
         let workspace = host.store(cx);
-        wait_until(cx, &workspace, "member baseline", |cx| {
-            workspace.read_with(cx, |store, _| store.baseline_ready())
-        });
+        host.driver
+            .wait_until(cx, &workspace, "member baseline", |cx| {
+                workspace.read_with(cx, |store, _| store.baseline_ready())
+            });
         host.barrier(cx, &workspace);
         workspace.read_with(cx, |store, _| {
             assert_eq!(
@@ -4275,11 +4235,13 @@ pub(crate) mod tests {
             });
             store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None });
         });
-        wait_until(cx, &workspace, "new space baseline", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store.projects().first().is_some_and(|p| p.id == "other") && store.index_hydrated()
-            })
-        });
+        host.driver
+            .wait_until(cx, &workspace, "new space baseline", |cx| {
+                workspace.read_with(cx, |store, _| {
+                    store.projects().first().is_some_and(|p| p.id == "other")
+                        && store.index_hydrated()
+                })
+            });
         host.barrier(cx, &workspace);
         workspace.read_with(cx, |store, _| {
             assert!(store.enabled_profiles().is_empty());
@@ -4312,7 +4274,6 @@ pub(crate) mod tests {
             cx.update(|_, cx| crate::remote::spaces::for_store(&workspace, cx))
                 .is_none()
         );
-        host.schedule_pump(cx);
         *host.scope.lock().unwrap() = tcode_protocol::Scope::Full;
         workspace.update(cx, |store, _| {
             store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
@@ -4321,12 +4282,12 @@ pub(crate) mod tests {
             });
             store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None });
         });
-        wait_until(cx, &workspace, "full scope baseline", |cx| {
-            host.flush_replies();
-            workspace.read_with(cx, |store, _| {
-                store.scope().is_full() && store.baseline_ready()
-            })
-        });
+        host.driver
+            .wait_until(cx, &workspace, "full scope baseline", |cx| {
+                workspace.read_with(cx, |store, _| {
+                    store.scope().is_full() && store.baseline_ready()
+                })
+            });
 
         let spaces = cx
             .update(|_, cx| crate::remote::spaces::for_store(&workspace, cx))
@@ -4340,10 +4301,10 @@ pub(crate) mod tests {
             *captured.borrow_mut() = Some(created.await);
         })
         .detach();
-        wait_until(cx, &workspace, "created space and project share", |_| {
-            host.flush_replies();
-            result.borrow().is_some()
-        });
+        host.driver
+            .wait_until(cx, &workspace, "created space and project share", |_| {
+                result.borrow().is_some()
+            });
         assert_eq!(
             result.borrow().as_ref().unwrap().as_ref().unwrap().id,
             "created"
@@ -4393,12 +4354,12 @@ pub(crate) mod tests {
         workspace.update(cx, |store, _| {
             store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None })
         });
-        wait_until(cx, &workspace, "moved member baseline", |cx| {
-            host.flush_replies();
-            workspace.read_with(cx, |store, _| {
-                !store.scope().is_full() && store.baseline_ready()
-            })
-        });
+        host.driver
+            .wait_until(cx, &workspace, "moved member baseline", |cx| {
+                workspace.read_with(cx, |store, _| {
+                    !store.scope().is_full() && store.baseline_ready()
+                })
+            });
         workspace.update(cx, |store, cx| {
             store.apply_domain_event(
                 &EventEnvelope {
@@ -4419,11 +4380,12 @@ pub(crate) mod tests {
 
     #[gpui::test]
     fn member_sidebar_and_read_preferences_change_without_host_commands(cx: &mut TestAppContext) {
-        let host = ScriptedSpace::new();
+        let mut host = ScriptedSpace::new();
         let workspace = host.store(cx);
-        wait_until(cx, &workspace, "member baseline", |cx| {
-            workspace.read_with(cx, |store, _| store.baseline_ready())
-        });
+        host.driver
+            .wait_until(cx, &workspace, "member baseline", |cx| {
+                workspace.read_with(cx, |store, _| store.baseline_ready())
+            });
         host.barrier(cx, &workspace);
         host.requests.lock().unwrap().clear();
         workspace.update(cx, |store, cx| {
