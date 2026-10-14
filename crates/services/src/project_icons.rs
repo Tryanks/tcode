@@ -81,29 +81,8 @@ fn raster(path: &Path, pixels: u32) -> io::Result<Vec<u8>> {
             "icon size must be between 1 and 128 pixels",
         ));
     }
-    let mut rgba = decode(&crate::user_files::read_bounded(path, MAX_BYTES)?, 8192)?.into_rgba32f();
-    // Average premultiplied colors so transparent pixels cannot darken the preview.
-    for pixel in rgba.pixels_mut() {
-        let alpha = pixel[3];
-        for channel in &mut pixel.0[..3] {
-            *channel *= alpha;
-        }
-    }
-    let mut resized = image::DynamicImage::ImageRgba32F(rgba)
-        .resize(pixels, pixels, image::imageops::FilterType::Lanczos3)
-        .into_rgba32f();
-    for pixel in resized.pixels_mut() {
-        let alpha = pixel[3];
-        for channel in &mut pixel.0[..3] {
-            *channel = if alpha > 0. { *channel / alpha } else { 0. };
-        }
-    }
-    let mut png = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba32F(resized)
-        .to_rgba8()
-        .write_to(&mut png, ImageFormat::Png)
-        .map_err(io::Error::other)?;
-    Ok(png.into_inner())
+    let image = decode(&crate::user_files::read_bounded(path, MAX_BYTES)?, 8192)?;
+    crate::image_previews::resize_to_png(image, pixels)
 }
 
 pub fn read_project_icon(project: &Project, pixels: u32) -> io::Result<Vec<u8>> {
