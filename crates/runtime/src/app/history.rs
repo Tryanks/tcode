@@ -77,32 +77,42 @@ const HISTORY_PREVIEW_CACHE_BYTES: usize = 16 * 1024;
 /// [`OUTPUT_PREVIEW_BYTES`] stays on the host, read back with
 /// `Query::ReadItemOutput`.
 pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRecord> {
-    if !oversized_output(&record.event) {
+    let Some((event, elided)) = wire_event(&record.event) else {
         return Cow::Borrowed(record);
+    };
+    Cow::Owned(SessionEventRecord {
+        origin: record.origin,
+        author: record.author.clone(),
+        ts: record.ts,
+        event,
+        elided,
+    })
+}
+
+fn wire_event(event: &AgentEvent) -> Option<(AgentEvent, Option<u64>)> {
+    if !oversized_output(event) {
+        return None;
     }
     if let AgentEvent::Delta {
         item_id,
         kind: DeltaKind::CommandOutput,
         text,
-    } = &record.event
+    } = event
     {
-        return Cow::Owned(SessionEventRecord {
-            origin: record.origin,
-            author: record.author.clone(),
-            ts: record.ts,
-            event: AgentEvent::Delta {
+        return Some((
+            AgentEvent::Delta {
                 item_id: item_id.clone(),
                 kind: DeltaKind::CommandOutput,
                 text: output_tail(text).to_owned(),
             },
-            elided: Some(text.len() as u64),
-        });
+            Some(text.len() as u64),
+        ));
     }
-    let item = match &record.event {
+    let item = match event {
         AgentEvent::ItemStarted(item)
         | AgentEvent::ItemUpdated(item)
         | AgentEvent::ItemCompleted(item) => item,
-        _ => return Cow::Borrowed(record),
+        _ => return None,
     };
     let (content, elided) = match &item.content {
         ItemContent::CommandExecution {
@@ -180,25 +190,49 @@ pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRe
             },
             None,
         ),
-        _ => return Cow::Borrowed(record),
+        _ => return None,
     };
     let preview = agent::ThreadItem {
         id: item.id.clone(),
         parent_item_id: item.parent_item_id.clone(),
         content,
     };
-    let event = match &record.event {
+    let event = match event {
         AgentEvent::ItemStarted(_) => AgentEvent::ItemStarted(preview),
         AgentEvent::ItemUpdated(_) => AgentEvent::ItemUpdated(preview),
         _ => AgentEvent::ItemCompleted(preview),
     };
-    Cow::Owned(SessionEventRecord {
-        origin: record.origin,
-        author: record.author.clone(),
-        ts: record.ts,
+    Some((event, elided))
+}
+
+pub(super) fn append_projection(
+    bytes: usize,
+    ts: u64,
+    event: &AgentEvent,
+    author: Option<&Author>,
+    origin: Option<MessageOrigin>,
+) -> Option<(String, Vec<u8>)> {
+    if bytes < HISTORY_PREVIEW_CACHE_BYTES {
+        return None;
+    }
+    let (event, elided) = wire_event(event)?;
+    let record = SessionEventRecord {
+        origin,
+        author: author.cloned(),
+        ts: Some(ts),
         event,
         elided,
-    })
+    };
+    match serde_json::to_vec(&record) {
+        Ok(body) if body.len() < HISTORY_PREVIEW_CACHE_BYTES => {
+            Some((HISTORY_PREVIEW_VERSION.to_owned(), body))
+        }
+        Ok(_) => None,
+        Err(error) => {
+            log::warn!("could not encode appended history preview: {error}");
+            None
+        }
+    }
 }
 
 fn wire_image(image: &agent::Attachment) -> agent::Attachment {
