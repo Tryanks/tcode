@@ -1601,7 +1601,7 @@ impl StreamTask {
         let full = matches!(principal, Principal::Full);
         let attachment = self.shared.mux.attach(principal);
         let scope = self.connection.remote_id().to_string();
-        let (outbound, outbound_rx) = async_channel::bounded::<String>(1);
+        let (outbound, outbound_rx) = async_channel::unbounded::<String>();
         let writer = async {
             loop {
                 let line = tokio::select! {
@@ -1673,10 +1673,12 @@ impl StreamTask {
                 io::ErrorKind::ConnectionAborted, "host attachment closed",
             )),
         };
-        let attachment_closed = attachment.to_host.is_closed();
         attachment.to_host.close();
         send.finish();
-        if result.is_err() || attachment_closed {
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+        {
             self.connection.close(2_u32.into(), b"protocol");
         }
         result

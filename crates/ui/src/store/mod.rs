@@ -683,15 +683,14 @@ impl WorkspaceStore {
                 space_name: space_name.clone(),
             },
         };
-        // Reconnect may move this device to another space or change its grant.
-        // Retire the previous domains before requesting the new baseline.
-        for subscription in self.host.subscriptions() {
-            if subscription.topic != Topic::Scope {
-                let _ = self.host.unsubscribe(subscription);
-            }
-        }
         let changed = self.scope != next;
+        let needs_baseline = changed || self.applied_scope_request.is_none();
         if changed {
+            for subscription in self.host.subscriptions() {
+                if subscription.topic != Topic::Scope {
+                    let _ = self.host.unsubscribe(subscription);
+                }
+            }
             self.leave_session();
             self.threads.clear();
             self.conversation_ui.clear();
@@ -699,19 +698,19 @@ impl WorkspaceStore {
             self.index_summary = Default::default();
             self.draft_fallback_pending = false;
         }
-        self.archived_replica = None;
-        self.archived_task = None;
-        self.baseline_topics.clear();
-        self.baseline_topics.insert(Topic::Scope);
-        if changed {
+        if needs_baseline {
+            self.archived_replica = None;
+            self.archived_task = None;
+            self.baseline_topics.clear();
             self.index_hydrated = false;
             self.settings_hydrated = false;
+            self.providers_replica = Default::default();
+            self.scoped_providers.clear();
         }
+        self.baseline_topics.insert(Topic::Scope);
         self.scope = next;
-        self.providers_replica = Default::default();
-        self.scoped_providers.clear();
         match scope {
-            Scope::Full => {
+            Scope::Full if needs_baseline => {
                 for topic in [
                     Topic::Settings,
                     Topic::Index,
@@ -741,6 +740,7 @@ impl WorkspaceStore {
                     self.select_session(id);
                 }
             }
+            Scope::Full => {}
             Scope::Space {
                 projects,
                 providers,
@@ -763,6 +763,7 @@ impl WorkspaceStore {
                 self.settings_hydrated = true;
                 self.index_replica.1 = projects.clone();
                 self.scoped_providers = providers.clone();
+                self.providers_replica = Default::default();
                 for choice in providers {
                     self.providers_replica
                         .model_catalogs
@@ -770,11 +771,13 @@ impl WorkspaceStore {
                         .or_default()
                         .extend(choice.models.clone());
                 }
-                let _ = self.host.subscribe(Subscription {
-                    known_index: self.cached_index_fingerprint(),
-                    topic: self.index_topic(),
-                    after: None,
-                });
+                if needs_baseline {
+                    let _ = self.host.subscribe(Subscription {
+                        known_index: self.cached_index_fingerprint(),
+                        topic: self.index_topic(),
+                        after: None,
+                    });
+                }
             }
         }
         for topic in [TopicKind::Settings, TopicKind::Providers, TopicKind::Index] {
@@ -828,6 +831,8 @@ impl WorkspaceStore {
                 ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
             ),
         };
+        // State notifications and events use separate queues; a delayed disconnect
+        // must not clear baselines already applied for the current Scope request.
         let scope_is_current = self.applied_scope_request.is_some()
             && self.applied_scope_request == self.host.subscription_request_id(&Topic::Scope);
         let disconnected = matches!(
@@ -835,11 +840,6 @@ impl WorkspaceStore {
             ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
         );
         if restarts && (!scope_is_current || disconnected) {
-            for subscription in self.host.subscriptions() {
-                if subscription.topic != Topic::Scope {
-                    let _ = self.host.unsubscribe(subscription);
-                }
-            }
             self.baseline_topics.clear();
             self.archived_task = None;
         }
@@ -1096,6 +1096,7 @@ impl WorkspaceStore {
                     ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
                 )
             {
+                self.baseline_topics.clear();
                 self.apply_scope(scope, cx);
                 self.applied_scope_request = envelope.request_id;
             }
@@ -4009,10 +4010,24 @@ pub(crate) mod tests {
                                             tcode_protocol::ProvidersStatus::default(),
                                         )
                                     }
-                                    _ => panic!(
-                                        "unexpected member subscription: {:?}",
-                                        subscription.topic
-                                    ),
+                                    _ => {
+                                        let rejection = HostMessage::Ack {
+                                            id: request.id,
+                                            result: Err(
+                                                tcode_protocol::ProtocolError::out_of_scope(
+                                                    "subscription outside current space",
+                                                ),
+                                            ),
+                                        };
+                                        if replies
+                                            .send(tcode_protocol::encode_line(&rejection).unwrap())
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                        continue;
+                                    }
                                 };
                                 HostMessage::Event(EventEnvelope {
                                     request_id: Some(request.id),
@@ -6173,6 +6188,47 @@ pub(crate) mod tests {
         driver.wait_until(cx, &workspace, "correlated reconnect baselines", |cx| {
             workspace.read_with(cx, |store, _| store.connection_state().is_connected())
         });
+        let reconnecting = ConnectionState::Reconnecting {
+            attempt: 3,
+            reason: None,
+        };
+        let syncing = ConnectionState::Syncing { path: None };
+        driver.link.set_connection_state(reconnecting.clone());
+        driver.link.set_connection_state(syncing.clone());
+        let events = driver.link.events();
+        let mut next = std::pin::pin!(events.recv());
+        let scope = smol::block_on(smol::future::race(
+            std::future::poll_fn(|task_cx| {
+                let _ = driver.pump.as_mut().poll(task_cx);
+                next.as_mut().poll(task_cx)
+            }),
+            async {
+                smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                panic!("recovery Scope was not delivered");
+            },
+        ))
+        .unwrap();
+        assert!(matches!(scope.event, ServerEvent::ScopeSnapshot(_)));
+        workspace.update(cx, |store, cx| {
+            store.apply_domain_event(&scope, cx);
+            assert!(
+                !store.baseline_ready(),
+                "Scope alone cannot make old baselines current"
+            );
+            store.apply_connection_state(reconnecting);
+            store.apply_connection_state(syncing);
+            assert!(
+                !store.baseline_ready(),
+                "other current baselines are still pending"
+            );
+            assert!(!store.chat_loading(), "cached thread remains visible");
+        });
+        driver.wait_until(
+            cx,
+            &workspace,
+            "baselines after delayed state notifications",
+            |cx| workspace.read_with(cx, |store, _| store.connection_state().is_connected()),
+        );
         driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(root);
     }

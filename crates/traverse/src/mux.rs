@@ -169,6 +169,12 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                         pending_subscriptions.insert(next_global_id, topic.clone());
                     } else {
                         topics.remove(&topic);
+                        if let Ok(tcode_protocol::Topic::Terminal { terminal_id }) =
+                            serde_json::from_str(&topic)
+                            && let Some(sender) = clients.get(&connection_id)
+                        {
+                            sender.forget_terminal(terminal_id);
+                        }
                         pending_subscriptions.retain(|global_id, pending_topic| {
                             pending_topic != &topic
                                 || routes
@@ -270,7 +276,20 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                                     && let Some(sender) = clients.get(&connection_id)
                                 {
                                     value["content"]["request_id"] = local_id.into();
-                                    let _ = sender.try_send(encode_line(&value).unwrap(), None);
+                                    if matches!(
+                                        value
+                                            .pointer("/content/event/type")
+                                            .and_then(serde_json::Value::as_str),
+                                        Some("terminal_frame" | "terminal_delta")
+                                    ) {
+                                        if let Ok(tcode_protocol::HostMessage::Event(envelope)) =
+                                            serde_json::from_value(value.clone())
+                                        {
+                                            let _ = sender.try_send_terminal(envelope);
+                                        }
+                                    } else {
+                                        let _ = sender.try_send(encode_line(&value).unwrap(), None);
+                                    }
                                 }
                             }
                         } else {
@@ -293,7 +312,20 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                                     .get(id)
                                     .is_some_and(|topics| topics.contains(&topic))
                                 {
-                                    let _ = sender.try_send(line.clone(), replace.clone());
+                                    if matches!(
+                                        content
+                                            .pointer("/event/type")
+                                            .and_then(serde_json::Value::as_str),
+                                        Some("terminal_frame" | "terminal_delta")
+                                    ) {
+                                        if let Ok(tcode_protocol::HostMessage::Event(envelope)) =
+                                            serde_json::from_value(value.clone())
+                                        {
+                                            let _ = sender.try_send_terminal(envelope);
+                                        }
+                                    } else {
+                                        let _ = sender.try_send(line.clone(), replace.clone());
+                                    }
                                 }
                             }
                         }
