@@ -1,8 +1,12 @@
 //! Host-owned image paths loaded through the query plane and GPUI's asset cache.
-use gpui::{App, Asset, Global, Image, ImageCacheError, ImageSource};
-use std::{path::PathBuf, sync::Arc};
+use gpui::{App, Asset, Global, Image, ImageCacheError, ImageSource, SharedString};
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tcode_client::HostLink;
 use tcode_protocol::{Query, QueryResponse};
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 pub(super) struct HostImages {
     pub link: Option<HostLink>,
@@ -42,10 +46,30 @@ enum ImageRequest {
     },
 }
 
+/// What the host answered for one image read.
+#[derive(Clone)]
+enum HostRead {
+    Image(Arc<Image>),
+    /// The host's answer that there is nothing to draw, such as no preview for this source.
+    Unavailable(SharedString),
+    /// The read never reached the host's answer; it is asked again when next drawn.
+    Unreached(Instant),
+}
+
+/// Query errors raised before the host answered.
+const UNREACHED: [&str; 3] = ["timeout", "transport_closed", "disconnected"];
+
+/// A read that did not reach the host is asked again only when drawn this long after it failed,
+/// so a link that fails at once cannot turn each redraw into another read.
+const RETRY_UNREACHED: Duration = Duration::from_secs(5);
+
+/// The largest side, in physical pixels, the host renders a preview at.
+pub(crate) const MAX_PREVIEW_PIXELS: u32 = 1024;
+
 struct HostImage;
 impl Asset for HostImage {
     type Source = (u64, ImageRequest);
-    type Output = Result<Arc<Image>, ImageCacheError>;
+    type Output = HostRead;
     fn load(
         (namespace, request): Self::Source,
         cx: &mut App,
@@ -54,8 +78,7 @@ impl Asset for HostImage {
         let host = images
             .link
             .clone()
-            .filter(|_| images.namespace == namespace)
-            .ok_or_else(|| std::io::Error::other("image belongs to a detached host"));
+            .filter(|_| images.namespace == namespace);
         #[cfg(test)]
         let blocking_queries = images.blocking_queries;
         async move {
@@ -102,7 +125,9 @@ impl Asset for HostImage {
                     pixels,
                 },
             };
-            let host = host?;
+            let Some(host) = host else {
+                return HostRead::Unreached(Instant::now());
+            };
             #[cfg(test)]
             let result = if blocking_queries {
                 futures_lite::future::block_on(host.query(query))
@@ -113,70 +138,68 @@ impl Asset for HostImage {
             let result = host.query(query).await;
             let bytes = match result {
                 Ok(QueryResponse::FileBytes(bytes)) => bytes,
-                result => {
-                    return Err(std::io::Error::other(format!(
-                        "host image read failed: {result:?}"
-                    ))
-                    .into());
+                Err(error) if UNREACHED.contains(&error.code.as_str()) => {
+                    return HostRead::Unreached(Instant::now());
+                }
+                Err(error) => return HostRead::Unavailable(error.message.into()),
+                Ok(response) => {
+                    return HostRead::Unavailable(format!("unexpected {response:?}").into());
                 }
             };
-            let format = image::guess_format(&bytes)?;
-            let format = gpui::ImageFormat::from_mime_type(format.to_mime_type())
-                .ok_or_else(|| std::io::Error::other("unsupported host image format"))?;
-            Ok(Arc::new(Image::from_bytes(format, bytes)))
+            let format = image::guess_format(&bytes)
+                .ok()
+                .and_then(|format| gpui::ImageFormat::from_mime_type(format.to_mime_type()));
+            match format {
+                Some(format) => HostRead::Image(Arc::new(Image::from_bytes(format, bytes))),
+                None => HostRead::Unavailable("unsupported host image format".into()),
+            }
         }
     }
 }
 
+/// Draws a host image; an `img` shows its fallback for every read without an image.
 fn source(request: impl Fn(&gpui::Window) -> ImageRequest + 'static) -> ImageSource {
     ImageSource::from(move |window: &mut gpui::Window, cx: &mut App| {
-        let namespace = cx.try_global::<HostImages>()?.namespace;
-        match window.use_asset::<HostImage>(&(namespace, request(window)), cx)? {
-            Ok(image) => image.use_render_image(window, cx).map(Ok),
-            Err(error) => Some(Err(error)),
+        let key = (cx.try_global::<HostImages>()?.namespace, request(window));
+        match window.use_asset::<HostImage>(&key, cx)? {
+            HostRead::Image(image) => image.use_render_image(window, cx).map(Ok),
+            HostRead::Unavailable(reason) => Some(Err(ImageCacheError::Asset(reason))),
+            HostRead::Unreached(failed) => {
+                if failed.elapsed() >= RETRY_UNREACHED {
+                    cx.remove_asset::<HostImage>(&key);
+                    let _ = window.use_asset::<HostImage>(&key, cx);
+                }
+                Some(Err(ImageCacheError::Asset(
+                    "the host image read did not reach the host".into(),
+                )))
+            }
         }
     })
 }
 
+/// The original image; only an explicit open reads it, since it may be large.
 pub(crate) fn host_image(path: PathBuf) -> ImageSource {
     source(move |_| ImageRequest::File(path.clone()))
 }
 
+/// The host's preview of `path` at `logical_pixels` square. It never falls back to the
+/// original: without a preview, the tile draws its fallback and opening it reads the original.
 pub(crate) fn image_preview(
     path: PathBuf,
     logical_pixels: f32,
     crop_to_square: bool,
 ) -> ImageSource {
-    preview_source(move |window| {
-        let pixels = (logical_pixels * window.scale_factor())
-            .ceil()
-            .clamp(1., 1024.) as u32;
-        (
-            ImageRequest::Preview {
-                path: path.clone(),
-                pixels,
-                crop_to_square,
-            },
-            ImageRequest::File(path.clone()),
-        )
+    source(move |window| ImageRequest::Preview {
+        path: path.clone(),
+        pixels: preview_pixels(logical_pixels, window),
+        crop_to_square,
     })
 }
 
-fn preview_source(
-    request: impl Fn(&gpui::Window) -> (ImageRequest, ImageRequest) + 'static,
-) -> ImageSource {
-    ImageSource::from(move |window: &mut gpui::Window, cx: &mut App| {
-        let namespace = cx.try_global::<HostImages>()?.namespace;
-        let (preview, original) = request(window);
-        let image = match window.use_asset::<HostImage>(&(namespace, preview), cx)? {
-            Ok(image) => image,
-            Err(_) => match window.use_asset::<HostImage>(&(namespace, original), cx)? {
-                Ok(image) => image,
-                Err(error) => return Some(Err(error)),
-            },
-        };
-        image.use_render_image(window, cx).map(Ok)
-    })
+fn preview_pixels(logical: f32, window: &gpui::Window) -> u32 {
+    (logical * window.scale_factor())
+        .ceil()
+        .clamp(1., MAX_PREVIEW_PIXELS as f32) as u32
 }
 
 pub(crate) fn item_image_preview(
@@ -186,23 +209,12 @@ pub(crate) fn item_image_preview(
     width: f32,
     height: f32,
 ) -> ImageSource {
-    preview_source(move |window| {
-        let physical =
-            |logical: f32| (logical * window.scale_factor()).ceil().clamp(1., 1024.) as u32;
-        (
-            ImageRequest::ItemPreview {
-                session_id: session_id.clone(),
-                item_id: item_id.clone(),
-                image_index,
-                width: physical(width),
-                height: physical(height),
-            },
-            ImageRequest::Item {
-                session_id: session_id.clone(),
-                item_id: item_id.clone(),
-                image_index,
-            },
-        )
+    source(move |window| ImageRequest::ItemPreview {
+        session_id: session_id.clone(),
+        item_id: item_id.clone(),
+        image_index,
+        width: preview_pixels(width, window),
+        height: preview_pixels(height, window),
     })
 }
 
@@ -701,14 +713,14 @@ mod tests {
                 let image = cx
                     .update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)))
                     .expect("the host reply completes the cached load");
-                match color {
-                    Some(color) => {
-                        let image = image.unwrap();
+                match (color, image) {
+                    (Some(color), HostRead::Image(image)) => {
                         let rgba = image::load_from_memory(&image.bytes).unwrap().into_rgba8();
                         assert_eq!(rgba.dimensions(), (pixels, pixels));
                         assert_eq!(rgba.get_pixel(0, 0).0, color);
                     }
-                    None => assert!(image.is_err()),
+                    (None, HostRead::Unavailable(_)) => {}
+                    _ => panic!("the cached load must hold the host's answer"),
                 }
                 assert!(cx.update(|cx| cx.has_asset::<HostImage>(&key(pixels))));
             }
@@ -731,7 +743,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn markdown_images_and_badge_previews_read_files_from_the_host(cx: &mut TestAppContext) {
+    fn markdown_images_draw_host_previews_and_open_host_originals(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
@@ -771,10 +783,11 @@ mod tests {
                 (relative.clone(), cwd.join(relative)),
                 (
                     url::Url::from_file_path(&file_url_path).unwrap().into(),
-                    file_url_path,
+                    file_url_path.clone(),
                 ),
             ];
-            for (uri, expected_path) in cases {
+            for (case, (uri, expected_path)) in cases.into_iter().enumerate() {
+                let has_preview = case != 1;
                 let mut markdown = format!("![sample](<{uri}>)");
                 if inline {
                     markdown = format!("Before {markdown} after");
@@ -795,24 +808,41 @@ mod tests {
                 .unwrap();
                 assert_eq!(
                     request.payload,
-                    ClientPayload::Query(Query::ReadFileBytes {
+                    ClientPayload::Query(Query::ReadImagePreview {
                         path: expected_path,
-                        max_bytes: None
+                        pixels: MAX_PREVIEW_PIXELS,
+                        crop_to_square: false,
                     }),
                     "{markdown}",
                 );
+                let result = if has_preview {
+                    Ok(QueryResponse::FileBytes(
+                        include_bytes!("../../../../assets/icons/app/tcode.png").to_vec(),
+                    ))
+                } else {
+                    Err(tcode_protocol::ProtocolError {
+                        code: "preview_unavailable".into(),
+                        message: "no preview".into(),
+                    })
+                };
                 replies
                     .send_blocking(
                         encode_line(&HostMessage::QueryResult {
                             id: request.id,
-                            result: Ok(QueryResponse::FileBytes(
-                                include_bytes!("../../../../assets/icons/app/tcode.png").to_vec(),
-                            )),
+                            result,
                         })
                         .unwrap(),
                     )
                     .unwrap();
                 cx.run_until_parked();
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                assert!(
+                    requests.is_empty(),
+                    "drawing an image without a preview must not read its original"
+                );
             }
 
             cx.update(|window, cx| {
@@ -842,6 +872,34 @@ mod tests {
                         "{key} must move focus into the image lightbox"
                     );
                 });
+                if key == "enter" {
+                    let request = decode_client_line(
+                        &requests
+                            .try_recv()
+                            .expect("the lightbox must read the original"),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        request.payload,
+                        ClientPayload::Query(Query::ReadFileBytes {
+                            path: file_url_path.clone(),
+                            max_bytes: None
+                        })
+                    );
+                    replies
+                        .send_blocking(
+                            encode_line(&HostMessage::QueryResult {
+                                id: request.id,
+                                result: Ok(QueryResponse::FileBytes(
+                                    include_bytes!("../../../../assets/icons/app/tcode.png")
+                                        .to_vec(),
+                                )),
+                            })
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    cx.run_until_parked();
+                }
                 for navigation in ["tab", "shift-tab"] {
                     cx.simulate_keystrokes(navigation);
                     cx.update(|window, cx| {

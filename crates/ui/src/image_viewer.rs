@@ -17,6 +17,7 @@ use gpui_base::motion::{Interpolate, Transition, transition};
 
 use crate::icon::IconName;
 use crate::overlay::OverlayExt as _;
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 
 actions!(image_viewer, [ZoomIn, ZoomOut, ZoomToFit, ActualSize]);
@@ -69,6 +70,41 @@ pub(crate) fn open(
     });
     // The dialog focused its own host; the viewer's key bindings sit below it.
     focus.focus(window, cx);
+}
+
+/// What an image draws when it has no preview to show; the viewer it still opens reads the
+/// original. `caption` names the action on tiles large enough for text, and `framed` gives
+/// the placeholder its own surface where nothing behind the image draws one.
+pub(crate) fn unpreviewed(
+    caption: bool,
+    framed: bool,
+    cx: &App,
+) -> impl Fn() -> gpui::AnyElement + 'static {
+    let color = cx.theme().muted_foreground;
+    let surface = framed.then(|| (cx.theme().muted, cx.theme().tokens.radius.md));
+    let caption =
+        caption.then(|| SharedString::from(crate::tr!("markdown.open_image").into_owned()));
+    move || {
+        gpui_base::v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .text_color(color)
+            .when_some(surface, |tile, (background, radius)| {
+                tile.rounded(radius).bg(background)
+            })
+            .child(
+                crate::icon::Icon::default()
+                    .path("icons/image.svg")
+                    .small()
+                    .text_color(color),
+            )
+            .when_some(caption.clone(), |tile, caption| {
+                tile.child(div().text_xs().child(caption))
+            })
+            .into_any_element()
+    }
 }
 
 /// Where the image sits: its zoom relative to the fitted size, where 1 fits

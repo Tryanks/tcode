@@ -5869,7 +5869,7 @@ mod tests {
         let window_state = cx.new(|_| WindowState::new(false));
         struct LoadedImageChat {
             chat: Entity<ChatView>,
-            source: gpui::ImageSource,
+            sources: Vec<gpui::ImageSource>,
             ready: std::rc::Rc<std::cell::Cell<bool>>,
         }
         impl gpui::Render for LoadedImageChat {
@@ -5878,23 +5878,36 @@ mod tests {
                 window: &mut gpui::Window,
                 cx: &mut gpui::Context<Self>,
             ) -> impl gpui::IntoElement {
-                if let gpui::ImageSource::Custom(load) = &self.source {
+                let mut loaded = true;
+                for source in &self.sources {
+                    let gpui::ImageSource::Custom(load) = source else {
+                        unreachable!("host images load through the query plane");
+                    };
                     match load(window, cx) {
-                        Some(Ok(_)) => self.ready.set(true),
+                        Some(Ok(_)) => {}
                         Some(Err(error)) => panic!("inline host image load failed: {error:?}"),
-                        None => {}
+                        None => loaded = false,
                     }
                 }
+                self.ready.set(loaded);
                 self.chat.clone()
             }
         }
         let ready = std::rc::Rc::new(std::cell::Cell::new(false));
-        let image_source = crate::store::host_image(path.clone());
+        // The row draws the host's preview and the lightbox the original; wait for both.
+        let image_sources = vec![
+            crate::store::image_preview(
+                path.clone(),
+                crate::store::MAX_PREVIEW_PIXELS as f32,
+                false,
+            ),
+            crate::store::host_image(path.clone()),
+        ];
         let (root, cx) = cx.add_window_view(|window, cx| {
             let chat = cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx));
             let surface = cx.new(|_| LoadedImageChat {
                 chat,
-                source: image_source,
+                sources: image_sources,
                 ready: ready.clone(),
             });
             gpui_base::Root::new(surface, window, cx)

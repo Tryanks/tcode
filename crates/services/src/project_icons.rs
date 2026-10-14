@@ -58,7 +58,6 @@ fn decode(bytes: &[u8], max_dimension: u32) -> io::Result<image::DynamicImage> {
     reader.limits(limits.clone());
     let mut decoder = reader.into_decoder().map_err(io::Error::other)?;
     let (width, height) = decoder.dimensions();
-    // RGBA32F needs 16 bytes per pixel beyond the decoder's own allocation.
     // Bound the source before decoding or converting, including grayscale input.
     if u64::from(width) * u64::from(height) > 4 * 1024 * 1024 {
         return Err(io::Error::other("image exceeds the 4 megapixel size limit"));
