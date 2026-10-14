@@ -21,7 +21,7 @@ const FINGERPRINT_REREAD: Duration = Duration::from_secs(30 * 60);
 const PENDING_MERGEABILITY: Duration = Duration::from_secs(10 * 60);
 const GROUP_CONCURRENCY: usize = 4;
 
-/// Reads are shared per project and pull request; each thread keeps its own watermarks.
+/// Watch progress and pagination caches remain independent per project and pull request.
 type GroupKey = (Option<String>, PullRequestKey);
 
 /// The last successful read of a pull request, kept in memory: a restart reads each once.
@@ -98,6 +98,8 @@ struct Plan {
     /// reply past a thread's first page is seen though the thread's count is unchanged.
     reread_tails: bool,
 }
+
+type ActivityRead = (Result<Option<Vec<PullRequestRemark>>, ForgeError>, Tails);
 
 type GroupRead = Result<(PullRequestWatchRead, Option<Option<Vec<PullRequestRemark>>>), ForgeError>;
 
@@ -198,7 +200,7 @@ impl AppState {
     }
 
     /// One pass over every watched pull request: a batched fingerprint read, then the detail and
-    /// activity reads it calls for, each shared by every thread of a project that watches it.
+    /// activity reads it calls for, shared across projects only for identical inputs.
     pub(super) fn sweep_pull_request_watches(&mut self, cx: &mut HostCx) -> HostTask<()> {
         if std::mem::replace(&mut self.pull_request_watches.passing, true) {
             return cx.spawn_background(async {});
@@ -346,33 +348,58 @@ impl AppState {
             else {
                 return;
             };
+            // Sharing lasts one pass; each project still applies its own watch generation
+            // and watermarks. Activity is reusable only with identical input tails.
+            let mut details: HashMap<_, Option<Result<PullRequestWatchRead, ForgeError>>> =
+                HashMap::new();
+            let mut activities: HashMap<_, Vec<(Tails, Option<ActivityRead>)>> = HashMap::new();
             let mut planned = planned.into_iter().peekable();
             while planned.peek().is_some() {
                 let reading: Vec<_> = planned
                     .by_ref()
                     .take(GROUP_CONCURRENCY)
                     .map(|(group, fingerprint, plan, tails)| {
-                        let detail = {
-                            let forge = forge.clone();
-                            let key = group.key.1.clone();
-                            host.unblock(move || forge.watch_detail(&key))
+                        let key = group.key.1.clone();
+                        let detail = match details.entry(key.clone()) {
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(None);
+                                let forge = forge.clone();
+                                let key = key.clone();
+                                Some(host.unblock(move || forge.watch_detail(&key)))
+                            }
+                            std::collections::hash_map::Entry::Occupied(_) => None,
                         };
                         let activity = tails.map(|mut tails| {
+                            let reads = activities.entry(key.clone()).or_default();
+                            if let Some(index) = reads.iter().position(|(input, _)| input == &tails)
+                            {
+                                return (index, None);
+                            }
+                            let index = reads.len();
+                            reads.push((tails.clone(), None));
                             let forge = forge.clone();
-                            let key = group.key.1.clone();
-                            host.unblock(move || {
+                            let task = host.unblock(move || {
                                 let read = forge.activity(&key, &mut tails);
                                 (read, tails)
-                            })
+                            });
+                            (index, Some(task))
                         });
                         (group, fingerprint, plan, detail, activity)
                     })
                     .collect();
                 for (group, fingerprint, plan, detail, activity) in reading {
-                    let detail = detail.await;
+                    let key = &group.key.1;
+                    if let Some(task) = detail {
+                        details.insert(key.clone(), Some(task.await));
+                    }
+                    let detail = details[key].as_ref().unwrap().clone();
                     let (activity, tails) = match activity {
-                        Some(task) => {
-                            let (read, tails) = task.await;
+                        Some((index, task)) => {
+                            let cached = &mut activities.get_mut(key).unwrap()[index].1;
+                            if let Some(task) = task {
+                                *cached = Some(task.await);
+                            }
+                            let (read, tails) = cached.as_ref().unwrap().clone();
                             (Some(read), Some(tails))
                         }
                         None => (None, None),
