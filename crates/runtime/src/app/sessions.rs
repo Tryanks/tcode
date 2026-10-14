@@ -4,8 +4,8 @@ use tcode_core::thread_sort::ThreadSection;
 /// Sessions viewed by clients and sessions retained for in-flight work or re-adoption.
 #[derive(Default)]
 pub struct ResidentSessions {
-    pub live: HashMap<String, ActiveSession>,
-    pub(super) parked: HashMap<String, ActiveSession>,
+    pub live: Revisioned<HashMap<String, ActiveSession>>,
+    pub(super) parked: Revisioned<HashMap<String, ActiveSession>>,
 }
 impl ResidentSessions {
     pub(crate) fn resident(&self, id: &str) -> Option<&ActiveSession> {

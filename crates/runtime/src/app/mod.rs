@@ -258,6 +258,7 @@ mod pull_request_stacks;
 mod pull_request_watch;
 mod pull_requests;
 mod send;
+mod revisioned;
 mod session_index;
 mod sessions;
 mod settlement;
@@ -283,6 +284,7 @@ use providers::{
     computer_use_attaches, effort_selection, launch_env_for_profile, normalized_selections,
     provider_secret_names, session_options,
 };
+pub use revisioned::Revisioned;
 pub use session_index::SessionIndex;
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
@@ -356,7 +358,7 @@ pub struct AppState {
     settlement_timer_generation: u64,
     decision_revisions: HashMap<String, u64>,
     callback_generations: HashMap<String, u64>,
-    thread_activity: HashMap<String, tcode_core::settlement::ThreadActivity>,
+    thread_activity: Revisioned<HashMap<String, tcode_core::settlement::ThreadActivity>>,
     space_scopes: HashMap<String, BTreeSet<String>>,
     space_policy_revisions: HashMap<String, u64>,
     space_archives_revision: Option<u64>,
@@ -401,7 +403,7 @@ pub struct AppState {
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
-    title_generating: HashSet<String>,
+    title_generating: Revisioned<HashSet<String>>,
     provider_launcher: ProviderLauncher,
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last
@@ -422,7 +424,7 @@ pub struct AppState {
     child_reported_results: HashMap<String, String>,
     /// Live provider approvals for every resident session. This is the sole
     /// host-side authority; persisted timeline approvals remain client state.
-    approvals: HashMap<String, Vec<agent::ApprovalRequest>>,
+    approvals: Revisioned<HashMap<String, Vec<agent::ApprovalRequest>>>,
     /// Background-computed git state of the active session's cwd, driving the
     /// adaptive header quick-action button (`None` until the first refresh /
     /// with no active session). See [`AppState::refresh_git_status`].
@@ -557,7 +559,7 @@ impl AppState {
             settlement_timer_generation: 0,
             decision_revisions: HashMap::new(),
             callback_generations: HashMap::new(),
-            thread_activity: HashMap::new(),
+            thread_activity: Default::default(),
             space_scopes: HashMap::new(),
             space_policy_revisions: HashMap::new(),
             space_archives_revision: None,
@@ -584,7 +586,7 @@ impl AppState {
             scheduler_generation: 0,
             resident_idle_grace: RESIDENT_IDLE_GRACE,
             ai_title_generation_enabled,
-            title_generating: HashSet::new(),
+            title_generating: Default::default(),
             provider_launcher: ProviderLauncher::default(),
             acp_registry: None,
             acp_registry_loading: false,
@@ -595,7 +597,7 @@ impl AppState {
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
             child_reported_results: HashMap::new(),
-            approvals: HashMap::new(),
+            approvals: Default::default(),
             git_status: HashMap::new(),
             git_busy: HashSet::new(),
             next_operation_id: 1,

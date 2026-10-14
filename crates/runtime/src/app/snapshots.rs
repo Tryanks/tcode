@@ -10,6 +10,7 @@ pub(crate) struct DomainDiff {
     subscriptions: HashSet<Topic>,
     index: IndexSnapshot,
     sessions_revision: u64,
+    summary_revisions: [u64; 7],
     space_indexes: HashMap<String, IndexSnapshot>,
     settings: Settings,
     providers: Option<ProvidersStatus>,
@@ -32,6 +33,7 @@ impl DomainDiff {
                 }
             },
             sessions_revision: state.sessions.revision(),
+            summary_revisions: state.index_summary_revisions(),
             space_indexes: HashMap::new(),
             settings: state.settings_snapshot(),
             providers: state
@@ -50,6 +52,9 @@ impl DomainDiff {
         }
         state.refresh_space_archives();
         let sessions_changed = self.sessions_revision != state.sessions.revision();
+        let settings_changed = self.settings != state.settings;
+        let summary_revisions = state.index_summary_revisions();
+        let summary_changed = self.summary_revisions != summary_revisions || settings_changed;
         if state.subscriptions.contains(&Topic::Index) {
             if !self.subscriptions.contains(&Topic::Index) {
                 self.index = state.index_snapshot();
@@ -66,7 +71,7 @@ impl DomainDiff {
                         emit_replacement(Topic::Index, event, cx);
                     }
                     self.index = index;
-                } else {
+                } else if summary_changed {
                     for event in reconcile_index_summary(&mut self.index.summary, |insert| {
                         state.project_index_summary(insert)
                     }) {
@@ -117,10 +122,18 @@ impl DomainDiff {
                                 .is_some_and(|id| visible_projects.contains(id))
                     })))
             {
-                for event in reconcile_index_summary(&mut old.summary, |insert| {
-                    state.project_space_index_summary(id, &old.projects, insert)
-                }) {
-                    emit_replacement(topic.clone(), event, cx);
+                if summary_changed
+                    || old.summary.archived_revision
+                        != state
+                            .space_archives
+                            .get(id)
+                            .map_or(0, |archive| archive.revision)
+                {
+                    for event in reconcile_index_summary(&mut old.summary, |insert| {
+                        state.project_space_index_summary(id, &old.projects, insert)
+                    }) {
+                        emit_replacement(topic.clone(), event, cx);
+                    }
                 }
                 continue;
             }
@@ -132,7 +145,7 @@ impl DomainDiff {
             }
             self.space_indexes.insert(id.clone(), index);
         }
-        if self.settings != state.settings {
+        if settings_changed {
             let settings = state.settings_snapshot();
             emit_replacement(
                 Topic::Settings,
@@ -244,6 +257,7 @@ impl DomainDiff {
         // Retain its projection as the baseline; subsequent turns emit changes,
         // including late adoption when no status was available in that reply.
         self.sessions_revision = state.sessions.revision();
+        self.summary_revisions = summary_revisions;
         self.subscriptions.clone_from(&state.subscriptions);
     }
 }
@@ -530,6 +544,18 @@ impl<'a> ActivityProjection<'a> {
 }
 
 impl AppState {
+    fn index_summary_revisions(&self) -> [u64; 7] {
+        [
+            self.sessions.revision(),
+            self.residents.live.revision(),
+            self.residents.parked.revision(),
+            self.thread_activity.revision(),
+            self.title_generating.revision(),
+            self.approvals.revision(),
+            self.archived_revision,
+        ]
+    }
+
     pub fn index_snapshot(&self) -> IndexSnapshot {
         self.index_snapshot_with_summary(self.index_summary())
     }
