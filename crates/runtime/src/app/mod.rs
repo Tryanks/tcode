@@ -281,8 +281,8 @@ use active_session::{
 use orchestrate::McpWiring;
 pub use providers::ProviderCatalog;
 use providers::{
-    computer_use_attaches, effort_selection, launch_env_for_profile, normalized_selections,
-    provider_secret_names, session_options,
+    computer_use_attaches, effort_selection, normalized_selections, provider_secret_names,
+    session_options,
 };
 pub use revisioned::Revisioned;
 pub use session_index::SessionIndex;
