@@ -100,7 +100,6 @@ impl AppState {
                     started.elapsed().as_millis()
                 );
                 state.settlement_sweep_running = false;
-                state.start_turn_index_backfill(cx);
                 if std::mem::take(&mut state.settlement_sweep_pending) {
                     state.request_settlement_sweep(cx);
                     return;

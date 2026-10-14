@@ -14,7 +14,6 @@ pub(super) fn create_cache(db: &Db, connection: &Connection) -> io::Result<()> {
          token TEXT NOT NULL, body BLOB, PRIMARY KEY (session_id, position))",
         (),
     )?;
-    // Older builds must invalidate derived data too, including same-length replacements.
     for (name, event, affected) in [
         (
             "insert",
@@ -51,10 +50,8 @@ pub(super) fn create_cache(db: &Db, connection: &Connection) -> io::Result<()> {
 }
 
 impl SessionStore {
-    /// Visit derived records newest first. `version` identifies the projection
-    /// policy; change it whenever that policy changes. A borrowed result must
-    /// be the original record. Canonical log reads are unaffected. Returns
-    /// uncached large-row positions eligible for read_log_with_projections.
+    /// A borrowed projection must be the original record. Returns uncached
+    /// large-row positions eligible for read_log_with_projections.
     pub fn visit_projected_rows_backwards(
         &self,
         id: &str,
@@ -118,8 +115,6 @@ impl SessionStore {
                          ORDER BY position DESC",
                         (id, start, end, version), |row| {
                             let position = integer(row, 0)?;
-                            // Fill earlier gaps before decoding this cache hit. At most one
-                            // cached row is fetched ahead of the visitor's stopping point.
                             more = gap(position + 1, cursor, &mut visit)?;
                             if !more { return Ok(false); }
                             match serde_json::from_slice::<StoredEvent>(&blob(row, 1)?) {
@@ -139,9 +134,8 @@ impl SessionStore {
         })
     }
 
-    /// Read canonical history and prepare small derived previews for the rows
-    /// a preceding tail read found expensive. Publishing is separate so the
-    /// caller can deliver history before waiting for the cache's durable write.
+    /// Publishing is separate so history delivery does not wait for the
+    /// cache's durable write.
     pub fn read_log_with_projections(
         &self,
         id: &str,
@@ -203,8 +197,8 @@ impl SessionStore {
     }
 }
 
-/// Derived data prepared from a canonical read. A later canonical mutation
-/// invalidates the token, so publishing after delivery cannot revive old data.
+/// A canonical mutation invalidates the token, so publishing after delivery
+/// cannot revive old data.
 pub struct ProjectionPublication {
     store: SessionStore,
     id: String,
