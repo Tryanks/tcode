@@ -171,31 +171,34 @@ impl DomainDiff {
             self.providers = None;
         }
 
-        let git_status: HashMap<_, _> = state
-            .subscriptions
-            .iter()
-            .filter_map(|topic| match topic {
-                Topic::GitStatus { session_id } => {
-                    Some((session_id.clone(), state.git_status_snapshot(session_id)))
-                }
-                _ => None,
-            })
-            .collect();
-        for (id, status) in &git_status {
-            if self.subscriptions.contains(&Topic::GitStatus {
+        self.git_status.retain(|id, _| {
+            state.subscriptions.contains(&Topic::GitStatus {
                 session_id: id.clone(),
-            }) && self.git_status.get(id) != Some(status)
+            })
+        });
+        for topic in &state.subscriptions {
+            let Topic::GitStatus { session_id } = topic else {
+                continue;
+            };
+            let status = state.git_status.get(session_id);
+            let busy = state.git_busy.contains(session_id);
+            if self
+                .git_status
+                .get(session_id)
+                .is_some_and(|previous| previous.status.as_ref() == status && previous.busy == busy)
             {
+                continue;
+            }
+            let snapshot = state.git_status_snapshot(session_id);
+            if self.subscriptions.contains(topic) {
                 emit_replacement(
-                    Topic::GitStatus {
-                        session_id: id.clone(),
-                    },
-                    ServerEvent::GitStatusReplaced(status.clone()),
+                    topic.clone(),
+                    ServerEvent::GitStatusReplaced(snapshot.clone()),
                     cx,
                 );
             }
+            self.git_status.insert(session_id.clone(), snapshot);
         }
-        self.git_status = git_status;
 
         let session_statuses = state.subscribed_session_status_snapshots();
         let mut changed_ids: Vec<_> = session_statuses
