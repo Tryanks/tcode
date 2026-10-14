@@ -375,3 +375,7 @@ pub enum Route {
 #[derive(Clone, Copy)]
 pub struct OpenThread;
 impl EventEmitter<OpenThread> for WindowState {}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OpenPanel(pub NavigationPanel);
+impl EventEmitter<OpenPanel> for WindowState {}
