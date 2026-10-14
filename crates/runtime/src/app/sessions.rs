@@ -933,6 +933,7 @@ impl AppState {
             .provider_usage
             .keys()
             .chain(self.providers.usage_checking.iter())
+            .chain(self.providers.provider_snapshots.keys())
             .filter(|id| self.settings.resolved_profile(id) != settings.resolved_profile(id))
             .cloned()
             .collect();
