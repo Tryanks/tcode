@@ -274,6 +274,7 @@ pub(crate) fn user_bubble(
                         .cursor_pointer()
                         .child(
                             img(crate::store::image_preview(path, 120., true))
+                                .id("attachment-image")
                                 .size(px(120.))
                                 .rounded_xl()
                                 .object_fit(ObjectFit::Cover),
