@@ -374,27 +374,51 @@ impl DiffPanel {
         let workspace_store = self.workspace_store.clone();
         cx.spawn(async move |this, cx| {
             let mut fallback_texts = vec![None; changes.len()];
-            for (index, change) in changes.iter().enumerate() {
-                if texts
-                    .get(index)
-                    .is_some_and(|text| text.old.is_some() && text.new.is_some())
+            for first in (0..changes.len()).step_by(4) {
+                if !this
+                    .update(cx, |panel, _cx| {
+                        panel.render_loading_key.as_ref() == Some(&key)
+                    })
+                    .unwrap_or(false)
                 {
-                    continue;
+                    return;
                 }
-                let path = PathBuf::from(&change.path);
-                let path = if path.is_absolute() {
-                    path
-                } else {
-                    cwd.join(path)
-                };
-                let task =
-                    workspace_store.update(cx, |store, cx| store.read_file_preview(path, cx));
-                let Ok(bytes) = task.await else {
-                    continue;
-                };
-                if let Ok(text) = String::from_utf8(bytes) {
-                    fallback_texts[index] = Some(text);
+                let reads = changes
+                    .iter()
+                    .enumerate()
+                    .skip(first)
+                    .take(4)
+                    .filter_map(|(index, change)| {
+                        if texts
+                            .get(index)
+                            .is_some_and(|text| text.old.is_some() && text.new.is_some())
+                        {
+                            return None;
+                        }
+                        let path = PathBuf::from(&change.path);
+                        let path = if path.is_absolute() {
+                            path
+                        } else {
+                            cwd.join(path)
+                        };
+                        let task = workspace_store
+                            .update(cx, |store, cx| store.read_file_preview(path, cx));
+                        Some((index, task))
+                    })
+                    .collect::<Vec<_>>();
+                for (index, task) in reads {
+                    if let Ok(bytes) = task.await {
+                        fallback_texts[index] = String::from_utf8(bytes).ok();
+                    }
                 }
+            }
+            if !this
+                .update(cx, |panel, _cx| {
+                    panel.render_loading_key.as_ref() == Some(&key)
+                })
+                .unwrap_or(false)
+            {
+                return;
             }
             let files = cx
                 .background_executor()
