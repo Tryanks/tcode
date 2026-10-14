@@ -40,6 +40,11 @@ pub enum Query {
     ReadIconImage {
         path: PathBuf,
     },
+    ReadImagePreview {
+        path: PathBuf,
+        pixels: u32,
+        crop_to_square: bool,
+    },
     ReadProjectIcon {
         project_id: String,
         /// Physical display size, from 1 through 128 pixels.
