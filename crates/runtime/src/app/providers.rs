@@ -999,6 +999,37 @@ impl AppState {
         )
     }
 
+    pub(super) fn prepare_session_env(
+        &self,
+        meta: &SessionMeta,
+        cx: &HostCx,
+    ) -> impl std::future::Future<Output = Result<LaunchEnv, String>> + use<> {
+        let native = (meta.provider != ProviderKind::Acp).then(|| {
+            self.prepare_profile_env(
+                meta.profile_id
+                    .as_deref()
+                    .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider)),
+                cx,
+            )
+        });
+        let acp_env = (meta.provider == ProviderKind::Acp).then(|| {
+            meta.acp_agent_id
+                .as_deref()
+                .and_then(|id| self.settings.acp_agent(id))
+                .map(|agent| agent.env.clone())
+                .unwrap_or_default()
+        });
+        async move {
+            match native {
+                Some(env) => env.await,
+                None => Ok(LaunchEnv {
+                    env: acp_env.unwrap_or_default(),
+                    home: None,
+                }),
+            }
+        }
+    }
+
     // Only credential writes gate a launch; unrelated log batches must not
     // turn an ordinary refresh into a database flush barrier.
     fn prepare_profile_env(
@@ -1148,36 +1179,6 @@ pub(super) fn provider_secret_names(
             (id, names)
         })
         .collect()
-}
-
-pub(super) fn session_launch_env(
-    settings: &Settings,
-    settings_store: &SettingsStore,
-    meta: &SessionMeta,
-) -> LaunchEnv {
-    match meta.provider {
-        ProviderKind::Acp => {}
-        ProviderKind::Codex
-        | ProviderKind::ClaudeCode
-        | ProviderKind::Pi
-        | ProviderKind::OpenCode
-        | ProviderKind::Cursor
-        | ProviderKind::Grok => {
-            let profile_id = meta
-                .profile_id
-                .clone()
-                .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
-            let secrets = settings_store.profile_secrets(&profile_id);
-            return launch_env_for_profile(settings, &profile_id, secrets);
-        }
-    }
-    let env = meta
-        .acp_agent_id
-        .as_deref()
-        .and_then(|id| settings.acp_agent(id))
-        .map(|agent| agent.env.clone())
-        .unwrap_or_default();
-    LaunchEnv { env, home: None }
 }
 
 /// Whether tcode's computer-use server is offered to a session of `provider`.
