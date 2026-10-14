@@ -9,6 +9,7 @@ use tcode_protocol::AgentStatus;
 pub(crate) struct DomainDiff {
     subscriptions: HashSet<Topic>,
     index: IndexSnapshot,
+    sessions_revision: u64,
     space_indexes: HashMap<String, IndexSnapshot>,
     settings: Settings,
     providers: Option<ProvidersStatus>,
@@ -30,6 +31,7 @@ impl DomainDiff {
                     projects: state.projects.clone(),
                 }
             },
+            sessions_revision: state.sessions.revision(),
             space_indexes: HashMap::new(),
             settings: state.settings_snapshot(),
             providers: state
@@ -47,16 +49,18 @@ impl DomainDiff {
             state.space_archives_revision = None;
         }
         state.refresh_space_archives();
+        let sessions_changed = self.sessions_revision != state.sessions.revision();
         if state.subscriptions.contains(&Topic::Index) {
             if !self.subscriptions.contains(&Topic::Index) {
                 self.index = state.index_snapshot();
             } else {
                 let summary = state.index_summary();
                 if self.index.projects != state.projects
-                    || !self.index.sessions.iter().eq(state
-                        .sessions
-                        .iter()
-                        .filter(|meta| meta.archived_at.is_none()))
+                    || (sessions_changed
+                        && !self.index.sessions.iter().eq(state
+                            .sessions
+                            .iter()
+                            .filter(|meta| meta.archived_at.is_none())))
                 {
                     let index = state.index_snapshot_with_summary(summary);
                     for event in index_changes(&self.index, &index) {
@@ -104,13 +108,14 @@ impl DomainDiff {
                     .projects
                     .iter()
                     .eq(state.projects.iter().filter(|p| projects.contains(&p.id)))
-                && old.sessions.iter().eq(state.sessions.iter().filter(|meta| {
-                    meta.archived_at.is_none()
-                        && meta
-                            .project_id
-                            .as_deref()
-                            .is_some_and(|id| visible_projects.contains(id))
-                }))
+                && (!sessions_changed
+                    || old.sessions.iter().eq(state.sessions.iter().filter(|meta| {
+                        meta.archived_at.is_none()
+                            && meta
+                                .project_id
+                                .as_deref()
+                                .is_some_and(|id| visible_projects.contains(id))
+                    })))
             {
                 let summary = state.space_index_summary(id, &old.projects);
                 for event in index_summary_changes(&old.summary, &summary) {
@@ -238,6 +243,7 @@ impl DomainDiff {
         // The first subscribed turn already replies with a correlated snapshot.
         // Retain its projection as the baseline; subsequent turns emit changes,
         // including late adoption when no status was available in that reply.
+        self.sessions_revision = state.sessions.revision();
         self.subscriptions.clone_from(&state.subscriptions);
     }
 }
