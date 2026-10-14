@@ -26,7 +26,6 @@ pub fn read_chunk(
     offset: u64,
     revision: Option<&str>,
 ) -> io::Result<tcode_protocol::QueryResponse> {
-    use sha2::Digest as _;
     const CHUNK_BYTES: u64 = 4 * 1024 * 1024;
     let mut file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
@@ -51,21 +50,7 @@ pub fn read_chunk(
     let revision = match revision {
         Some(revision) => revision.to_owned(),
         None => {
-            let mut hash = sha2::Sha256::new();
-            hash.update(&bytes);
-            let mut buffer = [0; 64 * 1024];
-            loop {
-                let count = file.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                hash.update(&buffer[..count]);
-            }
-            let digest: String = hash
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
+            let digest = content_digest(std::io::Cursor::new(&bytes).chain(&mut file))?;
             format!("{current}:{digest}")
         }
     };
@@ -78,6 +63,24 @@ pub fn read_chunk(
         total: metadata.len(),
         revision,
     })
+}
+
+pub(crate) fn content_digest(mut reader: impl Read) -> io::Result<String> {
+    use sha2::Digest as _;
+    let mut hash = sha2::Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 /// Return the directory used to persist attachments for a session.

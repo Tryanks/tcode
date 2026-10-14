@@ -629,14 +629,12 @@ impl SessionLog {
         self.view().history_page(before, limit)
     }
 
-    pub(super) fn item_image(
+    fn image_attachment(
         &self,
         item_id: &str,
         image_index: usize,
-    ) -> Result<QueryResponse, ProtocolError> {
-        use base64::Engine as _;
-        let image = self
-            .fold
+    ) -> Result<&agent::Attachment, ProtocolError> {
+        self.fold
             .entries
             .iter()
             .rev()
@@ -650,20 +648,30 @@ impl SessionLog {
                 }
                 _ => None,
             })
-            .ok_or_else(|| ProtocolError::out_of_scope("image is outside this item"))?;
-        if image.data_base64.len() > MAX_SESSION_HISTORY_BYTES {
-            return Err(ProtocolError {
-                code: "item_image_too_large".into(),
-                message: "The image exceeds the response limit.".into(),
-            });
-        }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&image.data_base64)
-            .map_err(|_| ProtocolError {
-                code: "invalid_image".into(),
-                message: "Invalid image encoding.".into(),
-            })?;
-        Ok(QueryResponse::FileBytes(bytes))
+            .ok_or_else(|| ProtocolError::out_of_scope("image is outside this item"))
+    }
+
+    pub(super) fn item_image(
+        &self,
+        item_id: &str,
+        image_index: usize,
+        max_bytes: Option<u64>,
+    ) -> Result<tcode_services::image_bytes::ImageRead, ProtocolError> {
+        let image = self.image_attachment(item_id, image_index)?;
+        tcode_services::image_bytes::ImageRead::complete(&image.data_base64, max_bytes)
+            .map_err(image_read_error)
+    }
+
+    fn item_image_chunk(
+        &self,
+        item_id: &str,
+        image_index: usize,
+        offset: u64,
+        revision: Option<String>,
+    ) -> Result<tcode_services::image_bytes::ImageRead, ProtocolError> {
+        let image = self.image_attachment(item_id, image_index)?;
+        tcode_services::image_bytes::ImageRead::chunk(&image.data_base64, offset, revision)
+            .map_err(image_read_error)
     }
 
     /// The whole output of one item, as the full log folds it.
@@ -1304,14 +1312,12 @@ impl AppState {
 
     /// Answer a query from the session's log: now when it is resident,
     /// otherwise once it has been read.
-    fn query_session_log(
+    fn query_session_log<T: Send + 'static>(
         &mut self,
         session_id: &str,
-        query: impl FnOnce(&SessionLog) -> Result<QueryResponse, tcode_protocol::ProtocolError>
-        + Send
-        + 'static,
+        query: impl FnOnce(&SessionLog) -> Result<T, tcode_protocol::ProtocolError> + Send + 'static,
         cx: &mut HostCx,
-    ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
+    ) -> HostTask<Result<T, tcode_protocol::ProtocolError>> {
         if let Some(log) = self.event_records.get(session_id) {
             let result = query(log);
             return cx.spawn_background(async move { result });
@@ -1354,13 +1360,32 @@ impl AppState {
         session_id: &str,
         item_id: String,
         image_index: usize,
+        max_bytes: Option<u64>,
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, ProtocolError>> {
-        self.query_session_log(
+        let read = self.query_session_log(
             session_id,
-            move |log| log.item_image(&item_id, image_index),
+            move |log| log.item_image(&item_id, image_index, max_bytes),
             cx,
-        )
+        );
+        decode_image_read(read, cx)
+    }
+
+    pub(crate) fn item_image_chunk(
+        &mut self,
+        session_id: &str,
+        item_id: String,
+        image_index: usize,
+        offset: u64,
+        revision: Option<String>,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
+        let read = self.query_session_log(
+            session_id,
+            move |log| log.item_image_chunk(&item_id, image_index, offset, revision),
+            cx,
+        );
+        decode_image_read(read, cx)
     }
 
     pub(crate) fn item_output(
@@ -1437,4 +1462,30 @@ impl AppState {
             });
         }
     }
+}
+
+fn image_read_error(error: std::io::Error) -> ProtocolError {
+    ProtocolError {
+        code: if error.kind() == std::io::ErrorKind::FileTooLarge {
+            "file_too_large"
+        } else {
+            "invalid_image"
+        }
+        .into(),
+        message: error.to_string(),
+    }
+}
+
+fn decode_image_read(
+    read: HostTask<Result<tcode_services::image_bytes::ImageRead, ProtocolError>>,
+    cx: &mut HostCx,
+) -> HostTask<Result<QueryResponse, ProtocolError>> {
+    let host_cx = cx.clone();
+    cx.spawn_background(async move {
+        let read = read.await?;
+        host_cx
+            .unblock(move || read.read())
+            .await
+            .map_err(image_read_error)
+    })
 }

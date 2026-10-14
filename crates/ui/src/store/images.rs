@@ -60,6 +60,7 @@ impl Asset for HostImage {
                     session_id,
                     item_id,
                     image_index,
+                    max_bytes: None,
                 },
                 ImageRequest::Thumbnail(path) => Query::ReadIconImage { path },
                 ImageRequest::Project { id, pixels, .. } => Query::ReadProjectIcon {
