@@ -228,9 +228,26 @@ impl MarkdownState {
         self.link_targets.resolve(url, self.base_dir())
     }
 
+    /// The image drawn in the text. A host file is drawn from its largest preview, whose key
+    /// does not depend on the width it lays out at.
+    pub(super) fn image_source(&self, uri: &SharedUri) -> ImageSource {
+        self.resolve_image(uri, |path| {
+            crate::store::image_preview(path, crate::store::MAX_PREVIEW_PIXELS as f32, false)
+        })
+    }
+
+    /// The image the viewer opens, which reads a host file's original.
+    pub(super) fn opened_image_source(&self, uri: &SharedUri) -> ImageSource {
+        self.resolve_image(uri, crate::store::host_image)
+    }
+
     /// Markdown file images belong to the attached host, including relative paths.
     /// Do not check the client's filesystem before asking that host for the bytes.
-    pub(super) fn image_source(&self, uri: &SharedUri) -> ImageSource {
+    fn resolve_image(
+        &self,
+        uri: &SharedUri,
+        host_file: impl FnOnce(PathBuf) -> ImageSource,
+    ) -> ImageSource {
         if let Some(source) = self
             .image_resolver
             .as_ref()
@@ -240,7 +257,7 @@ impl MarkdownState {
         }
         let path = PathBuf::from(uri.as_ref());
         if path.is_absolute() {
-            return crate::store::host_image(path);
+            return host_file(path);
         }
         if let Ok(url) = url::Url::parse(uri.as_ref()) {
             if url.scheme() == "file"
@@ -255,7 +272,7 @@ impl MarkdownState {
                     .strip_prefix('/')
                     .filter(|path| path.as_bytes().get(1) == Some(&b':'))
                     .unwrap_or(&path);
-                return crate::store::host_image(PathBuf::from(path));
+                return host_file(PathBuf::from(path));
             }
             return uri.clone().into();
         }
@@ -263,7 +280,7 @@ impl MarkdownState {
             Some(base_dir) => base_dir.join(path),
             None => path,
         };
-        crate::store::host_image(path)
+        host_file(path)
     }
 
     pub(super) fn image_layout(&self, path: &str) -> (usize, Option<Size<Pixels>>) {

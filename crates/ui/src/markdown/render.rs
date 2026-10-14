@@ -720,7 +720,9 @@ fn pending_images(
                             let source = state.read(cx).image_source(&image.url);
                             FittedImage::new(
                                 source.clone(),
-                                img(source).object_fit(ObjectFit::Contain),
+                                img(source).object_fit(ObjectFit::Contain).with_fallback(
+                                    crate::image_viewer::unpreviewed(true, true, cx),
+                                ),
                                 state,
                                 format!("{path}/image/{ix}"),
                                 cx,
@@ -774,7 +776,7 @@ fn render_paragraph(
                 let tooltip_title = title.clone();
                 let view = view.clone();
                 let source = view.read(cx).image_source(&image.url);
-                let image_source = source.clone();
+                let opened = view.read(cx).opened_image_source(&image.url);
                 let image_owner = view.clone();
                 let link = image.link.clone();
                 let context_view = view.clone();
@@ -795,6 +797,7 @@ fn render_paragraph(
                 let image =
                     crate::material::accessible_clickable(img(source.clone()), ix, role, label, cx)
                         .object_fit(ObjectFit::Contain)
+                        .with_fallback(crate::image_viewer::unpreviewed(true, true, cx))
                         .cursor_pointer()
                         .when(link.is_some(), |image| {
                             image.tooltip(move |window, cx| {
@@ -821,20 +824,14 @@ fn render_paragraph(
                                 }
                             } else {
                                 crate::image_viewer::open(
-                                    source.clone(),
+                                    opened.clone(),
                                     title.clone(),
                                     window,
                                     cx,
                                 );
                             }
                         });
-                FittedImage::new(
-                    image_source,
-                    image,
-                    &image_owner,
-                    format!("{id}/image/{ix}"),
-                    cx,
-                )
+                FittedImage::new(source, image, &image_owner, format!("{id}/image/{ix}"), cx)
             }))
             .into_any_element();
     }
