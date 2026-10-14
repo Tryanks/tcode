@@ -143,16 +143,16 @@ impl DomainDiff {
         }
 
         if state.subscriptions.contains(&Topic::Providers) {
-            let providers = state.providers_status_snapshot();
-            if self.providers.as_ref() != Some(&providers) {
-                if self.providers.is_some() {
+            if let Some(providers) = self.providers.as_mut() {
+                if state.update_providers_status_snapshot(providers) {
                     emit_replacement(
                         Topic::Providers,
                         ServerEvent::ProvidersReplaced(providers.clone()),
                         cx,
                     );
                 }
-                self.providers = Some(providers);
+            } else {
+                self.providers = Some(state.providers_status_snapshot());
             }
         } else {
             self.providers = None;
@@ -819,7 +819,29 @@ impl AppState {
     /// Build the complete provider read projection. This is the sole
     /// constructor for the replicated providers domain.
     pub fn providers_status_snapshot(&self) -> ProvidersStatus {
+        self.providers_status_with_models(self.providers.model_catalogs.clone())
+    }
+
+    fn update_providers_status_snapshot(&self, previous: &mut ProvidersStatus) -> bool {
+        let mut next = self.providers_status_with_models(HashMap::new());
+        let models = std::mem::take(&mut previous.model_catalogs);
+        let models_changed = models != self.providers.model_catalogs;
+        let changed = models_changed || *previous != next;
+        next.model_catalogs = if models_changed {
+            self.providers.model_catalogs.clone()
+        } else {
+            models
+        };
+        *previous = next;
+        changed
+    }
+
+    fn providers_status_with_models(
+        &self,
+        model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
+    ) -> ProvidersStatus {
         self.providers.status_snapshot(
+            model_catalogs,
             self.acp_marketplace_items(),
             self.acp_registry_loading,
             self.acp_registry_error.clone(),
