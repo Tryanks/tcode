@@ -37,10 +37,15 @@ struct ParsedFileChange {
     new_path: Option<String>,
 }
 
+fn git_command(cwd: &Path) -> std::process::Command {
+    let mut command = crate::process::command("git");
+    command.env("GIT_OPTIONAL_LOCKS", "0").current_dir(cwd);
+    command
+}
+
 fn git_output(cwd: &Path, args: &[String]) -> Result<std::process::Output, String> {
-    crate::process::command("git")
+    git_command(cwd)
         .args(args)
-        .current_dir(cwd)
         .output()
         .map_err(|error| error.to_string())
 }
@@ -443,10 +448,8 @@ pub fn checkout_if_clean(cwd: &Path, branch: &str) -> Result<(), CheckoutError> 
 }
 
 pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let out = crate::process::command("git")
-        .env("GIT_OPTIONAL_LOCKS", "0")
+    let out = git_command(cwd)
         .args(args)
-        .current_dir(cwd)
         .output()
         .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
     if out.status.success() {
