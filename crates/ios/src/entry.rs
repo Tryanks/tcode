@@ -60,3 +60,26 @@ pub extern "C" fn tcode_ios_start() {
         }
     });
 }
+
+/// Whether UIKit's left-edge pan may begin: only where it pops a page, so an
+/// edge contact elsewhere stays an ordinary touch.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcode_ios_can_swipe_back() -> u8 {
+    APPLICATION.with(|slot| {
+        slot.get()
+            .is_some_and(|app| app.update(|cx| tcode_ui::can_swipe_back(cx)))
+            .into()
+    })
+}
+
+/// UIKit's left-edge pan ended past its commit point.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcode_ios_swipe_back() {
+    APPLICATION.with(|slot| {
+        if let Some(app) = slot.get() {
+            app.to_async().update(|cx| {
+                tcode_ui::handle_back(cx);
+            });
+        }
+    });
+}
