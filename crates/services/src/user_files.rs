@@ -1,4 +1,4 @@
-use std::io::{self, Read, Seek};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 pub fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
@@ -19,68 +19,6 @@ pub fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
         return Err(too_large());
     }
     Ok(bytes)
-}
-
-pub fn read_chunk(
-    path: &Path,
-    offset: u64,
-    revision: Option<&str>,
-) -> io::Result<tcode_protocol::QueryResponse> {
-    const CHUNK_BYTES: u64 = 4 * 1024 * 1024;
-    let mut file = std::fs::File::open(path)?;
-    let metadata = file.metadata()?;
-    let stamp = |metadata: &std::fs::Metadata| -> io::Result<String> {
-        Ok(format!("{}:{:?}", metadata.len(), metadata.modified()?))
-    };
-    let current = stamp(&metadata)?;
-    if offset > metadata.len()
-        || (offset != 0 && revision.is_none())
-        || revision.is_some_and(|revision| {
-            revision
-                .rsplit_once(':')
-                .is_none_or(|(stamp, _)| stamp != current)
-        })
-    {
-        return Err(io::Error::other("file changed during transfer"));
-    }
-    file.seek(io::SeekFrom::Start(offset))?;
-    let length = (metadata.len() - offset).min(CHUNK_BYTES) as usize;
-    let mut bytes = vec![0; length];
-    file.read_exact(&mut bytes)?;
-    let revision = match revision {
-        Some(revision) => revision.to_owned(),
-        None => {
-            let digest = content_digest(std::io::Cursor::new(&bytes).chain(&mut file))?;
-            format!("{current}:{digest}")
-        }
-    };
-    if stamp(&file.metadata()?)? != current {
-        return Err(io::Error::other("file changed during transfer"));
-    }
-    Ok(tcode_protocol::QueryResponse::FileChunk {
-        bytes,
-        offset,
-        total: metadata.len(),
-        revision,
-    })
-}
-
-pub(crate) fn content_digest(mut reader: impl Read) -> io::Result<String> {
-    use sha2::Digest as _;
-    let mut hash = sha2::Sha256::new();
-    let mut buffer = [0; 64 * 1024];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&buffer[..count]);
-    }
-    Ok(hash
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
 }
 
 /// Return the directory used to persist attachments for a session.

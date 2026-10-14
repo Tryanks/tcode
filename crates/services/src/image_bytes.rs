@@ -11,15 +11,6 @@ pub struct ImageRead {
 enum ImageReadKind {
     Complete,
     Preview { width: u32, height: u32 },
-    Chunk(ImagePart),
-}
-
-struct ImagePart {
-    offset: u64,
-    total: u64,
-    skip: usize,
-    length: usize,
-    revision: Option<String>,
 }
 
 fn decoded_len(encoded: &str) -> io::Result<u64> {
@@ -60,77 +51,14 @@ impl ImageRead {
         Ok(read)
     }
 
-    pub fn chunk(encoded: &str, offset: u64, revision: Option<String>) -> io::Result<Self> {
-        const CHUNK_BYTES: u64 = 4 * 1024 * 1024;
-        let total = decoded_len(encoded)?;
-        let current = total.to_string();
-        if offset > total
-            || (offset != 0 && revision.is_none())
-            || revision.as_ref().is_some_and(|revision| {
-                revision
-                    .rsplit_once(':')
-                    .is_none_or(|(stamp, _)| stamp != current)
-            })
-        {
-            return Err(io::Error::other("Image changed during transfer"));
-        }
-        let length = (total - offset).min(CHUNK_BYTES) as usize;
-        let skip = (offset % 3) as usize;
-        let selected = if revision.is_none() {
-            encoded.as_bytes()
-        } else {
-            let start = (offset / 3 * 4) as usize;
-            let end = ((offset + length as u64).div_ceil(3) * 4) as usize;
-            &encoded.as_bytes()[start..end]
-        };
-        Ok(Self {
-            encoded: selected.to_vec(),
-            kind: ImageReadKind::Chunk(ImagePart {
-                offset,
-                total,
-                skip,
-                length,
-                revision,
-            }),
-        })
-    }
-
     pub fn read(self) -> io::Result<QueryResponse> {
-        let part = match self.kind {
-            ImageReadKind::Chunk(part) => part,
-            kind => {
-                let bytes = STANDARD.decode(&self.encoded).map_err(io::Error::other)?;
-                let bytes = match kind {
-                    ImageReadKind::Preview { width, height } => {
-                        crate::image_previews::read_bytes(&bytes, width, height)?
-                    }
-                    _ => bytes,
-                };
-                return Ok(QueryResponse::FileBytes(bytes));
+        let bytes = STANDARD.decode(&self.encoded).map_err(io::Error::other)?;
+        let bytes = match self.kind {
+            ImageReadKind::Complete => bytes,
+            ImageReadKind::Preview { width, height } => {
+                crate::image_previews::read_bytes(&bytes, width, height)?
             }
         };
-        let revision = match part.revision {
-            Some(revision) => revision,
-            None => {
-                let reader = base64::read::DecoderReader::new(&self.encoded[..], &STANDARD);
-                format!(
-                    "{}:{}",
-                    part.total,
-                    crate::user_files::content_digest(reader)?
-                )
-            }
-        };
-        let end = (part.skip + part.length).div_ceil(3) * 4;
-        let mut bytes = STANDARD
-            .decode(&self.encoded[..end])
-            .map_err(io::Error::other)?;
-        bytes.drain(..part.skip);
-        bytes.truncate(part.length);
-        Ok(QueryResponse::FileChunk {
-            bytes,
-            offset: part.offset,
-            total: part.total,
-            revision,
-        })
+        Ok(QueryResponse::FileBytes(bytes))
     }
 }
