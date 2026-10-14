@@ -1,13 +1,13 @@
 //! App-owned Git process and filesystem infrastructure.
 
-use std::{io::Read, path::Path, process::Stdio};
+use std::path::Path;
 
 use agent::{FileChange, FileChangeKind};
 use tcode_core::git::{GitAction, GitStatus, parse_status};
 pub use tcode_protocol::{GitDiffResult, GitDiffScope, GitFileText};
 
 const MAX_RAW_DIFF_BYTES: usize = 200 * 1024;
-const MAX_FILE_TEXT_BYTES: u64 = 512 * 1024;
+pub const MAX_FILE_TEXT_BYTES: u64 = 512 * 1024;
 
 fn working_tree_diff_args(ignore_whitespace: bool) -> Vec<String> {
     let mut args = vec!["diff".into(), "HEAD".into()];
@@ -37,45 +37,17 @@ struct ParsedFileChange {
     new_path: Option<String>,
 }
 
-fn git_output(cwd: &Path, args: &[String]) -> Result<std::process::Output, String> {
-    crate::process::command("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| error.to_string())
+fn git_command(cwd: &Path) -> std::process::Command {
+    let mut command = crate::process::command("git");
+    command.env("GIT_OPTIONAL_LOCKS", "0").current_dir(cwd);
+    command
 }
 
-fn git_output_limited(
-    cwd: &Path,
-    args: &[String],
-    limit: u64,
-) -> Result<std::process::Output, String> {
-    let mut child = crate::process::command("git")
+fn git_output(cwd: &Path, args: &[String]) -> Result<std::process::Output, String> {
+    git_command(cwd)
         .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    std::thread::scope(|scope| {
-        let reader = scope.spawn(move || -> std::io::Result<Vec<u8>> {
-            let mut bytes = Vec::new();
-            stdout.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
-            // Drain excess output so Git can exit normally and report failures.
-            std::io::copy(&mut stdout, &mut std::io::sink())?;
-            Ok(bytes)
-        });
-        let result = child.wait_with_output();
-        let stdout = reader
-            .join()
-            .map_err(|_| "Git stdout reader panicked".to_string())?
-            .map_err(|error| error.to_string())?;
-        let mut output = result.map_err(|error| error.to_string())?;
-        output.stdout = stdout;
-        Ok(output)
-    })
+        .output()
+        .map_err(|error| error.to_string())
 }
 
 fn append_capped(raw: &mut Vec<u8>, bytes: &[u8], truncated: &mut bool) {
@@ -190,7 +162,7 @@ fn read_disk_text(path: &Path) -> Option<String> {
 
 fn read_git_text(cwd: &Path, revision: &str, path: &str) -> Option<String> {
     let args = vec!["show".into(), format!("{revision}:{path}")];
-    let output = git_output_limited(cwd, &args, MAX_FILE_TEXT_BYTES).ok()?;
+    let output = git_output(cwd, &args).ok()?;
     if !output.status.success() || output.stdout.len() as u64 > MAX_FILE_TEXT_BYTES {
         return None;
     }
@@ -323,7 +295,7 @@ pub fn load_git_diff(
             };
         }
     };
-    let output = match git_output_limited(cwd, &args, MAX_RAW_DIFF_BYTES as u64) {
+    let output = match git_output(cwd, &args) {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
             return GitDiffResult {
@@ -362,11 +334,8 @@ pub fn load_git_diff(
             {
                 let path = String::from_utf8_lossy(path).to_string();
                 let args = vec!["diff".into(), "--no-index".into(), "/dev/null".into(), path];
-                if let Ok(output) = git_output_limited(
-                    cwd,
-                    &args,
-                    MAX_RAW_DIFF_BYTES.saturating_sub(raw.len()) as u64,
-                ) && (output.status.success() || output.status.code() == Some(1))
+                if let Ok(output) = git_output(cwd, &args)
+                    && (output.status.success() || output.status.code() == Some(1))
                 {
                     append_capped(&mut raw, &output.stdout, &mut truncated);
                 }
@@ -479,9 +448,8 @@ pub fn checkout_if_clean(cwd: &Path, branch: &str) -> Result<(), CheckoutError> 
 }
 
 pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let out = crate::process::command("git")
+    let out = git_command(cwd)
         .args(args)
-        .current_dir(cwd)
         .output()
         .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
     if out.status.success() {
@@ -503,40 +471,29 @@ pub fn read_status(cwd: &Path) -> GitStatus {
     if !is_git_repo(cwd) {
         return GitStatus::default();
     }
-    std::thread::scope(|scope| {
-        let numstat = scope.spawn(|| read_numstat(cwd));
-        let remote = scope.spawn(|| {
-            let has_origin_remote = run_git(cwd, &["remote"])
-                .map(|out| out.lines().any(|line| line.trim() == "origin"))
-                .unwrap_or(false);
-            let default_branch = run_git(cwd, &["symbolic-ref", "refs/remotes/origin/HEAD"])
-                .ok()
-                .map(|value| {
-                    value
-                        .trim()
-                        .trim_start_matches("refs/remotes/origin/")
-                        .to_string()
-                })
-                .filter(|value| !value.is_empty());
-            (has_origin_remote, default_branch)
-        });
-        let repository = scope.spawn(|| {
-            crate::github::repository::resolve(cwd)
-                .map(|repository| format!("{}/{}", repository.owner, repository.name))
-        });
-        let porcelain = run_git(cwd, &["status", "--porcelain=2", "--branch"]).unwrap_or_default();
-        let numstat = numstat.join().expect("Git numstat reader panicked");
-        let (has_origin_remote, default_branch) =
-            remote.join().expect("Git remote reader panicked");
-        let mut status = parse_status(
-            &porcelain,
-            &numstat,
-            default_branch.as_deref(),
-            has_origin_remote,
-        );
-        status.github_repository = repository.join().expect("Git repository reader panicked");
-        status
-    })
+    let porcelain = run_git(cwd, &["status", "--porcelain=2", "--branch"]).unwrap_or_default();
+    let numstat = read_numstat(cwd);
+    let has_origin_remote = run_git(cwd, &["remote"])
+        .map(|out| out.lines().any(|line| line.trim() == "origin"))
+        .unwrap_or(false);
+    let default_branch = run_git(cwd, &["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .ok()
+        .map(|value| {
+            value
+                .trim()
+                .trim_start_matches("refs/remotes/origin/")
+                .to_string()
+        })
+        .filter(|value| !value.is_empty());
+    let mut status = parse_status(
+        &porcelain,
+        &numstat,
+        default_branch.as_deref(),
+        has_origin_remote,
+    );
+    status.github_repository = crate::github::repository::resolve(cwd)
+        .map(|repository| format!("{}/{}", repository.owner, repository.name));
+    status
 }
 
 fn read_numstat(cwd: &Path) -> Vec<(String, u32, u32)> {

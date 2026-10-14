@@ -87,7 +87,7 @@ fn render_file(
     fallback_new_text: Option<&str>,
     context: RenderFileContext<'_>,
 ) -> RenderedFile {
-    let needs_reconstruction = texts.is_none_or(|texts| texts.old.is_none() || texts.new.is_none());
+    let needs_reconstruction = texts.is_none_or(|texts| texts.new.is_none());
     let reconstructed = needs_reconstruction
         .then(|| {
             change.diff.as_deref().and_then(|patch| {
@@ -389,9 +389,8 @@ impl DiffPanel {
                     .skip(first)
                     .take(4)
                     .filter_map(|(index, change)| {
-                        if texts
-                            .get(index)
-                            .is_some_and(|text| text.old.is_some() && text.new.is_some())
+                        if change.diff.is_none()
+                            || texts.get(index).is_some_and(|text| text.new.is_some())
                         {
                             return None;
                         }
@@ -1664,6 +1663,89 @@ mod tests {
     use super::*;
     use crate::diff::list::build_list_items_with;
     use agent::FileChangeKind;
+
+    #[gpui::test]
+    fn supplied_added_text_and_binary_changes_render_without_fallback_reads(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (to_host, requests) = async_channel::unbounded();
+        let (_replies, from_host) = async_channel::unbounded();
+        let host = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                host,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let panel = cx.new(|cx| DiffPanel::new(store, window_state, cx));
+        panel.update(cx, |panel, cx| {
+            panel.request_rendered_files(
+                RenderKey {
+                    session: "thread".into(),
+                    scope: DiffScope::WorkingTree,
+                    revision: 1,
+                    dark: true,
+                    ignore_ws: false,
+                    show_invisibles: false,
+                },
+                vec![
+                    FileChange {
+                        path: "/workspace/added.rs".into(),
+                        kind: FileChangeKind::Create,
+                        diff: Some("@@ -0,0 +1 @@\n+fn added() {}\n".into()),
+                    },
+                    FileChange {
+                        path: "/workspace/image.png".into(),
+                        kind: FileChangeKind::Modify,
+                        diff: None,
+                    },
+                ],
+                vec![
+                    GitFileText {
+                        old: None,
+                        new: Some("fn added() {}\n".into()),
+                    },
+                    GitFileText::default(),
+                ],
+                PathBuf::from("/workspace"),
+                RenderAppearance {
+                    theme: HighlightTheme::default_dark(),
+                    colors: DiffColors {
+                        added_word_bg: gpui::hsla(0.3, 0.8, 0.5, 0.3),
+                        removed_word_bg: gpui::hsla(0., 0.8, 0.5, 0.28),
+                    },
+                    whitespace_style: HighlightStyle::default(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        while let Ok(line) = requests.try_recv() {
+            let request = tcode_protocol::decode_client_line(&line).unwrap();
+            assert!(
+                !matches!(
+                    request.payload,
+                    tcode_protocol::ClientPayload::Query(
+                        tcode_protocol::Query::ReadFilePreview { .. }
+                    )
+                ),
+                "supplied added-file text and binary changes need no fallback file read"
+            );
+        }
+        panel.read_with(cx, |panel, _| {
+            let cache = panel
+                .cache
+                .as_ref()
+                .expect("files render without host file replies");
+            assert_eq!(cache.list.files.len(), 2);
+            assert_eq!(cache.list.files[0].added, 1);
+        });
+    }
 
     #[test]
     fn out_of_workspace_turn_change_renders_from_stored_diff_without_file_text() {
