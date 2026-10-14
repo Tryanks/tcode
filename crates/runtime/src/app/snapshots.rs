@@ -54,7 +54,6 @@ impl DomainDiff {
             if !self.subscriptions.contains(&Topic::Index) {
                 self.index = state.index_snapshot();
             } else {
-                let summary = state.index_summary();
                 if self.index.projects != state.projects
                     || (sessions_changed
                         && !self.index.sessions.iter().eq(state
@@ -62,16 +61,17 @@ impl DomainDiff {
                             .iter()
                             .filter(|meta| meta.archived_at.is_none())))
                 {
-                    let index = state.index_snapshot_with_summary(summary);
+                    let index = state.index_snapshot();
                     for event in index_changes(&self.index, &index) {
                         emit_replacement(Topic::Index, event, cx);
                     }
                     self.index = index;
-                } else if self.index.summary != summary {
-                    for event in index_summary_changes(&self.index.summary, &summary) {
+                } else {
+                    for event in reconcile_index_summary(&mut self.index.summary, |insert| {
+                        state.project_index_summary(insert)
+                    }) {
                         emit_replacement(Topic::Index, event, cx);
                     }
-                    self.index.summary = summary;
                 }
             }
         } else {
@@ -117,11 +117,11 @@ impl DomainDiff {
                                 .is_some_and(|id| visible_projects.contains(id))
                     })))
             {
-                let summary = state.space_index_summary(id, &old.projects);
-                for event in index_summary_changes(&old.summary, &summary) {
+                for event in reconcile_index_summary(&mut old.summary, |insert| {
+                    state.project_space_index_summary(id, &old.projects, insert)
+                }) {
                     emit_replacement(topic.clone(), event, cx);
                 }
-                old.summary = summary;
                 continue;
             }
             let index = state.space_index_snapshot(id, projects);
@@ -285,20 +285,10 @@ fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
 fn index_summary_changes(old: &IndexSummary, new: &IndexSummary) -> Vec<ServerEvent> {
     let mut events = Vec::new();
     if old != new {
-        let IndexSummary {
-            activity,
-            title_generating,
-            archived_counts,
-            worktree_shared,
-            archived_revision,
-        } = new;
-        if old.title_generating == *title_generating
-            && old.archived_counts == *archived_counts
-            && old.worktree_shared == *worktree_shared
-            && old.archived_revision == *archived_revision
-        {
+        if index_summary_metadata_eq(old, new) {
             events.push(ServerEvent::IndexActivitiesChanged {
-                upserts: activity
+                upserts: new
+                    .activity
                     .iter()
                     .filter(|(id, value)| old.activity.get(*id) != Some(*value))
                     .map(|(id, value)| (id.clone(), value.clone()))
@@ -306,7 +296,7 @@ fn index_summary_changes(old: &IndexSummary, new: &IndexSummary) -> Vec<ServerEv
                 removed: old
                     .activity
                     .keys()
-                    .filter(|id| !activity.contains_key(*id))
+                    .filter(|id| !new.activity.contains_key(*id))
                     .cloned()
                     .collect(),
             });
@@ -315,6 +305,71 @@ fn index_summary_changes(old: &IndexSummary, new: &IndexSummary) -> Vec<ServerEv
         }
     }
     events
+}
+
+fn index_summary_metadata_eq(old: &IndexSummary, new: &IndexSummary) -> bool {
+    let IndexSummary {
+        activity: _,
+        title_generating,
+        archived_counts,
+        worktree_shared,
+        archived_revision,
+    } = new;
+    old.title_generating == *title_generating
+        && old.archived_counts == *archived_counts
+        && old.worktree_shared == *worktree_shared
+        && old.archived_revision == *archived_revision
+}
+
+fn build_index_summary<'a>(
+    project: impl FnOnce(&mut dyn FnMut(&'a str, SessionActivity) -> bool) -> IndexSummary,
+) -> IndexSummary {
+    let mut activity = HashMap::new();
+    let mut summary = project(&mut |id, value| activity.insert(id.to_owned(), value).is_none());
+    summary.activity = activity;
+    summary
+}
+
+fn reconcile_index_summary<'a>(
+    previous: &mut IndexSummary,
+    project: impl FnOnce(&mut dyn FnMut(&'a str, SessionActivity) -> bool) -> IndexSummary,
+) -> Vec<ServerEvent> {
+    let mut seen = HashSet::with_capacity(previous.activity.len());
+    let mut upserts = HashMap::new();
+    let mut next = project(&mut |id, value| {
+        let first = seen.insert(id);
+        match previous.activity.get_mut(id) {
+            Some(old) if *old == value => {}
+            Some(old) => {
+                *old = value.clone();
+                upserts.insert(id.to_owned(), value);
+            }
+            None => {
+                previous.activity.insert(id.to_owned(), value.clone());
+                upserts.insert(id.to_owned(), value);
+            }
+        }
+        first
+    });
+    let mut removed = Vec::new();
+    previous.activity.retain(|id, _| {
+        if seen.contains(id.as_str()) {
+            true
+        } else {
+            removed.push(id.clone());
+            false
+        }
+    });
+    let metadata_changed = !index_summary_metadata_eq(previous, &next);
+    next.activity = std::mem::take(&mut previous.activity);
+    *previous = next;
+    if metadata_changed {
+        vec![ServerEvent::IndexSummaryReplaced(previous.clone())]
+    } else if !upserts.is_empty() || !removed.is_empty() {
+        vec![ServerEvent::IndexActivitiesChanged { upserts, removed }]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Visiting a thread changes only its visit time, so that alone crosses the
@@ -493,6 +548,13 @@ impl AppState {
     }
 
     fn index_summary(&self) -> IndexSummary {
+        build_index_summary(|insert| self.project_index_summary(insert))
+    }
+
+    fn project_index_summary<'a>(
+        &'a self,
+        insert: &mut dyn FnMut(&'a str, SessionActivity) -> bool,
+    ) -> IndexSummary {
         let activity = ActivityProjection::new(self);
         let mut summary = IndexSummary {
             title_generating: self.title_generating.clone(),
@@ -503,8 +565,8 @@ impl AppState {
         for meta in &self.sessions {
             if meta.archived_at.is_none() {
                 let resident = self.resident(&meta.id);
-                summary.activity.insert(
-                    meta.id.clone(),
+                insert(
+                    &meta.id,
                     activity
                         .session_activity(resident.map_or(meta, |session| &session.meta), resident),
                 );
@@ -528,18 +590,14 @@ impl AppState {
             let Some(session) = self.resident(id) else {
                 continue;
             };
-            if session.meta.archived_at.is_none() && !summary.activity.contains_key(id) {
-                summary.activity.insert(
-                    id.to_string(),
-                    activity.session_activity(&session.meta, Some(session)),
-                );
-                if session.meta.worktree.is_some()
-                    && sharing
-                        .get_or_init(|| self.worktree_sharing())
-                        .is_shared(&session.meta)
-                {
-                    summary.worktree_shared.insert(id.to_string());
-                }
+            if session.meta.archived_at.is_none()
+                && insert(id, activity.session_activity(&session.meta, Some(session)))
+                && session.meta.worktree.is_some()
+                && sharing
+                    .get_or_init(|| self.worktree_sharing())
+                    .is_shared(&session.meta)
+            {
+                summary.worktree_shared.insert(id.to_string());
             }
         }
         summary
@@ -577,6 +635,15 @@ impl AppState {
     }
 
     fn space_index_summary(&self, space_id: &str, projects: &[Project]) -> IndexSummary {
+        build_index_summary(|insert| self.project_space_index_summary(space_id, projects, insert))
+    }
+
+    fn project_space_index_summary<'a>(
+        &'a self,
+        space_id: &str,
+        projects: &[Project],
+        insert: &mut dyn FnMut(&'a str, SessionActivity) -> bool,
+    ) -> IndexSummary {
         let activity = ActivityProjection::new(self);
         let ids: HashSet<_> = projects.iter().map(|p| p.id.as_str()).collect();
         let in_scope = |meta: &&SessionMeta| {
@@ -615,8 +682,8 @@ impl AppState {
                 continue;
             }
             let resident = self.resident(&meta.id);
-            summary.activity.insert(
-                meta.id.clone(),
+            insert(
+                &meta.id,
                 activity.session_activity(resident.map_or(meta, |s| &s.meta), resident),
             );
             if self.title_generating.contains(&meta.id) {
