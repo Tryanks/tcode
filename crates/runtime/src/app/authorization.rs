@@ -351,6 +351,7 @@ impl AppState {
                 }
                 Query::ReadFileBytes { path, .. }
                 | Query::ReadFileChunk { path, .. }
+                | Query::ReadImagePreview { path, .. }
                 | Query::ReadFilePreview { path }
                 | Query::ReadIconImage { path } => {
                     self.authorize_path(path, project_ids, PathAccess::Descendant, cx)

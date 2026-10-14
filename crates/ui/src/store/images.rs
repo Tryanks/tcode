@@ -17,6 +17,11 @@ impl Global for HostImages {}
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ImageRequest {
     File(PathBuf),
+    Preview {
+        path: PathBuf,
+        pixels: u32,
+        crop_to_square: bool,
+    },
     Item {
         session_id: String,
         item_id: String,
@@ -51,6 +56,15 @@ impl Asset for HostImage {
                 ImageRequest::File(path) => Query::ReadFileBytes {
                     path,
                     max_bytes: None,
+                },
+                ImageRequest::Preview {
+                    path,
+                    pixels,
+                    crop_to_square,
+                } => Query::ReadImagePreview {
+                    path,
+                    pixels,
+                    crop_to_square,
                 },
                 ImageRequest::Item {
                     session_id,
@@ -106,6 +120,41 @@ fn source(request: impl Fn(&gpui::Window) -> ImageRequest + 'static) -> ImageSou
 
 pub(crate) fn host_image(path: PathBuf) -> ImageSource {
     source(move |_| ImageRequest::File(path.clone()))
+}
+
+pub(crate) fn image_preview(
+    path: PathBuf,
+    logical_pixels: f32,
+    crop_to_square: bool,
+) -> ImageSource {
+    ImageSource::from(move |window: &mut gpui::Window, cx: &mut App| {
+        let namespace = cx.try_global::<HostImages>()?.namespace;
+        let original = (namespace, ImageRequest::File(path.clone()));
+        if cx.has_asset::<HostImage>(&original)
+            && let Some(Ok(image)) = window.use_asset::<HostImage>(&original, cx)
+            && let Some(image) = image.use_render_image(window, cx)
+        {
+            return Some(Ok(image));
+        }
+        let pixels = (logical_pixels * window.scale_factor())
+            .ceil()
+            .clamp(1., 1024.) as u32;
+        let preview = ImageRequest::Preview {
+            path: path.clone(),
+            pixels,
+            crop_to_square,
+        };
+        let image = match window.use_asset::<HostImage>(&(namespace, preview), cx)? {
+            Ok(image) => image,
+            Err(_) => match window
+                .use_asset::<HostImage>(&(namespace, ImageRequest::File(path.clone())), cx)?
+            {
+                Ok(image) => image,
+                Err(error) => return Some(Err(error)),
+            },
+        };
+        image.use_render_image(window, cx).map(Ok)
+    })
 }
 
 pub(crate) fn item_image(session_id: String, item_id: String, image_index: usize) -> ImageSource {
