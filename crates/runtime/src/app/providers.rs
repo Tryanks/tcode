@@ -13,9 +13,18 @@ struct UpdateRun {
     pending: std::collections::VecDeque<ProviderKind>,
 }
 
+#[derive(Default)]
+struct ModelRefresh {
+    configuration: ProviderSettings,
+    profile_revision: u64,
+    network: bool,
+    generation: u64,
+    loading: bool,
+}
+
 pub struct ProviderCatalog {
     pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
-    pub models_loading: HashMap<ProviderKind, bool>,
+    model_refreshes: HashMap<ProviderKind, ModelRefresh>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
     version_rounds: HashMap<u64, VersionCheckRound>,
     next_version_round: u64,
@@ -26,7 +35,7 @@ pub struct ProviderCatalog {
     pub provider_usage: HashMap<String, tcode_core::usage::ProviderUsage>,
     /// Profile ids with a usage fetch in flight.
     pub usage_checking: HashSet<String>,
-    usage_revisions: HashMap<String, u64>,
+    profile_revisions: HashMap<String, u64>,
     pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
 }
 
@@ -37,7 +46,7 @@ impl ProviderCatalog {
     ) -> Self {
         Self {
             model_catalogs,
-            models_loading: HashMap::new(),
+            model_refreshes: HashMap::new(),
             provider_versions: HashMap::new(),
             version_rounds: HashMap::new(),
             next_version_round: 0,
@@ -46,15 +55,51 @@ impl ProviderCatalog {
             provider_snapshots: HashMap::new(),
             provider_usage: HashMap::new(),
             usage_checking: HashSet::new(),
-            usage_revisions: HashMap::new(),
+            profile_revisions: HashMap::new(),
             provider_secret_names,
         }
     }
 
-    pub(super) fn invalidate_usage(&mut self, id: &str) {
+    fn begin_model_refresh(
+        &mut self,
+        provider: ProviderKind,
+        configuration: ProviderSettings,
+        profile_revision: u64,
+        network: bool,
+    ) -> Option<u64> {
+        let refresh = self.model_refreshes.entry(provider).or_default();
+        if refresh.loading
+            && refresh.configuration == configuration
+            && refresh.profile_revision == profile_revision
+            && refresh.network == network
+        {
+            return None;
+        }
+        *refresh = ModelRefresh {
+            configuration,
+            profile_revision,
+            network,
+            generation: refresh.generation + 1,
+            loading: true,
+        };
+        Some(refresh.generation)
+    }
+
+    fn finish_model_refresh(&mut self, provider: ProviderKind, generation: u64) -> bool {
+        let Some(refresh) = self.model_refreshes.get_mut(&provider) else {
+            return false;
+        };
+        if refresh.generation != generation {
+            return false;
+        }
+        refresh.loading = false;
+        true
+    }
+
+    pub(super) fn invalidate_profile_reads(&mut self, id: &str) {
         self.provider_usage.remove(id);
         self.usage_checking.remove(id);
-        *self.usage_revisions.entry(id.to_owned()).or_default() += 1;
+        *self.profile_revisions.entry(id.to_owned()).or_default() += 1;
     }
 
     pub(super) fn invalidate_versions(&mut self) {
@@ -130,7 +175,7 @@ impl ProviderCatalog {
         revision: u64,
         usage: Option<tcode_core::usage::ProviderUsage>,
     ) {
-        if self.usage_revisions.get(&id).copied().unwrap_or(0) != revision {
+        if self.profile_revisions.get(&id).copied().unwrap_or(0) != revision {
             return;
         }
         self.usage_checking.remove(&id);
@@ -150,7 +195,11 @@ impl ProviderCatalog {
     ) -> ProvidersStatus {
         ProvidersStatus {
             model_catalogs,
-            models_loading: self.models_loading.clone(),
+            models_loading: self
+                .model_refreshes
+                .iter()
+                .map(|(provider, refresh)| (*provider, refresh.loading))
+                .collect(),
             provider_versions: self
                 .provider_versions
                 .iter()
@@ -216,29 +265,59 @@ impl AppState {
     /// `model_catalogs` and are persisted so the next launch is instant.
     pub fn refresh_model_catalogs(&mut self, cx: &mut HostCx) {
         for provider in ProviderKind::NATIVE {
-            let binary = self.settings.provider(provider).binary_path;
+            let profile_id = Settings::builtin_profile_id(provider).to_string();
+            let configuration = self.settings.provider(provider);
+            let profile_revision = self
+                .providers
+                .profile_revisions
+                .get(&profile_id)
+                .copied()
+                .unwrap_or(0);
+            let network = self.provider_update_checks_enabled();
+            let Some(generation) = self.providers.begin_model_refresh(
+                provider,
+                configuration.clone(),
+                profile_revision,
+                network,
+            ) else {
+                continue;
+            };
+            let binary = configuration.binary_path.clone();
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
-            self.providers.models_loading.insert(provider, true);
             let store = self.store.clone();
             // Claude's manifest cache lives next to the persisted catalogs and
             // phones home only under the same switch as CLI update checks.
             let refresh = CatalogRefresh {
                 cache_dir: Some(store.root().clone()),
-                network: self.provider_update_checks_enabled(),
+                network,
             };
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
-                let profile_id = Settings::builtin_profile_id(provider).to_string();
+                let env_profile_id = profile_id.clone();
                 let launch_env = host_cx
                     .unblock(move || {
-                        let secrets = settings_store.profile_secrets(&profile_id);
-                        launch_env_for_profile(&settings, &profile_id, secrets)
+                        let secrets = settings_store.profile_secrets(&env_profile_id);
+                        launch_env_for_profile(&settings, &env_profile_id, secrets)
                     })
                     .await;
                 let result = list_models(provider, binary, launch_env, refresh).await;
                 host_cx.enqueue(move |state, _cx| {
-                    state.providers.models_loading.insert(provider, false);
+                    if !state.providers.finish_model_refresh(provider, generation) {
+                        return;
+                    }
+                    if state.settings.provider(provider) != configuration
+                        || state
+                            .providers
+                            .profile_revisions
+                            .get(&profile_id)
+                            .copied()
+                            .unwrap_or(0)
+                            != profile_revision
+                        || state.provider_update_checks_enabled() != network
+                    {
+                        return;
+                    }
                     match result {
                         Ok(models) if !models.is_empty() => {
                             if let Err(err) = store.save_models(provider, &models) {
@@ -341,7 +420,7 @@ impl AppState {
         value: Option<&str>,
         cx: &mut HostCx,
     ) {
-        self.providers.invalidate_usage(id);
+        self.providers.invalidate_profile_reads(id);
         if Settings::builtin_kind_from_id(id).is_some() {
             self.providers.invalidate_versions();
         }
@@ -554,7 +633,7 @@ impl AppState {
             self.providers.usage_checking.insert(profile_id.clone());
             let revision = self
                 .providers
-                .usage_revisions
+                .profile_revisions
                 .get(&profile_id)
                 .copied()
                 .unwrap_or(0);

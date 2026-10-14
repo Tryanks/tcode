@@ -937,7 +937,7 @@ impl AppState {
             .cloned()
             .collect();
         for id in changed {
-            self.providers.invalidate_usage(&id);
+            self.providers.invalidate_profile_reads(&id);
         }
         let hosts_changed = self.settings.source_control.hosts != settings.source_control.hosts;
         self.settings = settings;
