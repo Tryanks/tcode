@@ -5,7 +5,13 @@ use tcode_protocol::QueryResponse;
 /// An owned encoded selection that can be decoded after releasing the session log.
 pub struct ImageRead {
     encoded: Vec<u8>,
-    part: Option<ImagePart>,
+    kind: ImageReadKind,
+}
+
+enum ImageReadKind {
+    Complete,
+    Preview { width: u32, height: u32 },
+    Chunk(ImagePart),
 }
 
 struct ImagePart {
@@ -39,8 +45,19 @@ impl ImageRead {
         }
         Ok(Self {
             encoded: encoded.as_bytes().to_vec(),
-            part: None,
+            kind: ImageReadKind::Complete,
         })
+    }
+
+    pub fn preview(encoded: &str, width: u32, height: u32) -> io::Result<Self> {
+        if !(1..=1024).contains(&width) || !(1..=1024).contains(&height) {
+            return Err(io::Error::other(
+                "Preview size is outside the supported range",
+            ));
+        }
+        let mut read = Self::complete(encoded, Some(64 * 1024 * 1024))?;
+        read.kind = ImageReadKind::Preview { width, height };
+        Ok(read)
     }
 
     pub fn chunk(encoded: &str, offset: u64, revision: Option<String>) -> io::Result<Self> {
@@ -68,7 +85,7 @@ impl ImageRead {
         };
         Ok(Self {
             encoded: selected.to_vec(),
-            part: Some(ImagePart {
+            kind: ImageReadKind::Chunk(ImagePart {
                 offset,
                 total,
                 skip,
@@ -79,11 +96,18 @@ impl ImageRead {
     }
 
     pub fn read(self) -> io::Result<QueryResponse> {
-        let Some(part) = self.part else {
-            return STANDARD
-                .decode(&self.encoded)
-                .map(QueryResponse::FileBytes)
-                .map_err(io::Error::other);
+        let part = match self.kind {
+            ImageReadKind::Chunk(part) => part,
+            kind => {
+                let bytes = STANDARD.decode(&self.encoded).map_err(io::Error::other)?;
+                let bytes = match kind {
+                    ImageReadKind::Preview { width, height } => {
+                        crate::image_previews::read_bytes(&bytes, width, height)?
+                    }
+                    _ => bytes,
+                };
+                return Ok(QueryResponse::FileBytes(bytes));
+            }
         };
         let revision = match part.revision {
             Some(revision) => revision,
