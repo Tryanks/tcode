@@ -478,6 +478,7 @@ impl Composer {
                     .cursor_pointer()
                     .child(
                         img(crate::store::image_preview(path, 18., false))
+                            .id("attachment-image")
                             .size(px(18.))
                             .rounded(crate::material::radius_chip(cx)),
                     )
