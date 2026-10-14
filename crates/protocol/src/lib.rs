@@ -148,6 +148,7 @@ pub use wire::{
 // Unreleased: ReadFileBytes accepts an optional max_bytes read budget, capped by network bridges.
 // Unreleased: ReadFileChunk/FileChunk allow complete reads across bounded network replies;
 // ReadFileBytes reports file_too_large when its read budget is exceeded.
+// Unreleased: ReadItemImagePreview returns optional previews of recorded tool images.
 // Unreleased: ReadImagePreview returns optional size-specific static attachment previews.
 // Unreleased: ReadItemImage accepts the same optional network read budget;
 // ReadItemImageChunk retrieves complete recorded images through bounded replies.

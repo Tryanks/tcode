@@ -1063,6 +1063,13 @@ fn dispatch_query(
             image_index,
             max_bytes,
         } => app.item_image(&session_id, item_id, image_index, max_bytes, cx),
+        Query::ReadItemImagePreview {
+            session_id,
+            item_id,
+            image_index,
+            width,
+            height,
+        } => app.item_image_preview(&session_id, item_id, image_index, width, height, cx),
         Query::ReadItemImageChunk {
             session_id,
             item_id,
