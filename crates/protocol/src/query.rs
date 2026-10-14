@@ -111,6 +111,13 @@ pub enum Query {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_bytes: Option<u64>,
     },
+    ReadItemImagePreview {
+        session_id: String,
+        item_id: String,
+        image_index: usize,
+        width: u32,
+        height: u32,
+    },
     ReadItemImageChunk {
         session_id: String,
         item_id: String,
