@@ -50,7 +50,7 @@ use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_secs;
 use crate::window_caption;
 use crate::window_drag_area;
-use crate::window_state::WindowState;
+use crate::window_state::{NavigationPanel, OpenPanel, WindowState};
 
 use self::components::assistant::MdState;
 
@@ -1750,8 +1750,7 @@ impl ChatView {
             let toggle_more_key = more_key;
             let handlers = components::changed_files::ChangedFilesHandlers {
                 view_diff: Box::new(cx.listener(move |this, _, _, cx| {
-                    this.workspace_store
-                        .update(cx, |store, cx| store.open_diff_for_turn(index, cx));
+                    this.open_diff(index, None, cx);
                 })),
                 toggle_more: Box::new(cx.listener(move |this, _, _, cx| {
                     this.toggle_expanded(index, &toggle_more_key, cx);
@@ -1761,9 +1760,7 @@ impl ChatView {
                     .map(|change| {
                         let path = change.path.clone();
                         Box::new(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store.update(cx, |store, cx| {
-                                store.open_diff_for_file(index, path.clone(), cx)
-                            });
+                            this.open_diff(index, Some(path.clone()), cx);
                         })) as components::changed_files::ClickHandler
                     })
                     .collect(),
@@ -1846,10 +1843,20 @@ impl ChatView {
             .update(cx, |store, _cx| store.rewind_turn(turn, mode));
     }
 
+    fn open_diff(&mut self, turn: usize, path: Option<String>, cx: &mut Context<Self>) {
+        self.workspace_store.update(cx, |store, cx| match path {
+            Some(path) => store.open_diff_for_file(turn, path, cx),
+            None => store.open_diff_for_turn(turn, cx),
+        });
+        if self.window_state.read(cx).compact {
+            self.window_state
+                .update(cx, |_, cx| cx.emit(OpenPanel(NavigationPanel::Diff)));
+        }
+    }
+
     fn on_open_file_diff(&mut self, action: &OpenFileDiff, _: &mut Window, cx: &mut Context<Self>) {
         let OpenFileDiff { turn, path } = action.clone();
-        self.workspace_store
-            .update(cx, |store, cx| store.open_diff_for_file(turn, path, cx));
+        self.open_diff(turn, Some(path), cx);
     }
 
     fn compose_user(
