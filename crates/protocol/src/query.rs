@@ -103,6 +103,15 @@ pub enum Query {
         session_id: String,
         item_id: String,
         image_index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<u64>,
+    },
+    ReadItemImageChunk {
+        session_id: String,
+        item_id: String,
+        image_index: usize,
+        offset: u64,
+        revision: Option<String>,
     },
     /// Every archived thread, most recently archived first.
     ArchivedSessions,

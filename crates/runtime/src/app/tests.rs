@@ -8812,13 +8812,15 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
         );
         assert_eq!(
             state.event_records["outputs"]
-                .item_image("image", 0)
+                .item_image("image", 0, None)
+                .unwrap()
+                .read()
                 .unwrap(),
             QueryResponse::FileBytes(vec![1, 2, 3])
         );
         assert!(
             state.event_records["outputs"]
-                .item_image("image", 1)
+                .item_image("image", 1, None)
                 .is_err()
         );
 

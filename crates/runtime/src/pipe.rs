@@ -1044,7 +1044,15 @@ fn dispatch_query(
             session_id,
             item_id,
             image_index,
-        } => app.item_image(&session_id, item_id, image_index, cx),
+            max_bytes,
+        } => app.item_image(&session_id, item_id, image_index, max_bytes, cx),
+        Query::ReadItemImageChunk {
+            session_id,
+            item_id,
+            image_index,
+            offset,
+            revision,
+        } => app.item_image_chunk(&session_id, item_id, image_index, offset, revision, cx),
         Query::PullRequest {
             session_id,
             key,

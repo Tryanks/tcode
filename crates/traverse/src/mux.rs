@@ -205,10 +205,12 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                     .pointer("/payload/type")
                     .and_then(serde_json::Value::as_str)
                     == Some("query")
-                    && value
-                        .pointer("/payload/content/type")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("read_file_bytes")
+                    && matches!(
+                        value
+                            .pointer("/payload/content/type")
+                            .and_then(serde_json::Value::as_str),
+                        Some("read_file_bytes" | "read_item_image")
+                    )
                     && let Some(limit) = clients
                         .get(&connection_id)
                         .and_then(Outbox::file_bytes_limit)

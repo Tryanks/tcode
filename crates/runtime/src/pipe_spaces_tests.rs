@@ -506,6 +506,7 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
                 session_id: session_id.into(),
                 item_id: "foreign-tool".into(),
                 image_index: 0,
+                max_bytes: None,
             }),
         ));
     }

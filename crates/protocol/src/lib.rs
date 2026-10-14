@@ -148,6 +148,8 @@ pub use wire::{
 // Unreleased: ReadFileBytes accepts an optional max_bytes read budget, capped by network bridges.
 // Unreleased: ReadFileChunk/FileChunk allow complete reads across bounded network replies;
 // ReadFileBytes reports file_too_large when its read budget is exceeded.
+// Unreleased: ReadItemImage accepts the same optional network read budget;
+// ReadItemImageChunk retrieves complete recorded images through bounded replies.
 // Unreleased: adds TurnRetry events, SessionStatus.turn_retry and the RetryTurn command
 // for native capacity continuations.
 // Unreleased: the agent event stream gains steer_rejected, a provider's

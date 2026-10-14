@@ -674,15 +674,17 @@ impl HostLink {
     }
 
     pub async fn query(&self, query: Query) -> Result<QueryResponse, ProtocolError> {
-        let complete_file = match &query {
+        let complete_source = match &query {
             Query::ReadFileBytes {
-                path,
-                max_bytes: None,
-            } => Some(path.clone()),
+                max_bytes: None, ..
+            }
+            | Query::ReadItemImage {
+                max_bytes: None, ..
+            } => Some(query.clone()),
             _ => None,
         };
         let result = self.query_once(query).await;
-        if let (Some(path), Err(error)) = (complete_file, &result)
+        if let (Some(source), Err(error)) = (complete_source, &result)
             && error.code == "file_too_large"
         {
             use sha2::Digest as _;
@@ -692,13 +694,27 @@ impl HostLink {
             let mut expected_total = None;
             loop {
                 let offset = bytes.len() as u64;
-                let reply = self
-                    .query_once(Query::ReadFileChunk {
+                let next = match &source {
+                    Query::ReadFileBytes { path, .. } => Query::ReadFileChunk {
                         path: path.clone(),
                         offset,
                         revision: revision.clone(),
-                    })
-                    .await?;
+                    },
+                    Query::ReadItemImage {
+                        session_id,
+                        item_id,
+                        image_index,
+                        ..
+                    } => Query::ReadItemImageChunk {
+                        session_id: session_id.clone(),
+                        item_id: item_id.clone(),
+                        image_index: *image_index,
+                        offset,
+                        revision: revision.clone(),
+                    },
+                    _ => unreachable!("complete image or file source"),
+                };
+                let reply = self.query_once(next).await?;
                 let QueryResponse::FileChunk {
                     bytes: chunk,
                     offset: received_offset,
