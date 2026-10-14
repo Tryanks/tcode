@@ -9,7 +9,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 use std::{
-    sync::{Arc, LazyLock, RwLock},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -179,21 +179,15 @@ fn named_router(hosts: &str) -> ToolRouter<PullRequestTools> {
 /// Every tool's name and the description its model reads naming `hosts`, in the order they
 /// are listed.
 pub fn tool_descriptions(hosts: &str) -> Vec<(String, String)> {
-    static DESCRIPTIONS: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
-        PullRequestTools::tool_router()
-            .list_all()
-            .into_iter()
-            .map(|tool| {
-                (
-                    tool.name.to_string(),
-                    tool.description.as_deref().unwrap_or_default().to_owned(),
-                )
-            })
-            .collect()
-    });
-    DESCRIPTIONS
-        .iter()
-        .map(|(name, description)| (name.clone(), description.replace("{hosts}", hosts)))
+    named_router(hosts)
+        .list_all()
+        .into_iter()
+        .map(|tool| {
+            (
+                tool.name.to_string(),
+                tool.description.as_deref().unwrap_or_default().to_owned(),
+            )
+        })
         .collect()
 }
 /// The server's `instructions`, which the client reads at initialization.

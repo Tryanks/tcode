@@ -24,6 +24,9 @@ pub struct ThreadActivity {
     pub interrupted: bool,
 }
 
+/// Bump when `fold_stored`, `moves_clock`, or `complete` changes persisted activity semantics.
+pub const THREAD_ACTIVITY_FOLD_VERSION: u32 = 2;
+
 impl ThreadActivity {
     pub fn fold_stored<'a>(
         records: impl IntoIterator<Item = &'a StoredEvent>,
