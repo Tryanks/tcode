@@ -1,9 +1,11 @@
 use async_channel::{Receiver, Sender};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
-use tcode_protocol::MAX_LINE_BYTES;
+use tcode_protocol::{
+    EventEnvelope, HostMessage, MAX_LINE_BYTES, ServerEvent, TerminalFrame, encode_line,
+};
 
 const MAX_QUEUED_BYTES: usize = 2 * MAX_LINE_BYTES;
 const MAX_QUEUED_MESSAGES: usize = 1024;
@@ -19,6 +21,7 @@ struct Pending {
     // Includes the line waiting for the one-slot output channel.
     bytes: usize,
     closed: bool,
+    terminals: HashMap<u64, Box<TerminalFrame>>,
 }
 
 pub(super) struct Outbox {
@@ -82,6 +85,51 @@ impl Outbox {
         })
     }
 
+    pub(super) fn forget_terminal(&self, terminal_id: u64) {
+        self.pending.lock().unwrap().terminals.remove(&terminal_id);
+    }
+
+    pub(super) fn try_send_terminal(&self, mut envelope: EventEnvelope) -> Result<(), ()> {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.closed {
+            return Err(());
+        }
+        let (terminal_id, ordered) = match &envelope.event {
+            ServerEvent::TerminalFrame { terminal_id, frame } => {
+                pending.terminals.insert(*terminal_id, frame.clone());
+                (*terminal_id, false)
+            }
+            ServerEvent::TerminalDelta { terminal_id, delta } => {
+                if let Some(frame) = pending.terminals.get_mut(terminal_id) {
+                    frame.apply(delta);
+                }
+                (*terminal_id, delta.bell || delta.clipboard.is_some())
+            }
+            _ => unreachable!(),
+        };
+        // Bell and clipboard effects must reach the client in order, even when
+        // the surrounding grid updates can be replaced by a complete frame.
+        let replace = (envelope.request_id.is_none()
+            && !ordered
+            && pending.terminals.contains_key(&terminal_id))
+        .then(|| format!("terminal:{terminal_id}"));
+        if let Some(key) = &replace
+            && pending
+                .lines
+                .iter()
+                .rev()
+                .take_while(|line| line.replace.is_some())
+                .any(|line| line.replace.as_ref() == Some(key))
+        {
+            envelope.event = ServerEvent::TerminalFrame {
+                terminal_id,
+                frame: pending.terminals[&terminal_id].clone(),
+            };
+        }
+        drop(pending);
+        self.try_send(encode_line(&HostMessage::Event(envelope)).unwrap(), replace)
+    }
+
     pub(super) fn try_send(&self, text: String, replace: Option<String>) -> Result<(), ()> {
         let mut pending = self.pending.lock().unwrap();
         if pending.closed || self.input.is_closed() {
@@ -120,6 +168,7 @@ impl Outbox {
         let mut pending = self.pending.lock().unwrap();
         pending.closed = true;
         pending.lines.clear();
+        pending.terminals.clear();
         pending.bytes = 0;
         self.input.close();
         self.wake.close();
