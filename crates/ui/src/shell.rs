@@ -64,7 +64,7 @@ use crate::sidebar::SessionsSidebar;
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
-use crate::window_state::{Destination, OpenThread, Route, WindowState};
+use crate::window_state::{Destination, OpenPanel, OpenThread, Route, WindowState};
 
 actions!(tcode, [Quit, TogglePalette]);
 
@@ -414,6 +414,12 @@ impl AppShell {
             }),
             cx.subscribe_in(&window_state, window, |this, _, _: &OpenThread, w, cx| {
                 this.open_thread(w, cx);
+            }),
+            cx.subscribe(&window_state, |this, _, event: &OpenPanel, cx| {
+                this.show_panel(event.0.id(), cx);
+                if this.window_state.read(cx).compact {
+                    this.go(Destination::Panel, cx);
+                }
             }),
             // The one width observer. It updates the layout only when the rule
             // flips; `render` keeps its own width tracking for the split.
