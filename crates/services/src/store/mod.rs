@@ -252,6 +252,7 @@ enum Op {
     AppendEvent {
         session_id: String,
         line: Vec<u8>,
+        projection: Option<(String, Vec<u8>)>,
     },
     ReplaceEventLog {
         session_id: String,
@@ -283,22 +284,27 @@ impl Mutation {
     /// Append one event, wrapped in a timestamped envelope
     /// (`{"ts": <unix_ms>, "event": {…}}`).
     pub fn append_event(session_id: &str, ts: u64, event: &AgentEvent) -> io::Result<Self> {
-        Self::append_authored_event(session_id, ts, event, None, None)
+        Self::append_authored_event(session_id, ts, event, None, None, |_| None)
     }
 
+    /// `project` returns a derived body using the same policy/version as
+    /// `visit_projected_rows_backwards`; it never replaces the canonical event.
     pub fn append_authored_event(
         session_id: &str,
         ts: u64,
         event: &AgentEvent,
         author: Option<&Author>,
         origin: Option<tcode_core::session::MessageOrigin>,
+        project: impl FnOnce(usize) -> Option<(String, Vec<u8>)>,
     ) -> io::Result<Self> {
         let mut line = serde_json::to_vec(&EventEnvelopeRef::new(ts, event, author, origin))
             .map_err(invalid_data)?;
         line.push(b'\n');
+        let projection = project(line.len());
         Ok(Self(Op::AppendEvent {
             session_id: session_id.to_owned(),
             line,
+            projection,
         }))
     }
 
@@ -382,7 +388,9 @@ impl Mutation {
     /// Approximate bytes this change writes, for bounding a batch.
     pub fn payload_len(&self) -> usize {
         match &self.0 {
-            Op::AppendEvent { line, .. } => line.len(),
+            Op::AppendEvent {
+                line, projection, ..
+            } => line.len() + projection.as_ref().map_or(0, |(_, body)| body.len()),
             Op::ReplaceEventLog { bytes, .. } => bytes.len(),
             _ => 0,
         }
@@ -1309,7 +1317,11 @@ fn apply_op(
     icons: &mut Vec<Option<PathBuf>>,
 ) -> io::Result<()> {
     match op {
-        Op::AppendEvent { session_id, line } => {
+        Op::AppendEvent {
+            session_id,
+            line,
+            projection,
+        } => {
             let mut last = None;
             db.query(
                 connection,
@@ -1348,6 +1360,15 @@ fn apply_op(
                 }
             };
             insert_segments(db, connection, session_id, next, [line])?;
+            if let Some((version, body)) = projection
+                && let Err(error) = db.execute(
+                    connection,
+                    "INSERT INTO event_preview_v1 (session_id, position, version, token, body) VALUES (?1, ?2, ?3, '', ?4)",
+                    (session_id.as_str(), next, version.as_str(), body.as_slice()),
+                )
+            {
+                log::warn!("could not persist appended history preview: {error}");
+            }
         }
         Op::ReplaceEventLog { session_id, bytes } => {
             db.execute(

@@ -10420,7 +10420,7 @@ fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
                     })
                 )
                 .then_some(sender);
-                Mutation::append_authored_event(id, *ts, event, None, origin).unwrap()
+                Mutation::append_authored_event(id, *ts, event, None, origin, |_| None).unwrap()
             })
             .collect();
         store.apply(&mutations).unwrap();
