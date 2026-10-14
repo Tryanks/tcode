@@ -114,19 +114,33 @@ impl SettingsStore {
 
     /// Every stored provider secret, keyed by profile id then variable name.
     pub fn load_secrets(&self) -> BTreeMap<String, BTreeMap<String, String>> {
-        let mut all = self.read_secrets().unwrap_or_default();
+        self.try_load_secrets().unwrap_or_default()
+    }
+
+    fn try_load_secrets(&self) -> std::io::Result<Secrets> {
+        let mut all = self.read_secrets()?;
         for kind in HostKind::ALL {
             all.remove(token_secrets(kind));
         }
         all.remove(EMAIL_SECRETS);
         all.remove(VERIFIED_SECRETS);
-        all
+        Ok(all)
     }
 
     /// The sensitive env values for one profile id: a built-in profile's
     /// [`Settings::builtin_profile_id`] or a user profile's slug.
     pub fn profile_secrets(&self, profile_id: &str) -> BTreeMap<String, String> {
-        self.load_secrets().remove(profile_id).unwrap_or_default()
+        self.try_profile_secrets(profile_id).unwrap_or_default()
+    }
+
+    pub fn try_profile_secrets(
+        &self,
+        profile_id: &str,
+    ) -> std::io::Result<BTreeMap<String, String>> {
+        Ok(self
+            .try_load_secrets()?
+            .remove(profile_id)
+            .unwrap_or_default())
     }
 
     pub(crate) fn token(&self, kind: HostKind, host: &str) -> Option<String> {
