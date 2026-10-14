@@ -3216,9 +3216,12 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
             ("ANTHROPIC_API_KEY".to_string(), "sk-official".to_string()),
         ]
     );
+    let cx = TestAppContext::default().host_cx();
     let builtin_meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
     assert_eq!(
-        session_launch_env(&state.settings, &state.settings_store, &builtin_meta).env,
+        smol::block_on(state.prepare_session_env(&builtin_meta, &cx))
+            .unwrap()
+            .env,
         builtin
     );
     assert!(!builtin.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
@@ -3235,7 +3238,7 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
         state.resolve_profile_binary("klaude-kode"),
         Some(PathBuf::from("/opt/kimi/claude"))
     );
-    let launch_env = session_launch_env(&state.settings, &state.settings_store, &meta);
+    let launch_env = smol::block_on(state.prepare_session_env(&meta, &cx)).unwrap();
     assert_eq!(launch_env.env, env);
     assert!(!launch_env.env.iter().any(|(key, _)| key == "UNSET_SECRET"));
     assert!(
