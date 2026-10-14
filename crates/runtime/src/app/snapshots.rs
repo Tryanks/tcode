@@ -592,14 +592,12 @@ impl AppState {
             };
             if session.meta.archived_at.is_none()
                 && insert(id, activity.session_activity(&session.meta, Some(session)))
+                && session.meta.worktree.is_some()
+                && sharing
+                    .get_or_init(|| self.worktree_sharing())
+                    .is_shared(&session.meta)
             {
-                if session.meta.worktree.is_some()
-                    && sharing
-                        .get_or_init(|| self.worktree_sharing())
-                        .is_shared(&session.meta)
-                {
-                    summary.worktree_shared.insert(id.to_string());
-                }
+                summary.worktree_shared.insert(id.to_string());
             }
         }
         summary
