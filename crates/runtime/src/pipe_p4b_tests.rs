@@ -15,8 +15,8 @@ pub(super) fn linked(mux: &HostMux) -> HostLink {
     link
 }
 
-/// Consume like the app while synchronous assertions retain an ordered event history.
-pub(super) fn observed_events(link: &HostLink) -> async_channel::Receiver<EventEnvelope> {
+// The host continues publishing while requests wait; retain events for assertions.
+pub(crate) fn observed_events(link: &HostLink) -> async_channel::Receiver<EventEnvelope> {
     let events = link.events();
     let (observed, received) = async_channel::unbounded();
     smol::spawn(async move {
@@ -86,8 +86,6 @@ pub(super) fn next(
 fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscriber_refusal() {
     let (host, mux, link, _viewed) = fixture();
     let second = linked(&mux);
-    let events = observed_events(&link);
-    let other_events = observed_events(&second);
     for client in [&link, &second] {
         client
             .subscribe(Subscription {
@@ -101,6 +99,8 @@ fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscribe
     // Neither client views `background`: the agent's thread may be off every
     // screen while it drives the preview.
     let session_id = "background".to_string();
+    let events = observed_events(&link);
+    let other_events = observed_events(&second);
     let (requests, receiver) = async_channel::unbounded();
     smol::block_on(
         host.update_state_for_test(move |state, cx| {
@@ -281,6 +281,77 @@ fn attachments_mux_uses_host_session_directory_and_returns_identical_bytes() {
         assert_eq!(error.code, "invalid_attachment");
     }
     link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+}
+
+#[test]
+fn oversized_remote_reads_are_rejected_and_local_reads_are_complete() {
+    use base64::Engine as _;
+
+    let root = std::env::temp_dir().join(format!("tcode-read-budget-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::open_at(root.clone()).unwrap();
+    let bytes = vec![0x89; tcode_protocol::MAX_LINE_BYTES];
+    let path = root.join("image.png");
+    std::fs::write(&path, &bytes).unwrap();
+    let meta =
+        tcode_core::project::SessionMeta::new(agent::ProviderKind::Codex, root.clone(), None);
+    store.upsert_meta(&meta).unwrap();
+    store
+        .append_event(
+            &meta.id,
+            1,
+            &agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "image".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::ImageRead {
+                    path: path.to_string_lossy().into_owned(),
+                    image: Some(agent::Attachment {
+                        media_type: "image/png".into(),
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                        source_path: None,
+                    }),
+                },
+            }),
+        )
+        .unwrap();
+    let host = spawn_host(store, HostServices::default()).unwrap();
+    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let remote = linked(&mux);
+    let connection = mux.attach_local(tcode_protocol::Principal::Full);
+    let local = HostLink::new(connection.to_host, connection.from_host);
+    let pump = local.clone();
+    smol::spawn(async move { pump.pump().await }).detach();
+
+    for max_bytes in [None, Some(u64::MAX), Some(2)] {
+        for query in [
+            Query::ReadFileBytes {
+                path: path.clone(),
+                max_bytes,
+            },
+            Query::ReadItemImage {
+                session_id: meta.id.clone(),
+                item_id: "image".into(),
+                image_index: 0,
+                max_bytes,
+            },
+        ] {
+            assert_eq!(
+                smol::block_on(remote.query(query.clone()))
+                    .unwrap_err()
+                    .code,
+                "file_too_large"
+            );
+            let result = smol::block_on(local.query(query));
+            if max_bytes == Some(2) {
+                assert_eq!(result.unwrap_err().code, "file_too_large");
+            } else {
+                assert_eq!(result.unwrap(), QueryResponse::FileBytes(bytes.clone()));
+            }
+        }
+    }
+    smol::block_on(local.shutdown()).unwrap();
+    host.to_host.close();
+    host.stopped.recv_blocking().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// A host with a project but no session, plus the temp root the store owns.

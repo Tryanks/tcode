@@ -1245,14 +1245,12 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("thread-0".into()));
-        crate::store::tests::wait_until(cx, &store, "palette thread index", |cx| {
-            store.read_with(cx, |store, _| !store.threads_loading())
-        });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {
             palette: cx.new(|cx| CommandPalette::new(store.clone(), window_state, window, cx)),
         });
         cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         let palette = sheet.read_with(cx, |sheet, _| sheet.palette.clone());
         cx.update(|window, cx| palette.update(cx, |palette, cx| palette.open(false, window, cx)));
