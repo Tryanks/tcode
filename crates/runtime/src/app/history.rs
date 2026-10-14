@@ -69,6 +69,10 @@ fn oversized_output(event: &AgentEvent) -> bool {
     }
 }
 
+// Persisted previews must be regenerated when wire_record changes its policy.
+const HISTORY_PREVIEW_VERSION: &str = "history-preview-v1";
+const HISTORY_PREVIEW_CACHE_BYTES: usize = 16 * 1024;
+
 /// A record as clients receive it: tool and command output beyond
 /// [`OUTPUT_PREVIEW_BYTES`] stays on the host, read back with
 /// `Query::ReadItemOutput`.
@@ -270,8 +274,9 @@ fn wire_window(
             && last_kind == kind
         {
             if *kind == DeltaKind::CommandOutput {
-                let full = last.elided.unwrap_or(last_text.len() as u64) + text.len() as u64;
-                if text.len() >= OUTPUT_PREVIEW_BYTES {
+                let full = last.elided.unwrap_or(last_text.len() as u64)
+                    + record.elided.unwrap_or(text.len() as u64);
+                if record.elided.unwrap_or(text.len() as u64) >= OUTPUT_PREVIEW_BYTES as u64 {
                     last_text.clear();
                     last_text.push_str(output_tail(text));
                 } else {
@@ -664,6 +669,7 @@ impl SessionLog {
 /// the turn index of the whole log so the window is the one the whole log
 /// would give.
 pub(super) struct Tail {
+    cache_rows: Vec<u64>,
     records: Vec<SessionEventRecord>,
     rows: Vec<u64>,
     from: u64,
@@ -694,6 +700,7 @@ impl Tail {
         }
         .turn_aligned_start(end.saturating_sub(BASELINE_RECORDS));
         let mut tail = Self {
+            cache_rows: Vec::new(),
             records: Vec::new(),
             rows: Vec::new(),
             from: start,
@@ -703,15 +710,23 @@ impl Tail {
         let (mut low, mut bytes) = (end, 0);
         while low > start && bytes <= SESSION_WINDOW_BYTES {
             let from = low.saturating_sub(TAIL_ROWS).max(start);
-            store.visit_rows_backwards(session_id, from..low, |row, record| {
-                bytes += wire_len(&wire_record(&record)) + 1;
-                tail.records.push(record);
-                tail.rows.push(row);
-                if bytes > SESSION_WINDOW_BYTES {
-                    tail.from = row;
-                }
-                bytes <= SESSION_WINDOW_BYTES
-            })?;
+            let cache_rows = store.visit_projected_rows_backwards(
+                session_id,
+                from..low,
+                HISTORY_PREVIEW_VERSION,
+                HISTORY_PREVIEW_CACHE_BYTES,
+                wire_record,
+                |row, record| {
+                    bytes += wire_len(&wire_record(&record)) + 1;
+                    tail.records.push(record);
+                    tail.rows.push(row);
+                    if bytes > SESSION_WINDOW_BYTES {
+                        tail.from = row;
+                    }
+                    bytes <= SESSION_WINDOW_BYTES
+                },
+            )?;
+            tail.cache_rows.extend(cache_rows);
             low = from;
         }
         tail.records.reverse();
@@ -944,22 +959,51 @@ impl AppState {
                         })
                         .await
                 };
-                if let Some(tail) = tail {
+                let mut cache_rows = Vec::new();
+                if let Some(mut tail) = tail {
+                    cache_rows = std::mem::take(&mut tail.cache_rows);
                     let tail_id = read_id.clone();
                     host_cx.enqueue(move |state, cx| state.serve_tail(&tail_id, tail, cx));
                 }
-                let log = {
+                let (log, publication) = {
                     let read_id = read_id.clone();
                     host_cx
                         .unblock(move || {
-                            store
-                                .read_log_until(&read_id, end)
-                                .map(SessionLog::new)
-                                .map_err(|error| error.to_string())
+                            if cache_rows.is_empty() {
+                                return (
+                                    store
+                                        .read_log_until(&read_id, end)
+                                        .map(SessionLog::new)
+                                        .map_err(|error| error.to_string()),
+                                    None,
+                                );
+                            }
+                            match store.read_log_with_projections(
+                                &read_id,
+                                end,
+                                &cache_rows,
+                                HISTORY_PREVIEW_VERSION,
+                                HISTORY_PREVIEW_CACHE_BYTES,
+                                wire_record,
+                            ) {
+                                Ok((log, publication)) => {
+                                    (Ok(SessionLog::new(log)), Some(publication))
+                                }
+                                Err(error) => (Err(error.to_string()), None),
+                            }
                         })
                         .await
                 };
                 host_cx.enqueue(move |state, cx| state.finish_hydration(read_id, log, cx));
+                if let Some(publication) = publication {
+                    host_cx
+                        .unblock(move || {
+                            if let Err(error) = publication.publish() {
+                                log::warn!("could not publish history previews: {error}");
+                            }
+                        })
+                        .await;
+                }
             });
             self.log_hydrations.insert(
                 session_id.to_string(),
