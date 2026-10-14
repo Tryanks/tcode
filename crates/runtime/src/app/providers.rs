@@ -196,7 +196,6 @@ impl ProviderCatalog {
 
     pub(super) fn status_snapshot(
         &self,
-        model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
         acp_marketplace_items: Vec<AcpMarketplaceItem>,
         acp_registry_loading: bool,
         acp_registry_error: Option<String>,
@@ -204,7 +203,7 @@ impl ProviderCatalog {
         plugins: Vec<tcode_protocol::ProviderPluginCatalog>,
     ) -> ProvidersStatus {
         ProvidersStatus {
-            model_catalogs,
+            model_catalogs: self.model_catalogs.clone(),
             models_loading: self
                 .model_refreshes
                 .iter()

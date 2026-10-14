@@ -193,11 +193,7 @@ impl<'a> WorktreeSharing<'a> {
         };
         for meta in sessions {
             for ancestor in meta.cwd.ancestors() {
-                if let Some(owners) = sharing.paths.get_mut(ancestor) {
-                    Self::add_owner(owners, meta);
-                } else {
-                    sharing.paths.insert(ancestor.to_owned(), vec![meta]);
-                }
+                Self::add_owner(sharing.paths.entry(ancestor.to_owned()).or_default(), meta);
             }
             if let Some(worktree) = &meta.worktree {
                 Self::add_owner(sharing.branches.entry(&worktree.branch).or_default(), meta);
