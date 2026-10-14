@@ -51,6 +51,12 @@ pub enum Query {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_bytes: Option<u64>,
     },
+    /// A bounded part of a complete file read. Later parts require the first revision.
+    ReadFileChunk {
+        path: PathBuf,
+        offset: u64,
+        revision: Option<String>,
+    },
     /// Complete file contents for a preview, rejected above 512 KiB.
     ReadFilePreview {
         path: PathBuf,
@@ -147,6 +153,15 @@ pub enum QueryResponse {
     CommitMessage(String),
     GitDiff(GitDiffResult),
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
+    FileChunk {
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+        offset: u64,
+        total: u64,
+        /// Host metadata followed by `:` and the lowercase SHA-256 hex of the
+        /// complete first read. Clients verify the digest before using assembled bytes.
+        revision: String,
+    },
     SavedAttachment(PathBuf),
     UserFileRemoved,
     /// A rendered thread export. `suggested_name` is already safe for a file

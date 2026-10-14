@@ -1,9 +1,14 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 
 pub fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let file = std::fs::File::open(path)?;
-    let too_large = || io::Error::other(format!("file exceeds the {limit} byte size limit"));
+    let too_large = || {
+        io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!("file exceeds the {limit} byte size limit"),
+        )
+    };
     if file.metadata()?.len() > limit {
         return Err(too_large());
     }
@@ -14,6 +19,65 @@ pub fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
         return Err(too_large());
     }
     Ok(bytes)
+}
+
+pub fn read_chunk(
+    path: &Path,
+    offset: u64,
+    revision: Option<&str>,
+) -> io::Result<tcode_protocol::QueryResponse> {
+    use sha2::Digest as _;
+    const CHUNK_BYTES: u64 = 4 * 1024 * 1024;
+    let mut file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    let stamp = |metadata: &std::fs::Metadata| -> io::Result<String> {
+        Ok(format!("{}:{:?}", metadata.len(), metadata.modified()?))
+    };
+    let current = stamp(&metadata)?;
+    if offset > metadata.len()
+        || (offset != 0 && revision.is_none())
+        || revision.is_some_and(|revision| {
+            revision
+                .rsplit_once(':')
+                .is_none_or(|(stamp, _)| stamp != current)
+        })
+    {
+        return Err(io::Error::other("file changed during transfer"));
+    }
+    file.seek(io::SeekFrom::Start(offset))?;
+    let length = (metadata.len() - offset).min(CHUNK_BYTES) as usize;
+    let mut bytes = vec![0; length];
+    file.read_exact(&mut bytes)?;
+    let revision = match revision {
+        Some(revision) => revision.to_owned(),
+        None => {
+            let mut hash = sha2::Sha256::new();
+            hash.update(&bytes);
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hash.update(&buffer[..count]);
+            }
+            let digest: String = hash
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("{current}:{digest}")
+        }
+    };
+    if stamp(&file.metadata()?)? != current {
+        return Err(io::Error::other("file changed during transfer"));
+    }
+    Ok(tcode_protocol::QueryResponse::FileChunk {
+        bytes,
+        offset,
+        total: metadata.len(),
+        revision,
+    })
 }
 
 /// Return the directory used to persist attachments for a session.

@@ -980,10 +980,27 @@ fn dispatch_query(
                 None => std::fs::read(path),
             });
             cx.spawn_background(async move {
-                task.await
-                    .map(QueryResponse::FileBytes)
-                    .map_err(io_protocol_error)
+                task.await.map(QueryResponse::FileBytes).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::FileTooLarge {
+                        ProtocolError {
+                            code: "file_too_large".into(),
+                            message: error.to_string(),
+                        }
+                    } else {
+                        io_protocol_error(error)
+                    }
+                })
             })
+        }
+        Query::ReadFileChunk {
+            path,
+            offset,
+            revision,
+        } => {
+            let task = cx.unblock(move || {
+                tcode_services::user_files::read_chunk(&path, offset, revision.as_deref())
+            });
+            cx.spawn_background(async move { task.await.map_err(io_protocol_error) })
         }
         Query::SaveAttachment { dir, bytes, ext } => {
             if bytes.len() as u64 > tcode_core::attachments::MAX_BYTES
