@@ -129,13 +129,6 @@ pub(crate) fn image_preview(
 ) -> ImageSource {
     ImageSource::from(move |window: &mut gpui::Window, cx: &mut App| {
         let namespace = cx.try_global::<HostImages>()?.namespace;
-        let original = (namespace, ImageRequest::File(path.clone()));
-        if cx.has_asset::<HostImage>(&original)
-            && let Some(Ok(image)) = window.use_asset::<HostImage>(&original, cx)
-            && let Some(image) = image.use_render_image(window, cx)
-        {
-            return Some(Ok(image));
-        }
         let pixels = (logical_pixels * window.scale_factor())
             .ceil()
             .clamp(1., 1024.) as u32;
