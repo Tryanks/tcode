@@ -105,6 +105,9 @@ struct HostLinkInner {
     events_rx: async_channel::Receiver<EventEnvelope>,
     delivery_changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
     next_id: AtomicU64,
+    // Keep intent changes and recovery replay atomic: a cloned recovery intent
+    // must not be sent after a newer unsubscribe or cursor change.
+    subscription_transition: Mutex<()>,
     subscribed_topics: Mutex<HashMap<Topic, Subscription>>,
     retired_topics: Mutex<HashMap<u64, Topic>>,
     subscription_requests: Mutex<HashMap<Topic, u64>>,
@@ -151,6 +154,7 @@ impl HostLink {
                 events_rx,
                 delivery_changes: async_channel::bounded(1),
                 next_id: AtomicU64::new(1),
+                subscription_transition: Mutex::new(()),
                 subscribed_topics: Mutex::new(HashMap::new()),
                 retired_topics: Mutex::new(HashMap::new()),
                 subscription_requests: Mutex::new(HashMap::new()),
@@ -677,6 +681,7 @@ impl HostLink {
     }
 
     pub fn subscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
+        let _transition = self.inner.subscription_transition.lock().unwrap();
         self.inner
             .retired_topics
             .lock()
@@ -725,6 +730,7 @@ impl HostLink {
     }
 
     pub fn unsubscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
+        let _transition = self.inner.subscription_transition.lock().unwrap();
         let removed = self
             .inner
             .subscribed_topics
@@ -756,6 +762,7 @@ impl HostLink {
 
     /// Request another history window, advancing the cursor already applied locally.
     pub fn update_after(&self, topic: &Topic, after: u64) -> Result<(), ProtocolError> {
+        let _transition = self.inner.subscription_transition.lock().unwrap();
         if let Some(subscription) = self.advance_after(topic, after) {
             self.send_subscription(subscription)?;
         }
@@ -764,6 +771,7 @@ impl HostLink {
 
     /// Advance recovery memory without asking the host to resend an empty tail.
     pub fn remember_after(&self, topic: &Topic, after: u64) {
+        let _transition = self.inner.subscription_transition.lock().unwrap();
         let Some(subscription) = self.advance_after(topic, after) else {
             return;
         };
@@ -824,6 +832,7 @@ impl HostLink {
     }
 
     pub fn set_connection_state(&self, state: ConnectionState) {
+        let _transition = self.inner.subscription_transition.lock().unwrap();
         let mut current = self.inner.connection_state.lock().unwrap();
         let previous = std::mem::replace(&mut *current, state.clone());
         if matches!(
