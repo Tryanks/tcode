@@ -97,6 +97,7 @@ impl ProviderCatalog {
     }
 
     pub(super) fn invalidate_profile_reads(&mut self, id: &str) {
+        self.provider_snapshots.remove(id);
         self.provider_usage.remove(id);
         self.usage_checking.remove(id);
         *self.profile_revisions.entry(id.to_owned()).or_default() += 1;
@@ -562,8 +563,14 @@ impl AppState {
     /// indeterminate auth state until their model/session requests run.
     pub fn refresh_provider_status(&mut self, cx: &mut HostCx) {
         for profile in self.all_profiles() {
-            let profile_id = profile.id;
+            let profile_id = profile.id.clone();
             let provider = profile.kind;
+            let revision = self
+                .providers
+                .profile_revisions
+                .get(&profile_id)
+                .copied()
+                .unwrap_or(0);
             let snapshot = self
                 .providers
                 .provider_snapshots
@@ -588,6 +595,17 @@ impl AppState {
                 let snapshot = probe_provider(provider, binary, launch_env).await;
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
                 host_cx.enqueue(move |state, _cx| {
+                    if state
+                        .providers
+                        .profile_revisions
+                        .get(&profile_id)
+                        .copied()
+                        .unwrap_or(0)
+                        != revision
+                        || state.settings.resolved_profile(&profile_id).as_ref() != Some(&profile)
+                    {
+                        return;
+                    }
                     state
                         .providers
                         .provider_snapshots
