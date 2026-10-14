@@ -4642,9 +4642,6 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("background".into()));
-        crate::store::tests::wait_until(cx, &store, "sidebar settings and index baseline", |cx| {
-            store.read_with(cx, |store, _| !store.threads_loading())
-        });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -5436,9 +5433,6 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("virtual-0".into()));
-        crate::store::tests::wait_until(cx, &store, "sidebar settings and index baseline", |cx| {
-            store.read_with(cx, |store, _| !store.threads_loading())
-        });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
             sidebar: cx.new(|cx| SessionsSidebar::new(store.clone(), window_state, cx)),
@@ -5581,9 +5575,6 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("virtual-0".into()));
-        crate::store::tests::wait_until(cx, &store, "sidebar settings and index baseline", |cx| {
-            store.read_with(cx, |store, _| !store.threads_loading())
-        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
@@ -5753,9 +5744,6 @@ mod tests {
         // A selection keeps the store from opening a draft against a host
         // this fake transport never answers.
         store.update(cx, |store, _| store.select_session("other".into()));
-        crate::store::tests::wait_until(cx, &store, "sidebar settings and index baseline", |cx| {
-            store.read_with(cx, |store, _| !store.threads_loading())
-        });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -5972,9 +5960,6 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("settled-39".into()));
-        crate::store::tests::wait_until(cx, &store, "sidebar settings and index baseline", |cx| {
-            store.read_with(cx, |store, _| !store.threads_loading())
-        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -6145,9 +6130,6 @@ mod tests {
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // The open thread is settled, so the closed shelf shows its row.
         store.update(cx, |store, _| store.select_session("settled-20".into()));
-        crate::store::tests::wait_until(cx, &store, "sidebar settings and index baseline", |cx| {
-            store.read_with(cx, |store, _| !store.threads_loading())
-        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -6344,9 +6326,6 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("mixed-a".into()));
-        crate::store::tests::wait_until(cx, &store, "sidebar settings and index baseline", |cx| {
-            store.read_with(cx, |store, _| !store.threads_loading())
-        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));

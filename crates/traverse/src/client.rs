@@ -629,7 +629,7 @@ impl TunnelOpener for AttachmentTunnels {
 /// the attachment's [`AttachmentTunnels`].
 pub fn connect(host: &PairedHost, device: &DeviceIdentity) -> Transport {
     let (to_host, outgoing) = tcode_client::outgoing::channel();
-    let (incoming, from_host) = async_channel::bounded(1);
+    let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
     let tunnels = AttachmentTunnels::default();
     let current_host = LiveHost::with_tunnels(host.clone(), Arc::new(tunnels.clone()));
@@ -1064,7 +1064,7 @@ async fn relay_connected(
     let mut reader = wire::LineStream::new(reader);
     // Reads and writes run in their own tasks: a line read or written
     // halfway must never be abandoned by a select branch.
-    let (lines_tx, lines_rx) = async_channel::bounded::<String>(1);
+    let (lines_tx, lines_rx) = async_channel::unbounded::<String>();
     let reader_task = tokio::spawn(async move {
         loop {
             match reader.read_line(wire::MAX_LINE).await {
@@ -1107,42 +1107,28 @@ async fn relay_connected(
     let mut heartbeat = Heartbeat::with_idle(now_ms(), NATIVE_IDLE_MS);
     let mut healthy = false;
     let mut connected = false;
-    let mut delivery: Option<std::pin::Pin<Box<async_channel::Send<'_, String>>>> = None;
     let lost = loop {
-        // A full local queue prevents reading a Pong; connection closure and explicit
-        // reconnect requests remain live while application-level probes are paused.
-        let wait = if delivery.is_some() {
-            NATIVE_IDLE_MS
-        } else {
-            match heartbeat.tick(now_ms()) {
-                Tick::Wait(ms) => ms,
-                Tick::Ping => {
-                    if wire_tx.send(ping_line()).await.is_err() {
-                        break Lost {
-                            failure: ConnectionFailure::Unreachable(None),
-                            healthy,
-                            wake: None,
-                        };
-                    }
-                    LIVENESS_REPLY_MS
-                }
-                Tick::Lost => {
+        let wait = match heartbeat.tick(now_ms()) {
+            Tick::Wait(ms) => ms,
+            Tick::Ping => {
+                if wire_tx.send(ping_line()).await.is_err() {
                     break Lost {
-                        failure: ConnectionFailure::Timeout,
+                        failure: ConnectionFailure::Unreachable(None),
                         healthy,
                         wake: None,
                     };
                 }
+                LIVENESS_REPLY_MS
+            }
+            Tick::Lost => {
+                break Lost {
+                    failure: ConnectionFailure::Timeout,
+                    healthy,
+                    wake: None,
+                };
             }
         };
         tokio::select! {
-            result = async { delivery.as_mut().unwrap().as_mut().await }, if delivery.is_some() => {
-                if result.is_err() {
-                    break Lost { failure: ConnectionFailure::HostClosed, healthy, wake: None };
-                }
-                delivery = None;
-                heartbeat.received(now_ms());
-            },
             line = outgoing.recv() => match line {
                 Ok(line) => {
                     if wire_tx.send(line).await.is_err() {
@@ -1151,7 +1137,7 @@ async fn relay_connected(
                 }
                 Err(_) => break Lost { failure: ConnectionFailure::HostClosed, healthy, wake: None },
             },
-            line = lines_rx.recv(), if delivery.is_none() => match line {
+            line = lines_rx.recv() => match line {
                 Ok(line) => {
                     heartbeat.received(now_ms());
                     healthy = true;
@@ -1159,7 +1145,9 @@ async fn relay_connected(
                         connected = true;
                         state.connected().await;
                     }
-                    delivery = Some(Box::pin(incoming.send(format!("{line}\n"))));
+                    if incoming.send(format!("{line}\n")).await.is_err() {
+                        break Lost { failure: ConnectionFailure::HostClosed, healthy, wake: None };
+                    }
                 }
                 Err(_) => {
                     let failure = match connection.close_reason() {

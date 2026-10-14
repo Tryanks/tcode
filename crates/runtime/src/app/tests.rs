@@ -10158,20 +10158,6 @@ fn next_host_event(events: &async_channel::Receiver<EventEnvelope>) -> EventEnve
 #[test]
 fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename() {
     use crate::pipe::{HostServices, spawn_host};
-    let collect = |link: &tcode_client::HostLink| {
-        let source = link.events();
-        let (sender, events) = async_channel::unbounded();
-        // Keep receiving while requests wait, as the app's event task does.
-        smol::spawn(async move {
-            while let Ok(event) = source.recv().await {
-                if sender.send(event).await.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-        events
-    };
     let store = TestStore::new("cold-settlement");
     let stamp = now_millis() - 10 * 86_400_000;
     for id in ["inherit", "never"] {
@@ -10222,7 +10208,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     .unwrap();
     let host = spawn_host((*store).clone(), HostServices::default()).unwrap();
     let link = host.link();
-    let events = collect(&link);
+    let events = crate::pipe::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
         known_index: None,
         topic: Topic::Index,
@@ -10274,7 +10260,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     )
     .unwrap();
     let link = restarted.link();
-    let events = collect(&link);
+    let events = crate::pipe::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
         known_index: None,
         topic: Topic::Index,

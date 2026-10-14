@@ -338,7 +338,6 @@ impl AppState {
                 | Query::ReadItemOutput { session_id, .. }
                 | Query::ReadItemImage { session_id, .. }
                 | Query::ReadItemImagePreview { session_id, .. }
-                | Query::ReadItemImageChunk { session_id, .. }
                 | Query::PullRequest { session_id, .. }
                 | Query::RenderStoredOutput { session_id, .. } => session(session_id),
                 Query::ReadProjectIcon { project_id, .. } => self
@@ -351,7 +350,6 @@ impl AppState {
                     self.authorize_path(cwd, project_ids, PathAccess::Workspace, cx)
                 }
                 Query::ReadFileBytes { path, .. }
-                | Query::ReadFileChunk { path, .. }
                 | Query::ReadImagePreview { path, .. }
                 | Query::ReadFilePreview { path }
                 | Query::ReadIconImage { path } => {

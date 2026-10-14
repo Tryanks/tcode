@@ -662,18 +662,6 @@ impl SessionLog {
             .map_err(image_read_error)
     }
 
-    fn item_image_chunk(
-        &self,
-        item_id: &str,
-        image_index: usize,
-        offset: u64,
-        revision: Option<String>,
-    ) -> Result<tcode_services::image_bytes::ImageRead, ProtocolError> {
-        let image = self.image_attachment(item_id, image_index)?;
-        tcode_services::image_bytes::ImageRead::chunk(&image.data_base64, offset, revision)
-            .map_err(image_read_error)
-    }
-
     /// The whole output of one item, as the full log folds it.
     pub(super) fn item_output(
         &self,
@@ -1387,23 +1375,6 @@ impl AppState {
                 tcode_services::image_bytes::ImageRead::preview(&image.data_base64, width, height)
                     .map_err(image_read_error)
             },
-            cx,
-        );
-        decode_image_read(read, cx)
-    }
-
-    pub(crate) fn item_image_chunk(
-        &mut self,
-        session_id: &str,
-        item_id: String,
-        image_index: usize,
-        offset: u64,
-        revision: Option<String>,
-        cx: &mut HostCx,
-    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
-        let read = self.query_session_log(
-            session_id,
-            move |log| log.item_image_chunk(&item_id, image_index, offset, revision),
             cx,
         );
         decode_image_read(read, cx)

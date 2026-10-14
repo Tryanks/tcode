@@ -1009,16 +1009,6 @@ fn dispatch_query(
                 })
             })
         }
-        Query::ReadFileChunk {
-            path,
-            offset,
-            revision,
-        } => {
-            let task = cx.unblock(move || {
-                tcode_services::user_files::read_chunk(&path, offset, revision.as_deref())
-            });
-            cx.spawn_background(async move { task.await.map_err(io_protocol_error) })
-        }
         Query::SaveAttachment { dir, bytes, ext } => {
             if bytes.len() as u64 > tcode_core::attachments::MAX_BYTES
                 || !app.accepts_attachment(&dir, &ext)
@@ -1070,13 +1060,6 @@ fn dispatch_query(
             width,
             height,
         } => app.item_image_preview(&session_id, item_id, image_index, width, height, cx),
-        Query::ReadItemImageChunk {
-            session_id,
-            item_id,
-            image_index,
-            offset,
-            revision,
-        } => app.item_image_chunk(&session_id, item_id, image_index, offset, revision, cx),
         Query::PullRequest {
             session_id,
             key,
@@ -2069,7 +2052,7 @@ mod tests {
 
 #[cfg(test)]
 #[path = "pipe_p4b_tests.rs"]
-mod p4b_tests;
+pub(crate) mod p4b_tests;
 
 #[cfg(test)]
 #[path = "terminal_replication_tests.rs"]
