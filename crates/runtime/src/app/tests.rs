@@ -5815,6 +5815,56 @@ fn resident_idle_lru_evicts_only_oldest_provider() {
 }
 
 #[test]
+fn idle_histories_evict_oldest_by_bytes_and_bypass_oversized_logs() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("idle-history-bytes");
+    for (id, bytes) in [
+        ("oldest", 12 * 1024 * 1024),
+        ("middle", 12 * 1024 * 1024),
+        ("newest", 12 * 1024 * 1024),
+        ("oversized", 33 * 1024 * 1024),
+    ] {
+        open_stored_session(&store, id);
+        let record = tool_call("large-output", "x".repeat(bytes));
+        store
+            .apply(&[tcode_services::store::Mutation::append_event(id, 1, &record.event).unwrap()])
+            .unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    for (index, id) in ["oldest", "middle", "newest", "oversized"]
+        .into_iter()
+        .enumerate()
+    {
+        let request = index as u64 * 2 + 1;
+        let window = window_reply(
+            &through_pipe(&state, cx, request, subscribe_events(id, None)),
+            request,
+        );
+        assert!(!window.records.is_empty());
+        through_pipe(&state, cx, request + 1, unsubscribe_events(id));
+        if index >= 2 {
+            state.read(|state| {
+                assert!(!state.residents.parked.contains_key("oldest"));
+                assert!(state.event_records.contains_key("middle"));
+                assert!(state.event_records.contains_key("newest"));
+            });
+            cx.run_until(|state| !state.event_records.contains_key("oldest"));
+        }
+    }
+    cx.run_until(|state| !state.event_records.contains_key("oversized"));
+    state.read(|state| {
+        assert!(!state.residents.parked.contains_key("oversized"));
+        assert!(state.residents.parked.contains_key("middle"));
+        assert!(state.residents.parked.contains_key("newest"));
+    });
+    let window = window_reply(
+        &through_pipe(&state, cx, 20, subscribe_events("oldest", None)),
+        20,
+    );
+    assert_eq!(window.records[0].elided, Some(12 * 1024 * 1024));
+}
+
+#[test]
 fn settings_restart_waits_for_background_follow_up() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-background-restart-test");
@@ -9948,12 +9998,6 @@ fn a_child_completing_while_its_log_is_read_reports_that_turn() {
     assert!(callback.ends_with("\nthe new answer"));
 }
 
-/// A long thread with a turn index opens with a baseline window cut from its
-/// last rows, sent while the whole log is still being read, and equal to the
-/// window the whole log gives: the index the first open built, kept current
-/// by the appends of a resident log, a rewind included, serves it. An append
-/// to a log nobody holds forgets the index, and the next open waits for the
-/// whole log, with the same result.
 #[test]
 fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     let cx = &mut TestAppContext::default();
@@ -9962,11 +10006,9 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     persist_streamed_turns(&store, "long", 3);
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let mut id = 0;
-    // Open the thread cold, returning its window, whether it went out while
-    // the whole log was still being read, and the window the whole log gives.
-    let mut open = |state: &TestEntity, cx: &mut TestAppContext| {
+    let mut open = |state: &TestEntity, cx: &mut TestAppContext, after: Option<u64>| {
         id += 1;
-        send_to_host(state, cx, id, subscribe_events("long", None));
+        send_to_host(state, cx, id, subscribe_events("long", after));
         let (window, early) = loop {
             cx.run_next();
             let messages = cx.drain_outgoing();
@@ -9984,13 +10026,17 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
                 );
             }
         };
+        if after.is_some() && early {
+            send_to_host(state, cx, id + 1000, subscribe_events("long", after));
+            assert_eq!(window_reply(&cx.drain_outgoing(), id + 1000), window);
+        }
         cx.run_until(|state| state.event_records.contains_key("long"));
         let whole = SessionLog::new(store.read_log("long").unwrap()).events_window(&Subscription {
             known_index: None,
             topic: Topic::SessionEvents {
                 session_id: "long".into(),
             },
-            after: None,
+            after,
         });
         (window, early, window_of(&whole).unwrap())
     };
@@ -10000,7 +10046,7 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
         cx.run_until(|state| !state.event_records.contains_key("long"));
     };
 
-    let (window, early, whole) = open(&state, cx);
+    let (window, early, whole) = open(&state, cx, None);
     assert!(
         !early,
         "without an index the first open reads the whole log"
@@ -10008,10 +10054,34 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     assert_eq!(window, whole);
     release(&state, cx, 100);
 
-    let (window, early, whole) = open(&state, cx);
+    let (window, early, whole) = open(&state, cx, None);
     assert!(early, "the index the first open built serves the tail");
     assert_eq!(window, whole);
     assert!(window.from > 0 && window.total_turns == 3);
+    let held_end = window.end;
+    state.update(cx, |state, cx| {
+        for text in ["caught ", "up"] {
+            state.record_event(
+                "long",
+                &AgentEvent::Delta {
+                    item_id: "pi-assistant-0:0".into(),
+                    kind: agent::DeltaKind::AssistantText,
+                    text: text.into(),
+                },
+                cx,
+            );
+        }
+    });
+    release(&state, cx, 103);
+    let (window, early, whole) = open(&state, cx, Some(held_end));
+    assert!(
+        early,
+        "a cached reopen receives catch-up before full hydration"
+    );
+    assert_eq!(window, whole);
+    assert_eq!(window.from, held_end);
+    assert_eq!(window.end, held_end + 2);
+    assert!(!window.records.is_empty());
     let turn = |index: usize| {
         vec![
             AgentEvent::TurnStarted {
@@ -10030,8 +10100,6 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
         ]
     };
     state.update(cx, |state, cx| {
-        // The rewind drops the last late turn and is the last change to
-        // the turns.
         for event in
             turn(0)
                 .into_iter()
@@ -10048,7 +10116,7 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     });
     release(&state, cx, 101);
 
-    let (window, early, whole) = open(&state, cx);
+    let (window, early, whole) = open(&state, cx, None);
     assert!(early, "appends to the resident log kept the index current");
     assert_eq!(window, whole);
     assert_eq!(
@@ -10061,7 +10129,7 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
         state.record_event("long", &persisted_assistant_event("nobody held it"), cx)
     });
     cx.run_until_parked();
-    let (window, early, whole) = open(&state, cx);
+    let (window, early, whole) = open(&state, cx, None);
     assert!(!early, "an append nobody folded forgot the index");
     assert_eq!(window, whole);
 }

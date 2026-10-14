@@ -425,7 +425,6 @@ impl AppState {
 
     /// Shut down every provider process before the application exits.
     pub fn shutdown_all(&mut self, cx: &mut HostCx) {
-        self.turn_index_backfill = TurnIndexBackfill::Stopped;
         self.stop_diff_pass();
         self.stop_pull_request_workers();
         for id in self
@@ -476,13 +475,6 @@ impl AppState {
             self.release_stale_session_logs(cx);
             return;
         }
-        log::info!(
-            "parking session {} (turn in flight: {}, queued: {}, background tasks: {})",
-            active.meta.id,
-            active.turn_in_flight,
-            active.queue.len(),
-            active.background_task_count
-        );
         let session_id = active.meta.id.clone();
         if has_work {
             active.idle_since = None;
@@ -519,42 +511,55 @@ impl AppState {
             .unwrap()
             .idle_since = Some(idle_since);
 
-        let oldest = {
-            let mut residents: Vec<_> = self
-                .residents
-                .parked
-                .iter()
-                .filter(|(id, session)| {
-                    session.queue.is_empty()
-                        && !session.turn_in_flight
-                        && session.delivery_in_flight.is_none()
-                        && session.background_task_count == 0
-                        && !self.pending_native_rewinds.contains_key(id.as_str())
+        let mut residents: Vec<_> = self
+            .residents
+            .parked
+            .iter()
+            .filter(|(id, session)| {
+                session.queue.is_empty()
+                    && !session.turn_in_flight
+                    && session.delivery_in_flight.is_none()
+                    && session.background_task_count == 0
+                    && !self.pending_native_rewinds.contains_key(id.as_str())
+            })
+            .filter_map(|(id, session)| {
+                session.idle_since.map(|idle| {
+                    let replay = !session.draft && matches!(session.runtime, Runtime::Idle);
+                    let bytes = if replay {
+                        self.event_records
+                            .get(id)
+                            .map_or(0, SessionLog::retained_bytes)
+                    } else {
+                        0
+                    };
+                    (id.clone(), idle, replay, bytes)
                 })
-                .filter_map(|(id, session)| {
-                    session.idle_since.map(|idle| {
-                        (
-                            id.clone(),
-                            idle,
-                            !session.draft && matches!(session.runtime, Runtime::Idle),
-                        )
-                    })
-                })
-                .collect();
-            let replay_only = residents.iter().filter(|(_, _, replay)| *replay).count();
-            if replay_only > MAX_IDLE_REPLAY_RESIDENTS || residents.len() > MAX_IDLE_RESIDENTS {
-                residents.sort_unstable_by_key(|(_, idle, _)| *idle);
-                residents
-                    .iter()
-                    .find(|(_, _, replay)| replay_only <= MAX_IDLE_REPLAY_RESIDENTS || *replay)
-                    .map(|(id, _, _)| id.clone())
-            } else {
-                None
+            })
+            .collect();
+        residents.sort_unstable_by_key(|(_, idle, _, _)| *idle);
+        for (id, _, replay, bytes) in &residents {
+            if *replay && *bytes > MAX_IDLE_REPLAY_BYTES {
+                self.drop_background(id, cx);
             }
-        };
-        if let Some(oldest) = oldest {
-            log::info!("evicting idle resident {oldest}");
-            self.drop_background(&oldest, cx);
+        }
+        residents.retain(|(_, _, replay, bytes)| !*replay || *bytes <= MAX_IDLE_REPLAY_BYTES);
+        let mut replay_count = residents.iter().filter(|(_, _, replay, _)| *replay).count();
+        let mut replay_bytes: usize = residents.iter().map(|(_, _, _, bytes)| *bytes).sum();
+        while replay_count > MAX_IDLE_REPLAY_RESIDENTS
+            || replay_bytes > MAX_IDLE_REPLAY_BYTES
+            || residents.len() > MAX_IDLE_RESIDENTS
+        {
+            let replay_over =
+                replay_count > MAX_IDLE_REPLAY_RESIDENTS || replay_bytes > MAX_IDLE_REPLAY_BYTES;
+            let oldest = residents
+                .iter()
+                .position(|(_, _, replay, _)| !replay_over || *replay)
+                .expect("an exceeded replay budget has an idle replay resident");
+            let (id, _, replay, bytes) = residents.remove(oldest);
+            log::info!("evicting idle resident {id}");
+            self.drop_background(&id, cx);
+            replay_count -= usize::from(replay);
+            replay_bytes -= bytes;
         }
 
         let session_id = session_id.to_string();

@@ -2,6 +2,7 @@ use super::*;
 use agent::DeltaKind;
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::LazyLock;
 use tcode_core::session::{TurnSnapshots, drop_turn_diffs};
 use tcode_protocol::{
     CommandResponse, HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES,
@@ -69,8 +70,9 @@ fn oversized_output(event: &AgentEvent) -> bool {
     }
 }
 
-// Persisted previews must be regenerated when wire_record changes its policy.
-const HISTORY_PREVIEW_VERSION: &str = "history-preview-v1";
+const HISTORY_PREVIEW_POLICY: u32 = 1;
+static HISTORY_PREVIEW_VERSION: LazyLock<String> =
+    LazyLock::new(|| format!("history-preview-{HISTORY_PREVIEW_POLICY}-{OUTPUT_PREVIEW_BYTES}"));
 const HISTORY_PREVIEW_CACHE_BYTES: usize = 16 * 1024;
 
 /// A record as clients receive it: tool and command output beyond
@@ -212,20 +214,22 @@ pub(super) fn append_projection(
     author: Option<&Author>,
     origin: Option<MessageOrigin>,
 ) -> Option<(String, Vec<u8>)> {
-    if bytes < HISTORY_PREVIEW_CACHE_BYTES {
+    if bytes < HISTORY_PREVIEW_CACHE_BYTES || !oversized_output(event) {
         return None;
     }
-    let (event, elided) = wire_event(event)?;
     let record = SessionEventRecord {
         origin,
         author: author.cloned(),
         ts: Some(ts),
-        event,
-        elided,
+        event: event.clone(),
+        elided: None,
     };
-    match serde_json::to_vec(&record) {
+    let Cow::Owned(preview) = wire_record(&record) else {
+        return None;
+    };
+    match serde_json::to_vec(&preview) {
         Ok(body) if body.len() < HISTORY_PREVIEW_CACHE_BYTES => {
-            Some((HISTORY_PREVIEW_VERSION.to_owned(), body))
+            Some((HISTORY_PREVIEW_VERSION.to_string(), body))
         }
         Ok(_) => None,
         Err(error) => {
@@ -498,6 +502,7 @@ const BASELINE_RECORDS: u64 = 400;
 #[derive(Clone)]
 pub(super) struct SessionLog {
     records: Vec<SessionEventRecord>,
+    retained_bytes: usize,
     /// The stored row each record is in, ascending.
     rows: Vec<u64>,
     /// The rows of the records that opened a turn in `fold`, ascending.
@@ -522,6 +527,7 @@ impl SessionLog {
     pub(super) fn new(log: EventLog) -> Self {
         let mut session_log = Self {
             records: Vec::new(),
+            retained_bytes: 0,
             rows: Vec::new(),
             turn_starts: Vec::new(),
             fold: Timeline::default(),
@@ -572,12 +578,19 @@ impl SessionLog {
         if self.fold.turns.len() > turns {
             self.turn_starts.push(row);
         }
+        self.retained_bytes += wire_len(&record) + 1;
         self.records.push(record);
         self.rows.push(row);
         if let Some((earlier, _)) = superseded {
+            self.retained_bytes -= wire_len(&self.records[earlier]);
             drop_turn_diffs(&mut self.records[earlier].event);
+            self.retained_bytes += wire_len(&self.records[earlier]);
         }
         superseded
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
     }
 
     pub(super) fn records(&self) -> &[SessionEventRecord] {
@@ -743,7 +756,7 @@ impl Tail {
             let cache_rows = store.visit_projected_rows_backwards(
                 session_id,
                 from..low,
-                HISTORY_PREVIEW_VERSION,
+                &HISTORY_PREVIEW_VERSION,
                 HISTORY_PREVIEW_CACHE_BYTES,
                 wire_record,
                 |row, record| {
@@ -805,133 +818,7 @@ pub(super) struct Hydration {
 
 type LogQuery = Box<dyn FnOnce(Result<&SessionLog, &str>) + Send>;
 
-pub(super) enum TurnIndexBackfill {
-    Pending,
-    Started { _task: HostTask<()> },
-    Stopped,
-}
-
 impl AppState {
-    /// Build missing indexes after activity recovery, one log at a time and
-    /// outside the writer. The same fold as hydration owns turn boundaries;
-    /// a revision check rejects work overtaken by appends or metadata changes.
-    pub(super) fn start_turn_index_backfill(&mut self, cx: &mut HostCx) {
-        if !matches!(self.turn_index_backfill, TurnIndexBackfill::Pending) || self.store_failed {
-            return;
-        }
-        let ids: Vec<_> = self
-            .sessions
-            .iter()
-            .filter(|meta| meta.archived_at.is_none())
-            .map(|meta| meta.id.clone())
-            .collect();
-        let store = self.store.clone();
-        let host_cx = cx.clone();
-        self.turn_index_backfill = TurnIndexBackfill::Started {
-            _task: cx.spawn_background(async move {
-                let started = Instant::now();
-                let mut indexed = 0;
-                for id in ids {
-                    let read_store = store.clone();
-                    let read_id = id.clone();
-                    let missing = host_cx
-                        .unblock(move || -> std::io::Result<bool> {
-                            Ok(read_store.turn_index(&read_id)?.is_none()
-                                && read_store.next_row(&read_id)? > BASELINE_RECORDS)
-                        })
-                        .await;
-                    match missing {
-                        Ok(false) => continue,
-                        Err(error) => {
-                            log::warn!("could not inspect turn index of {id}: {error}");
-                            break;
-                        }
-                        Ok(true) => {}
-                    }
-                    let read_id = id.clone();
-                    let Ok(Some((revision, taken))) = host_cx
-                        .enqueue_and_wait(move |state, cx| {
-                            if state.store_failed
-                                || !matches!(
-                                    state.turn_index_backfill,
-                                    TurnIndexBackfill::Started { .. }
-                                )
-                                || state.resident(&read_id).is_some()
-                                || state.log_hydrations.contains_key(&read_id)
-                                || !state
-                                    .find_meta(&read_id)
-                                    .is_some_and(|meta| meta.archived_at.is_none())
-                            {
-                                return None;
-                            }
-                            let revision = state.decision_revision(&read_id);
-                            let (snapshot, taken) = smol::channel::bounded(1);
-                            state.enqueue_store_write(
-                                StoreWrite::SnapshotLog {
-                                    id: read_id,
-                                    end: snapshot,
-                                },
-                                cx,
-                            );
-                            Some((revision, taken))
-                        })
-                        .await
-                    else {
-                        continue;
-                    };
-                    let Ok(Ok(end)) = taken.recv().await else {
-                        break;
-                    };
-                    let read_store = store.clone();
-                    let read_id = id.clone();
-                    let index = host_cx
-                        .unblock(move || {
-                            read_store
-                                .read_log_until(&read_id, end)
-                                .map(|log| SessionLog::new(log).turn_index())
-                        })
-                        .await;
-                    let index = match index {
-                        Ok(index) => index,
-                        Err(error) => {
-                            log::warn!("could not build turn index of {id}: {error}");
-                            break;
-                        }
-                    };
-                    let Ok(Some(flushed)) = host_cx
-                        .enqueue_and_wait(move |state, cx| {
-                            if state.store_failed
-                                || !matches!(
-                                    state.turn_index_backfill,
-                                    TurnIndexBackfill::Started { .. }
-                                )
-                                || state.decision_revision(&id) != revision
-                                || state.find_meta(&id).is_none()
-                            {
-                                return None;
-                            }
-                            state.enqueue_store_write(StoreWrite::SetTurnIndex { id, index }, cx);
-                            let (completion, flushed) = smol::channel::bounded(1);
-                            state.enqueue_store_write(StoreWrite::Flush(completion), cx);
-                            Some(flushed)
-                        })
-                        .await
-                    else {
-                        continue;
-                    };
-                    if !matches!(flushed.recv().await, Ok(Ok(()))) {
-                        break;
-                    }
-                    indexed += 1;
-                }
-                log::info!(
-                    "backfilled {indexed} turn indexes in {:?}",
-                    started.elapsed()
-                );
-            }),
-        };
-    }
-
     /// The session's hydration, begun unless its log is being read already.
     /// Callers check first that the log is not resident.
     pub(super) fn hydrate_log(
@@ -1012,7 +899,7 @@ impl AppState {
                                 &read_id,
                                 end,
                                 &cache_rows,
-                                HISTORY_PREVIEW_VERSION,
+                                &HISTORY_PREVIEW_VERSION,
                                 HISTORY_PREVIEW_CACHE_BYTES,
                                 wire_record,
                             ) {
@@ -1057,7 +944,7 @@ impl AppState {
         hydration
     }
 
-    /// Answer the baseline subscriptions waiting for the log from its tail,
+    /// Answer subscriptions covered by the tail,
     /// unless a record arrived since the read began: the tail ends before it.
     fn serve_tail(&mut self, session_id: &str, tail: Tail, cx: &mut HostCx) {
         let Some(hydration) = self.log_hydrations.get_mut(session_id) else {
@@ -1066,13 +953,15 @@ impl AppState {
         if !hydration.pending.is_empty() {
             return;
         }
-        let (baselines, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut hydration.replies)
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut hydration.replies)
             .into_iter()
-            .partition(|(_, subscription)| subscription.after.is_none());
+            .partition(|(_, subscription)| {
+                subscription.after.is_none_or(|after| after >= tail.from)
+            });
         hydration.replies = waiting;
-        hydration.live |= !baselines.is_empty();
+        hydration.live |= !ready.is_empty();
         let view = tail.view();
-        for (request_id, subscription) in &baselines {
+        for (request_id, subscription) in &ready {
             self.reply_with(
                 view.events_window(subscription),
                 *request_id,
@@ -1251,7 +1140,10 @@ impl AppState {
             let window = hydration
                 .tail
                 .as_ref()
-                .filter(|_| hydration.pending.is_empty() && subscription.after.is_none())
+                .filter(|tail| {
+                    hydration.pending.is_empty()
+                        && subscription.after.is_none_or(|after| after >= tail.from)
+                })
                 .map(|tail| tail.view().events_window(&subscription));
             match window {
                 Some(window) => {
@@ -1480,4 +1372,93 @@ fn decode_image_read(
             .await
             .map_err(image_read_error)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_preview_policy_golden() {
+        let image = agent::Attachment {
+            media_type: "image/png".into(),
+            data_base64: "AQID".repeat(10_000),
+            source_path: Some("/fixture/image.png".into()),
+        };
+        let command = ItemContent::CommandExecution {
+            command: "make".into(),
+            output: format!("{}tail", "é".repeat(20_000)),
+            exit_code: Some(0),
+            status: agent::ItemStatus::Completed,
+        };
+        let tool = ItemContent::ToolCall {
+            image_reads: vec![image.clone()],
+            name: "Read".into(),
+            input: serde_json::json!({"path": "/fixture/image.png"}),
+            output: Some(format!("{}{}suffix", image.data_base64, "é".repeat(20_000))),
+            status: agent::ItemStatus::Completed,
+        };
+        let attachment = ItemContent::ImageRead {
+            path: "/fixture/image.png".into(),
+            image: Some(image),
+        };
+        let item = |id: &str, content| agent::ThreadItem {
+            id: id.into(),
+            parent_item_id: Some("parent".into()),
+            content,
+        };
+        let events = vec![
+            AgentEvent::ItemStarted(item("command-start", command.clone())),
+            AgentEvent::ItemUpdated(item("command-update", command.clone())),
+            AgentEvent::ItemCompleted(item("command", command)),
+            AgentEvent::Delta {
+                item_id: "command".into(),
+                kind: DeltaKind::CommandOutput,
+                text: format!("{}tail", "é".repeat(20_000)),
+            },
+            AgentEvent::ItemCompleted(item("tool", tool)),
+            AgentEvent::ItemCompleted(item("image", attachment)),
+        ];
+        let records: Vec<_> = events
+            .into_iter()
+            .map(|event| SessionEventRecord {
+                origin: Some(MessageOrigin::Agent),
+                author: Some(Author {
+                    device_id: "fixture-device".into(),
+                    name: "Fixture".into(),
+                }),
+                ts: Some(1234),
+                event,
+                elided: None,
+            })
+            .collect();
+        let previews: Vec<_> = records
+            .iter()
+            .map(|record| wire_record(record).into_owned())
+            .collect();
+        let serialized = serde_json::to_vec(&previews).unwrap();
+        let hash = serialized
+            .iter()
+            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            });
+        assert_eq!(
+            hash, 0x97dd8e2f15bd29c0,
+            "wire previews changed: bump HISTORY_PREVIEW_POLICY and update this golden for an intentional policy change"
+        );
+        for (record, preview) in records.iter().zip(previews) {
+            let (_, body) = append_projection(
+                wire_len(record) + 1,
+                record.ts.unwrap(),
+                &record.event,
+                record.author.as_ref(),
+                record.origin,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<SessionEventRecord>(&body).unwrap(),
+                preview
+            );
+        }
+    }
 }
