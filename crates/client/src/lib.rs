@@ -109,7 +109,6 @@ struct HostLinkInner {
     // must not be sent after a newer unsubscribe or cursor change.
     subscription_transition: Mutex<()>,
     subscribed_topics: Mutex<HashMap<Topic, Subscription>>,
-    retired_topics: Mutex<HashMap<u64, Topic>>,
     subscription_requests: Mutex<HashMap<Topic, u64>>,
     connection_state: Mutex<ConnectionState>,
     connection_state_tx: async_channel::Sender<ConnectionState>,
@@ -156,7 +155,6 @@ impl HostLink {
                 next_id: AtomicU64::new(1),
                 subscription_transition: Mutex::new(()),
                 subscribed_topics: Mutex::new(HashMap::new()),
-                retired_topics: Mutex::new(HashMap::new()),
                 subscription_requests: Mutex::new(HashMap::new()),
                 connection_state: Mutex::new(ConnectionState::Connected { path: None }),
                 connection_state_tx,
@@ -204,9 +202,6 @@ impl HostLink {
                 Ok(
                     message @ (HostMessage::Ack { id, .. } | HostMessage::QueryResult { id, .. }),
                 ) => {
-                    if matches!(&message, HostMessage::Ack { result: Ok(_), .. }) {
-                        self.inner.retired_topics.lock().unwrap().remove(&id);
-                    }
                     if matches!(message, HostMessage::Ack { .. }) {
                         let mut delivery = self.inner.delivery.lock().unwrap();
                         if let Some(index) = delivery.writes.iter().position(|write| write.id == id)
@@ -679,11 +674,6 @@ impl HostLink {
     pub fn subscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
         let _transition = self.inner.subscription_transition.lock().unwrap();
         self.inner
-            .retired_topics
-            .lock()
-            .unwrap()
-            .retain(|_, topic| topic != &subscription.topic);
-        self.inner
             .subscribed_topics
             .lock()
             .unwrap()
@@ -742,11 +732,6 @@ impl HostLink {
             return Ok(());
         }
         let id = self.next_id();
-        self.inner
-            .retired_topics
-            .lock()
-            .unwrap()
-            .insert(id, subscription.topic.clone());
         if matches!(
             self.connection_state(),
             ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
@@ -874,26 +859,12 @@ impl HostLink {
             _ => false,
         };
         if restores_subscriptions {
-            // Replay the store's applied cursor once per recovery, before the
-            // first reply changes Syncing to Connected.
-            {
-                let mut retired = self.inner.retired_topics.lock().unwrap();
-                let topics: Vec<_> = retired.drain().map(|(_, topic)| topic).collect();
-                for topic in topics {
-                    let id = self.next_id();
-                    // An ACK from the previous connection must not retire this retry.
-                    retired.insert(id, topic.clone());
-                    let _ = self.send_payload(
-                        id,
-                        ClientPayload::Unsubscribe(Subscription {
-                            known_index: None,
-                            topic,
-                            after: None,
-                        }),
-                    );
-                }
-            }
-            for subscription in self.subscriptions() {
+            // Scope is answered synchronously by the host. Keep it ahead of the
+            // other baselines so the store can recognize this recovery even if
+            // its separate connection-state queue is delayed.
+            let mut subscriptions = self.subscriptions();
+            subscriptions.sort_by_key(|subscription| subscription.topic != Topic::Scope);
+            for subscription in subscriptions {
                 let _ = self.send_subscription(subscription);
             }
         }
@@ -1564,10 +1535,17 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_replays_the_cursor_applied_by_the_store_and_retired_topics() {
+    fn reconnect_replays_the_cursor_applied_by_the_store() {
         let (to_host, outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
+        link.subscribe(Subscription {
+            known_index: None,
+            topic: Topic::Scope,
+            after: None,
+        })
+        .unwrap();
+        outgoing.try_recv().unwrap();
         let topic = Topic::SessionEvents {
             session_id: "one".into(),
         };
@@ -1588,7 +1566,16 @@ mod tests {
             attempt: 1,
             reason: None,
         });
-        link.set_connection_state(ConnectionState::Connected { path: None });
+        link.set_connection_state(ConnectionState::Syncing { path: None });
+        let scope = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            scope.payload,
+            ClientPayload::Subscribe(Subscription {
+                topic: Topic::Scope,
+                ..
+            })
+        ));
+
         let replay = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
         assert_eq!(updated.payload, replay.payload);
         let queued_reply = EventEnvelope {
@@ -1611,20 +1598,6 @@ mod tests {
         })
         .unwrap();
         assert!(!link.subscription_reply_is_current(&queued_reply));
-        assert!(link.inner.subscription_requests.lock().unwrap().is_empty());
-        outgoing.try_recv().unwrap();
-        link.set_connection_state(ConnectionState::Reconnecting {
-            attempt: 2,
-            reason: None,
-        });
-        link.set_connection_state(ConnectionState::Connected { path: None });
-        assert!(matches!(
-            tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap())
-                .unwrap()
-                .payload,
-            ClientPayload::Unsubscribe(_)
-        ));
-        assert!(link.subscribed_topics().is_empty());
     }
 
     #[test]

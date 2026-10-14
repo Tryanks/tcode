@@ -9844,6 +9844,103 @@ fn the_event_that_starts_a_read_follows_the_window_once() {
     );
 }
 
+#[test]
+fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
+    use crate::pipe::{HostServices, spawn_host};
+    use tcode_client::HostLink;
+
+    let root = TestStore::new("cold-open-mux");
+    open_stored_session(&root, "cold");
+    for index in 0..3 {
+        root.append_event(
+            "cold",
+            index,
+            &AgentEvent::Warning {
+                message: format!("persisted {index}"),
+            },
+        )
+        .unwrap();
+    }
+    let persisted = root.read_events("cold").unwrap();
+    let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
+    let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let clients: Vec<HostLink> = (0..2)
+        .map(|_| {
+            let connection = mux.attach(tcode_protocol::Principal::Full);
+            let link = HostLink::new(connection.to_host, connection.from_host);
+            smol::spawn({
+                let link = link.clone();
+                async move { link.pump().await }
+            })
+            .detach();
+            link
+        })
+        .collect();
+    for link in &clients {
+        link.subscribe(Subscription {
+            known_index: None,
+            topic: Topic::SessionEvents {
+                session_id: "cold".into(),
+            },
+            after: None,
+        })
+        .unwrap();
+    }
+    smol::block_on(host.update_state_for_test(|state, cx| {
+        state.record_event(
+            "cold",
+            &AgentEvent::Warning {
+                message: "first live".into(),
+            },
+            cx,
+        );
+    }))
+    .unwrap();
+    for link in &clients {
+        let mut received = Vec::new();
+        let events = link.events();
+        smol::block_on(smol::future::race(
+            async {
+                let mut has_window = false;
+                while received.len() < persisted.len() + 1 {
+                    let event = events.recv().await.unwrap().event;
+                    if let Some(window) = window_of(&event) {
+                        assert!(!has_window, "one baseline per client");
+                        assert_eq!(window.from, 0);
+                        received.extend(window.records);
+                        has_window = true;
+                    } else if let ServerEvent::SessionEvent(record) = event {
+                        assert!(has_window, "baseline precedes live records");
+                        received.push(record);
+                    } else {
+                        panic!("unexpected {event:?}");
+                    }
+                }
+                // A FIFO reply proves all preceding records have reached the pump.
+                link.query(tcode_protocol::Query::Ping).await.unwrap();
+                assert!(
+                    events.try_recv().is_err(),
+                    "no duplicate records after the tail"
+                );
+            },
+            async {
+                smol::Timer::after(Duration::from_secs(5)).await;
+                panic!("the host stopped delivering the thread");
+            },
+        ));
+        assert_eq!(&received[..persisted.len()], persisted.as_slice());
+        assert!(
+            matches!(&received.last().unwrap().event, AgentEvent::Warning { message } if message == "first live")
+        );
+    }
+    clients[0].shutdown_blocking().unwrap();
+    for link in clients {
+        link.close();
+    }
+    host.to_host.close();
+    host.stopped.recv_blocking().unwrap();
+}
+
 /// A subscriber that leaves a cold thread before its log is read gets no
 /// window for it, and a log read for a session that is no longer resident is
 /// not kept.

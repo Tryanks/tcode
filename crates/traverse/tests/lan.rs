@@ -166,6 +166,56 @@ fn stale_addresses_without_a_browse_do_not_reach_the_machine() {
     host.shutdown();
 }
 
+#[test]
+fn a_saved_address_further_down_the_list_reaches_the_machine() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let host_dir = TestDir::new("saved-host");
+    let port = free_port();
+    let (host, _host_rx, _host_tx) = start_host(&host_dir, Some(port));
+    let device_dir = TestDir::new("saved-device");
+    let current = format!("127.0.0.1:{port}");
+    let (device, saved) = relaunched_device(
+        &host,
+        &device_dir,
+        vec![
+            format!("127.0.0.1:{}", free_port()),
+            format!("127.0.0.1:{}", free_port()),
+            current.clone(),
+        ],
+    );
+
+    let client = tcode_traverse::connect(&saved, &device);
+    wait_state(
+        &client,
+        |state| matches!(state, ConnectionState::Syncing { .. }),
+        Duration::from_secs(20),
+    );
+    let reached = host.devices();
+    assert!(
+        reached[0].live.as_ref().is_some_and(|path| path.direct),
+        "the machine sees a direct path: {reached:?}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let saved = tcode_traverse::hosts::load_hosts(&device_dir.0).unwrap();
+        if saved[0]
+            .addrs
+            .first()
+            .is_some_and(|addr| addr.ends_with(&format!(":{port}")))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "working address was not saved: {:?}",
+            saved[0].addrs
+        );
+        std::thread::yield_now();
+    }
+    client.to_host.close();
+    host.shutdown();
+}
+
 /// A platform browse delivers what it finds while the resolve is polled, and
 /// is told to stop the moment the resolve is dropped: iroh drops a resolve
 /// as soon as it has a path, which aborts the task behind it, so the stop

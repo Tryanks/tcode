@@ -14,8 +14,6 @@ use wasm_bindgen::prelude::*;
 thread_local! {
     static APPLICATION: RefCell<Option<gpui::ApplicationHandle>> = const { RefCell::new(None) };
     static CANVAS_OBSERVER: RefCell<Option<CanvasObserver>> = const { RefCell::new(None) };
-    #[cfg(feature = "debug-exports")]
-    static DEBUG: RefCell<Option<DebugConnection>> = const { RefCell::new(None) };
 }
 
 struct CanvasObserver {
@@ -136,23 +134,6 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
-#[cfg(feature = "debug-exports")]
-struct DebugConnection {
-    link: tcode_client::HostLink,
-    history: Rc<RefCell<Vec<String>>>,
-    index_snapshots: usize,
-}
-
-#[cfg(feature = "debug-exports")]
-impl Drop for DebugConnection {
-    fn drop(&mut self) {
-        self.link.close();
-    }
-}
-
-/// Exercise the actual WebHost methods without depending on screen state:
-/// connect to the machine the login page signed in with. The retained
-/// transport also permits restart/replay verification.
 #[wasm_bindgen]
 #[cfg(feature = "debug-exports")]
 pub async fn debug_connect() -> String {
@@ -169,78 +150,15 @@ pub async fn debug_connect() -> String {
         return serde_json::json!({"error":"not signed in"}).to_string();
     };
     let transport = host.connect(&paired);
-    let link = tcode_client::HostLink::new(transport.to_host, transport.from_host);
-    if let Err(error) = link.subscribe(tcode_protocol::Subscription {
-        known_index: None,
-        topic: tcode_protocol::Topic::Index,
-        after: None,
-    }) {
-        return serde_json::json!({"error": error.message}).to_string();
-    }
-    let history = Rc::new(RefCell::new(Vec::new()));
-    wasm_bindgen_futures::spawn_local({
-        let link = link.clone();
-        async move { link.pump().await }
-    });
-    wasm_bindgen_futures::spawn_local({
-        let link = link.clone();
-        let history = history.clone();
-        async move {
-            while let Ok(state) = transport.state.recv().await {
-                let mut history = history.borrow_mut();
-                if history.len() == 64 {
-                    history.remove(0);
-                }
-                history.push(format!("{state:?}"));
-                link.set_connection_state(state);
-            }
-        }
-    });
-    let event = match link.events().recv().await {
-        Ok(event) => event,
-        Err(error) => {
-            link.close();
-            return serde_json::json!({"error": error.to_string()}).to_string();
-        }
-    };
-    let index_snapshots = usize::from(matches!(
-        &event.event,
-        tcode_protocol::ServerEvent::IndexSnapshot(_)
-    ));
-    let line =
-        tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(event)).unwrap_or_default();
-    DEBUG.with(|slot| {
-        *slot.borrow_mut() = Some(DebugConnection {
-            link,
-            history,
-            index_snapshots,
-        });
-    });
+    let _ = transport.to_host.try_send(
+        r#"{"id":1,"payload":{"type":"subscribe","content":{"topic":{"type":"index"}}}}"#.into(),
+    );
+    let line = transport
+        .from_host
+        .recv()
+        .await
+        .unwrap_or_else(|error| serde_json::json!({"error":error.to_string()}).to_string());
+    transport.to_host.close();
+    transport.from_host.close();
     line
-}
-
-/// Returns the last ConnectionState, its observed transitions, and received
-/// index snapshot count. Omits tokens and unrelated host payloads.
-#[wasm_bindgen]
-#[cfg(feature = "debug-exports")]
-pub fn debug_connection_state() -> String {
-    DEBUG.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let Some(debug) = slot.as_mut() else {
-            return serde_json::json!({"state":"Offline"}).to_string();
-        };
-        while let Ok(event) = debug.link.events().try_recv() {
-            debug.index_snapshots += usize::from(matches!(
-                event.event,
-                tcode_protocol::ServerEvent::IndexSnapshot(_)
-            ));
-        }
-        let history = debug.history.borrow();
-        serde_json::json!({
-            "state": history.last(),
-            "history": *history,
-            "index_snapshots": debug.index_snapshots,
-        })
-        .to_string()
-    })
 }
