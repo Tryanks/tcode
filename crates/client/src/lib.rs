@@ -674,6 +674,87 @@ impl HostLink {
     }
 
     pub async fn query(&self, query: Query) -> Result<QueryResponse, ProtocolError> {
+        let complete_file = match &query {
+            Query::ReadFileBytes {
+                path,
+                max_bytes: None,
+            } => Some(path.clone()),
+            _ => None,
+        };
+        let result = self.query_once(query).await;
+        if let (Some(path), Err(error)) = (complete_file, &result)
+            && error.code == "file_too_large"
+        {
+            use sha2::Digest as _;
+            let mut bytes = Vec::new();
+            let mut hash = sha2::Sha256::new();
+            let mut revision = None;
+            let mut expected_total = None;
+            loop {
+                let offset = bytes.len() as u64;
+                let reply = self
+                    .query_once(Query::ReadFileChunk {
+                        path: path.clone(),
+                        offset,
+                        revision: revision.clone(),
+                    })
+                    .await?;
+                let QueryResponse::FileChunk {
+                    bytes: chunk,
+                    offset: received_offset,
+                    total,
+                    revision: received_revision,
+                } = reply
+                else {
+                    return Err(ProtocolError {
+                        code: "invalid_file_chunk".into(),
+                        message: "Expected a file chunk".into(),
+                    });
+                };
+                if received_offset != offset
+                    || expected_total.is_some_and(|expected| expected != total)
+                    || revision
+                        .as_ref()
+                        .is_some_and(|expected| expected != &received_revision)
+                    || chunk.len() as u64 > total.saturating_sub(offset)
+                    || offset > total
+                    || (chunk.is_empty() && offset != total)
+                {
+                    return Err(ProtocolError {
+                        code: "invalid_file_chunk".into(),
+                        message: "File changed or incomplete transfer".into(),
+                    });
+                }
+                bytes
+                    .try_reserve(chunk.len())
+                    .map_err(|error| ProtocolError {
+                        code: "file_allocation_failed".into(),
+                        message: error.to_string(),
+                    })?;
+                bytes.extend_from_slice(&chunk);
+                hash.update(&chunk);
+                if bytes.len() as u64 == total {
+                    let digest: String = hash
+                        .finalize()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    if received_revision.rsplit(':').next() != Some(digest.as_str()) {
+                        return Err(ProtocolError {
+                            code: "file_changed".into(),
+                            message: "File changed during transfer".into(),
+                        });
+                    }
+                    return Ok(QueryResponse::FileBytes(bytes));
+                }
+                revision = Some(received_revision);
+                expected_total = Some(total);
+            }
+        }
+        result
+    }
+
+    async fn query_once(&self, query: Query) -> Result<QueryResponse, ProtocolError> {
         match self.request(ClientPayload::Query(query)).await? {
             HostMessage::QueryResult { result, .. } => result,
             other => Err(unexpected_response("query result", &other)),
