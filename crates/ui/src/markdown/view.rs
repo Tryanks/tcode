@@ -182,7 +182,9 @@ impl Element for MarkdownView {
             .on_action({
                 let state = state.clone();
                 move |action: &OpenImage, window, cx| {
-                    let source = state.read(cx).image_source(&action.url.clone().into());
+                    let source = state
+                        .read(cx)
+                        .opened_image_source(&action.url.clone().into());
                     crate::image_viewer::open(source, action.title.clone(), window, cx);
                 }
             })

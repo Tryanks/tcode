@@ -277,7 +277,8 @@ pub(crate) fn user_bubble(
                                 .id("attachment-image")
                                 .size(px(120.))
                                 .rounded_xl()
-                                .object_fit(ObjectFit::Cover),
+                                .object_fit(ObjectFit::Cover)
+                                .with_fallback(crate::image_viewer::unpreviewed(true, false, cx)),
                         )
                         .on_click(on_click)
                         .context_menu(move |menu, _, _| menu.path_items(&menu_path, None))

@@ -2,6 +2,7 @@ use super::super::*;
 use crate::attachments::{TransferVerdict, transfer_verdict};
 use crate::thread_export::format_size;
 use crate::widgets::menu::ContextMenuExt as _;
+use gpui::StyledImage as _;
 use image::GenericImageView as _;
 use std::cell::RefCell;
 use tcode_core::attachments::{AttachError, MAX_EDGE_PX, MAX_IMAGES, MAX_SOURCE_BYTES};
@@ -480,7 +481,8 @@ impl Composer {
                         img(crate::store::image_preview(path, 18., false))
                             .id("attachment-image")
                             .size(px(18.))
-                            .rounded(crate::material::radius_chip(cx)),
+                            .rounded(crate::material::radius_chip(cx))
+                            .with_fallback(crate::image_viewer::unpreviewed(false, false, cx)),
                     )
                     .child(
                         div()

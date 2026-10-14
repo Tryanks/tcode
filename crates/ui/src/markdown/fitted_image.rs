@@ -9,13 +9,18 @@
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, GlobalElementId,
     ImageSource, InspectorElementId, IntoElement, LayoutId, ObjectFit, Pixels, Size, Style, Styled,
-    StyledImage as _, WeakEntity, Window, img, px, relative, size,
+    StyledImage as _, WeakEntity, Window, div, img, px, relative, size,
 };
 
 use super::state::MarkdownState;
 
 const MAX_HEIGHT: Pixels = px(720.);
 const MIN_SIDE: Pixels = px(15.);
+/// The size of the tile drawn for an image without a preview.
+const UNPREVIEWED: Size<Pixels> = Size {
+    width: px(120.),
+    height: px(80.),
+};
 
 pub(super) struct FittedImage<E> {
     source: ImageSource,
@@ -77,6 +82,12 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let intrinsic = img(self.source.clone())
             .object_fit(ObjectFit::Contain)
+            .with_fallback(|| {
+                div()
+                    .w(UNPREVIEWED.width)
+                    .h(UNPREVIEWED.height)
+                    .into_any_element()
+            })
             .into_any_element()
             .layout_as_root(AvailableSpace::min_size(), window, cx);
         if self.previous_size != Some(intrinsic) {

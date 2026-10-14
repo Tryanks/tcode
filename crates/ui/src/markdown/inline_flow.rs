@@ -156,6 +156,7 @@ impl InlineFlow {
         cx: &App,
     ) -> AnyElement {
         let source = view.read(cx).image_source(url);
+        let opened = view.read(cx).opened_image_source(url);
         let link = link.clone();
         let title = title.to_string();
         let tooltip_title = title.clone();
@@ -174,8 +175,9 @@ impl InlineFlow {
         } else {
             Role::Button
         };
-        crate::material::accessible_clickable(img(source.clone()), ix, role, label, cx)
+        crate::material::accessible_clickable(img(source), ix, role, label, cx)
             .object_fit(ObjectFit::Contain)
+            .with_fallback(crate::image_viewer::unpreviewed(false, true, cx))
             .max_w(relative(1.))
             .w(size.width)
             .h(size.height)
@@ -204,7 +206,7 @@ impl InlineFlow {
                         LinkTarget::Local(path) => cx.open_with_system(&path),
                     }
                 } else {
-                    crate::image_viewer::open(source.clone(), title.clone(), window, cx);
+                    crate::image_viewer::open(opened.clone(), title.clone(), window, cx);
                 }
             })
             .into_any_element()

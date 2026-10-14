@@ -79,7 +79,8 @@ pub(crate) fn image_tiles(
                                 .id("tool-image")
                                 .w_full()
                                 .h_full()
-                                .object_fit(ObjectFit::Cover),
+                                .object_fit(ObjectFit::Cover)
+                                .with_fallback(crate::image_viewer::unpreviewed(true, false, cx)),
                             ),
                         SharedString::from(format!("image-read-{}-{index}", entry.id)),
                         Role::Button,
