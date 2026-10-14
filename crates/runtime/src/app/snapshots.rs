@@ -2,14 +2,9 @@ use super::*;
 use tcode_core::settlement::{AgentDelivery, AgentExecution};
 use tcode_protocol::AgentStatus;
 
-/// Last emitted values for every replace-style replica domain.
-///
-/// The host turn is the single seam that reconciles these projections. Timeline
-/// appends and one-shot events deliberately remain on their existing paths.
 pub(crate) struct DomainDiff {
     subscriptions: HashSet<Topic>,
     index: IndexSnapshot,
-    sessions_revision: u64,
     summary_revisions: [u64; 7],
     space_indexes: HashMap<String, IndexSnapshot>,
     settings: Settings,
@@ -32,7 +27,6 @@ impl DomainDiff {
                     projects: state.projects.clone(),
                 }
             },
-            sessions_revision: state.sessions.revision(),
             summary_revisions: state.index_summary_revisions(),
             space_indexes: HashMap::new(),
             settings: state.settings_snapshot(),
@@ -51,9 +45,9 @@ impl DomainDiff {
             state.space_archives_revision = None;
         }
         state.refresh_space_archives();
-        let sessions_changed = self.sessions_revision != state.sessions.revision();
         let settings_changed = self.settings != state.settings;
         let summary_revisions = state.index_summary_revisions();
+        let sessions_changed = self.summary_revisions[0] != summary_revisions[0];
         let summary_changed = self.summary_revisions != summary_revisions || settings_changed;
         if state.subscriptions.contains(&Topic::Index) {
             if !self.subscriptions.contains(&Topic::Index) {
@@ -72,11 +66,18 @@ impl DomainDiff {
                     }
                     self.index = index;
                 } else if summary_changed {
-                    for event in reconcile_index_summary(&mut self.index.summary, |insert| {
-                        state.project_index_summary(insert)
-                    }) {
+                    let summary = state.build_index_summary();
+                    for event in index_summary_changes(&self.index.summary, &summary) {
                         emit_replacement(Topic::Index, event, cx);
                     }
+                    self.index.summary = summary;
+                } else {
+                    #[cfg(debug_assertions)]
+                    assert_eq!(
+                        self.index.summary,
+                        state.build_index_summary(),
+                        "index summary inputs changed without a revision"
+                    );
                 }
             }
         } else {
@@ -84,7 +85,6 @@ impl DomainDiff {
                 self.index.sessions = Vec::new();
                 self.index.summary = IndexSummary::default();
             }
-            // Project changes also invalidate scoped archives without a global subscriber.
             if self.index.projects != state.projects {
                 self.index.projects.clone_from(&state.projects);
             }
@@ -129,11 +129,18 @@ impl DomainDiff {
                             .get(id)
                             .map_or(0, |archive| archive.revision)
                 {
-                    for event in reconcile_index_summary(&mut old.summary, |insert| {
-                        state.project_space_index_summary(id, &old.projects, insert)
-                    }) {
+                    let summary = state.space_index_summary(id, &old.projects);
+                    for event in index_summary_changes(&old.summary, &summary) {
                         emit_replacement(topic.clone(), event, cx);
                     }
+                    old.summary = summary;
+                } else {
+                    #[cfg(debug_assertions)]
+                    assert_eq!(
+                        old.summary,
+                        state.space_index_summary(id, &old.projects),
+                        "scoped index summary inputs changed without a revision"
+                    );
                 }
                 continue;
             }
@@ -156,16 +163,16 @@ impl DomainDiff {
         }
 
         if state.subscriptions.contains(&Topic::Providers) {
-            if let Some(providers) = self.providers.as_mut() {
-                if state.update_providers_status_snapshot(providers) {
+            let providers = state.providers_status_snapshot();
+            if self.providers.as_ref() != Some(&providers) {
+                if self.providers.is_some() {
                     emit_replacement(
                         Topic::Providers,
                         ServerEvent::ProvidersReplaced(providers.clone()),
                         cx,
                     );
                 }
-            } else {
-                self.providers = Some(state.providers_status_snapshot());
+                self.providers = Some(providers);
             }
         } else {
             self.providers = None;
@@ -253,10 +260,6 @@ impl DomainDiff {
             );
         }
         self.session_plans = session_plans;
-        // The first subscribed turn already replies with a correlated snapshot.
-        // Retain its projection as the baseline; subsequent turns emit changes,
-        // including late adoption when no status was available in that reply.
-        self.sessions_revision = state.sessions.revision();
         self.summary_revisions = summary_revisions;
         self.subscriptions.clone_from(&state.subscriptions);
     }
@@ -299,10 +302,20 @@ fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
 fn index_summary_changes(old: &IndexSummary, new: &IndexSummary) -> Vec<ServerEvent> {
     let mut events = Vec::new();
     if old != new {
-        if index_summary_metadata_eq(old, new) {
+        let IndexSummary {
+            activity,
+            title_generating,
+            archived_counts,
+            worktree_shared,
+            archived_revision,
+        } = new;
+        if old.title_generating == *title_generating
+            && old.archived_counts == *archived_counts
+            && old.worktree_shared == *worktree_shared
+            && old.archived_revision == *archived_revision
+        {
             events.push(ServerEvent::IndexActivitiesChanged {
-                upserts: new
-                    .activity
+                upserts: activity
                     .iter()
                     .filter(|(id, value)| old.activity.get(*id) != Some(*value))
                     .map(|(id, value)| (id.clone(), value.clone()))
@@ -310,7 +323,7 @@ fn index_summary_changes(old: &IndexSummary, new: &IndexSummary) -> Vec<ServerEv
                 removed: old
                     .activity
                     .keys()
-                    .filter(|id| !new.activity.contains_key(*id))
+                    .filter(|id| !activity.contains_key(*id))
                     .cloned()
                     .collect(),
             });
@@ -319,71 +332,6 @@ fn index_summary_changes(old: &IndexSummary, new: &IndexSummary) -> Vec<ServerEv
         }
     }
     events
-}
-
-fn index_summary_metadata_eq(old: &IndexSummary, new: &IndexSummary) -> bool {
-    let IndexSummary {
-        activity: _,
-        title_generating,
-        archived_counts,
-        worktree_shared,
-        archived_revision,
-    } = new;
-    old.title_generating == *title_generating
-        && old.archived_counts == *archived_counts
-        && old.worktree_shared == *worktree_shared
-        && old.archived_revision == *archived_revision
-}
-
-fn build_index_summary<'a>(
-    project: impl FnOnce(&mut dyn FnMut(&'a str, SessionActivity) -> bool) -> IndexSummary,
-) -> IndexSummary {
-    let mut activity = HashMap::new();
-    let mut summary = project(&mut |id, value| activity.insert(id.to_owned(), value).is_none());
-    summary.activity = activity;
-    summary
-}
-
-fn reconcile_index_summary<'a>(
-    previous: &mut IndexSummary,
-    project: impl FnOnce(&mut dyn FnMut(&'a str, SessionActivity) -> bool) -> IndexSummary,
-) -> Vec<ServerEvent> {
-    let mut seen = HashSet::with_capacity(previous.activity.len());
-    let mut upserts = HashMap::new();
-    let mut next = project(&mut |id, value| {
-        let first = seen.insert(id);
-        match previous.activity.get_mut(id) {
-            Some(old) if *old == value => {}
-            Some(old) => {
-                *old = value.clone();
-                upserts.insert(id.to_owned(), value);
-            }
-            None => {
-                previous.activity.insert(id.to_owned(), value.clone());
-                upserts.insert(id.to_owned(), value);
-            }
-        }
-        first
-    });
-    let mut removed = Vec::new();
-    previous.activity.retain(|id, _| {
-        if seen.contains(id.as_str()) {
-            true
-        } else {
-            removed.push(id.clone());
-            false
-        }
-    });
-    let metadata_changed = !index_summary_metadata_eq(previous, &next);
-    next.activity = std::mem::take(&mut previous.activity);
-    *previous = next;
-    if metadata_changed {
-        vec![ServerEvent::IndexSummaryReplaced(previous.clone())]
-    } else if !upserts.is_empty() || !removed.is_empty() {
-        vec![ServerEvent::IndexActivitiesChanged { upserts, removed }]
-    } else {
-        Vec::new()
-    }
 }
 
 /// Visiting a thread changes only its visit time, so that alone crosses the
@@ -421,7 +369,7 @@ fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
 pub(super) struct ActivityProjection<'a> {
     state: &'a AppState,
     children: &'a HashMap<String, Vec<usize>>,
-    holding: std::cell::RefCell<HashMap<&'a str, bool>>,
+    holding: std::cell::RefCell<HashMap<String, bool>>,
 }
 
 impl<'a> ActivityProjection<'a> {
@@ -436,25 +384,25 @@ impl<'a> ActivityProjection<'a> {
     /// Whether a child of this thread holds it: one still runs, or a
     /// dispatched one awaits its lead's settle.
     pub(super) fn children_hold(&self, parent_id: &str) -> bool {
-        let Some((parent_id, children)) = self.children.get_key_value(parent_id) else {
-            return false;
-        };
-        let parent_id = parent_id.as_str();
         if let Some(holds) = self.holding.borrow().get(parent_id) {
             return *holds;
         }
-        let holds = children.iter().any(|index| {
-            let child = &self.state.sessions[*index];
-            match self.agent_status(child) {
-                Some(status) => status.delivery.holds_parent(),
-                None => {
-                    self.state.resident(&child.id).is_some_and(|session| {
-                        session.is_unfinished() || session.timeline.turn_running
-                    }) || self.children_hold(&child.id)
+        let holds = self.children.get(parent_id).is_some_and(|children| {
+            children.iter().any(|index| {
+                let child = &self.state.sessions[*index];
+                match self.agent_status(child) {
+                    Some(status) => status.delivery.holds_parent(),
+                    None => {
+                        self.state.resident(&child.id).is_some_and(|session| {
+                            session.is_unfinished() || session.timeline.turn_running
+                        }) || self.children_hold(&child.id)
+                    }
                 }
-            }
+            })
         });
-        self.holding.borrow_mut().insert(parent_id, holds);
+        self.holding
+            .borrow_mut()
+            .insert(parent_id.to_owned(), holds);
         holds
     }
 
@@ -557,7 +505,7 @@ impl AppState {
     }
 
     pub fn index_snapshot(&self) -> IndexSnapshot {
-        self.index_snapshot_with_summary(self.index_summary())
+        self.index_snapshot_with_summary(self.build_index_summary())
     }
 
     fn index_snapshot_with_summary(&self, summary: IndexSummary) -> IndexSnapshot {
@@ -573,14 +521,7 @@ impl AppState {
         }
     }
 
-    fn index_summary(&self) -> IndexSummary {
-        build_index_summary(|insert| self.project_index_summary(insert))
-    }
-
-    fn project_index_summary<'a>(
-        &'a self,
-        insert: &mut dyn FnMut(&'a str, SessionActivity) -> bool,
-    ) -> IndexSummary {
+    fn build_index_summary(&self) -> IndexSummary {
         let activity = ActivityProjection::new(self);
         let mut summary = IndexSummary {
             title_generating: self.title_generating.clone(),
@@ -591,8 +532,8 @@ impl AppState {
         for meta in &self.sessions {
             if meta.archived_at.is_none() {
                 let resident = self.resident(&meta.id);
-                insert(
-                    &meta.id,
+                summary.activity.insert(
+                    meta.id.clone(),
                     activity
                         .session_activity(resident.map_or(meta, |session| &session.meta), resident),
                 );
@@ -616,14 +557,18 @@ impl AppState {
             let Some(session) = self.resident(id) else {
                 continue;
             };
-            if session.meta.archived_at.is_none()
-                && insert(id, activity.session_activity(&session.meta, Some(session)))
-                && session.meta.worktree.is_some()
-                && sharing
-                    .get_or_init(|| self.worktree_sharing())
-                    .is_shared(&session.meta)
-            {
-                summary.worktree_shared.insert(id.to_string());
+            if session.meta.archived_at.is_none() && !summary.activity.contains_key(id) {
+                summary.activity.insert(
+                    id.to_owned(),
+                    activity.session_activity(&session.meta, Some(session)),
+                );
+                if session.meta.worktree.is_some()
+                    && sharing
+                        .get_or_init(|| self.worktree_sharing())
+                        .is_shared(&session.meta)
+                {
+                    summary.worktree_shared.insert(id.to_owned());
+                }
             }
         }
         summary
@@ -661,15 +606,6 @@ impl AppState {
     }
 
     fn space_index_summary(&self, space_id: &str, projects: &[Project]) -> IndexSummary {
-        build_index_summary(|insert| self.project_space_index_summary(space_id, projects, insert))
-    }
-
-    fn project_space_index_summary<'a>(
-        &'a self,
-        space_id: &str,
-        projects: &[Project],
-        insert: &mut dyn FnMut(&'a str, SessionActivity) -> bool,
-    ) -> IndexSummary {
         let activity = ActivityProjection::new(self);
         let ids: HashSet<_> = projects.iter().map(|p| p.id.as_str()).collect();
         let in_scope = |meta: &&SessionMeta| {
@@ -703,8 +639,8 @@ impl AppState {
                 continue;
             }
             let resident = self.resident(&meta.id);
-            insert(
-                &meta.id,
+            summary.activity.insert(
+                meta.id.clone(),
                 activity.session_activity(resident.map_or(meta, |s| &s.meta), resident),
             );
             if self.title_generating.contains(&meta.id) {
@@ -915,32 +851,8 @@ impl AppState {
         self.settings.clone()
     }
 
-    /// Build the complete provider read projection. This is the sole
-    /// constructor for the replicated providers domain.
     pub fn providers_status_snapshot(&self) -> ProvidersStatus {
-        self.providers_status_with_models(self.providers.model_catalogs.clone())
-    }
-
-    fn update_providers_status_snapshot(&self, previous: &mut ProvidersStatus) -> bool {
-        let mut next = self.providers_status_with_models(HashMap::new());
-        let models = std::mem::take(&mut previous.model_catalogs);
-        let models_changed = models != self.providers.model_catalogs;
-        let changed = models_changed || *previous != next;
-        next.model_catalogs = if models_changed {
-            self.providers.model_catalogs.clone()
-        } else {
-            models
-        };
-        *previous = next;
-        changed
-    }
-
-    fn providers_status_with_models(
-        &self,
-        model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
-    ) -> ProvidersStatus {
         self.providers.status_snapshot(
-            model_catalogs,
             self.acp_marketplace_items(),
             self.acp_registry_loading,
             self.acp_registry_error.clone(),
@@ -949,7 +861,6 @@ impl AppState {
         )
     }
 
-    /// Build the complete active-workspace Git projection.
     pub fn git_status_snapshot(&self, session_id: &str) -> GitStatusStatus {
         GitStatusStatus {
             status: self.git_status.get(session_id).cloned(),
@@ -976,7 +887,6 @@ impl AppState {
         );
     }
 
-    /// Build the serialized snapshot associated with one subscription.
     pub(crate) fn subscription_snapshot(
         &mut self,
         subscription: &tcode_protocol::Subscription,
