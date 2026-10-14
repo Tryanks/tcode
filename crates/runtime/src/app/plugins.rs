@@ -177,8 +177,7 @@ impl AppState {
     }
 
     fn list_plugins(&mut self, profile_id: &str, cx: &mut HostCx) {
-        let settings = self.settings.clone();
-        let settings_store = self.settings_store.clone();
+        let settings = &self.settings;
         let Some(catalog) = self
             .plugin_catalogs
             .get_mut(profile_id)
@@ -191,12 +190,14 @@ impl AppState {
         let request = catalog.list_request;
         let provider = catalog.launch.provider;
         let cwd = catalog.context_cwd.clone();
+        let context = self.plugin_context(profile_id, cwd, cx);
         let profile_id = profile_id.to_string();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let context =
-                plugin_context(&host_cx, settings, settings_store, &profile_id, cwd).await;
-            let result = list_plugins(provider, &context).await;
+            let result = match context.await {
+                Ok(context) => list_plugins(provider, &context).await,
+                Err(error) => Err(error),
+            };
             host_cx.enqueue(move |state, _cx| {
                 let Some(catalog) = state.plugin_catalogs.get_mut(&profile_id) else {
                     return;
@@ -434,8 +435,6 @@ impl AppState {
     }
 
     fn execute_plugin_operation(&mut self, profile_id: &str, cx: &mut HostCx) {
-        let settings = self.settings.clone();
-        let settings_store = self.settings_store.clone();
         let Some(catalog) = self.plugin_catalogs.get_mut(profile_id) else {
             return;
         };
@@ -457,12 +456,14 @@ impl AppState {
         let id = operation.id;
         let op = operation.op.clone();
         let cwd = operation.cwd.clone();
+        let context = self.plugin_context(profile_id, cwd, cx);
         let profile_id = profile_id.to_string();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let context =
-                plugin_context(&host_cx, settings, settings_store, &profile_id, cwd).await;
-            let result = run_plugin_op(provider, &context, &op).await;
+            let result = match context.await {
+                Ok(context) => run_plugin_op(provider, &context, &op).await,
+                Err(error) => Err(error),
+            };
             host_cx.enqueue(move |state, cx| {
                 state.finish_plugin_operation(&profile_id, id, result, cx);
             });
@@ -726,36 +727,34 @@ fn removal(listing: &PluginListing, name: &str) -> Option<Vec<String>> {
         })
 }
 
-/// The profile's CLI and environment, as a session launch resolves them but
-/// without session arguments or Tcode's MCP servers. Without a project the
-/// command runs from the provider's home, outside any project.
-async fn plugin_context(
-    host_cx: &HostCx,
-    settings: Settings,
-    settings_store: SettingsStore,
-    profile_id: &str,
-    cwd: Option<PathBuf>,
-) -> PluginContext {
-    let binary_path = settings
-        .resolved_profile(profile_id)
-        .and_then(|profile| profile.settings.binary_path);
-    let id = profile_id.to_string();
-    let launch_env = host_cx
-        .unblock(move || {
-            let secrets = settings_store.profile_secrets(&id);
-            launch_env_for_profile(&settings, &id, secrets)
-        })
-        .await;
-    let project = cwd.is_some();
-    let cwd = cwd
-        .or_else(|| launch_env.home.clone())
-        .or_else(std::env::home_dir)
-        .unwrap_or_else(std::env::temp_dir);
-    PluginContext {
-        binary_path,
-        launch_env,
-        cwd,
-        project,
+impl AppState {
+    /// Resolve the native plugin installation without session arguments or MCP servers.
+    /// Without a project, run from the provider home instead of a project directory.
+    fn plugin_context(
+        &self,
+        profile_id: &str,
+        cwd: Option<PathBuf>,
+        cx: &HostCx,
+    ) -> impl std::future::Future<Output = Result<PluginContext, AgentError>> + use<> {
+        let binary_path = self
+            .settings
+            .resolved_profile(profile_id)
+            .and_then(|profile| profile.settings.binary_path);
+        let launch_env = self.prepare_profile_env(profile_id, cx);
+        async move {
+            let launch_env = launch_env.await.map_err(AgentError::Provider)?;
+            let project = cwd.is_some();
+            let cwd = cwd
+                .or_else(|| launch_env.home.clone())
+                .or_else(std::env::home_dir)
+                .unwrap_or_else(std::env::temp_dir);
+            Ok(PluginContext {
+                binary_path,
+                launch_env,
+                cwd,
+                project,
+            })
+        }
     }
 }
 
