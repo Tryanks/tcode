@@ -237,23 +237,25 @@ impl MarkdownState {
     }
 
     /// The image the viewer opens, which reads a host file's original.
-    pub(super) fn opened_image_source(&self, uri: &SharedUri) -> ImageSource {
-        self.resolve_image(uri, crate::store::host_image)
+    pub(super) fn opened_image_source(&self, uri: &SharedUri) -> crate::image_viewer::ViewerSource {
+        self.resolve_image(uri, |path| {
+            tcode_protocol::OriginalTarget::File { path }.into()
+        })
     }
 
     /// Markdown file images belong to the attached host, including relative paths.
     /// Do not check the client's filesystem before asking that host for the bytes.
-    fn resolve_image(
+    fn resolve_image<T: From<ImageSource>>(
         &self,
         uri: &SharedUri,
-        host_file: impl FnOnce(PathBuf) -> ImageSource,
-    ) -> ImageSource {
+        host_file: impl FnOnce(PathBuf) -> T,
+    ) -> T {
         if let Some(source) = self
             .image_resolver
             .as_ref()
             .and_then(|resolver| (resolver.source)(uri.as_ref()))
         {
-            return source;
+            return source.into();
         }
         let path = PathBuf::from(uri.as_ref());
         if path.is_absolute() {
@@ -274,7 +276,7 @@ impl MarkdownState {
                     .unwrap_or(&path);
                 return host_file(PathBuf::from(path));
             }
-            return uri.clone().into();
+            return ImageSource::from(uri.clone()).into();
         }
         let path = match self.base_dir() {
             Some(base_dir) => base_dir.join(path),

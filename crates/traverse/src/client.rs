@@ -623,6 +623,43 @@ impl TunnelOpener for AttachmentTunnels {
     }
 }
 
+impl tcode_client::original::OriginalOpener for AttachmentTunnels {
+    fn open(
+        &self,
+        target: tcode_protocol::OriginalTarget,
+    ) -> tcode_client::original::OriginalFuture<'static, tcode_client::original::OpenedOriginal>
+    {
+        let connection = self.current.lock().unwrap().clone();
+        Box::pin(async move {
+            let connection = connection
+                .ok_or_else(|| tcode_client::original::error("not connected to the machine"))?;
+            let (done, result) = async_channel::bounded(1);
+            struct Cancel(
+                async_channel::Receiver<
+                    Result<tcode_client::original::OpenedOriginal, tcode_protocol::ProtocolError>,
+                >,
+            );
+            impl Drop for Cancel {
+                fn drop(&mut self) {
+                    self.0.close();
+                }
+            }
+            let cancel = Cancel(result);
+            runtime().spawn(async move {
+                tokio::select! {
+                    opened = crate::original::open(&connection, target) => { let _ = done.try_send(opened); }
+                    _ = done.closed() => {}
+                }
+            });
+            cancel
+                .0
+                .recv()
+                .await
+                .map_err(tcode_client::original::error)?
+        })
+    }
+}
+
 /// Open a reconnecting link to `host`. Dropping the returned channels ends
 /// it. The stored relay and addresses are refreshed in `hosts.json` after
 /// each authenticated connection. The transport's `current_host` carries
@@ -632,6 +669,7 @@ pub fn connect(host: &PairedHost, device: &DeviceIdentity) -> Transport {
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
     let tunnels = AttachmentTunnels::default();
+    let originals = Arc::new(tunnels.clone());
     let current_host = LiveHost::with_tunnels(host.clone(), Arc::new(tunnels.clone()));
     let live = current_host.clone();
     let device = device.clone();
@@ -651,6 +689,7 @@ pub fn connect(host: &PairedHost, device: &DeviceIdentity) -> Transport {
         .await;
     });
     Transport {
+        originals: Some(originals),
         to_host,
         from_host,
         state,

@@ -327,6 +327,7 @@ impl ClientHost for NativeClientHost {
                     reason: tcode_client::ConnectionFailure::Unreachable(Some(error.to_string())),
                 });
                 Transport {
+                    originals: None,
                     to_host: to_host.into(),
                     from_host,
                     state,

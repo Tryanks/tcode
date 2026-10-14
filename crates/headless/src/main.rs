@@ -155,7 +155,8 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     }
     let host =
         spawn_host(store, services).map_err(|error| format!("machine startup failed: {error}"))?;
-    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone())
+        .with_original_backend(std::sync::Arc::new(host.clone()));
     let relayed = !traverse.is_empty();
     let traverse_host = Arc::new(
         TraverseHost::start(

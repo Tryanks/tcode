@@ -12,6 +12,7 @@
 //! `reason` of `token` or `protocol`. Only the current protocol version is
 //! accepted; the bundle and the listener ship together.
 mod auth;
+mod original;
 
 use std::collections::HashMap;
 use std::io;
@@ -280,6 +281,7 @@ where
     S: AsyncWrite + Unpin,
 {
     match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/original") => original::serve(stream, request, shared).await,
         ("GET", "/auth/state") => {
             let configured = shared.auth.lock().unwrap().password_configured();
             json_response(

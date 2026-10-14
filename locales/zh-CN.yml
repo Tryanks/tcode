@@ -1185,6 +1185,11 @@ attach:
   tunnel_body: "'%{name}' 大小为 %{size}，当前设备通过互联网直连主机，发送可能需要一些时间。"
   tunnel_confirm: "仍然发送"
 image_viewer:
+  cancelled: "已取消读取原图"
+  progress: "%{received} / %{total} 字节"
+  connecting: "正在打开原图…"
+  cancel: "取消"
+  retry: "重试"
   zoom_in: "放大"
   zoom_out: "缩小"
   fit: "适应窗口"

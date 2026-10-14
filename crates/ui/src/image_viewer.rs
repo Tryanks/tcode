@@ -41,6 +41,30 @@ const STAGE_MARGIN: Pixels = px(16.);
 /// How long keys, buttons and double-clicks take to reach their placement.
 const GLIDE: Duration = Duration::from_millis(200);
 
+#[derive(Clone)]
+pub(crate) enum ViewerSource {
+    Image(ImageSource),
+    Original(tcode_protocol::OriginalTarget),
+}
+
+impl From<ImageSource> for ViewerSource {
+    fn from(source: ImageSource) -> Self {
+        Self::Image(source)
+    }
+}
+impl From<tcode_protocol::OriginalTarget> for ViewerSource {
+    fn from(target: tcode_protocol::OriginalTarget) -> Self {
+        Self::Original(target)
+    }
+}
+
+enum OriginalState {
+    Loading { received: u64, total: Option<u64> },
+    Cancelled,
+    Failed(SharedString),
+    Complete,
+}
+
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("=", ZoomIn, Some(CONTEXT)),
@@ -58,15 +82,49 @@ pub(crate) fn init(cx: &mut App) {
 /// Open `source` in the viewer on the window's dialog stack, where it
 /// inherits Escape dismissal and focus restoration.
 pub(crate) fn open(
-    source: ImageSource,
+    source: impl Into<ViewerSource>,
     title: impl Into<SharedString>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let viewer = cx.new(|cx| ImageViewer::new(source, title.into(), cx));
+    let viewer = cx.new(|cx| {
+        let mut viewer = match source.into() {
+            ViewerSource::Image(source) => ImageViewer::new(source, title.into(), cx),
+            ViewerSource::Original(target) => {
+                let mut viewer =
+                    ImageViewer::new(ImageSource::Custom(Arc::new(|_, _| None)), title.into(), cx);
+                viewer.target = Some(target);
+                viewer.start_original(cx);
+                viewer
+            }
+        };
+        let namespace = cx
+            .try_global::<crate::store::images::HostImages>()
+            .map(|images| images.namespace);
+        viewer.host_changes = Some(cx.observe_global::<crate::store::images::HostImages>(
+            move |this, cx| {
+                if cx
+                    .try_global::<crate::store::images::HostImages>()
+                    .is_none_or(|images| {
+                        images.link.is_none() || Some(images.namespace) != namespace
+                    })
+                {
+                    this.cancel_original(cx);
+                }
+            },
+        ));
+        viewer
+    });
     let focus = viewer.read(cx).focus_handle.clone();
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog.fill().close_button(false).child(viewer.clone())
+        let closing = viewer.clone();
+        dialog
+            .fill()
+            .close_button(false)
+            .on_close(move |_, _, cx| {
+                closing.update(cx, |viewer, cx| viewer.cancel_original(cx));
+            })
+            .child(viewer.clone())
     });
     // The dialog focused its own host; the viewer's key bindings sit below it.
     focus.focus(window, cx);
@@ -158,6 +216,10 @@ pub(crate) struct ImageViewer {
     frame: Size<Pixels>,
     natural: Option<Size<Pixels>>,
     failed: bool,
+    target: Option<tcode_protocol::OriginalTarget>,
+    original_state: Option<OriginalState>,
+    transfer: Option<gpui::Task<()>>,
+    host_changes: Option<gpui::Subscription>,
 }
 
 impl ImageViewer {
@@ -173,7 +235,93 @@ impl ImageViewer {
             frame: Size::default(),
             natural: None,
             failed: false,
+            target: None,
+            original_state: None,
+            transfer: None,
+            host_changes: None,
         }
+    }
+
+    fn cancel_original(&mut self, cx: &mut Context<Self>) {
+        if self.transfer.take().is_some()
+            && matches!(self.original_state, Some(OriginalState::Loading { .. }))
+        {
+            self.original_state = Some(OriginalState::Cancelled);
+            cx.notify();
+        }
+    }
+
+    fn start_original(&mut self, cx: &mut Context<Self>) {
+        self.cancel_original(cx);
+        let Some(target) = self.target.clone() else {
+            return;
+        };
+        let Some(host) = cx
+            .try_global::<crate::store::images::HostImages>()
+            .and_then(|images| images.link.clone())
+        else {
+            self.original_state = Some(OriginalState::Failed(
+                crate::tr!("image_viewer.load_failed").into_owned().into(),
+            ));
+            return;
+        };
+        self.original_state = Some(OriginalState::Loading {
+            received: 0,
+            total: None,
+        });
+        self.transfer = Some(cx.spawn(async move |this, cx| {
+            let mut transfer = host.read_original(target);
+            let result = async {
+                let total = transfer.metadata().await?.len;
+                let _ = this.update(cx, |this, cx| {
+                    this.original_state = Some(OriginalState::Loading {
+                        received: 0,
+                        total: Some(total),
+                    });
+                    cx.notify();
+                });
+                let mut bytes = Vec::new();
+                while let Some(block) = transfer.read().await? {
+                    bytes
+                        .try_reserve(block.len())
+                        .map_err(tcode_client::original::error)?;
+                    bytes.extend_from_slice(&block);
+                    let received = transfer.received();
+                    if this
+                        .update(cx, |this, cx| {
+                            this.original_state = Some(OriginalState::Loading {
+                                received,
+                                total: Some(total),
+                            });
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        return Err(tcode_client::original::error("viewer closed"));
+                    }
+                }
+                let format = image::guess_format(&bytes)
+                    .ok()
+                    .and_then(|format| gpui::ImageFormat::from_mime_type(format.to_mime_type()))
+                    .ok_or_else(|| tcode_client::original::error("unsupported image format"))?;
+                Ok(ImageSource::Image(Arc::new(gpui::Image::from_bytes(
+                    format, bytes,
+                ))))
+            }
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(source) => {
+                        this.source = source;
+                        this.original_state = Some(OriginalState::Complete);
+                    }
+                    Err(error) => {
+                        this.original_state = Some(OriginalState::Failed(error.message.into()))
+                    }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     /// The scale at which the image fits the frame. A smaller image is shown
@@ -326,6 +474,7 @@ impl ImageViewer {
             .image_bounds(self.placement)
             .is_some_and(|bounds| bounds.contains(&position));
         if !on_image {
+            self.cancel_original(cx);
             window.close_dialog(cx);
         }
     }
@@ -433,13 +582,21 @@ impl Render for ImageViewer {
             })
             .when(image.is_none(), |el| {
                 el.flex().items_center().justify_center().map(|el| {
-                    if self.failed {
-                        el.child(
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(crate::tr!("image_viewer.load_failed").into_owned()),
+                    if self.failed
+                        || matches!(
+                            self.original_state,
+                            Some(OriginalState::Failed(_) | OriginalState::Cancelled)
                         )
+                    {
+                        el.child(div().text_sm().text_color(muted).child(
+                            match &self.original_state {
+                                Some(OriginalState::Failed(message)) => message.clone(),
+                                Some(OriginalState::Cancelled) => {
+                                    crate::tr!("image_viewer.cancelled").into_owned().into()
+                                }
+                                _ => crate::tr!("image_viewer.load_failed").into_owned().into(),
+                            },
+                        ))
                     } else {
                         el.child(crate::widgets::Spinner::new())
                     }
@@ -467,6 +624,62 @@ impl Render for ImageViewer {
                 this.zoom_to(zoom, this.stage.center(), true, cx);
             }))
         };
+        let show_transfer = matches!(
+            self.original_state,
+            Some(
+                OriginalState::Loading { .. } | OriginalState::Cancelled | OriginalState::Failed(_)
+            )
+        );
+        let transfer_controls = div()
+            .absolute()
+            .bottom(insets.bottom + STAGE_MARGIN)
+            .left(insets.left + STAGE_MARGIN)
+            .right(insets.right + STAGE_MARGIN)
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_2()
+            .rounded_lg()
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().foreground)
+            .border_1()
+            .border_color(cx.theme().border)
+            .occlude()
+            .when_some(self.original_state.as_ref(), |panel, state| match state {
+                OriginalState::Loading { received, total } => panel
+                    .child(
+                        div().text_xs().child(match total {
+                            Some(total) => crate::tr!(
+                                "image_viewer.progress",
+                                received = received.to_string(),
+                                total = total.to_string()
+                            )
+                            .into_owned(),
+                            None => crate::tr!("image_viewer.connecting").into_owned(),
+                        }),
+                    )
+                    .child(
+                        gpui_base::Button::new("image-viewer-cancel")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(cx.theme().secondary)
+                            .child(crate::tr!("image_viewer.cancel").into_owned())
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_original(cx))),
+                    ),
+                OriginalState::Cancelled | OriginalState::Failed(_) => panel.child(
+                    gpui_base::Button::new("image-viewer-retry")
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .bg(cx.theme().secondary)
+                        .child(crate::tr!("image_viewer.retry").into_owned())
+                        .on_click(cx.listener(|this, _, _, cx| this.start_original(cx))),
+                ),
+                OriginalState::Complete => panel,
+            });
+
         let toolbar = div()
             .absolute()
             .top(insets.top)
@@ -526,7 +739,10 @@ impl Render for ImageViewer {
                     crate::tr!("image_viewer.close").into_owned(),
                     compact,
                 )
-                .on_click(|_, window, cx| window.close_dialog(cx)),
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.cancel_original(cx);
+                    window.close_dialog(cx);
+                })),
             );
 
         div()
@@ -547,6 +763,7 @@ impl Render for ImageViewer {
             }))
             .child(stage)
             .child(toolbar)
+            .when(show_transfer, |view| view.child(transfer_controls))
     }
 }
 
@@ -693,5 +910,81 @@ mod tests {
         cx.simulate_keystrokes("escape");
         draw(cx);
         assert!(cx.debug_bounds("image-viewer-image").is_none());
+
+        // Contract: Escape cancels an in-flight original even while a dialog
+        // frame still holds the viewer's callbacks.
+        use tcode_client::original::{
+            OpenedOriginal, OriginalFuture, OriginalOpener, OriginalReader,
+        };
+        struct PendingReader(async_channel::Receiver<Vec<u8>>);
+        impl OriginalReader for PendingReader {
+            fn read(&mut self) -> OriginalFuture<'_, Option<Vec<u8>>> {
+                Box::pin(async move {
+                    self.0
+                        .recv()
+                        .await
+                        .map(Some)
+                        .map_err(tcode_client::original::error)
+                })
+            }
+            fn cancel(&mut self) {}
+        }
+        struct PendingOriginal {
+            source: std::sync::Mutex<Option<async_channel::Receiver<Vec<u8>>>>,
+            opened: async_channel::Sender<()>,
+        }
+        impl OriginalOpener for PendingOriginal {
+            fn open(
+                &self,
+                _: tcode_protocol::OriginalTarget,
+            ) -> OriginalFuture<'static, OpenedOriginal> {
+                let source = self.source.lock().unwrap().take().unwrap();
+                self.opened.try_send(()).unwrap();
+                Box::pin(async move {
+                    Ok(OpenedOriginal {
+                        metadata: tcode_protocol::OriginalMetadata {
+                            len: 1024,
+                            mime: Some("image/png".into()),
+                        },
+                        reader: Box::new(PendingReader(source)),
+                    })
+                })
+            }
+        }
+        let (blocks, source) = async_channel::bounded(2);
+        let (opened, requests) = async_channel::bounded(1);
+        let (to_host, _control) = async_channel::unbounded();
+        let (_replies, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new_remote(
+            to_host,
+            from_host,
+            Some(Arc::new(PendingOriginal {
+                source: std::sync::Mutex::new(Some(source)),
+                opened,
+            })),
+        );
+        cx.update(|window, cx| {
+            cx.set_global(crate::store::images::HostImages {
+                link: Some(link),
+                namespace: 1,
+                blocking_queries: false,
+            });
+            open(
+                tcode_protocol::OriginalTarget::File {
+                    path: "/host/pending.png".into(),
+                },
+                "pending.png",
+                window,
+                cx,
+            );
+        });
+        draw(cx);
+        requests
+            .try_recv()
+            .expect("explicit open starts the viewer transfer");
+        assert!(!blocks.is_closed());
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert!(blocks.is_closed(), "Escape must drop the transfer reader");
     }
 }

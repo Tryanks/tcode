@@ -25,6 +25,8 @@ pub struct HostMux {
 struct Inner {
     ingress: Sender<Ingress>,
     next_connection: AtomicU64,
+    originals: Option<Arc<dyn tcode_client::original::OriginalBackend>>,
+    original_slots: std::sync::Mutex<HashMap<String, usize>>,
 }
 
 enum Ingress {
@@ -44,8 +46,50 @@ impl HostMux {
             inner: Arc::new(Inner {
                 ingress,
                 next_connection: AtomicU64::new(1),
+                originals: None,
+                original_slots: Default::default(),
             }),
         }
+    }
+
+    pub fn with_original_backend(
+        mut self,
+        backend: Arc<dyn tcode_client::original::OriginalBackend>,
+    ) -> Self {
+        Arc::get_mut(&mut self.inner).unwrap().originals = Some(backend);
+        self
+    }
+
+    pub(crate) async fn open_original(
+        &self,
+        device: String,
+        principal: Principal,
+        target: tcode_protocol::OriginalTarget,
+    ) -> Result<AdmittedOriginal, tcode_protocol::ProtocolError> {
+        let permit = {
+            let mut slots = self.inner.original_slots.lock().unwrap();
+            if slots.values().sum::<usize>() >= 8 || slots.get(&device).copied().unwrap_or(0) >= 2 {
+                return Err(tcode_protocol::ProtocolError {
+                    code: "busy".into(),
+                    message: "too many original reads".into(),
+                });
+            }
+            *slots.entry(device.clone()).or_default() += 1;
+            OriginalPermit {
+                inner: self.inner.clone(),
+                device,
+            }
+        };
+        let backend = self
+            .inner
+            .originals
+            .as_ref()
+            .ok_or_else(|| tcode_client::original::error("original backend unavailable"))?;
+        let source = backend.open(principal, target).await?;
+        Ok(AdmittedOriginal {
+            source,
+            _permit: permit,
+        })
     }
 
     pub fn attach(&self, principal: Principal) -> Connection {
@@ -93,6 +137,27 @@ impl HostMux {
         Connection {
             to_host: client_tx,
             from_host: output_rx,
+        }
+    }
+}
+
+pub(crate) struct AdmittedOriginal {
+    pub source: tcode_client::original::OriginalSource,
+    _permit: OriginalPermit,
+}
+
+struct OriginalPermit {
+    inner: Arc<Inner>,
+    device: String,
+}
+impl Drop for OriginalPermit {
+    fn drop(&mut self) {
+        let mut slots = self.inner.original_slots.lock().unwrap();
+        if let Some(count) = slots.get_mut(&self.device) {
+            *count -= 1;
+            if *count == 0 {
+                slots.remove(&self.device);
+            }
         }
     }
 }

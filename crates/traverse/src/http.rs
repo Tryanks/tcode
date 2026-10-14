@@ -14,6 +14,8 @@ pub(crate) const MAX_BODY_BYTES: usize = 64 * 1024;
 pub(crate) struct Request {
     pub method: String,
     pub path: String,
+    #[cfg_attr(not(feature = "browser"), allow(dead_code))]
+    pub target: String,
     pub headers: HashMap<String, String>,
     /// Empty for proxy requests, whose bodies stay in the stream; only the
     /// browser listener reads one.
@@ -131,6 +133,7 @@ where
     Ok(Request {
         method: method.to_owned(),
         path,
+        target: target.to_owned(),
         headers,
         body,
     })

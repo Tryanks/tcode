@@ -1932,7 +1932,7 @@ impl ChatView {
                     .unwrap_or_else(|| "image".to_string());
                 Box::new(cx.listener(move |_, _, window, cx| {
                     crate::image_viewer::open(
-                        crate::store::host_image(path.clone()),
+                        tcode_protocol::OriginalTarget::File { path: path.clone() },
                         title.clone(),
                         window,
                         cx,
@@ -5894,15 +5894,11 @@ mod tests {
             }
         }
         let ready = std::rc::Rc::new(std::cell::Cell::new(false));
-        // The row draws the host's preview and the lightbox the original; wait for both.
-        let image_sources = vec![
-            crate::store::image_preview(
-                path.clone(),
-                crate::store::MAX_PREVIEW_PIXELS as f32,
-                false,
-            ),
-            crate::store::host_image(path.clone()),
-        ];
+        let image_sources = vec![crate::store::image_preview(
+            path.clone(),
+            crate::store::MAX_PREVIEW_PIXELS as f32,
+            false,
+        )];
         let (root, cx) = cx.add_window_view(|window, cx| {
             let chat = cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx));
             let surface = cx.new(|_| LoadedImageChat {
@@ -5960,6 +5956,16 @@ mod tests {
             draw(cx);
         };
         click(point(pill.center().x, pill.top() - px(40.)), cx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cx.debug_bounds("image-viewer-image").is_none() {
+            driver.step(cx, &store);
+            draw(cx);
+            assert!(
+                Instant::now() < deadline,
+                "exposed image finishes its explicit read"
+            );
+            std::thread::yield_now();
+        }
         assert!(
             cx.debug_bounds("image-viewer-image").is_some(),
             "exposed image opens the lightbox"

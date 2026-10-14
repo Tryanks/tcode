@@ -110,6 +110,9 @@ pub enum ClientLine {
     },
     /// Open a Preview tunnel; see the module documentation.
     Connect { host: String, port: u16 },
+    Original {
+        target: tcode_protocol::OriginalTarget,
+    },
 }
 
 /// Whether a `connect` line names something the machine will dial: a host

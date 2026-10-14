@@ -664,6 +664,31 @@ impl SessionLog {
             .ok_or_else(|| ProtocolError::out_of_scope("image is outside this item"))
     }
 
+    pub(super) fn original_image(
+        &self,
+        item_id: &str,
+        image_index: usize,
+    ) -> Result<(u64, &agent::Attachment), ProtocolError> {
+        let image = self.image_attachment(item_id, image_index)?;
+        let row = self
+            .records
+            .iter()
+            .zip(&self.rows)
+            .rev()
+            .find_map(|(record, row)| match &record.event {
+                AgentEvent::ItemStarted(item)
+                | AgentEvent::ItemUpdated(item)
+                | AgentEvent::ItemCompleted(item)
+                    if item.id == item_id =>
+                {
+                    Some(*row)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| ProtocolError::out_of_scope("image has no stored item"))?;
+        Ok((row, image))
+    }
+
     pub(super) fn item_image(
         &self,
         item_id: &str,
