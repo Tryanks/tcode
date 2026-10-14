@@ -725,17 +725,28 @@ impl AppState {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| default_program(provider));
-            let settings = self.settings.clone();
-            let settings_store = self.settings_store.clone();
+            let launch_env = self.prepare_profile_env(Settings::builtin_profile_id(provider), cx);
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
-                let profile_id = Settings::builtin_profile_id(provider).to_string();
-                let env = host_cx
-                    .unblock(move || {
-                        let secrets = settings_store.profile_secrets(&profile_id);
-                        launch_env_for_profile(&settings, &profile_id, secrets).pairs(provider)
-                    })
-                    .await;
+                let env = match launch_env.await {
+                    Ok(env) => env.pairs(provider),
+                    Err(error) => {
+                        host_cx.enqueue(move |state, cx| {
+                            let assessment = provider_updates::check(ProviderCheckInput {
+                                installed_output: None,
+                                latest_output: None,
+                            });
+                            if let Some(toast) = state
+                                .providers
+                                .complete_version_check(round, provider, revision, None, assessment)
+                            {
+                                emit_runtime(cx, RuntimeEvent::Toast(toast));
+                            }
+                            state.report_error(RuntimeError::PersistSettings { error }, cx);
+                        });
+                        return;
+                    }
+                };
                 let installed = run_capture_env(&program, &["--version"], &env).await;
                 let installation = match binary.as_deref() {
                     Some(binary) => {
