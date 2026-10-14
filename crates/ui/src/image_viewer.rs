@@ -386,6 +386,7 @@ impl Render for ImageViewer {
             .when_some(image, |el, bounds| {
                 el.child(
                     img(self.source.clone())
+                        .id("image-viewer-content")
                         .debug_selector(|| "image-viewer-image".into())
                         .absolute()
                         .left(bounds.origin.x)
