@@ -798,7 +798,7 @@ impl AppState {
         let written = (regenerate && records.is_none()).then(|| self.store_write_barrier(cx));
         let store = self.store.clone();
         let settings = self.settings.clone();
-        let settings_store = self.settings_store.clone();
+        let launch_env = self.prepare_session_env(&title_meta, cx);
         let executor = cx.clone();
         let provider_launcher = self.provider_launcher.clone();
 
@@ -856,11 +856,16 @@ impl AppState {
                     return;
                 }
             };
-            let env_meta = title_meta.clone();
-            let env_settings = settings.clone();
-            let launch_env = host_cx
-                .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
-                .await;
+            let launch_env = match launch_env.await {
+                Ok(env) => env,
+                Err(error) => {
+                    host_cx.enqueue(move |state, cx| {
+                        state.title_generating.remove(&session_id);
+                        state.report_error(RuntimeError::PersistSettings { error }, cx);
+                    });
+                    return;
+                }
+            };
             let options =
                 session_options(&title_meta, &settings, launch_env, None, None, None, None);
             let title = generate_ai_title(
@@ -897,7 +902,7 @@ impl AppState {
     ) {
         let review_meta = fallback_review_session_meta(&self.settings, cwd);
         let settings = self.settings.clone();
-        let settings_store = self.settings_store.clone();
+        let launch_env = self.prepare_session_env(&review_meta, cx);
         let prompt = fallback_review_prompt(category, &refused);
         let provider_launcher = self.provider_launcher.clone();
         let executor = cx.clone();
@@ -905,11 +910,15 @@ impl AppState {
 
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let env_meta = review_meta.clone();
-            let env_settings = settings.clone();
-            let launch_env = host_cx
-                .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
-                .await;
+            let launch_env = match launch_env.await {
+                Ok(env) => env,
+                Err(error) => {
+                    host_cx.enqueue(move |state, cx| {
+                        state.report_error(RuntimeError::PersistSettings { error }, cx);
+                    });
+                    return;
+                }
+            };
             let options =
                 session_options(&review_meta, &settings, launch_env, None, None, None, None);
             let review = run_fallback_review(

@@ -95,7 +95,7 @@ impl AppState {
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
-        let settings_store = self.settings_store.clone();
+        let launch_env = self.prepare_session_env(&meta, cx);
         let preview_registration = if meta.provider.caps().mcp_servers {
             self.preview_registration_for(&meta)
         } else {
@@ -130,23 +130,22 @@ impl AppState {
 
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let env_meta = meta.clone();
-            let env_settings = settings.clone();
-            let launch_env = host_cx
-                .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
-                .await;
-            let mut opts = session_options(
-                &meta,
-                &settings,
-                launch_env,
-                preview_registration,
-                orchestrate_registration,
-                orchestrate_report_registration,
-                computer_use_registration,
-            );
-            opts.mcp_servers.extend(pull_request_registration);
-            opts.instructions = instructions;
-            let result = provider_launcher.launch(meta.provider, opts).await;
+            let result = async {
+                let launch_env = launch_env.await.map_err(agent::AgentError::Spawn)?;
+                let mut opts = session_options(
+                    &meta,
+                    &settings,
+                    launch_env,
+                    preview_registration,
+                    orchestrate_registration,
+                    orchestrate_report_registration,
+                    computer_use_registration,
+                );
+                opts.mcp_servers.extend(pull_request_registration);
+                opts.instructions = instructions;
+                provider_launcher.launch(meta.provider, opts).await
+            }
+            .await;
             host_cx.enqueue(move |state, cx| {
                 let matches_active = state.residents.live.get(&session_id).is_some_and(|active| {
                     active.meta.id == session_id && active.is_starting_generation(generation)
