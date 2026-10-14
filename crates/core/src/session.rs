@@ -1217,10 +1217,7 @@ impl Timeline {
         let mut incoming = EntryContent::Item(item.content.clone());
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item.id) {
             let entry = Arc::make_mut(entry);
-            entry.content = merge_content(
-                std::mem::replace(&mut entry.content, incoming.clone()),
-                incoming,
-            );
+            entry.content = merge_content(&mut entry.content, incoming);
         } else {
             let turn = if matches!(
                 incoming,
@@ -1469,7 +1466,7 @@ pub fn parse_orchestrate_callback(text: &str) -> Option<OrchestrateCallback> {
 
 /// Merge an authoritative item snapshot over an existing entry, keeping
 /// incremental text or file diffs when the snapshot omits them.
-fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent {
+fn merge_content(existing: &mut EntryContent, incoming: EntryContent) -> EntryContent {
     match (existing, incoming) {
         (
             EntryContent::Steer { status, .. },
@@ -1480,7 +1477,7 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             }),
         ) => EntryContent::Steer {
             text,
-            status,
+            status: *status,
             context_len,
             attachments,
         },
@@ -1553,9 +1550,9 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             agent_type,
             description,
             status,
-            summary: summary.or(old_summary),
-            model: model.or(old_model),
-            effort: effort.or(old_effort),
+            summary: summary.or_else(|| old_summary.take()),
+            model: model.or_else(|| old_model.take()),
+            effort: effort.or_else(|| old_effort.take()),
         }),
         (_, incoming) => incoming,
     }
@@ -1575,9 +1572,9 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
 ///   next delta look like a fresh append and duplicate the overlapping text;
 /// * a snapshot with different text replaces (never concatenates onto) the
 ///   accumulated text.
-fn merge_text(old: String, new: String) -> String {
+fn merge_text(old: &mut String, new: String) -> String {
     if new.is_empty() || old.starts_with(new.as_str()) {
-        old
+        std::mem::take(old)
     } else {
         new
     }
