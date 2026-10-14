@@ -1043,7 +1043,7 @@ impl AppState {
 
     // Only credential writes gate a launch; unrelated log batches must not
     // turn an ordinary refresh into a database flush barrier.
-    fn prepare_profile_env(
+    pub(super) fn prepare_profile_env(
         &self,
         profile_id: &str,
         cx: &HostCx,
