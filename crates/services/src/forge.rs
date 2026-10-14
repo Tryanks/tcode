@@ -350,7 +350,7 @@ pub struct Fingerprint {
 }
 
 /// Replies past one review thread's first page.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tail {
     pub(crate) count: u64,
     pub(crate) comments: Vec<PullRequestRemark>,
