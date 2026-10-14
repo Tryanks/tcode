@@ -437,8 +437,6 @@ pub struct AppState {
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: HashMap<String, u64>,
-    // A key has one read in flight; its value holds requests made after it began.
-    git_status_pending: HashMap<PathBuf, HashMap<String, u64>>,
     /// Per-session token used to discard superseded timeline loads.
     timeline_load_generations: HashMap<String, u64>,
     subscriptions: HashSet<Topic>,
@@ -602,7 +600,6 @@ impl AppState {
             git_busy: HashSet::new(),
             next_operation_id: 1,
             git_status_generation: HashMap::new(),
-            git_status_pending: HashMap::new(),
             timeline_load_generations: HashMap::new(),
             subscriptions: HashSet::new(),
             event_records: HashMap::new(),

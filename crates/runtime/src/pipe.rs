@@ -983,8 +983,12 @@ fn dispatch_query(
             })
         }
         Query::ReadFilePreview { path } => {
-            let task =
-                cx.unblock(move || tcode_services::user_files::read_bounded(&path, 512 * 1024));
+            let task = cx.unblock(move || {
+                tcode_services::user_files::read_bounded(
+                    &path,
+                    tcode_services::git::MAX_FILE_TEXT_BYTES,
+                )
+            });
             cx.spawn_background(async move {
                 task.await
                     .map(QueryResponse::FileBytes)

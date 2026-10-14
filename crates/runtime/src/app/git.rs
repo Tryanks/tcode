@@ -15,49 +15,18 @@ impl AppState {
         let session_id = target_id.to_string();
         let generation = self
             .git_status_generation
-            .entry(session_id.clone())
+            .entry(target_id.to_string())
             .or_default();
         *generation += 1;
         let generation = *generation;
-        if let Some(pending) = self.git_status_pending.get_mut(&cwd) {
-            pending.insert(session_id, generation);
-        } else {
-            self.start_git_status_read(cwd, HashMap::from([(session_id, generation)]), cx);
-        }
-    }
-
-    fn start_git_status_read(
-        &mut self,
-        cwd: PathBuf,
-        requests: HashMap<String, u64>,
-        cx: &mut HostCx,
-    ) {
-        self.git_status_pending.insert(cwd.clone(), HashMap::new());
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let read_cwd = cwd.clone();
-            let status = host_cx.unblock(move || read_status(&read_cwd)).await;
-            host_cx.enqueue(move |state, cx| {
-                for (session_id, generation) in requests {
-                    if state.git_status_generation.get(&session_id) == Some(&generation)
-                        && state
-                            .resident(&session_id)
-                            .is_some_and(|session| session.meta.cwd == cwd)
-                    {
-                        state.git_status.insert(session_id, status.clone());
-                    }
-                }
-                // A turn or Git action may have changed the checkout after
-                // this read began. Later requests need a later snapshot.
-                let mut pending = state.git_status_pending.remove(&cwd).unwrap_or_default();
-                pending.retain(|session_id, generation| {
-                    state.git_status_generation.get(session_id) == Some(generation)
-                        && state
-                            .resident(session_id)
-                            .is_some_and(|session| session.meta.cwd == cwd)
-                });
-                if !pending.is_empty() {
-                    state.start_git_status_read(cwd, pending, cx);
+            let status = host_cx.unblock(move || read_status(&cwd)).await;
+            host_cx.enqueue(move |state, _cx| {
+                if state.git_status_generation.get(&session_id) == Some(&generation)
+                    && state.resident(&session_id).is_some()
+                {
+                    state.git_status.insert(session_id, status);
                 }
             });
         });
