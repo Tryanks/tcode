@@ -22,6 +22,13 @@ struct ModelRefresh {
     loading: bool,
 }
 
+struct SecretWrite {
+    completion: smol::channel::Receiver<Result<(), String>>,
+    result: Option<Result<(), String>>,
+}
+
+type SecretWrites = HashMap<String, HashMap<String, Arc<smol::lock::Mutex<SecretWrite>>>>;
+
 pub struct ProviderCatalog {
     pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
     model_refreshes: HashMap<ProviderKind, ModelRefresh>,
@@ -36,6 +43,7 @@ pub struct ProviderCatalog {
     /// Profile ids with a usage fetch in flight.
     pub usage_checking: HashSet<String>,
     profile_revisions: HashMap<String, u64>,
+    secret_writes: SecretWrites,
     pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
 }
 
@@ -56,6 +64,7 @@ impl ProviderCatalog {
             provider_usage: HashMap::new(),
             usage_checking: HashSet::new(),
             profile_revisions: HashMap::new(),
+            secret_writes: HashMap::new(),
             provider_secret_names,
         }
     }
@@ -284,8 +293,7 @@ impl AppState {
                 continue;
             };
             let binary = configuration.binary_path.clone();
-            let settings = self.settings.clone();
-            let settings_store = self.settings_store.clone();
+            let launch_env = self.prepare_profile_env(&profile_id, cx);
             let store = self.store.clone();
             // Claude's manifest cache lives next to the persisted catalogs and
             // phones home only under the same switch as CLI update checks.
@@ -295,14 +303,12 @@ impl AppState {
             };
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
-                let env_profile_id = profile_id.clone();
-                let launch_env = host_cx
-                    .unblock(move || {
-                        let secrets = settings_store.profile_secrets(&env_profile_id);
-                        launch_env_for_profile(&settings, &env_profile_id, secrets)
-                    })
-                    .await;
-                let result = list_models(provider, binary, launch_env, refresh).await;
+                let result = match launch_env.await {
+                    Ok(launch_env) => list_models(provider, binary, launch_env, refresh)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
                 host_cx.enqueue(move |state, _cx| {
                     if !state.providers.finish_model_refresh(provider, generation) {
                         return;
@@ -425,11 +431,24 @@ impl AppState {
         if Settings::builtin_kind_from_id(id).is_some() {
             self.providers.invalidate_versions();
         }
+        let (completion, pending) = smol::channel::bounded(1);
+        self.providers
+            .secret_writes
+            .entry(id.to_owned())
+            .or_default()
+            .insert(
+                name.to_owned(),
+                Arc::new(smol::lock::Mutex::new(SecretWrite {
+                    completion: pending,
+                    result: None,
+                })),
+            );
         self.enqueue_store_write(
             StoreWrite::SetProfileSecret {
                 profile_id: id.to_string(),
                 key: name.to_string(),
                 value: value.map(str::to_string),
+                completion,
             },
             cx,
         );
@@ -521,20 +540,7 @@ impl AppState {
                 let mut settings = state.settings.clone();
                 settings.profiles.insert(id.clone(), profile);
                 state.update_settings(settings, cx);
-                state.enqueue_store_write(
-                    StoreWrite::SetProfileSecret {
-                        profile_id: id.clone(),
-                        key: "ANTHROPIC_API_KEY".to_string(),
-                        value: Some(api_key),
-                    },
-                    cx,
-                );
-                state
-                    .providers
-                    .provider_secret_names
-                    .entry(id.clone())
-                    .or_default()
-                    .insert("ANTHROPIC_API_KEY".to_string());
+                state.set_profile_secret(&id, "ANTHROPIC_API_KEY", Some(&api_key), cx);
             });
         });
         result_id
@@ -553,6 +559,7 @@ impl AppState {
         }
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
         self.providers.provider_secret_names.remove(id);
+        self.providers.secret_writes.remove(id);
         self.update_settings(settings, cx);
     }
 
@@ -581,20 +588,15 @@ impl AppState {
             }
             snapshot.checking = true;
             let binary = self.resolve_profile_binary(&profile_id);
-            let settings = self.settings.clone();
-            let settings_store = self.settings_store.clone();
+            let launch_env = self.prepare_profile_env(&profile_id, cx);
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
-                let env_profile_id = profile_id.clone();
-                let launch_env = host_cx
-                    .unblock(move || {
-                        let secrets = settings_store.profile_secrets(&env_profile_id);
-                        launch_env_for_profile(&settings, &env_profile_id, secrets)
-                    })
-                    .await;
-                let snapshot = probe_provider(provider, binary, launch_env).await;
+                let snapshot = match launch_env.await {
+                    Ok(launch_env) => Ok(probe_provider(provider, binary, launch_env).await),
+                    Err(error) => Err(error),
+                };
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
-                host_cx.enqueue(move |state, _cx| {
+                host_cx.enqueue(move |state, cx| {
                     if state
                         .providers
                         .profile_revisions
@@ -606,10 +608,22 @@ impl AppState {
                     {
                         return;
                     }
-                    state
-                        .providers
-                        .provider_snapshots
-                        .insert(profile_id, snapshot);
+                    match snapshot {
+                        Ok(snapshot) => {
+                            state
+                                .providers
+                                .provider_snapshots
+                                .insert(profile_id, snapshot);
+                        }
+                        Err(error) => {
+                            if let Some(snapshot) =
+                                state.providers.provider_snapshots.get_mut(&profile_id)
+                            {
+                                snapshot.checking = false;
+                            }
+                            state.report_error(RuntimeError::PersistSettings { error }, cx);
+                        }
+                    }
                 });
             });
         }
@@ -656,17 +670,19 @@ impl AppState {
                 .copied()
                 .unwrap_or(0);
             let binary = self.resolve_profile_binary(&profile_id);
-            let settings = self.settings.clone();
-            let settings_store = self.settings_store.clone();
+            let launch_env = self.prepare_profile_env(&profile_id, cx);
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
-                let env_profile_id = profile_id.clone();
-                let launch_env = host_cx
-                    .unblock(move || {
-                        let secrets = settings_store.profile_secrets(&env_profile_id);
-                        launch_env_for_profile(&settings, &env_profile_id, secrets)
-                    })
-                    .await;
+                let launch_env = match launch_env.await {
+                    Ok(env) => env,
+                    Err(error) => {
+                        host_cx.enqueue(move |state, cx| {
+                            state.providers.complete_usage(profile_id, revision, None);
+                            state.report_error(RuntimeError::PersistSettings { error }, cx);
+                        });
+                        return;
+                    }
+                };
                 let usage = tcode_services::provider_usage::fetch_provider_usage(
                     provider, binary, launch_env,
                 )
@@ -981,6 +997,68 @@ impl AppState {
             meta.profile_id.as_deref(),
             meta.acp_agent_id.as_deref(),
         )
+    }
+
+    // Only credential writes gate a launch; unrelated log batches must not
+    // turn an ordinary refresh into a database flush barrier.
+    fn prepare_profile_env(
+        &self,
+        profile_id: &str,
+        cx: &HostCx,
+    ) -> impl std::future::Future<Output = Result<LaunchEnv, String>> + use<> {
+        let profile_id = profile_id.to_owned();
+        let settings = self.settings.clone();
+        let store = self.settings_store.clone();
+        let host_cx = cx.clone();
+        let sensitive: HashSet<_> = settings
+            .resolved_profile(&profile_id)
+            .into_iter()
+            .flat_map(|profile| profile.settings.env)
+            .filter(|var| var.sensitive && !var.name.trim().is_empty())
+            .map(|var| var.name)
+            .collect();
+        let writes: Vec<_> = self
+            .providers
+            .secret_writes
+            .get(&profile_id)
+            .into_iter()
+            .flat_map(|writes| writes.iter())
+            .filter(|(name, _)| sensitive.contains(*name))
+            .map(|(_, write)| write.clone())
+            .collect();
+        async move {
+            for write in writes {
+                let mut write = write.lock().await;
+                if write.result.is_none() {
+                    write.result = Some(write.completion.recv().await.unwrap_or_else(|_| {
+                        Err(
+                            "the session store writer stopped before saving provider credentials"
+                                .to_owned(),
+                        )
+                    }));
+                }
+                write
+                    .result
+                    .as_ref()
+                    .expect("completed secret write")
+                    .clone()?;
+            }
+            if sensitive.is_empty() {
+                return Ok(launch_env_for_profile(
+                    &settings,
+                    &profile_id,
+                    Default::default(),
+                ));
+            }
+            host_cx
+                .unblock(move || {
+                    let secrets = store
+                        .try_profile_secrets(&profile_id)
+                        .map_err(|error| error.to_string())?;
+                    Ok(launch_env_for_profile(&settings, &profile_id, secrets))
+                })
+                .await
+        }
     }
 
     /// The cached model catalog for `provider` (empty when never fetched).

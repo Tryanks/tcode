@@ -54,6 +54,7 @@ pub(super) enum StoreWrite {
         profile_id: String,
         key: String,
         value: Option<String>,
+        completion: smol::channel::Sender<Result<(), String>>,
     },
     SetHostToken {
         kind: tcode_core::pull_request::HostKind,
@@ -200,7 +201,8 @@ impl StoreWrite {
                 |error| RuntimeError::PersistSession { error },
                 Some(completion),
             ),
-            StoreWrite::SetHostToken { completion, .. } => (
+            StoreWrite::SetProfileSecret { completion, .. }
+            | StoreWrite::SetHostToken { completion, .. } => (
                 |error| RuntimeError::PersistSettings { error },
                 Some(completion),
             ),
@@ -215,7 +217,6 @@ impl StoreWrite {
             | StoreWrite::InvalidateCommands(_)
             | StoreWrite::WriteTerminalUi(_)
             | StoreWrite::WriteSettings(_)
-            | StoreWrite::SetProfileSecret { .. }
             | StoreWrite::ClearProfileSecrets(_) => {
                 (|error| RuntimeError::PersistSettings { error }, None)
             }
@@ -404,11 +405,17 @@ impl StoreWriter {
                 profile_id,
                 key,
                 value,
-            } => self
-                .settings_store
-                .set_profile_secret(&profile_id, &key, value.as_deref())
-                .err()
-                .map(settings_failure),
+                completion,
+            } => {
+                let result = self
+                    .settings_store
+                    .set_profile_secret(&profile_id, &key, value.as_deref())
+                    .map_err(|error| error.to_string());
+                let _ = completion.try_send(result.clone());
+                result
+                    .err()
+                    .map(|error| settings_failure(std::io::Error::other(error)))
+            }
             StoreWrite::SetHostToken {
                 kind,
                 host,
