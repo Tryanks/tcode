@@ -337,6 +337,7 @@ impl AppState {
                 | Query::RenderThreadExport { session_id, .. }
                 | Query::ReadItemOutput { session_id, .. }
                 | Query::ReadItemImage { session_id, .. }
+                | Query::ReadItemImagePreview { session_id, .. }
                 | Query::ReadItemImageChunk { session_id, .. }
                 | Query::PullRequest { session_id, .. }
                 | Query::RenderStoredOutput { session_id, .. } => session(session_id),

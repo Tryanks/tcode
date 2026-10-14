@@ -27,6 +27,13 @@ enum ImageRequest {
         item_id: String,
         image_index: usize,
     },
+    ItemPreview {
+        session_id: String,
+        item_id: String,
+        image_index: usize,
+        width: u32,
+        height: u32,
+    },
     Thumbnail(PathBuf),
     Project {
         id: String,
@@ -75,6 +82,19 @@ impl Asset for HostImage {
                     item_id,
                     image_index,
                     max_bytes: None,
+                },
+                ImageRequest::ItemPreview {
+                    session_id,
+                    item_id,
+                    image_index,
+                    width,
+                    height,
+                } => Query::ReadItemImagePreview {
+                    session_id,
+                    item_id,
+                    image_index,
+                    width,
+                    height,
                 },
                 ImageRequest::Thumbnail(path) => Query::ReadIconImage { path },
                 ImageRequest::Project { id, pixels, .. } => Query::ReadProjectIcon {
@@ -127,26 +147,62 @@ pub(crate) fn image_preview(
     logical_pixels: f32,
     crop_to_square: bool,
 ) -> ImageSource {
-    ImageSource::from(move |window: &mut gpui::Window, cx: &mut App| {
-        let namespace = cx.try_global::<HostImages>()?.namespace;
+    preview_source(move |window| {
         let pixels = (logical_pixels * window.scale_factor())
             .ceil()
             .clamp(1., 1024.) as u32;
-        let preview = ImageRequest::Preview {
-            path: path.clone(),
-            pixels,
-            crop_to_square,
-        };
+        (
+            ImageRequest::Preview {
+                path: path.clone(),
+                pixels,
+                crop_to_square,
+            },
+            ImageRequest::File(path.clone()),
+        )
+    })
+}
+
+fn preview_source(
+    request: impl Fn(&gpui::Window) -> (ImageRequest, ImageRequest) + 'static,
+) -> ImageSource {
+    ImageSource::from(move |window: &mut gpui::Window, cx: &mut App| {
+        let namespace = cx.try_global::<HostImages>()?.namespace;
+        let (preview, original) = request(window);
         let image = match window.use_asset::<HostImage>(&(namespace, preview), cx)? {
             Ok(image) => image,
-            Err(_) => match window
-                .use_asset::<HostImage>(&(namespace, ImageRequest::File(path.clone())), cx)?
-            {
+            Err(_) => match window.use_asset::<HostImage>(&(namespace, original), cx)? {
                 Ok(image) => image,
                 Err(error) => return Some(Err(error)),
             },
         };
         image.use_render_image(window, cx).map(Ok)
+    })
+}
+
+pub(crate) fn item_image_preview(
+    session_id: String,
+    item_id: String,
+    image_index: usize,
+    width: f32,
+    height: f32,
+) -> ImageSource {
+    preview_source(move |window| {
+        let physical =
+            |logical: f32| (logical * window.scale_factor()).ceil().clamp(1., 1024.) as u32;
+        (
+            ImageRequest::ItemPreview {
+                session_id: session_id.clone(),
+                item_id: item_id.clone(),
+                image_index,
+                width: physical(width),
+                height: physical(height),
+            },
+            ImageRequest::Item {
+                session_id: session_id.clone(),
+                item_id: item_id.clone(),
+                image_index,
+            },
+        )
     })
 }
 

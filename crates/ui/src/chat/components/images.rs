@@ -2,7 +2,7 @@ use std::path::Path;
 
 use agent::ItemContent;
 use gpui::{
-    App, IntoElement, ObjectFit, ParentElement as _, Role, SharedString,
+    App, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Role, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, img, px,
 };
 use gpui_base::h_flex;
@@ -69,10 +69,17 @@ pub(crate) fn image_tiles(
                             .overflow_hidden()
                             .bg(cx.theme().muted)
                             .child(
-                                img(source.clone())
-                                    .w_full()
-                                    .h_full()
-                                    .object_fit(ObjectFit::Cover),
+                                img(crate::store::item_image_preview(
+                                    session_id.into(),
+                                    entry.id.clone(),
+                                    index,
+                                    120.,
+                                    80.,
+                                ))
+                                .id("tool-image")
+                                .w_full()
+                                .h_full()
+                                .object_fit(ObjectFit::Cover),
                             ),
                         SharedString::from(format!("image-read-{}-{index}", entry.id)),
                         Role::Button,
