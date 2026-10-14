@@ -1371,6 +1371,27 @@ impl AppState {
         decode_image_read(read, cx)
     }
 
+    pub(crate) fn item_image_preview(
+        &mut self,
+        session_id: &str,
+        item_id: String,
+        image_index: usize,
+        width: u32,
+        height: u32,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
+        let read = self.query_session_log(
+            session_id,
+            move |log| {
+                let image = log.image_attachment(&item_id, image_index)?;
+                tcode_services::image_bytes::ImageRead::preview(&image.data_base64, width, height)
+                    .map_err(image_read_error)
+            },
+            cx,
+        );
+        decode_image_read(read, cx)
+    }
+
     pub(crate) fn item_image_chunk(
         &mut self,
         session_id: &str,
