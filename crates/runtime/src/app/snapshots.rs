@@ -658,12 +658,7 @@ impl AppState {
             .filter_map(|id| self.resident(id))
             .filter(|s| in_scope(&&s.meta))
             .collect();
-        let sharing = WorktreeSharing::new(
-            metas
-                .iter()
-                .copied()
-                .chain(residents.iter().map(|s| &s.meta)),
-        );
+        let sharing = std::cell::OnceCell::new();
         let mut summary = IndexSummary::default();
         for meta in &metas {
             if meta.archived_at.is_some() {
@@ -689,7 +684,18 @@ impl AppState {
             if self.title_generating.contains(&meta.id) {
                 summary.title_generating.insert(meta.id.clone());
             }
-            if sharing.is_shared(meta) {
+            if meta.worktree.is_some()
+                && sharing
+                    .get_or_init(|| {
+                        WorktreeSharing::new(
+                            metas
+                                .iter()
+                                .copied()
+                                .chain(residents.iter().map(|s| &s.meta)),
+                        )
+                    })
+                    .is_shared(meta)
+            {
                 summary.worktree_shared.insert(meta.id.clone());
             }
         }
