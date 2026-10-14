@@ -1609,6 +1609,7 @@ impl Mapper {
             Some("task_notification") => return self.on_task_notification(msg),
             Some("background_tasks_changed") => return self.on_background_tasks_changed(msg),
             Some("model_refusal_fallback") => return self.on_model_refusal_fallback(msg),
+            Some("api_retry") => return vec![api_retry_notice(msg)],
             other => {
                 log::debug!("claude: ignoring system/{other:?}");
                 return Vec::new();
@@ -2888,6 +2889,34 @@ impl Mapper {
     }
 }
 
+/// Claude Code keeps the turn open while it retries a failed API request, up to
+/// `max_retries` times, so each attempt is a non-fatal error rather than an end.
+fn api_retry_notice(msg: &Value) -> AgentEvent {
+    let count = |key| msg.get(key).and_then(Value::as_u64);
+    let mut cause = msg
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    if let Some(status) = count("error_status") {
+        cause.push_str(&format!(", HTTP {status}"));
+    }
+    if let Some(waited) = msg
+        .pointer("/no_response/waited_ms")
+        .and_then(Value::as_u64)
+    {
+        cause.push_str(&format!(", no response in {}s", waited / 1000));
+    }
+    let attempt = count("attempt").map_or("?".into(), |n| n.to_string());
+    let max = count("max_retries").map_or("?".into(), |n| n.to_string());
+    let delay =
+        count("retry_delay_ms").map_or("?".into(), |ms| format!("{:.1}s", ms as f64 / 1000.0));
+    AgentEvent::Error {
+        message: format!("claude API request failed ({cause}); retry {attempt}/{max} in {delay}"),
+        fatal: false,
+    }
+}
+
 fn is_file_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
 }
@@ -3733,6 +3762,21 @@ mod tests {
     fn feed(mapper: &mut Mapper, line: &str) -> Vec<AgentEvent> {
         let msg: Value = serde_json::from_str(line).expect("valid json fixture line");
         mapper.on_message(msg)
+    }
+
+    #[test]
+    fn api_retry_reports_a_non_fatal_error() {
+        let mut mapper = Mapper::new();
+        // Recorded from Claude Code 2.1.296 against an endpoint that drops every connection.
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"system","subtype":"api_retry","attempt":1,"max_retries":2,"retry_delay_ms":595,"error_status":null,"error":"unknown","session_id":"9a7e2512-3512-46f1-9b90-5a8871bd25f4","uuid":"2a513718-8785-4d57-8f42-54021fcc876f"}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::Error { message, fatal: false }]
+                if message == "claude API request failed (unknown); retry 1/2 in 0.6s"
+        ));
     }
 
     /// Every `result` publishes the current background-task count immediately

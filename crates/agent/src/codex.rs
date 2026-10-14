@@ -2270,7 +2270,14 @@ impl Actor {
                         return;
                     }
                     Some("contextCompaction") => {
-                        if method == "item/completed" {
+                        if method == "item/started" {
+                            self.events
+                                .emit(AgentEvent::ContextCompacted(crate::Compaction {
+                                    in_progress: true,
+                                    ..Default::default()
+                                }))
+                                .await;
+                        } else if method == "item/completed" {
                             self.restore_instructions();
                             self.events
                                 .emit(AgentEvent::ContextCompacted(Default::default()))
@@ -4517,6 +4524,9 @@ mod tests {
                 .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-2"}}}"#)
                 .await;
             actor
+                .handle_line(r#"{"method":"item/started","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"compaction"}}}"#)
+                .await;
+            actor
                 .handle_line(r#"{"method":"item/completed","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"compaction"}}}"#)
                 .await;
             let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
@@ -4532,10 +4542,13 @@ mod tests {
                     "content": [{"type": "input_text", "text": "<tcode><pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n</tcode>"}],
                 }]})
             );
-            assert!(
-                std::iter::from_fn(|| events.try_recv().ok())
-                    .any(|event| matches!(event, AgentEvent::ContextCompacted(_)))
-            );
+            let compactions: Vec<bool> = std::iter::from_fn(|| events.try_recv().ok())
+                .filter_map(|event| match event {
+                    AgentEvent::ContextCompacted(c) => Some(c.in_progress),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(compactions, [true, false]);
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
