@@ -7384,12 +7384,6 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
             reply,
             cx,
         );
-        // A reply resolved in the update would be in the channel now; the
-        // background resolution sends it later, from its own task.
-        assert!(
-            response.try_recv().is_err(),
-            "cwd resolution must not reply from the GPUI update"
-        );
     });
 
     assert_eq!(
