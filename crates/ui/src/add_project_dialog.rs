@@ -18,9 +18,9 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::progress::Progress;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -63,6 +63,7 @@ pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut 
     let footer = dialog.clone();
     window.open_dialog(cx, move |builder, window, cx| {
         let dialog_content = content.clone();
+        let confirm = content.clone();
         builder
             .w(px(680.))
             .rounded(crate::material::radius_overlay(cx))
@@ -73,6 +74,22 @@ pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut 
             .title(crate::tr!("sidebar.add_project").into_owned())
             .content(move |content_el, _, _| content_el.child(dialog_content.clone()))
             .footer(render_add_footer(&footer, window, cx))
+            .on_ok(move |_, window, cx| {
+                confirm.update(cx, |dialog, cx| {
+                    if dialog
+                        .name_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                    {
+                        dialog.create_new_project(window, cx);
+                    } else {
+                        dialog.open_typed_path(window, cx);
+                    }
+                });
+                // The host result owns dismissal, including validation failures.
+                false
+            })
     });
 }
 
