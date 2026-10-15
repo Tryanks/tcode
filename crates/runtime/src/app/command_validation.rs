@@ -242,7 +242,8 @@ impl AppState {
         // Index mutations operate on stored sessions, without requiring a live provider.
         if matches!(
             command,
-            Command::SettleSession { .. }
+            Command::SettleChildren { .. }
+                | Command::SettleSession { .. }
                 | Command::CancelAgent { .. }
                 | Command::UnsettleSession { .. }
                 | Command::SetAutoSettle { .. }

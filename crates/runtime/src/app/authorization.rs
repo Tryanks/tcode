@@ -258,6 +258,7 @@ impl AppState {
                 | Command::RegenerateSessionTitle { session_id }
                 | Command::ArchiveSession { session_id }
                 | Command::UnarchiveSession { session_id }
+                | Command::SettleChildren { session_id }
                 | Command::SettleSession { session_id }
                 | Command::CancelAgent { session_id }
                 | Command::UnsettleSession { session_id }

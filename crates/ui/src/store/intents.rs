@@ -308,6 +308,10 @@ impl WorkspaceStore {
 }
 
 impl WorkspaceStore {
+    pub fn settle_children(&mut self, session_id: String) {
+        self.dispatch(Command::SettleChildren { session_id });
+    }
+
     pub fn settle_session(&mut self, session_id: String) {
         self.dispatch(Command::SettleSession { session_id });
     }

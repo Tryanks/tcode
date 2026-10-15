@@ -329,6 +329,19 @@ impl OrchestrateTools {
     }
 
     #[tool(
+        description = "Settle every finished child of this lead thread that is awaiting_settle, accepting all of their results at once. Settling is the delivery and stops each child's provider; send reopens it. No thread ids are needed. Returns settled entries with thread_id and delivery, plus skipped children with their current delivery state. Running or waiting children are skipped, as are already settled or cancelled children."
+    )]
+    async fn settle_all(&self) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::SettleAll {
+                parent_id: self.parent_id.clone(),
+            },
+        )
+        .await
+    }
+
+    #[tool(
         description = "Answer a child thread's pending permission approval. Supply option with an exact native option id from the approval callback, or cancel: true to cancel; never both. request_id may be omitted when the child has exactly one pending request."
     )]
     async fn approve(&self, Parameters(p): Parameters<ApproveParams>) -> CallToolResult {
@@ -430,8 +443,21 @@ async fn run_op(broker: &Broker, op: OrchestrateOp) -> CallToolResult {
     }
 }
 
+pub fn tool_descriptions() -> Vec<(String, String)> {
+    OrchestrateTools::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| {
+            (
+                tool.name.to_string(),
+                tool.description.as_deref().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
 /// The orchestrating thread's server `instructions`, read at initialization.
-pub const INSTRUCTIONS: &str = "Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, send to continue either thread, and settle each child whose result you have accepted. dispatch, send, cancel and settle take a list, so act on every child that is ready in one call.";
+pub const INSTRUCTIONS: &str = "Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, send to continue either thread, and settle each child whose result you have accepted, or use settle_all to accept every finished child at once. dispatch, send, cancel and settle take a list, so act on every child that is ready in one call.";
 
 /// A dispatched child's server `instructions`, read at initialization.
 pub const REPORT_INSTRUCTIONS: &str =
@@ -667,6 +693,52 @@ mod tests {
             .settle(Parameters(ThreadsParams { thread_ids: vec![] }))
             .await;
         assert_eq!(empty.is_error, Some(true));
+        resolver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn settle_all_is_parameter_free_scoped_and_preserves_outcomes() {
+        let (tx, rx) = async_channel::unbounded();
+        let tools = OrchestrateTools::new(
+            broker(tx, std::time::Duration::from_secs(30)),
+            "lead".into(),
+        );
+        let schema = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "settle_all")
+            .unwrap();
+        assert!(
+            schema
+                .input_schema
+                .get("required")
+                .is_none_or(|value| value.as_array().unwrap().is_empty())
+        );
+        assert!(
+            schema
+                .input_schema
+                .get("properties")
+                .is_none_or(|value| value.as_object().unwrap().is_empty())
+        );
+        let outcomes = serde_json::json!({
+            "settled": [{"thread_id":"finished", "delivery":"settled"}],
+            "skipped": [{"thread_id":"working", "delivery":"running"}],
+        });
+        let reply = outcomes.clone();
+        let resolver = tokio::spawn(async move {
+            let request = rx.recv().await.unwrap();
+            assert_eq!(
+                request.op,
+                OrchestrateOp::SettleAll {
+                    parent_id: "lead".into()
+                }
+            );
+            request.reply.send(Ok(reply)).await.unwrap();
+        });
+        let result = tools.settle_all().await;
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(text(&result), outcomes);
         resolver.await.unwrap();
     }
 

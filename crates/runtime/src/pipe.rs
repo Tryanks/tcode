@@ -819,6 +819,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.toggle_project_collapsed(&project_id, cx)
         }
         Command::PatchSettings { patch } => app.patch_settings(patch, cx),
+        Command::SettleChildren { session_id } => {
+            response = CommandResponse::ChildrenSettled(app.settle_children(&session_id, cx));
+        }
         Command::SettleSession { session_id } => app.settle_session(&session_id, cx),
         Command::CancelAgent { session_id } => app.cancel_child(&session_id, cx),
         Command::SetAutoSettle {

@@ -12301,3 +12301,96 @@ fn deleting_the_last_child_releases_its_leads_automatic_settlement() {
     host.to_host.close();
     host.stopped.recv_blocking().unwrap();
 }
+
+#[test]
+fn settle_all_children_delivers_finished_results_and_skips_running_children() {
+    use tcode_core::settlement::AgentDelivery;
+    use tcode_protocol::{ChildSettlement, CommandResponse, SettleChildrenResult};
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("settle-all-children");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        for (id, parent, running, native) in [
+            ("lead", None, false, false),
+            ("first", Some("lead"), false, false),
+            ("second", Some("lead"), false, false),
+            ("running", Some("lead"), true, false),
+            ("other", Some("another-lead"), false, false),
+            ("native", Some("lead"), false, true),
+        ] {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+            meta.id = id.into();
+            meta.parent_session_id = parent.map(str::to_owned);
+            meta.native_subagent = native.then(|| "native-item".into());
+            let mut session = ActiveSession::new(meta.clone(), false, vec![]);
+            session.turn_in_flight = running;
+            state.sessions.push(meta);
+            state.residents.parked.insert(id.into(), session);
+        }
+    });
+    let messages = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::SettleChildren {
+            session_id: "lead".into(),
+        }),
+    );
+    let entry = |id: &str, delivery| ChildSettlement {
+        thread_id: id.into(),
+        delivery,
+    };
+    let expected = SettleChildrenResult {
+        settled: vec![
+            entry("first", AgentDelivery::Settled),
+            entry("second", AgentDelivery::Settled),
+        ],
+        skipped: vec![entry("running", AgentDelivery::Running)],
+    };
+    let mut result = messages
+        .iter()
+        .find_map(|message| match message {
+            HostMessage::Ack {
+                id: 1,
+                result: Ok(CommandResponse::ChildrenSettled(result)),
+            } => Some(result.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("settle-all response: {messages:?}"));
+    result.settled.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
+    assert_eq!(result, expected);
+    state.read(|state| {
+        for id in ["first", "second"] {
+            let meta = state.find_meta(id).unwrap();
+            assert!(meta.is_settled());
+            assert_eq!(
+                state.agent_status(&meta).unwrap().delivery,
+                AgentDelivery::Settled
+            );
+        }
+        for id in ["lead", "running", "other", "native"] {
+            assert!(!state.find_meta(id).unwrap().is_settled(), "{id}");
+        }
+        assert!(state.resident("running").unwrap().turn_in_flight);
+    });
+    let (reply, response) = smol::channel::bounded(1);
+    state.update(cx, |state, cx| {
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::SettleAll {
+                parent_id: "lead".into(),
+            },
+            reply,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let repeated = response.try_recv().unwrap().unwrap();
+    assert_eq!(repeated["settled"], serde_json::json!([]));
+    assert!(
+        repeated["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["thread_id"] == "running" && entry["delivery"] == "running")
+    );
+}

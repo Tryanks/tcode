@@ -2268,6 +2268,7 @@ agents:
   archived: "已归档"
   open: "打开子代理"
   stop: "停止子代理"
+  settle_all: "收尾全部已完成子代理"
   settle: "收尾子代理"
   cancel: "取消子代理"
   cancel_title: "取消这个子代理？"

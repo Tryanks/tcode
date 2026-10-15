@@ -31,7 +31,10 @@ pub use pull_request::{
 pub mod terminal;
 mod wire;
 
-pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, ThreadExportFormat};
+pub use command::{
+    ChildSettlement, Command, CommandResponse, SettingsPatch, SettleChildrenResult,
+    TerminalSelection, ThreadExportFormat,
+};
 pub use event::{
     AcpMarketplaceItem, AgentStatus, ArchivedSessions, EventEnvelope, ExternalImportState,
     ExternalImportStatus, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
@@ -165,6 +168,7 @@ pub use wire::{
 // are unchanged; subscription replies remain full index snapshots.
 // Unreleased: explicit original reads use a raw-byte iroh bi-stream or the authenticated browser /original endpoint; bounded ReadFileBytes/ReadItemImage control queries are unchanged.
 // Unreleased: Project.quick_chat identifies host-owned quick chats in replicated metadata.
+// Unreleased: adds SettleChildren and its ChildrenSettled command response.
 pub const PROTOCOL_VERSION: u32 = 12;
 
 #[cfg(test)]

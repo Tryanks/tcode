@@ -746,6 +746,15 @@ impl AppState {
                 })();
                 let _ = reply.try_send(result);
             }
+            OrchestrateOp::SettleAll { parent_id } => {
+                let result = self
+                    .validate_command_target(&tcode_protocol::Command::SettleChildren {
+                        session_id: parent_id.clone(),
+                    })
+                    .map_err(|error| error.message)
+                    .map(|()| serde_json::to_value(self.settle_children(&parent_id, cx)).unwrap());
+                let _ = reply.try_send(result);
+            }
             OrchestrateOp::ReportResult { child_id, text } => {
                 let result = (|| {
                     let is_child = self
@@ -826,6 +835,40 @@ impl AppState {
             child.meta = meta.clone();
         }
         self.persist_meta(&meta, cx);
+    }
+
+    pub fn settle_children(
+        &mut self,
+        parent_id: &str,
+        cx: &mut HostCx,
+    ) -> tcode_protocol::SettleChildrenResult {
+        let children: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| {
+                meta.is_dispatched() && meta.parent_session_id.as_deref() == Some(parent_id)
+            })
+            .filter_map(|meta| {
+                self.agent_status(meta)
+                    .map(|status| (meta.id.clone(), status.delivery))
+            })
+            .collect();
+        let mut result = tcode_protocol::SettleChildrenResult::default();
+        for (thread_id, delivery) in children {
+            if delivery == AgentDelivery::AwaitingSettle && !self.settle_thread_busy(&thread_id) {
+                self.settle_session(&thread_id, cx);
+                result.settled.push(tcode_protocol::ChildSettlement {
+                    thread_id,
+                    delivery: AgentDelivery::Settled,
+                });
+            } else {
+                result.skipped.push(tcode_protocol::ChildSettlement {
+                    thread_id,
+                    delivery,
+                });
+            }
+        }
+        result
     }
 
     pub(super) fn require_child(

@@ -337,6 +337,9 @@ pub enum Command {
     PatchSettings {
         patch: SettingsPatch,
     },
+    SettleChildren {
+        session_id: String,
+    },
     SettleSession {
         session_id: String,
     },
@@ -515,6 +518,19 @@ pub enum CommandResponse {
         session_id: Option<String>,
     },
     ExternalImportStarted(bool),
+    ChildrenSettled(SettleChildrenResult),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildSettlement {
+    pub thread_id: String,
+    pub delivery: tcode_core::settlement::AgentDelivery,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettleChildrenResult {
+    pub settled: Vec<ChildSettlement>,
+    pub skipped: Vec<ChildSettlement>,
 }
 
 impl Command {
@@ -543,6 +559,7 @@ impl Command {
             | Self::RemoveTerminalContext { session_id, .. }
             | Self::AddReviewComment { session_id, .. }
             | Self::RemoveReviewComment { session_id, .. }
+            | Self::SettleChildren { session_id }
             | Self::SettleSession { session_id, .. }
             | Self::CancelAgent { session_id }
             | Self::UnsettleSession { session_id, .. }
