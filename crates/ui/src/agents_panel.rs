@@ -872,6 +872,27 @@ impl Render for AgentsPanel {
             .px(px(if compact { 0. } else { 8. }))
             .pb_3()
             .gap_0p5();
+        let parent_id = self.store.read(cx).active_session_id();
+        column = column.child(
+            div()
+                .px(inset)
+                .py_2()
+                .debug_selector(|| "agents-settle-all".into())
+                .child(
+                    Button::new("agents-settle-all")
+                        .w_full()
+                        .outline()
+                        .small()
+                        .label(crate::tr!("agents.settle_all"))
+                        .when(compact, |button| button.min_h(px(44.)))
+                        .disabled(agents.needs_settle.is_empty())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(id) = parent_id.clone() {
+                                this.store.update(cx, |store, _| store.settle_children(id));
+                            }
+                        })),
+                ),
+        );
         if let Some(summary) = agents.summary() {
             column = column.child(
                 div()
@@ -1033,6 +1054,107 @@ mod tests {
             assert_eq!(keys(&agents.running), ["unsettled"]);
             assert_eq!(agents.outstanding(), 1);
         });
+        link.close();
+    }
+
+    #[gpui::test]
+    fn settle_all_button_sends_the_lead_command(cx: &mut TestAppContext) {
+        use gpui::{px, size};
+        use tcode_core::settlement::{AgentDelivery, AgentExecution};
+        use tcode_protocol::{
+            AgentStatus, ClientPayload, Command, SessionActivity, decode_client_line,
+        };
+        cx.update(crate::theme::init);
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let thread = |id: &str, parent: Option<&str>| {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, "/project".into(), None);
+            meta.id = id.into();
+            meta.title = id.into();
+            meta.parent_session_id = parent.map(str::to_owned);
+            meta
+        };
+        let mut index = IndexSnapshot {
+            sessions: vec![thread("lead", None), thread("finished", Some("lead"))],
+            projects: vec![],
+            summary: Default::default(),
+        };
+        index.summary.activity.insert(
+            "finished".into(),
+            SessionActivity {
+                agent: Some(AgentStatus {
+                    execution: AgentExecution::Finished,
+                    delivery: AgentDelivery::AwaitingSettle,
+                    run_started_at: None,
+                    run_completed_at: None,
+                }),
+                working: false,
+                turn_running: false,
+                waiting: false,
+                waiting_for_approval: false,
+                waiting_for_input: false,
+                failed: false,
+                unread: false,
+                fork: tcode_protocol::ForkAvailability::Available,
+            },
+        );
+        let index = tcode_protocol::encode_line(&HostMessage::Event(EventEnvelope {
+            request_id: None,
+            topic: Topic::Index,
+            event: ServerEvent::IndexSnapshot(index),
+        }))
+        .unwrap();
+        crate::store::tests::seed_full_scope(&store, &incoming, vec![index], cx);
+        let mut driver = crate::store::tests::LocalHostDriver::from_link(link.clone());
+        driver.wait_until(cx, &store, "child status", |cx| {
+            store.read_with(cx, |store, _| store.agent_status("finished").is_some())
+        });
+        store.update(cx, |store, _| store.select_session("lead".into()));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let panel = cx.new(|cx| super::AgentsPanel::for_sheet(store.clone(), cx));
+            gpui_base::Root::new(panel, window, cx)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let button = cx
+            .debug_bounds("agents-settle-all")
+            .expect("settle-all button is drawn");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        let mut commands = Vec::new();
+        driver.wait_until(cx, &store, "settle-all command", |_| {
+            while let Ok(line) = outgoing.try_recv() {
+                if let ClientPayload::Command(command) = decode_client_line(&line).unwrap().payload
+                {
+                    commands.push(command);
+                }
+            }
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::SettleChildren { .. }))
+        });
+        assert_eq!(
+            commands
+                .into_iter()
+                .filter(|command| matches!(command, Command::SettleChildren { .. }))
+                .collect::<Vec<_>>(),
+            vec![Command::SettleChildren {
+                session_id: "lead".into()
+            }]
+        );
         link.close();
     }
 }
