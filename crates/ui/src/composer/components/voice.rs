@@ -1,8 +1,8 @@
 //! System dictation and replacement of the session's whole transcript.
 
 use super::super::*;
+use client::{DictationEvent as SpeechEvent, SpeechState, SpeechStatus};
 use gpui::SharedString;
-use gpui_component::speech::{SpeechEvent, SpeechState, SpeechStatus};
 
 mod client;
 
@@ -93,7 +93,6 @@ impl Composer {
         } else {
             cx.theme().muted_foreground
         };
-        // Kit SpeechButton/SpeechWaveform require gpui-component's theme global, which Tcode does not initialise.
         Some(
             Button::new("voice-mic")
                 .ghost()
@@ -113,10 +112,7 @@ impl Composer {
                         div()
                             .rounded_full()
                             .p(px(2.))
-                            .bg(cx
-                                .theme()
-                                .danger
-                                .opacity(0.08 + state.levels().last().unwrap_or(0.) * 0.42))
+                            .bg(cx.theme().danger.opacity(0.08 + state.level() * 0.42))
                             .child(icon)
                             .into_any_element()
                     } else {
@@ -177,7 +173,7 @@ impl Composer {
                 }
             }
             SpeechEvent::Partial(text) | SpeechEvent::Final(text) => {
-                self.insert_transcript(text.clone(), window, cx);
+                self.insert_transcript(text.clone().into(), window, cx);
                 if matches!(event, SpeechEvent::Final(_)) {
                     self.voice.insertion = None;
                 }
@@ -189,9 +185,7 @@ impl Composer {
                 );
                 #[cfg(target_os = "macos")]
                 let notification = match error {
-                    // gpui-component flattens NSError into a message ending in (domain code).
-                    gpui_component::speech::SpeechError::Recognizer(error)
-                        if error.to_string().ends_with("(kLSRErrorDomain 201)") =>
+                    tcode_client::speech::SpeechError::Recognizer(error) if error.ends_with("(kLSRErrorDomain 201)") =>
                     {
                         Notification::error(crate::tr!("composer.voice_enable_dictation"))
                             .id1::<Voice>("dictation-disabled")
@@ -244,42 +238,29 @@ impl Composer {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, size};
-    use gpui_component::speech::{
-        AudioFormat, AudioInput, AudioSink, RecognitionSession, SpeechError, SpeechRecognizer,
-        SpeechSink,
-    };
     use std::cell::RefCell;
+    use tcode_client::speech::{SpeechEvent as PlatformEvent, SpeechRecognizer, SpeechSession};
 
-    struct Recognizer(Rc<RefCell<Option<SpeechSink>>>);
+    struct Recognizer(Rc<RefCell<Option<async_channel::Sender<PlatformEvent>>>>);
     struct Recognition;
 
     impl SpeechRecognizer for Recognizer {
+        fn is_available(&self, _: &str) -> bool {
+            true
+        }
         fn start(
             &self,
-            sink: SpeechSink,
-            cx: &mut App,
-        ) -> Result<Box<dyn RecognitionSession>, SpeechError> {
-            sink.ready(cx);
-            *self.0.borrow_mut() = Some(sink);
+            _: &str,
+            events: async_channel::Sender<PlatformEvent>,
+        ) -> Result<Box<dyn SpeechSession>, tcode_client::speech::SpeechError> {
+            events.try_send(PlatformEvent::Ready).unwrap();
+            *self.0.borrow_mut() = Some(events);
             Ok(Box::new(Recognition))
         }
     }
 
-    impl RecognitionSession for Recognition {
-        fn push_audio(&mut self, _: &[i16], _: &mut App) {}
-        fn finish(&mut self, _: &mut App) {}
-    }
-
-    struct SilentInput;
-    impl AudioInput for SilentInput {
-        fn start(
-            &self,
-            _: AudioFormat,
-            _: AudioSink,
-            _: &mut App,
-        ) -> Result<Subscription, SpeechError> {
-            Ok(Subscription::new(|| {}))
-        }
+    impl SpeechSession for Recognition {
+        fn finish(&mut self) {}
     }
 
     #[gpui::test]
@@ -325,13 +306,11 @@ mod tests {
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
         });
-        let sink = Rc::new(RefCell::new(None::<SpeechSink>));
+        let sink = Rc::new(RefCell::new(None::<async_channel::Sender<PlatformEvent>>));
         let (composer, cx) = cx.add_window_view(|window, cx| {
             let composer = Composer::new(store.clone(), window, cx);
             composer.voice.state.update(cx, |state, cx| {
-                *state = SpeechState::new(cx)
-                    .recognizer(Recognizer(sink.clone()))
-                    .input(SilentInput);
+                *state = SpeechState::new(cx).recognizer(Rc::new(Recognizer(sink.clone())));
             });
             composer
         });
@@ -356,13 +335,17 @@ mod tests {
             ("", "前后"),
             ("你好", "前你好后"),
         ] {
-            cx.update(|_, cx| first.hypothesis(text, cx));
+            first
+                .try_send(PlatformEvent::Hypothesis(text.into()))
+                .unwrap();
+            cx.run_until_parked();
             assert_eq!(
                 composer.read_with(cx, |composer, cx| composer.draft(cx)),
                 expected
             );
         }
-        cx.update(|_, cx| first.finish(cx));
+        first.try_send(PlatformEvent::Finished).unwrap();
+        cx.run_until_parked();
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "前你好后"
@@ -375,7 +358,10 @@ mod tests {
                 .update(cx, |state, cx| state.toggle(cx));
         });
         let edited = sink.borrow().clone().unwrap();
-        cx.update(|_, cx| edited.hypothesis(" text", cx));
+        edited
+            .try_send(PlatformEvent::Hypothesis(" text".into()))
+            .unwrap();
+        cx.run_until_parked();
         cx.simulate_input("!");
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.voice.state.read(cx).status()),
@@ -383,10 +369,9 @@ mod tests {
         );
         let draft = composer.read_with(cx, |composer, cx| composer.draft(cx));
         assert_eq!(draft, "前你好 text!后");
-        cx.update(|_, cx| {
-            edited.hypothesis("late overwrite", cx);
-            edited.finish(cx);
-        });
+        _ = edited.try_send(PlatformEvent::Hypothesis("late overwrite".into()));
+        _ = edited.try_send(PlatformEvent::Finished);
+        cx.run_until_parked();
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             draft
@@ -402,7 +387,10 @@ mod tests {
                 .update(cx, |state, cx| state.toggle(cx));
         });
         let submitted = sink.borrow().clone().unwrap();
-        cx.update(|_, cx| submitted.hypothesis("/model", cx));
+        submitted
+            .try_send(PlatformEvent::Hypothesis("/model".into()))
+            .unwrap();
+        cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_keystrokes("escape");
         assert_eq!(
@@ -413,10 +401,9 @@ mod tests {
             let input = composer.input.clone();
             composer.submit(&input, false, window, cx);
         });
-        cx.update(|_, cx| {
-            submitted.hypothesis("late text", cx);
-            submitted.finish(cx);
-        });
+        _ = submitted.try_send(PlatformEvent::Hypothesis("late text".into()));
+        _ = submitted.try_send(PlatformEvent::Finished);
+        cx.run_until_parked();
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             ""

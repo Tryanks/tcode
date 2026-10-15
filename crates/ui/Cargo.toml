@@ -44,7 +44,7 @@ native-preview = [
     "dep:tempfile",
 ]
 # System dictation in the composer, including ClientHost recognizers.
-voice = ["dep:gpui-component"]
+voice = ["tcode-client/voice"]
 # macOS TCC permission status, grant and relaunch for a *local* attachment.
 local-permissions = ["dep:computer-use-mcp"]
 # Reading an image off the macOS AppKit pasteboard.
@@ -60,9 +60,6 @@ tcode-protocol = { path = "../protocol", default-features = false }
 qrcode = { version = "0.14", default-features = false }
 gpui = { package = "gpui-pre", version = "0.3.8" }
 gpui-base = "0.7.1"
-gpui-component = { version = "0.7.1", features = ["speech"], optional = true }
-gpui-component-assets = { package = "gpui-kit-assets", version = "0.7.1" }
-gpui-component-macros = "0.7.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.23"
 async-channel = "2"

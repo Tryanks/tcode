@@ -7,7 +7,6 @@ use gpui::{
     SharedString, StyleRefinement, Styled, Svg, Transformation, Window,
     prelude::FluentBuilder as _, svg,
 };
-use gpui_component_macros::icon_named;
 
 /// Types implementing this trait can automatically be converted to [`Icon`].
 pub trait IconNamed {
@@ -20,7 +19,7 @@ impl<T: IconNamed> From<T> for Icon {
     }
 }
 
-icon_named!(IconName, "$GPUI_COMPONENT_DEFAULT_ICONS_DIR");
+include!(concat!(env!("OUT_DIR"), "/icon_names.rs"));
 
 impl IconName {
     pub fn view(self, cx: &mut App) -> Entity<Icon> {

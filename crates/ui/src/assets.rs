@@ -1,45 +1,6 @@
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
-#[cfg(not(target_arch = "wasm32"))]
-use gpui_component_assets::Assets as ComponentAssets;
-
-gpui_component_assets::icon_assets!(
-    PullRequestAssets,
-    [
-        GitPullRequest,
-        GitPullRequestDraft,
-        GitPullRequestClosed,
-        GitMerge,
-        GitMergeConflict,
-        Layers,
-        CircleCheck,
-        CircleDashed,
-        CircleX,
-        BadgeCheck,
-        MessageSquareMore,
-        MessageSquareWarning,
-        Unlink,
-        Trash,
-        Sticker,
-        RotateCcw,
-        Users,
-        Tag,
-        CircleDot,
-        ListOrdered,
-        Hourglass,
-        ArrowUpDown,
-        CircleQuestionMark,
-        CornerDownRight,
-        GitBranch,
-        Upload,
-    ]
-);
-
-gpui_component_assets::icon_assets!(ThreadArrangeAssets, [Pin, PinOff, GripVertical]);
-
-gpui_component_assets::icon_assets!(MathAssets, [Code, Sigma]);
-
 pub const DM_SANS: &[u8] = include_bytes!("../../../assets/fonts/DMSans[wght].ttf");
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const LILEX_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
@@ -55,7 +16,7 @@ pub const TERMINAL_SYMBOLS: &[u8] =
     include_bytes!("../../../assets/fonts/nerd-symbols/TcodeTerminalSymbols.ttf");
 const DM_SANS_PATH: &str = "fonts/DMSans[wght].ttf";
 
-/// Extra SVG icons bundled by tcode (not shipped by gpui-component).
+/// Additional Tcode icons.
 const EXTRA_ICONS: &[(&str, &[u8])] = &[
     (
         "icons/image.svg",
@@ -93,7 +54,7 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/users.svg",
         include_bytes!("../../../assets/icons/users.svg"),
     ),
-    // Forgejo's mark, which Gitea hosts share: gpui-kit-assets ships no forge mark but GitHub's.
+    // Forgejo's mark is shared by Gitea hosts.
     (
         "icons/forgejo.svg",
         include_bytes!("../../../assets/icons/forgejo.svg"),
@@ -200,11 +161,10 @@ const CHEVRON_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBo
 const MESSAGE_SQUARE_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6l-4 4V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/></svg>"#;
 const MONITOR_SMARTPHONE_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8"/><path d="M10 19v-3.96 3.15"/><path d="M7 19h5"/><rect width="6" height="10" x="16" y="12" rx="2"/></svg>"#;
 
-/// Lucide `mic`, inlined rather than shipped as a file: it is the composer
-/// dictation button's only asset and the feature is macOS-only.
+/// Lucide microphone icon.
 const MIC_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-mic"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>"#;
 
-/// App assets layered over gpui-component's built-in icon assets.
+/// Synchronously bundled app fonts and icons.
 pub struct Assets;
 
 impl AssetSource for Assets {
@@ -215,29 +175,10 @@ impl AssetSource for Assets {
         if let Some((_, bytes)) = EXTRA_ICONS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
-        if let Some(bytes) = PullRequestAssets.load(path)? {
-            return Ok(Some(bytes));
-        }
-        if let Some(bytes) = ThreadArrangeAssets.load(path)? {
-            return Ok(Some(bytes));
-        }
-        if let Some(bytes) = MathAssets.load(path)? {
-            return Ok(Some(bytes));
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            ComponentAssets.load(path)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            Ok(embedded_component_icon(path).map(Cow::Borrowed))
-        }
+        Ok(embedded_component_icon(path).map(Cow::Borrowed))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut paths = ComponentAssets.list(path)?;
-        #[cfg(target_arch = "wasm32")]
         let mut paths = COMPONENT_ICONS
             .iter()
             .filter(|(name, _)| name.starts_with(path))
@@ -246,9 +187,6 @@ impl AssetSource for Assets {
         if DM_SANS_PATH.starts_with(path) {
             paths.push(DM_SANS_PATH.into());
         }
-        paths.extend(PullRequestAssets.list(path)?);
-        paths.extend(ThreadArrangeAssets.list(path)?);
-        paths.extend(MathAssets.list(path)?);
         for (name, _) in EXTRA_ICONS {
             if name.starts_with(path) {
                 paths.push((*name).into());
@@ -258,10 +196,8 @@ impl AssetSource for Assets {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
 include!(concat!(env!("OUT_DIR"), "/component_icons.rs"));
 
-#[cfg(any(target_arch = "wasm32", test))]
 fn embedded_component_icon(path: &str) -> Option<&'static [u8]> {
     COMPONENT_ICONS
         .iter()
@@ -274,8 +210,7 @@ mod tests {
 
     #[test]
     fn browser_navigation_icons_are_available_without_network() {
-        // These controls rendered as blank hit targets when Web fell back to
-        // the component package's asynchronous network loader.
+        // Browser controls need SVG bytes synchronously, including offline.
         for path in [
             "icons/settings.svg",
             "icons/panel-left.svg",
