@@ -490,7 +490,11 @@ impl AppState {
         let file = store.read_file()?;
         let mut sessions = file.sessions;
         sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
-        let projects = file.projects;
+        let mut projects = file.projects;
+        let scratch_root = user_directories.scratch_root().ok();
+        for project in &mut projects {
+            project.quick_chat = scratch_root.as_ref() == Some(&project.root);
+        }
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());

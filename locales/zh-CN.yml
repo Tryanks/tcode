@@ -184,6 +184,7 @@ sidebar:
   sort: "排序：%{mode}"
   sort_recent: "最近活动"
   sort_name: "名称 A-Z"
+  quick_chats: "快速对话"
   quick_chat: "快速对话"
   create_new_project: "创建新项目"
   project_name: "项目名称"

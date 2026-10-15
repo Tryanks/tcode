@@ -163,6 +163,7 @@ pub use wire::{
 // IndexActivitiesChanged sends changed activity entries when other index facts
 // are unchanged; subscription replies remain full index snapshots.
 // Unreleased: explicit original reads use a raw-byte iroh bi-stream or the authenticated browser /original endpoint; bounded ReadFileBytes/ReadItemImage control queries are unchanged.
+// Unreleased: Project.quick_chat identifies host-owned quick chats in replicated metadata.
 pub const PROTOCOL_VERSION: u32 = 12;
 
 #[cfg(test)]

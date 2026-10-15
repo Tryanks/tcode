@@ -184,6 +184,7 @@ sidebar:
   sort: "Sort: %{mode}"
   sort_recent: "Recent activity"
   sort_name: "Name A-Z"
+  quick_chats: "Quick chats"
   quick_chat: "Quick chat"
   create_new_project: "Create new project"
   project_name: "Project name"

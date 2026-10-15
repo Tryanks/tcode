@@ -73,7 +73,7 @@ impl UserDirectories {
         Ok(root)
     }
 
-    pub fn scratch_directory(&self) -> std::io::Result<(PathBuf, PathBuf)> {
+    pub fn scratch_root(&self) -> std::io::Result<PathBuf> {
         let documents = self
             .documents
             .clone()
@@ -84,7 +84,11 @@ impl UserDirectories {
                     "Host documents directory is unavailable.",
                 )
             })?;
-        let root = documents.join("Tcode");
+        Ok(documents.join("Tcode"))
+    }
+
+    pub fn scratch_directory(&self) -> std::io::Result<(PathBuf, PathBuf)> {
+        let root = self.scratch_root()?;
         let daily = root.join(chrono::Local::now().date_naive().to_string());
         create_directory(&daily)?;
         Ok((root, daily))

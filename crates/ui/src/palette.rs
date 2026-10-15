@@ -333,21 +333,20 @@ impl CommandPalette {
                 Action::QuickChat,
             );
         }
-        for group in store.grouped_sessions() {
+        for project in store.projects() {
             push_action(
-                crate::tr!("palette.new_thread", project = group.project.name.clone()).into_owned(),
+                crate::tr!("palette.new_thread", project = project.name.clone()).into_owned(),
                 IconName::Plus,
                 Action::NewThread {
-                    cwd: group.project.root.clone(),
-                    project_id: group.project.id.clone(),
+                    cwd: project.root.clone(),
+                    project_id: project.id.clone(),
                 },
             );
             if store.scope().is_full() {
                 push_action(
-                    crate::tr!("project_icon.action", project = group.project.name.clone())
-                        .into_owned(),
+                    crate::tr!("project_icon.action", project = project.name.clone()).into_owned(),
                     IconName::Folder,
-                    Action::ChangeProjectIcon(group.project),
+                    Action::ChangeProjectIcon(project),
                 );
             }
         }
@@ -442,7 +441,7 @@ impl CommandPalette {
                             Item {
                                 icon: IconName::SquareTerminal,
                                 label: meta.title.clone(),
-                                subtitle: Some(group.project.name.clone()),
+                                subtitle: Some(crate::project_icon::label(&group.project)),
                                 provider: Some(meta.provider),
                                 updated_at: Some(meta.updated_at),
                                 action: Action::OpenThread {

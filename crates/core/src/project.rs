@@ -16,6 +16,9 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub root: PathBuf,
+    /// Host-owned scratch group, independent of the client filesystem.
+    #[serde(default)]
+    pub quick_chat: bool,
     /// Host-owned image selected by the user; absent uses the project config's iconPath.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_path: Option<PathBuf>,
@@ -34,6 +37,7 @@ impl Project {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             root,
+            quick_chat: false,
             icon_path: None,
             permission_defaults: BTreeMap::new(),
             created_at: now_secs(),
@@ -519,6 +523,7 @@ mod tests {
                 id: "p-old".into(),
                 name: "Old".into(),
                 root: PathBuf::from("/old"),
+                quick_chat: false,
                 icon_path: None,
                 permission_defaults: Default::default(),
                 created_at: 1,
@@ -527,6 +532,7 @@ mod tests {
                 id: "p-new".into(),
                 name: "New".into(),
                 root: PathBuf::from("/new"),
+                quick_chat: false,
                 icon_path: None,
                 permission_defaults: Default::default(),
                 created_at: 2,
@@ -535,6 +541,7 @@ mod tests {
                 id: "p-empty".into(),
                 name: "Empty".into(),
                 root: PathBuf::from("/empty"),
+                quick_chat: false,
                 icon_path: None,
                 permission_defaults: Default::default(),
                 created_at: 15,
