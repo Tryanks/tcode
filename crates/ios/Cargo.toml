@@ -18,6 +18,6 @@ tcode-client = { path = "../client" }
 # while this crate is built alone, as CI and build.sh do; a workspace-wide
 # build unifies the desktop's features into it.
 tcode-traverse = { path = "../traverse", default-features = false, features = ["native"] }
-tcode-ui = { path = "../ui", default-features = false }
+tcode-ui = { path = "../ui", default-features = false, features = ["voice"] }
 async-channel = "2"
 dirs = "7"
