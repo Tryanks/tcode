@@ -110,6 +110,14 @@ final class GPUIHostView: UIView {
     private var touchIdentifiers: [ObjectIdentifier: UInt64] = [:]
     private var keyboardFrameInScreen: CGRect?
     let keyboardProxy = GPUITextInput(frame: .zero)
+    private lazy var pasteControl: UIPasteControl = {
+        let configuration = UIPasteControl.Configuration()
+        configuration.displayMode = .labelOnly
+        let control = UIPasteControl(configuration: configuration)
+        control.target = keyboardProxy
+        control.isHidden = true
+        return control
+    }()
     // Once it recognizes, UIKit cancels the edge touch in this view, so GPUI
     // sees no pan to fling and no tap; an edge contact that never moves fails
     // it and reaches GPUI unchanged.
@@ -152,7 +160,9 @@ final class GPUIHostView: UIView {
         keyboardProxy.smartDashesType = .no
         keyboardProxy.smartQuotesType = .no
         keyboardProxy.smartInsertDeleteType = .no
+        keyboardProxy.pasteConfiguration = UIPasteConfiguration(forAccepting: NSString.self)
         addSubview(keyboardProxy)
+        addSubview(pasteControl)
         addGestureRecognizer(backSwipe)
 
         NotificationCenter.default.addObserver(
@@ -285,7 +295,25 @@ final class GPUIHostView: UIView {
     }
 
     func hideKeyboard() {
+        pasteControl.isHidden = true
         keyboardProxy.resignFirstResponder()
+    }
+
+    private var pendingPasteFrame = CGRect.zero
+    private var pasteUpdatePending = false
+
+    func setPasteControl(frame: CGRect) {
+        pendingPasteFrame = frame
+        guard !pasteUpdatePending else { return }
+        pasteUpdatePending = true
+        // Render clears the old menu before paint places its replacement. Apply
+        // both together so a redraw cannot cancel a control's tracked touch.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.pasteUpdatePending = false
+            self.pasteControl.frame = self.pendingPasteFrame
+            self.pasteControl.isHidden = self.pendingPasteFrame.isEmpty || !self.keyboardProxy.isFirstResponder
+        }
     }
 
     func configureTextInput(
@@ -296,6 +324,10 @@ final class GPUIHostView: UIView {
     ) {
         keyboardProxy.autocorrectionType = autocorrect ? .yes : .no
         keyboardProxy.spellCheckingType = suggestions ? .yes : .no
+        keyboardProxy.inlinePredictionType = suggestions ? .yes : .no
+        keyboardProxy.smartDashesType = autocorrect ? .yes : .no
+        keyboardProxy.smartQuotesType = autocorrect ? .yes : .no
+        keyboardProxy.smartInsertDeleteType = autocorrect ? .yes : .no
         keyboardProxy.autocapitalizationType = switch autocapitalize {
         case 1: .words
         case 2: .sentences
@@ -376,6 +408,9 @@ final class GPUIHostView: UIView {
         phase: ForwardedTouchPhase
     ) {
         var serialized = touches.compactMap { touch -> GpuiIosTouch? in
+            // Native subviews own their touches; replaying them in GPUI can
+            // redraw and remove a control before UIKit delivers its action.
+            guard touch.view === self else { return nil }
             guard let identifier = touchIdentifiers[ObjectIdentifier(touch)] else { return nil }
             let position = touch.location(in: self)
             let predicted = phase == .moved ? event?.predictedTouches(for: touch)?.last : nil

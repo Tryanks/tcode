@@ -275,10 +275,7 @@ impl Composer {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(min_rows, max_rows)
-                // Whether Enter sends is an input-device question, not a width
-                // one: a wide tablet still types on glass, and a desktop window
-                // dragged narrow still has a hardware Enter key.
-                .submit_on_enter(!gpui_base::is_mobile())
+                .submit_on_enter(true)
         });
         let model_search = cx.new(|cx| InputState::new(window, cx));
         let user_input_custom =
@@ -429,7 +426,7 @@ impl Composer {
                 cx.new(|cx| {
                     TextareaState::new(window, cx)
                         .auto_grow(min_rows, max_rows)
-                        .submit_on_enter(!gpui_base::is_mobile())
+                        .submit_on_enter(true)
                 })
             });
         self.input_destination = destination;
@@ -1099,7 +1096,7 @@ impl Render for Composer {
             .items_center();
 
         #[cfg(feature = "voice")]
-        let mic = if self.compact || readonly {
+        let mic = if readonly {
             None
         } else {
             self.render_mic_button(cx)
@@ -1121,6 +1118,7 @@ impl Render for Composer {
                 .children(attach_menu)
                 .child(div().flex_1().min_w_0().child(self.render_model_picker(cx)))
                 .child(self.render_traits_picker(cx))
+                .children(mic)
                 .child(self.render_primary_action(turn_running, cx))
         } else if compact {
             control_row_base
@@ -1351,6 +1349,7 @@ impl Render for Composer {
             .when(has_review_comments, |this| this.child(review_chips))
             .child(
                 Textarea::new(&self.input)
+                    .text_assistance(true)
                     .placeholder(desired_placeholder)
                     .disabled(readonly)
                     .appearance(false),

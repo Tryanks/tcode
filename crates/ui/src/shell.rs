@@ -27,10 +27,10 @@ use crate::widgets::tabs::{TabBar, TabItem};
 use crate::window_state::{NavigationPanel, NavigationSnapshot};
 use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Div,
-    ElementId, Entity, FocusHandle, Focusable as _, Global, HitboxBehavior,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    TouchPhase, WeakEntity, Window, actions, canvas, div, prelude::FluentBuilder as _, px,
+    ElementId, Entity, Focusable as _, Global, HitboxBehavior, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Role,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TouchPhase,
+    WeakEntity, Window, actions, canvas, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{
     NavMotion, NavOperation, NavStack, NavStackState, ResizableState, StyledExt as _, h_flex,
@@ -282,10 +282,6 @@ pub struct AppShell {
     /// Tracks the palette's open state across frames so it can be focused on the
     /// open transition.
     palette_was_open: bool,
-    /// The handle focused while a software keyboard covered the window, so the
-    /// frame the keyboard leaves can tell an IME dismissing itself (focus is
-    /// still there) from focus having moved to another input.
-    keyboard_focus: Option<FocusHandle>,
     /// Viewport width and sidebar collapse last seen by render; a change in
     /// either re-lays the split out, which arms the sidebar and panel restores.
     last_split_layout: Option<(Pixels, bool)>,
@@ -448,7 +444,6 @@ impl AppShell {
             operation_toasts: HashMap::new(),
             next_toast_id: 1,
             palette_was_open: false,
-            keyboard_focus: None,
             last_split_layout: None,
             window_title: String::new(),
             _subscriptions: subscriptions,
@@ -1020,26 +1015,6 @@ impl AppShell {
             attachment.link.store.update(cx, |store, cx| {
                 store.set_conversation_on_screen(on_screen, cx);
             });
-        }
-    }
-
-    /// A software keyboard the IME dismissed on its own (its own hide or Back
-    /// key) leaves GPUI focus on the input it served, so the input keeps its
-    /// focus ring while nothing can be typed. GPUI only reports the dismissal
-    /// as a visual viewport change, so the transition is observed here, once
-    /// per frame: the input focused while the keyboard covered the window is
-    /// blurred on the frame the cover leaves, unless focus already moved on
-    /// (switching inputs hides and re-shows the keyboard and must not blur the
-    /// new one). Only a mobile build has a software keyboard.
-    fn sync_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !crate::window_seam::is_mobile(cx) {
-            self.keyboard_focus = None;
-        } else if crate::window_seam::keyboard_covers_window(window) {
-            self.keyboard_focus = window.focused(cx);
-        } else if let Some(covered) = self.keyboard_focus.take()
-            && window.focused(cx) == Some(covered)
-        {
-            window.blur(cx);
         }
     }
 
@@ -3094,7 +3069,6 @@ impl Render for AppShell {
                 .update(cx, |p, cx| p.open(focus_query, window, cx));
         }
         self.palette_was_open = palette_open;
-        self.sync_keyboard_focus(window, cx);
         let body = if self.compact(cx) {
             self.render_compact(window, cx)
         } else {
@@ -4225,14 +4199,8 @@ mod tests {
         cx.update(|window, _| assert!(focus.is_focused(window)));
     }
 
-    /// A software keyboard the IME dismissed itself takes focus with it: the
-    /// composer that was focused under the keyboard is unfocused (its ring
-    /// gone) on the frame the keyboard leaves, and so is the palette's search
-    /// field, which is just another input. Focus that already moved to another
-    /// input on that frame is kept: switching inputs hides and re-shows the
-    /// keyboard and must not blur the input the user just tapped.
     #[gpui::test]
-    fn ime_dismissal_blurs_the_input_the_keyboard_covered(cx: &mut TestAppContext) {
+    fn keyboard_cover_changes_keep_editor_focus_until_explicit_dismissal(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
@@ -4273,99 +4241,50 @@ mod tests {
         await_restore_update(&shell, cx, |store| !store.chat_loading());
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
         let composer = shell.read_with(cx, |shell, cx| {
             shell.attachment.as_ref().unwrap().chat.read(cx).composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
-        let keyboard = gpui::Edges {
-            bottom: px(400.),
-            ..Default::default()
-        };
-        // A desktop visual-viewport transition is a control: without a
-        // software keyboard it must not blur the same focused editor.
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
-        resize(cx, 1024.);
         cx.update(|window, cx| focus.focus(window, cx));
         draw(cx);
-        for insets in [keyboard, gpui::Edges::default()] {
-            crate::window_seam::occlude_for_test(cx, insets);
-            draw(cx);
-            cx.update(|window, _| assert!(focus.is_focused(window)));
-        }
-        as_mobile(cx);
-        resize(cx, 393.);
-        cx.update(|window, cx| window.blur(cx));
+        crate::window_seam::occlude_for_test(
+            cx,
+            gpui::Edges {
+                bottom: px(400.),
+                ..Default::default()
+            },
+        );
         draw(cx);
+        crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
+        draw(cx);
+        cx.update(|window, _| {
+            assert!(
+                focus.is_focused(window),
+                "hardware input hides the software keyboard without ending editing"
+            )
+        });
+        cx.simulate_input("keyboard draft");
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "keyboard draft"
+        );
         let card = cx
             .debug_bounds("composer-card")
             .expect("composer on the thread page");
-        cx.simulate_click(card.center(), gpui::Modifiers::default());
-        draw(cx);
-        cx.update(|window, _| assert!(focus.is_focused(window)));
-        // The empty timeline above the composer must let a phone user put
-        // away the keyboard without finding another focusable control.
         cx.simulate_click(
             gpui::point(card.center().x, card.top() - px(40.)),
             gpui::Modifiers::default(),
         );
         draw(cx);
-        cx.update(|window, _| assert!(!focus.is_focused(window), "tap blank timeline"));
-        cx.simulate_click(card.center(), gpui::Modifiers::default());
-        draw(cx);
-        cx.update(|window, _| assert!(focus.is_focused(window), "tap composer again"));
-        crate::window_seam::occlude_for_test(cx, keyboard);
-        draw(cx);
-        cx.update(|window, _| assert!(focus.is_focused(window), "typing under the keyboard"));
-        crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
-        draw(cx);
         cx.update(|window, _| {
             assert!(
                 !focus.is_focused(window),
-                "the IME dismissing itself unfocuses the composer"
+                "tap blank timeline dismisses editing"
             )
-        });
-
-        // Every update the harness makes draws the window before the next
-        // one, and the viewport callback re-enters the app, so the palette
-        // opens without a notify: its focus-on-open then lands on the same
-        // frame as the keyboard's departure, as a tap on the search pill and
-        // an IME hide arriving together would.
-        let palette = shell.read_with(cx, |shell, _| {
-            shell.attachment.as_ref().unwrap().palette.clone()
         });
         cx.simulate_click(card.center(), gpui::Modifiers::default());
         draw(cx);
-        crate::window_seam::occlude_for_test(cx, keyboard);
-        draw(cx);
-        cx.update(|window, _| assert!(focus.is_focused(window)));
-        state.update(cx, |state, _| state.palette_open = true);
-        crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
-        draw(cx);
-        cx.update(|window, cx| {
-            assert!(!focus.is_focused(window));
-            assert!(
-                palette
-                    .read(cx)
-                    .focus_handle(cx)
-                    .contains_focused(window, cx),
-                "focus that moved to the palette on the frame the keyboard left is kept"
-            );
-        });
-        crate::window_seam::occlude_for_test(cx, keyboard);
-        draw(cx);
-        crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
-        draw(cx);
-        cx.update(|window, cx| {
-            assert!(
-                !palette
-                    .read(cx)
-                    .focus_handle(cx)
-                    .contains_focused(window, cx),
-                "the palette's search field is dismissed with its keyboard"
-            );
-            assert!(state.read(cx).palette_open);
-        });
+        cx.update(|window, _| assert!(focus.is_focused(window), "tap composer resumes editing"));
     }
 
     /// A tablet that rotates through phone widths and back: the read-only

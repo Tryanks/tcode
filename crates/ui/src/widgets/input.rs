@@ -68,6 +68,7 @@ pub struct Input {
     state: State,
     style: StyleRefinement,
     height: Option<DefiniteLength>,
+    text_assistance: bool,
     appearance: bool,
     bordered: bool,
     disabled: bool,
@@ -89,6 +90,7 @@ impl Input {
             state,
             style: StyleRefinement::default(),
             height: None,
+            text_assistance: false,
             appearance: true,
             bordered: true,
             disabled: false,
@@ -155,9 +157,8 @@ fn render_touch_selection(state: &State, window: &Window, cx: &App) -> Vec<AnyEl
     });
     let editable = capabilities.is_editable();
     let copyable = capabilities.is_copyable();
-    // Offered whenever the text can change, without peeking at the
-    // clipboard: on iOS every read of it shows the system's paste banner,
-    // and an empty clipboard pastes nothing.
+    // Rendering must not probe the iOS clipboard without user paste intent.
+    // An empty clipboard pastes nothing.
     let pasteable = editable;
 
     let dispatch = move |action: &dyn Action, window: &mut Window, cx: &mut App| {
@@ -187,11 +188,14 @@ fn render_touch_selection(state: &State, window: &Window, cx: &App) -> Vec<AnyEl
     }
     if pasteable {
         let dispatch = dispatch.clone();
-        items.push(EditMenuItem::new(
-            "paste",
-            crate::tr!("edit_menu.paste").into_owned(),
-            move |window, cx| dispatch(&Paste, window, cx),
-        ));
+        items.push(
+            EditMenuItem::new(
+                "paste",
+                crate::tr!("edit_menu.paste").into_owned(),
+                move |window, cx| dispatch(&Paste, window, cx),
+            )
+            .native_paste(),
+        );
     }
     if selectable {
         let state = state.clone();
@@ -232,6 +236,7 @@ impl Styled for Input {
 impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let multi_line = matches!(self.state, State::Textarea(_));
+        let text_assistance = self.text_assistance;
         let compact = crate::window_seam::window_is_compact(window, cx);
         dispatch_state!(&self.state, |state| state
             .update(cx, |state, cx| state.prepare(window, cx)));
@@ -250,6 +255,13 @@ impl RenderOnce for Input {
             .focus_handle(cx)
             .is_focused(window))
             && !self.disabled;
+        #[cfg(target_os = "ios")]
+        if focused {
+            gpui_ios::set_paste_input(dispatch_state!(&self.state, |base| base
+                .entity_id()
+                .as_u64()));
+            gpui_ios::set_paste_control_bounds(None);
+        }
         if !focused {
             dispatch_state!(&self.state, |base| base
                 .update(cx, |state, cx| commit_marked_text(state, window, cx)));
@@ -381,6 +393,7 @@ impl RenderOnce for Input {
                                     bounds,
                                     input_entity.clone(),
                                     multi_line,
+                                    text_assistance,
                                 ),
                                 cx,
                             );
@@ -446,6 +459,11 @@ impl Textarea {
         Self {
             input: Input::from_textarea(state),
         }
+    }
+    /// Enable prose correction, predictions and native smart punctuation.
+    pub fn text_assistance(mut self, enabled: bool) -> Self {
+        self.input.text_assistance = enabled;
+        self
     }
     pub fn appearance(mut self, value: bool) -> Self {
         self.input = self.input.appearance(value);

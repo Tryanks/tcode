@@ -20,6 +20,7 @@ final class GPUITextInput: UIView, UITextInput {
     lazy var tokenizer: UITextInputTokenizer = UITextInputStringTokenizer(textInput: self)
     var autocorrectionType: UITextAutocorrectionType = .no
     var autocapitalizationType: UITextAutocapitalizationType = .none
+    var inlinePredictionType: UITextInlinePredictionType = .no
     var spellCheckingType: UITextSpellCheckingType = .no
     var smartDashesType: UITextSmartDashesType = .no
     var smartQuotesType: UITextSmartQuotesType = .no
@@ -29,6 +30,15 @@ final class GPUITextInput: UIView, UITextInput {
     var returnKeyType: UIReturnKeyType = .default
     var enablesReturnKeyAutomatically = false
     var isSecureTextEntry = false
+    private var pasteGeneration: UInt64 = 0
+    private var inputOwner: UInt64 = 0
+
+    func setInputOwner(_ owner: UInt64) {
+        if inputOwner != owner {
+            inputOwner = owner
+            pasteGeneration &+= 1
+        }
+    }
     private var editing = false
     private var servingOldSnapshot = false
     private var synchronizationPending = false
@@ -49,6 +59,7 @@ final class GPUITextInput: UIView, UITextInput {
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool { false }
 
     override func resignFirstResponder() -> Bool {
+        pasteGeneration &+= 1
         unmarkText()
         return super.resignFirstResponder()
     }
@@ -176,6 +187,28 @@ final class GPUITextInput: UIView, UITextInput {
         }
     }
 
+    override var keyCommands: [UIKeyCommand]? {
+        [UIKeyCommand(input: "v", modifierFlags: .command, action: #selector(paste(_:)))]
+    }
+
+    override func paste(_ sender: Any?) {
+        paste(itemProviders: UIPasteboard.general.itemProviders)
+    }
+
+    override func paste(itemProviders: [NSItemProvider]) {
+        guard let provider = itemProviders.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else { return }
+        let expected = liveSnapshot()
+        let generation = pasteGeneration
+        provider.loadObject(ofClass: NSString.self) { [weak self] value, _ in
+            guard let text = value as? String else { return }
+            DispatchQueue.main.async {
+                guard let self, self.isFirstResponder, self.pasteGeneration == generation,
+                      self.liveSnapshot() == expected else { return }
+                self.edit { withUTF8(text) { gpui_ios_paste_text($0, $1) } }
+            }
+        }
+    }
+
     func deleteBackward() { edit { gpui_ios_delete_backward() } }
     func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
         replace(NSRange(location: NSNotFound, length: 0), text: markedText ?? "", marked: true, selection: selectedRange)
@@ -259,8 +292,13 @@ final class GPUITextInput: UIView, UITextInput {
             guard let key = $0.key else { return true }
             return key.modifierFlags.intersection([.command, .control]).isEmpty
         })
-        let raw = presses.subtracting(composing)
-        return composing.union(keyEventTarget?.sendPresses(raw, down: down, repeatKey: repeatKey) ?? raw)
+        // UIKit's standard Paste command carries the user's clipboard intent.
+        let pasting = Set(presses.filter {
+            $0.key?.modifierFlags.contains(.command) == true
+                && $0.key?.charactersIgnoringModifiers.lowercased() == "v"
+        })
+        let raw = presses.subtracting(composing).subtracting(pasting)
+        return composing.union(pasting).union(keyEventTarget?.sendPresses(raw, down: down, repeatKey: repeatKey) ?? raw)
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {

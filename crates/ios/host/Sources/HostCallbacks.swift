@@ -104,3 +104,13 @@ public func gpuiHostWriteClipboard(_ bytes: UnsafePointer<UInt8>?, _ length: Int
     else { return }
     UIPasteboard.general.string = value
 }
+
+@_cdecl("gpui_ios_host_set_paste_control")
+public func gpuiHostSetPasteControl(_ x: Double, _ y: Double, _ width: Double, _ height: Double) {
+    GPUIHostBridge.view?.setPasteControl(frame: CGRect(x: x, y: y, width: width, height: height))
+}
+
+@_cdecl("gpui_ios_host_set_paste_input")
+public func gpuiHostSetPasteInput(_ owner: UInt64) {
+    GPUIHostBridge.view?.keyboardProxy.setInputOwner(owner)
+}

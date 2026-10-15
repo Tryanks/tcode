@@ -11101,6 +11101,7 @@ dependencies = [
  "gpui-base",
  "gpui-component",
  "gpui-component-macros",
+ "gpui-ios",
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",

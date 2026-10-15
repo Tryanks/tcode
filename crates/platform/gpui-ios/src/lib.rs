@@ -8,6 +8,9 @@ use std::rc::Rc;
 
 pub mod text_input;
 
+#[cfg(any(target_os = "ios", test))]
+mod key_input;
+
 #[cfg(target_os = "ios")]
 mod ios;
 
@@ -27,4 +30,22 @@ pub fn platform() -> Rc<dyn gpui::Platform> {
 #[cfg(not(target_os = "ios"))]
 pub fn platform() -> Rc<dyn gpui::Platform> {
     panic!("gpui-ios::platform() is only available when target_os = \"ios\"")
+}
+
+/// Place UIKit's trusted paste control over the shared edit menu's Paste item.
+#[cfg(target_os = "ios")]
+pub fn set_paste_control_bounds(bounds: Option<gpui::Bounds<gpui::Pixels>>) {
+    ios::ffi::host_set_paste_control_bounds(bounds);
+}
+
+/// Keep asynchronous UIKit paste attached to the focused editor's identity.
+#[cfg(target_os = "ios")]
+pub fn set_paste_input(owner: u64) {
+    ios::ffi::host_set_paste_input(owner);
+}
+
+/// Make UIKit's authorized payload available to the editor's synchronous Paste action.
+#[cfg(target_os = "ios")]
+pub fn with_native_paste(item: gpui::ClipboardItem, paste: impl FnOnce()) {
+    ios::with_platform(|platform| platform.with_native_paste(item, paste));
 }
