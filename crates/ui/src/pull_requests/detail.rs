@@ -96,7 +96,7 @@ pub(super) enum TextState {
 pub(super) struct FilesView {
     pub(super) list: Option<crate::diff::list::DiffList>,
     /// The head, file count and options the list was rendered for.
-    pub(super) rendered: Option<(String, usize, bool, bool, bool)>,
+    pub(super) rendered: Option<(String, usize, bool)>,
     pub(super) rendering: bool,
     pub(super) page_loading: bool,
     pub(super) page_error: Option<ProtocolError>,
@@ -104,7 +104,7 @@ pub(super) struct FilesView {
     /// The reader's own collapse choices, by path; others follow the viewed mark.
     pub(super) collapsed: HashMap<String, bool>,
     /// A gap the reader expanded while its file's text was being read.
-    pub(super) pending_expand: Option<(String, u32, crate::diff::model::ExpandDir)>,
+    pub(super) pending_expand: Option<String>,
     /// A file text read that failed, told once on the next draw.
     pub(super) text_failure: Option<String>,
     pub(super) off_diff_open: bool,
@@ -171,7 +171,6 @@ pub struct PullRequestView {
     pub(super) current: Option<(String, PullRequestKey)>,
     pub(super) pages: HashMap<(String, PullRequestKey), PullRequestPage>,
     pub(super) ignore_ws: bool,
-    pub(super) show_invisibles: bool,
     pub(super) file_column: bool,
     pub(super) file_filter: Option<(Entity<crate::widgets::input::InputState>, Subscription)>,
     /// The phone header's chip row, which scrolls sideways.
@@ -239,7 +238,6 @@ impl PullRequestView {
             current: None,
             pages: HashMap::new(),
             ignore_ws: false,
-            show_invisibles: false,
             file_column: true,
             file_filter: None,
             chips_scroll: ScrollHandle::new(),
@@ -2261,14 +2259,14 @@ mod tests {
         let reread = reread.expect("an expired page 1 is read again");
 
         let scroll_to = |cx: &mut VisualTestContext, file: usize| {
-            view.update(cx, |view, _| {
+            view.update(cx, |view, cx| {
                 view.page()
                     .unwrap()
                     .files_view
                     .list
                     .as_ref()
                     .unwrap()
-                    .scroll_to_file(file)
+                    .scroll_to_file(file, cx)
             });
             settle(cx);
         };

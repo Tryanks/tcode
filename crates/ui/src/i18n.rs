@@ -56,6 +56,7 @@ fn system_locale() -> Option<String> {
 /// Set the process-global translation locale.
 pub fn set_locale(locale: &str) {
     rust_i18n::set_locale(locale);
+    gpui_component::set_locale(locale);
 }
 
 /// Translate a key in the current locale, returning the key when it is missing.

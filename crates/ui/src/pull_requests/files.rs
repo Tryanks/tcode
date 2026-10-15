@@ -1,14 +1,13 @@
 //! The Files view: a pull request's changed files drawn by the diff list, from the host's
 //! files read and never from the local checkout.
 
-use std::ops::Range;
 use std::rc::Rc;
 
 use agent::FileChangeKind;
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, HighlightStyle, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, AppContext as _, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
@@ -25,9 +24,7 @@ use crate::{
             DiffList, DiffListHost, DiffSelectionMenu, FileLayout, FileMenu, GapState, kind_rail,
             render_list, render_notice,
         },
-        model::{
-            DiffColors, ExpandDir, FileDiffInput, RenderedFile, build_file, reconstruct_from_text,
-        },
+        model::{FileDiffInput, PreparedFile, prepare_file, reconstruct_from_text},
     },
     icon::{Icon, IconName},
     material,
@@ -51,7 +48,6 @@ enum FilesOption {
     Split,
     Wrap,
     Whitespace,
-    Invisibles,
     CollapseAll,
     ExpandAll,
     /// The phone's way to the Review sheet.
@@ -132,20 +128,13 @@ impl PullRequestView {
 
     /// Renders the files the host answered with, once per head, page and option change.
     fn ensure_list(&mut self, cx: &mut Context<Self>) {
-        let dark = cx.theme().mode.is_dark();
-        let (ignore_ws, show_invisibles) = (self.ignore_ws, self.show_invisibles);
+        let ignore_ws = self.ignore_ws;
         let layouts = self.layouts();
         let Some(page) = self.page_mut() else { return };
         let Some(files) = page.files.data.as_ref() else {
             return;
         };
-        let key = (
-            files.head.clone(),
-            files.files.len(),
-            dark,
-            ignore_ws,
-            show_invisibles,
-        );
+        let key = (files.head.clone(), files.files.len(), ignore_ws);
         if page.files_view.rendered.as_ref() == Some(&key) {
             if let Some(list) = page.files_view.list.as_mut() {
                 list.set_layouts(layouts);
@@ -160,9 +149,7 @@ impl PullRequestView {
             .files_view
             .rendered
             .as_ref()
-            .filter(|rendered| {
-                (&rendered.0, rendered.2, rendered.3, rendered.4) == (&key.0, key.2, key.3, key.4)
-            })
+            .filter(|rendered| (&rendered.0, rendered.2) == (&key.0, key.2))
             .map_or(0, |rendered| rendered.1);
         let pending: Vec<_> = files.files[kept..]
             .iter()
@@ -175,15 +162,6 @@ impl PullRequestView {
             })
             .collect();
         page.files_view.rendering = true;
-        let theme = cx.theme().highlight_theme.clone();
-        let colors = DiffColors {
-            added_word_bg: cx.theme().success.opacity(0.30),
-            removed_word_bg: cx.theme().danger.opacity(0.28),
-        };
-        let whitespace = HighlightStyle {
-            color: Some(cx.theme().muted_foreground),
-            ..Default::default()
-        };
         let current = self.current.clone();
         cx.spawn(async move |this, cx| {
             let rendered = cx
@@ -191,17 +169,7 @@ impl PullRequestView {
                 .spawn(async move {
                     pending
                         .iter()
-                        .map(|(file, text)| {
-                            render(
-                                file,
-                                text.as_ref(),
-                                ignore_ws,
-                                show_invisibles,
-                                &theme,
-                                &colors,
-                                &whitespace,
-                            )
-                        })
+                        .map(|(file, text)| render(file, text.as_ref(), ignore_ws))
                         .collect::<Vec<_>>()
                 })
                 .await;
@@ -221,7 +189,7 @@ impl PullRequestView {
                         list.set_layouts(layouts);
                         list.relayout();
                     }
-                    None => page.files_view.list = Some(DiffList::new(rendered, layouts)),
+                    None => page.files_view.list = Some(DiffList::new(rendered, layouts, cx)),
                 }
                 page.files_view.rendered = Some(key);
                 cx.notify();
@@ -308,18 +276,9 @@ impl PullRequestView {
 
     /// Redraws a file once its text arrived, then applies the expansion that asked for it.
     fn apply_text(&mut self, cx: &mut Context<Self>) {
-        let dark_theme = cx.theme().highlight_theme.clone();
-        let colors = DiffColors {
-            added_word_bg: cx.theme().success.opacity(0.30),
-            removed_word_bg: cx.theme().danger.opacity(0.28),
-        };
-        let whitespace = HighlightStyle {
-            color: Some(cx.theme().muted_foreground),
-            ..Default::default()
-        };
-        let (ignore_ws, show_invisibles) = (self.ignore_ws, self.show_invisibles);
+        let ignore_ws = self.ignore_ws;
         let Some(page) = self.page_mut() else { return };
-        let Some((path, start, direction)) = page.files_view.pending_expand.clone() else {
+        let Some(path) = page.files_view.pending_expand.clone() else {
             return;
         };
         let Some(TextState::Loaded { old, new }) = page.files_view.texts.get(&path) else {
@@ -338,10 +297,6 @@ impl PullRequestView {
             &files.files[index],
             Some(&(old.clone(), new.clone())),
             ignore_ws,
-            show_invisibles,
-            &dark_theme,
-            &colors,
-            &whitespace,
         );
         page.files_view.pending_expand = None;
         let Some(list) = page.files_view.list.as_mut() else {
@@ -350,15 +305,7 @@ impl PullRequestView {
         if let Some(slot) = list.files.get_mut(index) {
             *slot = rendered;
         }
-        let gap = list.files[index]
-            .collapsed
-            .iter()
-            .find(|gap| gap.contains(&start) || gap.start == start)
-            .cloned();
-        match gap {
-            Some(gap) => list.expand(index, gap, direction),
-            None => list.relayout(),
-        }
+        list.relayout();
         cx.notify();
     }
 
@@ -470,13 +417,9 @@ impl PullRequestView {
                 .store
                 .update(cx, |store, cx| store.toggle_diff_wrap(cx)),
             FilesOption::Whitespace => self.ignore_ws = !self.ignore_ws,
-            FilesOption::Invisibles => self.show_invisibles = !self.show_invisibles,
             FilesOption::CollapseAll => self.set_all_collapsed(true, cx),
             FilesOption::ExpandAll => self.set_all_collapsed(false, cx),
             FilesOption::Review => self.open_review(window, cx),
-        }
-        if let Some(list) = self.page().and_then(|page| page.files_view.list.as_ref()) {
-            list.remeasure();
         }
         cx.notify();
     }
@@ -507,7 +450,7 @@ impl PullRequestView {
 
     fn scroll_to(&mut self, file: usize, cx: &mut Context<Self>) {
         if let Some(list) = self.page().and_then(|page| page.files_view.list.as_ref()) {
-            list.scroll_to_file(file);
+            list.scroll_to_file(file, cx);
         }
         cx.notify();
     }
@@ -866,13 +809,6 @@ impl PullRequestView {
                 IconName::Eye,
                 self.ignore_ws,
                 crate::tr!("diff.toggle_whitespace").into_owned(),
-            ),
-            (
-                FilesOption::Invisibles,
-                "pr-files-invisibles",
-                IconName::CaseSensitive,
-                self.show_invisibles,
-                crate::tr!("diff.toggle_invisibles").into_owned(),
             ),
         ];
         let mut toolbar = h_flex()
@@ -1425,13 +1361,7 @@ impl DiffListHost for PullRequestView {
         self.pages.get_mut(&current)?.files_view.list.as_mut()
     }
 
-    fn expand_gap(
-        &mut self,
-        file: usize,
-        lines: Range<u32>,
-        direction: ExpandDir,
-        cx: &mut Context<Self>,
-    ) {
+    fn load_context(&mut self, file: usize, cx: &mut Context<Self>) {
         let Some(path) = self
             .files_of()
             .and_then(|files| files.get(file))
@@ -1439,22 +1369,12 @@ impl DiffListHost for PullRequestView {
         else {
             return;
         };
-        let loaded = matches!(
-            self.page()
-                .and_then(|page| page.files_view.texts.get(&path)),
-            Some(TextState::Loaded { .. })
-        );
-        if loaded {
-            if let Some(list) = self.diff_list_mut() {
-                list.expand(file, lines, direction);
-            }
-        } else if let Some(page) = self.page_mut()
+        if let Some(page) = self.page_mut()
             && !page.files_view.texts.contains_key(&path)
         {
-            page.files_view.pending_expand = Some((path, lines.start, direction));
+            page.files_view.pending_expand = Some(path);
             self.read_text(file, cx);
         }
-        cx.notify();
     }
 
     fn gap_state(&self, file: usize, expandable: bool) -> GapState {
@@ -1505,37 +1425,6 @@ impl DiffListHost for PullRequestView {
                     .child(entry.path.clone()),
             )
             .into_any_element()
-    }
-
-    fn header_leading(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let path = self.files_of()?.get(file)?.path.clone();
-        let collapsed = self.collapsed(&path);
-        Some(
-            div()
-                .id(SharedString::from(format!("pr-file-chevron-{file}")))
-                .flex_none()
-                .child(
-                    Icon::new(if collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .size(px(12.))
-                    .text_color(cx.theme().muted_foreground),
-                )
-                .tooltip(move |window, cx| {
-                    Tooltip::new(
-                        crate::tr!(if collapsed {
-                            "pull_requests.files.expand_file"
-                        } else {
-                            "pull_requests.files.collapse_file"
-                        })
-                        .into_owned(),
-                    )
-                    .build(window, cx)
-                })
-                .into_any_element(),
-        )
     }
 
     fn header_note(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1591,6 +1480,17 @@ impl DiffListHost for PullRequestView {
         })
     }
 
+    fn annotation_positions(&self, cx: &App) -> Vec<(String, ReviewSide, u32)> {
+        let mut positions = self
+            .inline_threads()
+            .into_iter()
+            .filter_map(|thread| thread.anchor.as_ref())
+            .map(|anchor| (anchor.path.clone(), anchor.side, anchor.end_line))
+            .collect::<Vec<_>>();
+        positions.extend(self.review_annotation_positions(cx));
+        positions
+    }
+
     fn row_extras(
         &self,
         file: usize,
@@ -1642,29 +1542,19 @@ fn render(
     file: &PullRequestFile,
     text: Option<&(String, String)>,
     ignore_whitespace: bool,
-    show_invisibles: bool,
-    theme: &crate::highlight::HighlightTheme,
-    colors: &DiffColors,
-    whitespace: &HighlightStyle,
-) -> RenderedFile {
+) -> PreparedFile {
     let patch = match &file.patch {
         PullRequestPatch::Hunks(hunks) => Some(hunks.as_str()),
         _ => None,
     };
-    build_file(
+    prepare_file(
         &FileDiffInput {
-            path: &file.path,
-            kind: file.kind,
+                kind: file.kind,
             old_text: text.map(|(old, _)| old.as_str()),
             new_text: text.map(|(_, new)| new.as_str()),
             patch,
             ignore_whitespace,
-            show_invisibles,
         },
         file.path.clone(),
-        crate::highlight::language_name_for_path(&file.path),
-        theme,
-        colors,
-        whitespace,
     )
 }

@@ -601,9 +601,6 @@ impl PullRequestView {
         }
         if let Some(page) = self.page() {
             page.conversation_view.list.remeasure();
-            if let Some(list) = page.files_view.list.as_ref() {
-                list.remeasure();
-            }
         }
         cx.notify();
     }
@@ -774,7 +771,6 @@ impl PullRequestView {
                 self.close_editor(&Slot::Line, cx);
                 if let Some(list) = self.diff_list_mut_for_review() {
                     list.selection = None;
-                    list.remeasure();
                 }
             }
             Err(error) => {

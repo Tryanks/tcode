@@ -2,12 +2,9 @@
 //! lists, expandable gaps, and line-anchored review comments.
 
 use std::collections::HashMap;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 
-use crate::highlight::HighlightTheme;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -19,8 +16,8 @@ use crate::{
 };
 use agent::FileChange;
 use gpui::{
-    Action, AnyElement, App, AppContext as _, AvailableSpace, Context, Entity, HighlightStyle,
-    InteractiveElement as _, IntoElement, ListOffset, ParentElement as _, Render, Role,
+    Action, AnyElement, App, AppContext as _, AvailableSpace, Context, Entity,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
     prelude::FluentBuilder as _, px, size,
 };
@@ -28,21 +25,18 @@ use gpui_base::{PopoverState, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
 use super::list::{
-    DiffList, DiffListHost, DiffSelectionMenu, FileMenu, LineSelection, file_header_index,
-    render_list, render_notice,
+    DiffList, DiffListHost, DiffSelectionMenu, FileMenu, LineSelection, render_list, render_notice,
 };
-use super::model::{
-    DiffColors, ExpandDir, FileDiffInput, RenderedFile, build_file, reconstruct_from_text,
-};
+use super::model::{FileDiffInput, PreparedFile, prepare_file, reconstruct_from_text};
 use super::parse::RowKind;
 use crate::agents_panel::{Agents, AgentsPanel};
+use crate::material;
 use crate::plan_panel::PlanPanel;
 use crate::store::WorkspaceStore;
 use crate::widgets::menu::DropdownMenu as _;
 use crate::window_caption;
 use crate::window_state::WindowState;
 use crate::workspace_walk::relativize_to_workspace;
-use crate::{highlight, material};
 use tcode_core::{
     session::{ReviewComment, ReviewSide},
     ui::RightTab,
@@ -57,7 +51,6 @@ enum DiffViewOption {
     Split,
     Wrap,
     Whitespace,
-    Invisibles,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -70,15 +63,11 @@ enum DiffScope {
 #[derive(Clone, Copy)]
 struct DiffOptions {
     ignore_ws: bool,
-    show_invisibles: bool,
 }
 
 struct RenderFileContext<'a> {
     cwd: &'a Path,
     options: DiffOptions,
-    theme: &'a HighlightTheme,
-    colors: &'a DiffColors,
-    whitespace_style: &'a HighlightStyle,
 }
 
 fn render_file(
@@ -86,7 +75,7 @@ fn render_file(
     texts: Option<&GitFileText>,
     fallback_new_text: Option<&str>,
     context: RenderFileContext<'_>,
-) -> RenderedFile {
+) -> PreparedFile {
     let needs_reconstruction = texts.is_none_or(|texts| texts.new.is_none());
     let reconstructed = needs_reconstruction
         .then(|| {
@@ -104,33 +93,24 @@ fn render_file(
         .and_then(|texts| texts.new.as_deref())
         .or_else(|| reconstructed.as_ref().map(|(_, new)| new.as_str()));
 
-    build_file(
+    prepare_file(
         &FileDiffInput {
-            path: &change.path,
             kind: change.kind,
             old_text,
             new_text,
             patch: change.diff.as_deref(),
             ignore_whitespace: context.options.ignore_ws,
-            show_invisibles: context.options.show_invisibles,
         },
         relativize_to_workspace(&change.path, context.cwd),
-        highlight::language_name_for_path(&change.path),
-        context.theme,
-        context.colors,
-        context.whitespace_style,
     )
 }
 
-/// Cache of rendered files, invalidated when the session, selected turn, or
-/// theme brightness changes (highlight colors are theme-resolved).
+/// Prepared host patches for the selected scope and revision.
 struct DiffCache {
     session: String,
     scope: DiffScope,
     revision: u64,
-    dark: bool,
     ignore_ws: bool,
-    show_invisibles: bool,
     list: DiffList,
 }
 
@@ -139,15 +119,7 @@ struct RenderKey {
     session: String,
     scope: DiffScope,
     revision: u64,
-    dark: bool,
     ignore_ws: bool,
-    show_invisibles: bool,
-}
-
-struct RenderAppearance {
-    theme: Arc<HighlightTheme>,
-    colors: DiffColors,
-    whitespace_style: HighlightStyle,
 }
 
 struct GitPreview {
@@ -173,7 +145,6 @@ pub struct DiffPanel {
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     agents: Entity<AgentsPanel>,
     ignore_ws: bool,
-    show_invisibles: bool,
     scopes: HashMap<String, DiffScope>,
     bases: HashMap<String, String>,
     cache: Option<DiffCache>,
@@ -181,7 +152,6 @@ pub struct DiffPanel {
     loading_key: Option<(String, DiffScope, Option<String>, u64, bool)>,
     render_loading_key: Option<RenderKey>,
     comment_input: Option<Entity<InputState>>,
-    observed_review_comments: Vec<ReviewComment>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -200,14 +170,7 @@ impl DiffPanel {
         });
         let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), cx));
         let agents = cx.new(|cx| AgentsPanel::new(workspace_store.clone(), cx));
-        let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
-            let comments = store.read(cx).review_comments();
-            if this.observed_review_comments != comments {
-                this.observed_review_comments = comments;
-                this.remeasure_lists();
-            }
-            cx.notify();
-        })];
+        let subscriptions = vec![cx.observe(&workspace_store, |_, _, cx| cx.notify())];
         Self {
             workspace_store,
             window_state,
@@ -215,7 +178,6 @@ impl DiffPanel {
             pull_requests,
             agents,
             ignore_ws: false,
-            show_invisibles: false,
             scopes: HashMap::new(),
             bases: HashMap::new(),
             cache: None,
@@ -223,7 +185,6 @@ impl DiffPanel {
             loading_key: None,
             render_loading_key: None,
             comment_input: None,
-            observed_review_comments: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -239,12 +200,6 @@ impl DiffPanel {
                     .map(DiffScope::Turn)
             })
             .or(Some(DiffScope::WorkingTree))
-    }
-
-    fn remeasure_lists(&self) {
-        if let Some(cache) = &self.cache {
-            cache.list.remeasure();
-        }
     }
 
     fn apply_pending_file_focus(
@@ -277,22 +232,11 @@ impl DiffPanel {
         else {
             return;
         };
-        let list = &cache.list;
-        if let Some(index) =
-            file_header_index(&list.files, &list.unified_items, &request.path, &cwd)
-        {
-            list.unified_list.scroll_to(ListOffset {
-                item_ix: index,
-                offset_in_item: px(0.),
-            });
-        }
-        if let Some(index) = file_header_index(&list.files, &list.split_items, &request.path, &cwd)
-        {
-            list.split_list.scroll_to(ListOffset {
-                item_ix: index,
-                offset_in_item: px(0.),
-            });
-        }
+        let path = relativize_to_workspace(&request.path, &cwd);
+        cache
+            .list
+            .state
+            .update(cx, |state, cx| state.scroll_to_file(&path, cx));
         self.workspace_store.update(cx, |store, _cx| {
             store.take_diff_focus(session, turn);
         });
@@ -363,7 +307,6 @@ impl DiffPanel {
         changes: Vec<FileChange>,
         texts: Vec<GitFileText>,
         cwd: PathBuf,
-        appearance: RenderAppearance,
         cx: &mut Context<Self>,
     ) {
         if self.render_loading_key.as_ref() == Some(&key) {
@@ -434,11 +377,7 @@ impl DiffPanel {
                                     cwd: &cwd,
                                     options: DiffOptions {
                                         ignore_ws: key.ignore_ws,
-                                        show_invisibles: key.show_invisibles,
                                     },
-                                    theme: &appearance.theme,
-                                    colors: &appearance.colors,
-                                    whitespace_style: &appearance.whitespace_style,
                                 },
                             )
                         })
@@ -451,10 +390,8 @@ impl DiffPanel {
                         session: key.session.clone(),
                         scope: key.scope,
                         revision: key.revision,
-                        dark: key.dark,
                         ignore_ws: key.ignore_ws,
-                        show_invisibles: key.show_invisibles,
-                        list: DiffList::new(files, Vec::new()),
+                        list: DiffList::new(files, Vec::new(), cx),
                     });
                     panel.render_loading_key = None;
                     panel.apply_pending_file_focus(&key.session, key.scope, cx);
@@ -484,7 +421,6 @@ impl DiffPanel {
                 });
             }
         }
-        let dark = cx.theme().mode.is_dark();
         let (session, scope, revision, cwd) = {
             let store = self.workspace_store.read(cx);
             let Some(active) = store.diff_active_state() else {
@@ -529,22 +465,9 @@ impl DiffPanel {
             c.session != session
                 || c.scope != scope
                 || c.revision != revision
-                || c.dark != dark
                 || c.ignore_ws != self.ignore_ws
-                || c.show_invisibles != self.show_invisibles
         });
         if fresh {
-            let appearance = RenderAppearance {
-                theme: cx.theme().highlight_theme.clone(),
-                colors: DiffColors {
-                    added_word_bg: cx.theme().success.opacity(0.30),
-                    removed_word_bg: cx.theme().danger.opacity(0.28),
-                },
-                whitespace_style: HighlightStyle {
-                    color: Some(cx.theme().muted_foreground),
-                    ..Default::default()
-                },
-            };
             let (changes, texts) = match scope {
                 DiffScope::Turn(turn) => {
                     let changes = self
@@ -570,14 +493,11 @@ impl DiffPanel {
                     session,
                     scope,
                     revision,
-                    dark,
                     ignore_ws: self.ignore_ws,
-                    show_invisibles: self.show_invisibles,
                 },
                 changes,
                 texts,
                 cwd,
-                appearance,
                 cx,
             );
             return false;
@@ -829,13 +749,12 @@ impl DiffPanel {
         self.comment_input = Some(cx.new(|cx| {
             InputState::new(window, cx).placeholder(crate::tr!("diff.comment_placeholder"))
         }));
-        self.remeasure_lists();
         cx.notify();
     }
 
     /// The file's absolute path: the rendered path is relative to the
     /// workspace for display.
-    fn absolute_file_path(&self, file: &RenderedFile, cx: &App) -> String {
+    fn absolute_file_path(&self, file: &PreparedFile, cx: &App) -> String {
         let path = Path::new(&file.path);
         if path.is_absolute() {
             return file.path.clone();
@@ -852,20 +771,14 @@ impl DiffPanel {
                 let split = self.workspace_store.read(cx).diff_split();
                 self.workspace_store
                     .update(cx, |store, cx| store.set_diff_split(!split, cx));
-                self.remeasure_lists();
             }
             DiffViewOption::Wrap => {
                 self.workspace_store
                     .update(cx, |store, cx| store.toggle_diff_wrap(cx));
-                self.remeasure_lists();
             }
             DiffViewOption::Whitespace => {
                 self.ignore_ws = !self.ignore_ws;
                 self.git_preview = None;
-                self.cache = None;
-            }
-            DiffViewOption::Invisibles => {
-                self.show_invisibles = !self.show_invisibles;
                 self.cache = None;
             }
         }
@@ -1150,13 +1063,6 @@ impl DiffPanel {
                 self.ignore_ws,
                 crate::tr!("diff.toggle_whitespace").into_owned(),
             ),
-            (
-                DiffViewOption::Invisibles,
-                "diff-invisibles",
-                IconName::CaseSensitive,
-                self.show_invisibles,
-                crate::tr!("diff.toggle_invisibles").into_owned(),
-            ),
         ];
         let mut toolbar = h_flex()
             .flex_none()
@@ -1291,7 +1197,6 @@ impl DiffPanel {
             cache.list.selection = None;
         }
         self.comment_input = None;
-        self.remeasure_lists();
         cx.notify();
     }
 
@@ -1572,20 +1477,6 @@ impl DiffListHost for DiffPanel {
         self.cache.as_mut().map(|cache| &mut cache.list)
     }
 
-    fn expand_gap(
-        &mut self,
-        file: usize,
-        lines: Range<u32>,
-        direction: ExpandDir,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(list) = self.diff_list_mut() {
-            list.expand(file, lines, direction);
-        }
-        self.comment_input = None;
-        cx.notify();
-    }
-
     fn file_menu(&self, file: usize, cx: &App) -> FileMenu {
         let path = self
             .diff_list()
@@ -1598,6 +1489,15 @@ impl DiffListHost for DiffPanel {
             .diff_active_state()
             .map(|active| active.cwd);
         Rc::new(move |menu, _, _| menu.path_items(&path, cwd.as_deref()))
+    }
+
+    fn annotation_positions(&self, cx: &App) -> Vec<(String, ReviewSide, u32)> {
+        self.workspace_store
+            .read(cx)
+            .review_comments()
+            .into_iter()
+            .map(|comment| (comment.file, comment.side, comment.line_end))
+            .collect()
     }
 
     fn row_extras(
@@ -1661,13 +1561,13 @@ impl Render for DiffPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::list::build_list_items_with;
     use agent::FileChangeKind;
 
     #[gpui::test]
     fn supplied_added_text_and_binary_changes_render_without_fallback_reads(
         cx: &mut gpui::TestAppContext,
     ) {
+        cx.update(crate::theme::init);
         let (to_host, requests) = async_channel::unbounded();
         let (_replies, from_host) = async_channel::unbounded();
         let host = tcode_client::HostLink::new(to_host, from_host);
@@ -1689,9 +1589,7 @@ mod tests {
                     session: "thread".into(),
                     scope: DiffScope::WorkingTree,
                     revision: 1,
-                    dark: true,
                     ignore_ws: false,
-                    show_invisibles: false,
                 },
                 vec![
                     FileChange {
@@ -1713,14 +1611,6 @@ mod tests {
                     GitFileText::default(),
                 ],
                 PathBuf::from("/workspace"),
-                RenderAppearance {
-                    theme: HighlightTheme::default_dark(),
-                    colors: DiffColors {
-                        added_word_bg: gpui::hsla(0.3, 0.8, 0.5, 0.3),
-                        removed_word_bg: gpui::hsla(0., 0.8, 0.5, 0.28),
-                    },
-                    whitespace_style: HighlightStyle::default(),
-                },
                 cx,
             );
         });
@@ -1743,7 +1633,7 @@ mod tests {
                 .as_ref()
                 .expect("files render without host file replies");
             assert_eq!(cache.list.files.len(), 2);
-            assert_eq!(cache.list.files[0].added, 1);
+            assert_eq!(cache.list.files[0].document.additions(), 1);
         });
     }
 
@@ -1755,33 +1645,19 @@ mod tests {
             kind: FileChangeKind::Modify,
             diff: Some("@@ -1 +1 @@\n-fn old_value() {}\n+fn new_value() {}\n".into()),
         };
-        let colors = DiffColors {
-            added_word_bg: gpui::hsla(0.3, 0.8, 0.5, 0.3),
-            removed_word_bg: gpui::hsla(0., 0.8, 0.5, 0.28),
-        };
-
         let file = render_file(
             &change,
             None,
             None,
             RenderFileContext {
                 cwd: Path::new("/workspace/repository"),
-                options: DiffOptions {
-                    ignore_ws: false,
-                    show_invisibles: false,
-                },
-                theme: &HighlightTheme::default_dark(),
-                colors: &colors,
-                whitespace_style: &HighlightStyle::default(),
+                options: DiffOptions { ignore_ws: false },
             },
         );
 
         assert_eq!(file.path, path);
-        assert_eq!(file.added, 1);
-        assert_eq!(file.removed, 1);
+        assert_eq!(file.document.additions(), 1);
+        assert_eq!(file.document.deletions(), 1);
         assert_eq!(file.all_rows.len(), 2);
-        let items = build_list_items_with(std::slice::from_ref(&file), &[]);
-        assert_eq!(items.unified.len(), 3, "header plus two visible rows");
-        assert_eq!(items.split.len(), 2, "header plus one paired row");
     }
 }

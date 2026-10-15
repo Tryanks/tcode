@@ -119,9 +119,9 @@ dependencies = [
 
 [[package]]
 name = "aegis"
-version = "0.9.20"
+version = "0.9.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41585f248ed9406567ae6d61ca2a55ed3dc7348e65203a01229881253acb95e3"
+checksum = "58541132f980da31e9aa99f7bdee69bc84bf1e168b9b91ef2dbe8abb7b4ce5dd"
 dependencies = [
  "cc",
  "softaes",
@@ -1107,6 +1107,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56d87354e4229f54a44f7bf2435906a4656dba36026ab6eaca629a2c436a691c"
+dependencies = [
+ "bit-vec 0.10.1",
+]
+
+[[package]]
 name = "bit-vec"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1118,6 +1127,16 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5727b15fa97d4f4fee0a3b7c3d550ed0269f54329207b86388de918604e31269"
+dependencies = [
+ "borsh",
  "serde",
 ]
 
@@ -1238,6 +1257,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "borsh"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "553c5d846a6ba5150c65e3b1b8ec073bcf1abc20f9b7220de384a4443ea4e20a"
+dependencies = [
+ "borsh-derive",
+ "bytes",
+ "cfg_aliases 0.2.2",
+]
+
+[[package]]
+name = "borsh-derive"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12cdfe656708a01f89b451a7d36466e6fe6c414de0aa18fc54f864f6f9ca9f56"
+dependencies = [
+ "once_cell",
+ "proc-macro-crate 3.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.5",
+]
+
+[[package]]
 name = "branches"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1262,6 +1305,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5cee35f73844aa3014bb606320a6c1f010249dbdf43342fe54b5a4f6a8ed4b79"
 dependencies = [
  "memchr",
+ "regex-automata",
  "serde_core",
 ]
 
@@ -1400,9 +1444,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.6.0"
+version = "1.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
+checksum = "e17dd265a7d0f31ef544e1b20e03add05d3b45b491b633b10d67145d2acc1a38"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1458,15 +1502,6 @@ name = "cfg_block"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18758054972164c3264f7c8386f5fc6da6114cb46b619fd365d4e3b2dc3ae487"
-
-[[package]]
-name = "cgl"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ced0551234e87afee12411d535648dd89d2e7f34c78b753395567aff3d447ff"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "chacha20"
@@ -1675,16 +1710,6 @@ dependencies = [
  "serde",
  "termcolor",
  "unicode-width 0.2.2",
-]
-
-[[package]]
-name = "collections"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "gpui_util",
- "indexmap 2.14.0",
- "rustc-hash 2.1.3",
 ]
 
 [[package]]
@@ -1939,19 +1964,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core-graphics2"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4416167a69126e617f8d0a214af0e3c1dbdeffcb100ddf72dcd1a1ac9893c146"
-dependencies = [
- "bitflags 2.13.2",
- "block",
- "cfg-if",
- "core-foundation 0.10.1",
- "libc",
-]
-
-[[package]]
 name = "core-text"
 version = "21.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1964,18 +1976,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "core-video"
-version = "0.5.2"
+name = "core_detect"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "139679cc63eb9504bdbe37e37874b0247136177655f0008588781e90863afa62"
-dependencies = [
- "block",
- "core-foundation 0.10.1",
- "core-graphics2",
- "io-surface",
- "libc",
- "metal",
-]
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "core_maths"
@@ -2514,16 +2518,6 @@ dependencies = [
  "rustc_version",
  "syn 2.0.118",
  "unicode-xid",
-]
-
-[[package]]
-name = "derive_refineable"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
 ]
 
 [[package]]
@@ -3832,81 +3826,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui"
-version = "0.2.2"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "accesskit",
- "anyhow",
- "async-channel",
- "async-task",
- "backtrace",
- "bitflags 2.13.2",
- "chrono",
- "collections",
- "core-video",
- "ctor",
- "derive_more 2.1.1",
- "embed-resource",
- "etagere",
- "futures",
- "futures-concurrency",
- "getrandom 0.3.4",
- "gpui_macros",
- "gpui_shared_string",
- "gpui_util",
- "heapless",
- "http_client",
- "image",
- "inventory",
- "itertools 0.14.0",
- "libc",
- "log",
- "lyon",
- "num_cpus",
- "parking",
- "parking_lot",
- "pin-project",
- "pollster 0.4.0",
- "postage",
- "profiling",
- "proptest",
- "rand 0.9.4",
- "raw-window-handle",
- "refineable",
- "regex",
- "resvg 0.46.0",
- "scheduler",
- "schemars 1.2.2",
- "seahash",
- "serde",
- "serde_json",
- "slotmap",
- "smallvec",
- "spin 0.10.0",
- "strum 0.28.0",
- "sum_tree",
- "taffy",
- "thiserror 2.0.19",
- "ttf-parser",
- "url",
- "usvg 0.46.0",
- "uuid",
- "waker-fn",
- "web-time",
- "windows 0.62.2",
- "zed-scap",
-]
-
-[[package]]
 name = "gpui-android"
 version = "0.3.7"
 dependencies = [
  "android-activity",
  "anyhow",
  "futures",
- "gpui-pre",
- "gpui_wgpu",
+ "gpui-fast-wgpu",
+ "gpui-kit",
  "jni 0.22.4",
  "log",
  "ndk 0.9.0",
@@ -3919,9 +3846,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-base"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cf698677b253118459f552fe15513858c669d79a25837a94e480db2ae330050"
+checksum = "2e9955b6f4b048fd50ca15fc8e225d80bb00ba9ebc8fecdddde5ad26dbef9270"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3930,6 +3857,7 @@ dependencies = [
  "chrono",
  "data-url",
  "futures",
+ "gpui-fast",
  "gpui-pre",
  "gpui-pre-macros",
  "gpui-pre-sum-tree",
@@ -3960,9 +3888,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-component"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc8b7def8e74b0d822d3e96f6b28fb5a2c20eb7a83d30d22fa59ca8088d1159b"
+checksum = "465a363235cd4062ef5f0953fc096fc764ed6f53dfbd9f409f669f93ea3b1ff9"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -3972,6 +3900,7 @@ dependencies = [
  "enum-iterator",
  "gpui-base",
  "gpui-component-macros",
+ "gpui-fast",
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-macros",
@@ -4000,23 +3929,373 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_repr",
+ "similar",
  "smallvec",
  "smol",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-astro-next",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cmake",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-diff",
+ "tree-sitter-elixir",
+ "tree-sitter-embedded-template",
+ "tree-sitter-go",
+ "tree-sitter-graphql",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-jsdoc",
+ "tree-sitter-json",
+ "tree-sitter-kotlin-sg",
+ "tree-sitter-lua",
+ "tree-sitter-make",
+ "tree-sitter-md",
+ "tree-sitter-php",
+ "tree-sitter-proto",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-sequel",
+ "tree-sitter-svelte-next",
+ "tree-sitter-swift",
+ "tree-sitter-toml-ng",
+ "tree-sitter-typescript",
+ "tree-sitter-yaml",
+ "tree-sitter-zig",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
  "uuid",
  "windows 0.58.0",
 ]
 
 [[package]]
 name = "gpui-component-macros"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2968cc7f4a2bd8f51b09cfe4f1e77409951b48a0e2d48f372b010e69c3d7fb49"
+checksum = "5c0c9398aaf99e595d450e38eb44ff0c500df8c332b4783d5b72022e69525359"
 dependencies = [
  "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "gpui-fast"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06f57a8a598a3fc1b8594ff5a72c530241906806a3322d8be1bb9059c3fd3a11"
+dependencies = [
+ "accesskit",
+ "anyhow",
+ "async-channel",
+ "async-task",
+ "backtrace",
+ "bitflags 2.13.2",
+ "chrono",
+ "ctor",
+ "derive_more 2.1.1",
+ "embed-resource",
+ "etagere",
+ "futures",
+ "futures-concurrency",
+ "getrandom 0.3.4",
+ "gpui-fast-macros",
+ "gpui-pre-collections",
+ "gpui-pre-http-client",
+ "gpui-pre-refineable",
+ "gpui-pre-scheduler",
+ "gpui-pre-shared-string",
+ "gpui-pre-sum-tree",
+ "gpui-pre-util",
+ "heapless",
+ "image",
+ "inventory",
+ "itertools 0.14.0",
+ "libc",
+ "log",
+ "lyon",
+ "num_cpus",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "parking",
+ "parking_lot",
+ "pin-project",
+ "pollster 0.4.0",
+ "postage",
+ "profiling",
+ "proptest",
+ "rand 0.9.4",
+ "raw-window-handle",
+ "regex",
+ "resvg 0.46.0",
+ "schemars 1.2.2",
+ "seahash",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "smallvec",
+ "spin 0.10.0",
+ "strum 0.28.0",
+ "taffy 0.14.0",
+ "thiserror 2.0.19",
+ "ttf-parser",
+ "url",
+ "usvg 0.46.0",
+ "uuid",
+ "waker-fn",
+ "web-time",
+ "windows 0.62.2",
+ "zed-scap",
+]
+
+[[package]]
+name = "gpui-fast-apple"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64b9347b4e1ffff26a5ce515b3a6a633405ed3fba8182f0e891329fb1a738034"
+dependencies = [
+ "anyhow",
+ "async-task",
+ "block2 0.6.2",
+ "cbindgen",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "core-graphics 0.24.0",
+ "core-text",
+ "derive_more 2.1.1",
+ "dispatch2",
+ "etagere",
+ "foreign-types",
+ "futures",
+ "gpui-fast",
+ "gpui-pre-collections",
+ "gpui-pre-util",
+ "image",
+ "libc",
+ "log",
+ "mach2 0.6.0",
+ "metal",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-text",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "objc2-security",
+ "parking_lot",
+ "pathfinder_geometry",
+ "smallvec",
+ "thiserror 2.0.19",
+ "zed-font-kit",
+]
+
+[[package]]
+name = "gpui-fast-linux"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13940ee206eab9663b4b6598c5a979b2925eeb5beff05b778659db44be9f8e9"
+dependencies = [
+ "accesskit",
+ "accesskit_unix",
+ "anyhow",
+ "as-raw-xcb-connection",
+ "ashpd",
+ "bytemuck",
+ "calloop",
+ "calloop-wayland-source",
+ "filedescriptor",
+ "futures",
+ "gpui-fast",
+ "gpui-fast-wgpu",
+ "gpui-pre-collections",
+ "gpui-pre-http-client",
+ "gpui-pre-util",
+ "libc",
+ "log",
+ "notify-rust",
+ "oo7",
+ "open",
+ "parking_lot",
+ "raw-window-handle",
+ "smallvec",
+ "smol",
+ "strum 0.28.0",
+ "url",
+ "uuid",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-cursor",
+ "wayland-protocols",
+ "wayland-protocols-plasma",
+ "wayland-protocols-wlr",
+ "x11rb",
+ "xkbcommon",
+ "zed-scap",
+ "zed-xim",
+]
+
+[[package]]
+name = "gpui-fast-macos"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15715e9b9b95a5cb35e88d2519450a77b70b35f5574f38b27c955833fe25303b"
+dependencies = [
+ "accesskit",
+ "accesskit_macos",
+ "anyhow",
+ "block2 0.6.2",
+ "cocoa 0.26.0",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "core-graphics 0.24.0",
+ "ctor",
+ "dispatch2",
+ "foreign-types",
+ "futures",
+ "gpui-fast",
+ "gpui-fast-apple",
+ "gpui-pre-collections",
+ "gpui-pre-scheduler",
+ "gpui-pre-util",
+ "image",
+ "itertools 0.14.0",
+ "log",
+ "objc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+ "parking_lot",
+ "raw-window-handle",
+ "semver",
+ "smallvec",
+ "strum 0.28.0",
+ "uuid",
+]
+
+[[package]]
+name = "gpui-fast-macros"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb603746606a49ea4562b309ddcd3f299e2e151f93356d7f1b3d867d1b9cd68e"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
+name = "gpui-fast-platform"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7cd0b114bcafac3498b3c4580ee97a475817bfa275850c9bbe8b5448ef813bc"
+dependencies = [
+ "anyhow",
+ "console_error_panic_hook",
+ "gpui-fast",
+ "gpui-fast-linux",
+ "gpui-fast-macos",
+ "gpui-fast-web",
+ "gpui-fast-wgpu",
+ "gpui-fast-windows",
+]
+
+[[package]]
+name = "gpui-fast-web"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a497b4e5963ab60ec065af34ddfe2713766cd2a83e38c23a61730c4de57ab0f"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "console_error_panic_hook",
+ "futures",
+ "gpui-fast",
+ "gpui-fast-wgpu",
+ "gpui-pre-http-client",
+ "gpui-pre-scheduler",
+ "js-sys",
+ "log",
+ "parking_lot",
+ "raw-window-handle",
+ "smallvec",
+ "unicode-properties",
+ "unicode-script",
+ "unicode-segmentation",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm_thread",
+ "web-sys",
+ "web-time",
+]
+
+[[package]]
+name = "gpui-fast-wgpu"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9917628bed8af3d8606807823ce7eec46742401b3948c46dabb22f600c5a997"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "cosmic-text",
+ "etagere",
+ "gpui-fast",
+ "gpui-pre-collections",
+ "gpui-pre-util",
+ "image",
+ "itertools 0.14.0",
+ "log",
+ "parking_lot",
+ "profiling",
+ "raw-window-handle",
+ "smallvec",
+ "swash",
+ "unicode-bidi",
+ "unicode-segmentation",
+ "web-sys",
+ "wgpu",
+ "zed-font-kit",
+]
+
+[[package]]
+name = "gpui-fast-windows"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "832944506e1e79f0829f7eb95ae5eeb7c438a8b399170c9b1e573e8af4bf9ee2"
+dependencies = [
+ "accesskit",
+ "accesskit_windows",
+ "anyhow",
+ "dunce",
+ "etagere",
+ "futures",
+ "gpui-fast",
+ "gpui-pre-collections",
+ "gpui-pre-scheduler",
+ "gpui-pre-util",
+ "image",
+ "itertools 0.14.0",
+ "log",
+ "parking_lot",
+ "rand 0.9.4",
+ "raw-window-handle",
+ "smallvec",
+ "uuid",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+ "windows-numerics 0.3.1",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]
@@ -4029,8 +4308,8 @@ dependencies = [
  "core-text",
  "futures",
  "gpui-base",
- "gpui-pre",
- "gpui_wgpu",
+ "gpui-fast-wgpu",
+ "gpui-kit",
  "libc",
  "log",
  "parking_lot",
@@ -4038,16 +4317,35 @@ dependencies = [
  "raw-window-handle",
  "smallvec",
  "uuid",
- "zed-font-kit 0.14.1-zed (registry+https://github.com/rust-lang/crates.io-index)",
+ "zed-font-kit",
+]
+
+[[package]]
+name = "gpui-kit"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fac401f6b149bf33794da0942510240afd29b7b18556574e4cf17196b647066"
+dependencies = [
+ "gpui-base",
+ "gpui-component",
+ "gpui-fast",
+ "gpui-fast-platform",
+ "gpui-fast-web",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "gpui-pre-macros",
+ "gpui-pre-platform",
+ "gpui-pre-web",
 ]
 
 [[package]]
 name = "gpui-kit-assets"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db6c481ca987f1e6f10b1aed4d47f1b301cd1dc6f3016fac93c305f2a4f307c0"
+checksum = "b7abc281dcbfe51c16a7e73189521a3a771168c31e3ab0db99e21e481d1b1b9a"
 dependencies = [
  "anyhow",
+ "gpui-fast",
  "gpui-pre",
  "gpui-pre-reqwest",
  "log",
@@ -4058,27 +4356,289 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre"
-version = "0.3.8"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34f61c1cfd36fc9c436af09308c963822ae27a45a84feb21a77ba5c9e051f1c0"
 dependencies = [
- "gpui",
+ "accesskit",
+ "anyhow",
+ "async-channel",
+ "async-task",
+ "backtrace",
+ "bitflags 2.13.2",
+ "chrono",
+ "ctor",
+ "derive_more 2.1.1",
+ "embed-resource",
+ "etagere",
+ "futures",
+ "futures-concurrency",
+ "getrandom 0.3.4",
+ "gpui-pre-collections",
+ "gpui-pre-http-client",
+ "gpui-pre-macros",
+ "gpui-pre-refineable",
+ "gpui-pre-scheduler",
+ "gpui-pre-shared-string",
+ "gpui-pre-sum-tree",
+ "gpui-pre-util",
+ "heapless",
+ "image",
+ "inventory",
+ "itertools 0.14.0",
+ "libc",
+ "log",
+ "lyon",
+ "num_cpus",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "parking",
+ "parking_lot",
+ "pin-project",
+ "pollster 0.4.0",
+ "postage",
+ "profiling",
+ "proptest",
+ "rand 0.9.4",
+ "raw-window-handle",
+ "regex",
+ "resvg 0.46.0",
+ "schemars 1.2.2",
+ "seahash",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "smallvec",
+ "spin 0.10.0",
+ "strum 0.28.0",
+ "taffy 0.13.0",
+ "thiserror 2.0.19",
+ "ttf-parser",
+ "url",
+ "usvg 0.46.0",
+ "uuid",
+ "waker-fn",
+ "web-time",
+ "windows 0.62.2",
+ "zed-scap",
+]
+
+[[package]]
+name = "gpui-pre-apple"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b52f58893fe1a0836464428dfad2b5eaf42c9c303a9638f4c2aced5a69072a15"
+dependencies = [
+ "anyhow",
+ "async-task",
+ "block2 0.6.2",
+ "cbindgen",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "core-graphics 0.24.0",
+ "core-text",
+ "derive_more 2.1.1",
+ "dispatch2",
+ "etagere",
+ "foreign-types",
+ "futures",
+ "gpui-pre",
+ "gpui-pre-collections",
+ "gpui-pre-util",
+ "image",
+ "libc",
+ "log",
+ "mach2 0.6.0",
+ "metal",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-text",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "objc2-security",
+ "parking_lot",
+ "pathfinder_geometry",
+ "smallvec",
+ "thiserror 2.0.19",
+ "zed-font-kit",
+]
+
+[[package]]
+name = "gpui-pre-collections"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "920c2f5b2f1a7813114d89f4841f26f6060d9c35d7c8a852a4205d1a767a7ce0"
+dependencies = [
+ "gpui-pre-util",
+ "indexmap 2.14.0",
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
+name = "gpui-pre-derive-refineable"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "947395f26228296c0c79fb889d3687b205e552c25bbcdece216fb2394ea9bcd1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
+name = "gpui-pre-http-client"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c56cdaa3f1a271162b7fede1d4557879eedb056e293cedbb82743600650b755e"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "http",
+ "http-body",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "url",
+]
+
+[[package]]
+name = "gpui-pre-http-client-tls"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7616a90ec92c9832bbc80ddab34e10fdf8d23520d5cbb0b432b73e4e9f6c812"
+dependencies = [
+ "log",
+ "rustls",
+ "rustls-platform-verifier",
+ "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "gpui-pre-linux"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e28213c3fde6f13e91ba0b74b90cbaadec9373e36a031eda98561d31059870f3"
+dependencies = [
+ "accesskit",
+ "accesskit_unix",
+ "anyhow",
+ "as-raw-xcb-connection",
+ "ashpd",
+ "bytemuck",
+ "calloop",
+ "calloop-wayland-source",
+ "filedescriptor",
+ "futures",
+ "gpui-pre",
+ "gpui-pre-collections",
+ "gpui-pre-http-client",
+ "gpui-pre-util",
+ "gpui-pre-wgpu",
+ "libc",
+ "log",
+ "notify-rust",
+ "oo7",
+ "open",
+ "parking_lot",
+ "raw-window-handle",
+ "smallvec",
+ "smol",
+ "strum 0.28.0",
+ "url",
+ "uuid",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-cursor",
+ "wayland-protocols",
+ "wayland-protocols-plasma",
+ "wayland-protocols-wlr",
+ "x11rb",
+ "xkbcommon",
+ "zed-scap",
+ "zed-xim",
+]
+
+[[package]]
+name = "gpui-pre-macos"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c988b7e49775cc8542dbe48d5a10e073d8e898a023ef3ff3d24f33363e9863"
+dependencies = [
+ "accesskit",
+ "accesskit_macos",
+ "anyhow",
+ "block2 0.6.2",
+ "cocoa 0.26.0",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "core-graphics 0.24.0",
+ "ctor",
+ "dispatch2",
+ "foreign-types",
+ "futures",
+ "gpui-pre",
+ "gpui-pre-apple",
+ "gpui-pre-collections",
+ "gpui-pre-scheduler",
+ "gpui-pre-util",
+ "image",
+ "itertools 0.14.0",
+ "log",
+ "objc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+ "parking_lot",
+ "raw-window-handle",
+ "semver",
+ "smallvec",
+ "strum 0.28.0",
+ "uuid",
 ]
 
 [[package]]
 name = "gpui-pre-macros"
-version = "0.3.8"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bb80dac5e1f6b8cde1d2740389e77dfc0071bfcc81fba5526d5dc90f68171cc"
 dependencies = [
- "gpui_macros",
+ "heck 0.5.0",
+ "proc-macro-crate 3.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]
 name = "gpui-pre-platform"
-version = "0.3.8"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbdbdac421178313fed8929fe95b42634a266a735079fcf03ff231bc2ccb2c5e"
 dependencies = [
- "gpui",
- "gpui_platform",
+ "anyhow",
+ "console_error_panic_hook",
+ "gpui-pre",
+ "gpui-pre-linux",
+ "gpui-pre-macos",
+ "gpui-pre-web",
+ "gpui-pre-wgpu",
+ "gpui-pre-windows",
+]
+
+[[package]]
+name = "gpui-pre-refineable"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "237703b3b219d11adb50dd33bb0fcca3d34fc001623b3143e72cb051d0fb3777"
+dependencies = [
+ "gpui-pre-derive-refineable",
 ]
 
 [[package]]
@@ -4128,189 +4688,50 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
+ "webpki-roots 0.26.11",
  "windows-registry 0.4.0",
 ]
 
 [[package]]
 name = "gpui-pre-reqwest-client"
-version = "0.3.8"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "reqwest_client",
-]
-
-[[package]]
-name = "gpui-pre-sum-tree"
-version = "0.3.8"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "sum_tree",
-]
-
-[[package]]
-name = "gpui-pre-web"
-version = "0.3.8"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "gpui_web",
-]
-
-[[package]]
-name = "gpui-wry"
-version = "0.7.1"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e76703e4c356fa306a9fb0762105638e6add8664f7c2fdfebe226af12d351acd"
+checksum = "92c2e70dc8550d60324b1eb3f3d08b4ccf20a8b577a9a42732dd3bafb2363bc0"
 dependencies = [
  "anyhow",
- "gpui-pre",
- "lb-wry",
+ "bytes",
+ "futures",
+ "gpui-pre-http-client",
+ "gpui-pre-http-client-tls",
+ "gpui-pre-reqwest",
+ "gpui-pre-util",
+ "log",
+ "regex",
+ "tokio",
 ]
 
 [[package]]
-name = "gpui_apple"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
+name = "gpui-pre-scheduler"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83f342555282a59ed8dd58dd7e0a920524fa8ef6aa8c8f30e2edb7019a8f72cb"
 dependencies = [
- "anyhow",
  "async-task",
- "block2 0.6.2",
- "cbindgen",
- "collections",
- "core-foundation 0.10.1",
- "core-graphics 0.24.0",
- "core-video",
- "derive_more 2.1.1",
- "dispatch2",
- "etagere",
- "foreign-types",
- "gpui",
- "gpui_util",
- "image",
- "libc",
- "log",
- "mach2 0.6.0",
- "metal",
- "objc2 0.6.5",
- "objc2-foundation 0.3.2",
- "objc2-quartz-core 0.3.2",
- "parking_lot",
-]
-
-[[package]]
-name = "gpui_linux"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "accesskit",
- "accesskit_unix",
- "anyhow",
- "as-raw-xcb-connection",
- "ashpd",
- "bytemuck",
- "calloop",
- "calloop-wayland-source",
- "collections",
- "filedescriptor",
+ "backtrace",
+ "chrono",
+ "flume 0.12.0",
  "futures",
- "gpui",
- "gpui_util",
- "gpui_wgpu",
- "http_client",
- "libc",
- "log",
- "notify-rust",
- "oo7",
- "open",
  "parking_lot",
- "raw-window-handle",
- "smallvec",
- "smol",
- "strum 0.28.0",
- "url",
- "uuid",
- "wayland-backend",
- "wayland-client",
- "wayland-cursor",
- "wayland-protocols",
- "wayland-protocols-plasma",
- "wayland-protocols-wlr",
- "x11rb",
- "xkbcommon",
- "zed-scap",
- "zed-xim",
+ "rand 0.9.4",
+ "wasm_thread",
+ "web-time",
 ]
 
 [[package]]
-name = "gpui_macos"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "accesskit",
- "accesskit_macos",
- "anyhow",
- "block2 0.6.2",
- "cocoa 0.26.0",
- "collections",
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "core-graphics 0.24.0",
- "core-text",
- "core-video",
- "ctor",
- "dispatch2",
- "foreign-types",
- "futures",
- "gpui",
- "gpui_apple",
- "gpui_util",
- "image",
- "itertools 0.14.0",
- "log",
- "objc",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "objc2-user-notifications",
- "parking_lot",
- "pathfinder_geometry",
- "raw-window-handle",
- "scheduler",
- "semver",
- "smallvec",
- "strum 0.28.0",
- "uuid",
- "zed-font-kit 0.14.1-zed (git+https://github.com/zed-industries/font-kit?rev=94b0f28166665e8fd2f53ff6d268a14955c82269)",
-]
-
-[[package]]
-name = "gpui_macros"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "heck 0.5.0",
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
-name = "gpui_platform"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "anyhow",
- "console_error_panic_hook",
- "gpui",
- "gpui_linux",
- "gpui_macos",
- "gpui_web",
- "gpui_windows",
-]
-
-[[package]]
-name = "gpui_shared_string"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
+name = "gpui-pre-shared-string"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71f488bf4780735f6b2dad24f8db1e3d9e2593de0ec298e3574c788f571b81c4"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -4318,9 +4739,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui_util"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
+name = "gpui-pre-sum-tree"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aadb3bd3da22617e2158b1842f5a9c29c1626c926ad0686163ced1a009963ff3"
+dependencies = [
+ "gpui-pre-ztracing",
+ "heapless",
+ "rayon",
+ "tracing",
+]
+
+[[package]]
+name = "gpui-pre-util"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a04ec9abd7a87ac05a221f4629403831c44c17123bc33cb5d271a6303259b340"
 dependencies = [
  "anyhow",
  "log",
@@ -4328,21 +4762,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui_web"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
+name = "gpui-pre-web"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aedd55b99dc77e28df8202b0ea868aa5c90fda4aefff539ea21087d7c2ff4bfb"
 dependencies = [
  "anyhow",
+ "async-channel",
  "console_error_panic_hook",
  "futures",
- "gpui",
- "gpui_wgpu",
- "http_client",
+ "gpui-pre",
+ "gpui-pre-http-client",
+ "gpui-pre-scheduler",
+ "gpui-pre-wgpu",
  "js-sys",
  "log",
  "parking_lot",
  "raw-window-handle",
- "scheduler",
  "smallvec",
  "unicode-properties",
  "unicode-script",
@@ -4356,17 +4792,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui_wgpu"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
+name = "gpui-pre-wgpu"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b1cdb26c1503bf9662ee8fbc5ab0b44b2deeee4b5c12dc67491ba6fb5fc544b"
 dependencies = [
  "anyhow",
  "bytemuck",
- "collections",
  "cosmic-text",
  "etagere",
- "gpui",
- "gpui_util",
+ "gpui-pre",
+ "gpui-pre-collections",
+ "gpui-pre-util",
+ "image",
  "itertools 0.14.0",
  "log",
  "parking_lot",
@@ -4378,36 +4816,65 @@ dependencies = [
  "unicode-segmentation",
  "web-sys",
  "wgpu",
- "zed-font-kit 0.14.1-zed (git+https://github.com/zed-industries/font-kit?rev=94b0f28166665e8fd2f53ff6d268a14955c82269)",
+ "zed-font-kit",
 ]
 
 [[package]]
-name = "gpui_windows"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
+name = "gpui-pre-windows"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "513d4f0fc7d596d3bdef2a73a524ffb83dabc95bf484f2855a698e7f431290a9"
 dependencies = [
  "accesskit",
  "accesskit_windows",
  "anyhow",
- "collections",
  "dunce",
  "etagere",
  "futures",
- "gpui",
- "gpui_util",
+ "gpui-pre",
+ "gpui-pre-collections",
+ "gpui-pre-scheduler",
+ "gpui-pre-util",
  "image",
  "itertools 0.14.0",
  "log",
  "parking_lot",
  "rand 0.9.4",
  "raw-window-handle",
- "scheduler",
  "smallvec",
  "uuid",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-numerics 0.3.1",
  "windows-registry 0.6.1",
+]
+
+[[package]]
+name = "gpui-pre-ztracing"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f17bfd6bd1f77ba5c58181fa6f82fc7a63015a1c58bef94a76e5acb9f8e42572"
+dependencies = [
+ "gpui-pre-ztracing-macro",
+ "tracing",
+]
+
+[[package]]
+name = "gpui-pre-ztracing-macro"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b0d73e1bc02eef886a5947f41b8512708792e9e5d3053d181843311a487f96f"
+
+[[package]]
+name = "gpui-wry"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9af79b39236b37b09ce6ef257e5d877ca3e63b9f0fb2656cf22420f353b0f70"
+dependencies = [
+ "anyhow",
+ "gpui-fast",
+ "gpui-pre",
+ "lb-wry",
 ]
 
 [[package]]
@@ -4701,35 +5168,6 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
-]
-
-[[package]]
-name = "http_client"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "anyhow",
- "bytes",
- "futures",
- "http",
- "http-body",
- "log",
- "parking_lot",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "url",
-]
-
-[[package]]
-name = "http_client_tls"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "log",
- "rustls",
- "rustls-platform-verifier",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -5227,18 +5665,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
 dependencies = [
  "rustversion",
-]
-
-[[package]]
-name = "io-surface"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "554b8c5d64ec09a3a520fe58e4d48a73e00ff32899cdcbe32a4877afd4968b8e"
-dependencies = [
- "cgl",
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "leaky-cow",
 ]
 
 [[package]]
@@ -5813,21 +6239,6 @@ dependencies = [
  "windows-core 0.61.2",
  "windows-version",
  "x11-dl",
-]
-
-[[package]]
-name = "leak"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd100e01f1154f2908dfa7d02219aeab25d0b9c7fa955164192e3245255a0c73"
-
-[[package]]
-name = "leaky-cow"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40a8225d44241fd324a8af2806ba635fc7c8a7e9a7de4d5cf3ef54e71f5926fc"
-dependencies = [
- "leak",
 ]
 
 [[package]]
@@ -7277,6 +7688,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-io-surface",
+ "objc2-metal 0.3.2",
 ]
 
 [[package]]
@@ -8472,16 +8884,18 @@ dependencies = [
 
 [[package]]
 name = "proptest"
-version = "1.10.0"
-source = "git+https://github.com/proptest-rs/proptest?rev=3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b#3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8530004ccb15eae51c7e40009fbe317f341f804db54dc033eec1c50be28cfa0"
 dependencies = [
- "bit-set 0.8.0",
- "bit-vec 0.8.0",
+ "bit-set 0.11.1",
+ "bit-vec 0.10.1",
  "bitflags 2.13.2",
+ "chacha20",
+ "core_detect",
  "num-traits",
  "proptest-macro",
- "rand 0.9.4",
- "rand_chacha 0.9.0",
+ "rand 0.10.2",
  "rand_xorshift",
  "regex-syntax",
  "rusty-fork",
@@ -8491,13 +8905,14 @@ dependencies = [
 
 [[package]]
 name = "proptest-macro"
-version = "0.5.0"
-source = "git+https://github.com/proptest-rs/proptest?rev=3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b#3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e99782ea31698c2206c6887c1220d2f594b291c26cb9ec5b6d7cf175320bc212"
 dependencies = [
  "convert_case 0.11.0",
  "proc-macro2",
  "quote",
- "syn 2.0.118",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -8849,11 +9264,11 @@ dependencies = [
 
 [[package]]
 name = "rand_xorshift"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
+checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
- "rand_core 0.9.5",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -9066,14 +9481,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "refineable"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "derive_refineable",
-]
-
-[[package]]
 name = "regex"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9162,23 +9569,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.5.0",
  "web-sys",
-]
-
-[[package]]
-name = "reqwest_client"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "anyhow",
- "bytes",
- "futures",
- "gpui_util",
- "http_client",
- "http_client_tls",
- "log",
- "regex",
- "tokio",
- "zed-reqwest",
 ]
 
 [[package]]
@@ -9723,22 +10113,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scheduler"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "async-task",
- "backtrace",
- "chrono",
- "flume 0.12.0",
- "futures",
- "parking_lot",
- "rand 0.9.4",
- "wasm_thread",
- "web-time",
-]
-
-[[package]]
 name = "schemars"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10261,6 +10635,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+dependencies = [
+ "bstr",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "simple-dns"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10495,6 +10879,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
+name = "streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
+
+[[package]]
 name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10582,17 +10972,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "sum_tree"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "heapless",
- "rayon",
- "tracing",
- "ztracing",
-]
 
 [[package]]
 name = "svg_fmt"
@@ -10789,6 +11168,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "taffy"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "639627c87f43b9181c811f40a6296409e093a17bc761214cba3c15df74f86b99"
+dependencies = [
+ "arrayvec",
+ "serde",
+ "slotmap",
+ "smallvec",
+]
+
+[[package]]
 name = "tao-core-video-sys"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10853,8 +11244,8 @@ dependencies = [
  "computer-use-mcp",
  "embed-resource",
  "env_logger",
- "gpui-pre",
- "gpui-pre-platform",
+ "gpui-fast-platform",
+ "gpui-kit",
  "log",
  "smol",
  "tcode-client",
@@ -10874,7 +11265,7 @@ dependencies = [
  "async-channel",
  "futures",
  "gpui-android",
- "gpui-pre",
+ "gpui-kit",
  "jni 0.22.4",
  "log",
  "tcode-client",
@@ -10937,7 +11328,7 @@ dependencies = [
  "async-channel",
  "dirs 7.0.0",
  "gpui-ios",
- "gpui-pre",
+ "gpui-kit",
  "log",
  "tcode-client",
  "tcode-traverse",
@@ -11102,9 +11493,10 @@ dependencies = [
  "gpui-component",
  "gpui-component-macros",
  "gpui-ios",
+ "gpui-fast-platform",
+ "gpui-kit",
  "gpui-kit-assets",
- "gpui-pre",
- "gpui-pre-platform",
+ "gpui-pre-reqwest",
  "gpui-pre-reqwest-client",
  "gpui-wry",
  "image",
@@ -11143,7 +11535,6 @@ dependencies = [
  "web-time",
  "webview2-com",
  "windows-core 0.61.2",
- "zed-reqwest",
 ]
 
 [[package]]
@@ -11153,8 +11544,8 @@ dependencies = [
  "async-channel",
  "console_error_panic_hook",
  "futures-lite",
- "gpui-pre",
- "gpui-pre-web",
+ "gpui-fast-web",
+ "gpui-kit",
  "js-sys",
  "serde_json",
  "tcode-client",
@@ -11762,6 +12153,366 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tree-sitter"
+version = "0.26.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17ebdd3a5a7e28a1890b876fdbd0c3c0fe0a6336cffaa104f11b9f720c9daa29"
+dependencies = [
+ "cc",
+ "regex",
+ "regex-syntax",
+ "serde_json",
+ "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-astro-next"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "794a4a59fc2d88e49b4bc41fef9522d77184a36f4e68bbaf545cd1eb2364c46e"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-bash"
+version = "0.23.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "329a4d48623ac337d42b1df84e81a1c9dbb2946907c102ca72db158c1964a52e"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-c"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9b2eb57a55fed6b00812912e730b7a275cf4fe98bfd6a5d76263d4438371728"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-c-sharp"
+version = "0.23.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-cmake"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d22893fac54133fdb93497efc45713d53a96d93b035288c7a8ab0c2af77c0ddd"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-cpp"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-css"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ad6489794d41350d12a7fbe520e5199f688618f43aace5443980d1ddcf1b29e"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-diff"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfe1e5ca280a65dfe5ba4205c1bcc84edf486464fed315db53dee6da9a335889"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-elixir"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66dd064a762ed95bfc29857fa3cb7403bb1e5cb88112de0f6341b7e47284ba40"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-embedded-template"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790063ef14e5b67556abc0b3be0ed863fb41d65ee791cf8c0b20eb42a1fa46af"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-go"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b13d476345220dbe600147dd444165c5791bf85ef53e28acbedd46112ee18431"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-graphql"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efedc4cac157161cc23a0adc4553a2cedc908e1cd754b6cd033a919bb81ce5d6"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-html"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-java"
+version = "0.23.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-javascript"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf40bf599e0416c16c125c3cec10ee5ddc7d1bb8b0c60fa5c4de249ad34dc1b1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-jsdoc"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3862dfcb1038fc5e7812d7df14190afdeb7e1415288fd5f51f58395f8cb0faf"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-json"
+version = "0.24.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d727acca406c0020cffc6cf35516764f36c8e3dc4408e5ebe2cb35a947ec471"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-kotlin-sg"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c06ec43ae3c12165d4ac08afe4e1f5fc6757ffe274fa7bd5af9007ef11ba4319"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-language"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a"
+
+[[package]]
+name = "tree-sitter-lua"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea992f4164d83f371ef1239ae178c4d4596c296c09055e9a48bb02a2760403af"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-make"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5998dc7cbcbdab19fae8aefef982bf2d6544513d8d2e69cc44aec4c63810104"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-md"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2efd398be546456c814598ee56c0f51769a77241511b4a58077815d120afa882"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-php"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d8c17c3ab69052c5eeaa7ff5cd972dd1bc25d1b97ee779fec391ad3b5df5592"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-proto"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e4360b434b5980fc397137ef29e1988619fef4159ac86fa7ac5777d459d3924"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-python"
+version = "0.23.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d065aaa27f3aaceaf60c1f0e0ac09e1cb9eb8ed28e7bcdaa52129cffc7f4b04"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-ruby"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be0484ea4ef6bb9c575b4fdabde7e31340a8d2dbc7d52b321ac83da703249f95"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-rust"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-scala"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efde5e68b4736e9eac17bfa296c6f104a26bffab363b365eb898c40a63c15d2f"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-sequel"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-svelte-next"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56f88190d0743e897c3e148a7e241aba0a8844b8afe816943851426e3f7b9753"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-swift"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2688c06564afa397313e0db17d140a73e2c6a47f3884794614246167c9dd5dfd"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-toml-ng"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9adc2c898ae49730e857d75be403da3f92bb81d8e37a2f918a08dd10de5ebb1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-yaml"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c223db85f05e34794f065454843b0668ebc15d240ada63e2b5939f43ce7c97"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-zig"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab11fc124851b0db4dd5e55983bbd9631192e93238389dcd44521715e5d53e28"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -12479,7 +13230,8 @@ dependencies = [
 [[package]]
 name = "wasm_thread"
 version = "0.3.3"
-source = "git+https://github.com/zed-industries/wasm_thread?rev=0cf96c7708dfb97ccf3da50347e25edcf75d6937#0cf96c7708dfb97ccf3da50347e25edcf75d6937"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7516db7f32decdadb1c3b8deb1b7d78b9df7606c5cc2f6241737c2ab3a0258e"
 dependencies = [
  "futures",
  "js-sys",
@@ -13818,15 +14570,17 @@ checksum = "bec9e4a500ca8864c5b47b8b482a73d62e4237670e5b5f1d6b9e3cae50f28f2b"
 [[package]]
 name = "xim-ctext"
 version = "0.3.0"
-source = "git+https://github.com/zed-industries/xim-rs.git?rev=16f35a2c881b815a2b6cdfd6687988e84f8447d8#16f35a2c881b815a2b6cdfd6687988e84f8447d8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ac61a7062c40f3c37b6e82eeeef835d5cc7824b632a72784a89b3963c33284c"
 dependencies = [
  "encoding_rs",
 ]
 
 [[package]]
 name = "xim-parser"
-version = "0.2.1"
-source = "git+https://github.com/zed-industries/xim-rs.git?rev=16f35a2c881b815a2b6cdfd6687988e84f8447d8#16f35a2c881b815a2b6cdfd6687988e84f8447d8"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dcee45f89572d5a65180af3a84e7ddb24f5ea690a6d3aa9de231281544dd7b7"
 dependencies = [
  "bitflags 2.13.2",
 ]
@@ -14060,81 +14814,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "zed-font-kit"
-version = "0.14.1-zed"
-source = "git+https://github.com/zed-industries/font-kit?rev=94b0f28166665e8fd2f53ff6d268a14955c82269#94b0f28166665e8fd2f53ff6d268a14955c82269"
-dependencies = [
- "bitflags 2.13.2",
- "byteorder",
- "core-foundation 0.10.1",
- "core-graphics 0.24.0",
- "core-text",
- "dirs 6.0.0",
- "dwrote",
- "float-ord",
- "freetype-sys",
- "lazy_static",
- "libc",
- "log",
- "pathfinder_geometry",
- "pathfinder_simd",
- "walkdir",
- "winapi",
- "yeslogic-fontconfig-sys",
-]
-
-[[package]]
-name = "zed-reqwest"
-version = "0.12.15-zed"
-source = "git+https://github.com/zed-industries/reqwest.git?rev=33bc764aa15ff7b200bf7c93bd96e24878d53e14#33bc764aa15ff7b200bf7c93bd96e24878d53e14"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures-core",
- "futures-util",
- "h2",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "ipnet",
- "js-sys",
- "log",
- "mime",
- "once_cell",
- "percent-encoding",
- "pin-project-lite",
- "quinn",
- "rustls",
- "rustls-native-certs",
- "rustls-pemfile",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sync_wrapper",
- "system-configuration 0.8.0",
- "tokio",
- "tokio-rustls",
- "tokio-socks",
- "tokio-util",
- "tower",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-streams 0.4.2",
- "web-sys",
- "webpki-roots 0.26.11",
- "windows-registry 0.4.0",
-]
-
-[[package]]
 name = "zed-scap"
 version = "0.0.8-zed"
-source = "git+https://github.com/zed-industries/scap?rev=4afea48c3b002197176fb19cd0f9b180dd36eaac#4afea48c3b002197176fb19cd0f9b180dd36eaac"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6b338d705ae33a43ca00287c11129303a7a0aa57b101b72a1c08c863f698ac8"
 dependencies = [
  "anyhow",
  "cocoa 0.25.0",
@@ -14155,7 +14838,8 @@ dependencies = [
 [[package]]
 name = "zed-xim"
 version = "0.4.0-zed"
-source = "git+https://github.com/zed-industries/xim-rs.git?rev=16f35a2c881b815a2b6cdfd6687988e84f8447d8#16f35a2c881b815a2b6cdfd6687988e84f8447d8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c0b46ed118eba34d9ba53d94ddc0b665e0e06a2cf874cfa2dd5dec278148642"
 dependencies = [
  "ahash",
  "hashbrown 0.14.5",
@@ -14294,20 +14978,6 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[package]]
-name = "ztracing"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
-dependencies = [
- "tracing",
- "ztracing_macro",
-]
-
-[[package]]
-name = "ztracing_macro"
-version = "0.1.0"
-source = "git+https://github.com/longbridge/gpui-fast#3755a552f29744ada535e1e58dbb4b316c4a6943"
 
 [[package]]
 name = "zune-core"

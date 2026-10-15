@@ -25,7 +25,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 
-use crate::{diff::model::sub_runs, highlight};
+use crate::highlight::{self, sub_runs};
 
 use super::{
     fitted_image::FittedImage,

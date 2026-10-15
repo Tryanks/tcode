@@ -997,6 +997,7 @@ approval:
   cancel_turn: "取消本轮"
 diff:
   title: "Diff"
+  no_text: "无法显示文本差异（文件为二进制或过大）。"
   panel_tabs: "右侧面板标签页"
   scope_menu: "Diff 范围"
   base_branches: "基础分支"

@@ -310,7 +310,17 @@ pub fn init(cx: &mut App) {
 /// The desktop app uses this to flatten its translucent canvas colors when
 /// the platform window is opaque.
 pub fn init_with_json(theme_json: &str, cx: &mut App) {
-    gpui_base::init(cx);
+    gpui_component::init(cx);
+    let kit: gpui_component::ThemeSet = serde_json::from_str(theme_json).expect("valid Kit theme");
+    for config in kit.themes {
+        let config = std::rc::Rc::new(config);
+        let theme = gpui_component::Theme::global_mut(cx);
+        if config.mode.is_dark() {
+            theme.dark_theme = config;
+        } else {
+            theme.light_theme = config;
+        }
+    }
     crate::overlay::init(cx);
     crate::widgets::menu::init(cx);
     let themes = parse_theme_file(theme_json).expect("embedded themes/tcode.json must be valid");
@@ -324,6 +334,15 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         ThemeMode::Light => cx.global::<Themes>().light.clone(),
         ThemeMode::Dark => cx.global::<Themes>().dark.clone(),
     };
+    gpui_component::Theme::change(
+        if mode.is_dark() {
+            gpui_component::ThemeMode::Dark
+        } else {
+            gpui_component::ThemeMode::Light
+        },
+        None,
+        cx,
+    );
     let radius = theme.tokens.radius;
     let base_theme = gpui_base::Theme {
         appearance: match mode {

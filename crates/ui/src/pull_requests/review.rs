@@ -171,9 +171,24 @@ impl PullRequestView {
         if self.compact(cx) {
             self.open_sheet(Some(Sheet::Editor(Slot::Line)), cx);
         }
-        if let Some(list) = self.page().and_then(|page| page.files_view.list.as_ref()) {
-            list.remeasure();
+    }
+
+    pub(super) fn review_annotation_positions(&self, cx: &App) -> Vec<(String, ReviewSide, u32)> {
+        let mut positions = self
+            .draft(cx)
+            .into_iter()
+            .flat_map(|draft| draft.comments)
+            .filter(|comment| comment.placed)
+            .map(|comment| (comment.path, comment.side, comment.end_line))
+            .collect::<Vec<_>>();
+        if let Some(anchor) = self
+            .writes()
+            .and_then(|writes| writes.editors.get(&Slot::Line))
+            .and_then(|editor| editor.anchor.as_ref())
+        {
+            positions.push((anchor.path.clone(), anchor.side, anchor.end_line));
         }
+        positions
     }
 
     /// What Files draws under a code row: pending comments ending there, and the selection's row

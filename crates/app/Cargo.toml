@@ -20,8 +20,8 @@ tcode-traverse = { path = "../traverse", features = ["native"] }
 tcode-runtime = { path = "../runtime" }
 tcode-ui = { path = "../ui" }
 computer-use-mcp = { path = "../computer-use-mcp" }
-gpui = { package = "gpui-pre", version = "0.3.8" }
-gpui_platform = { package = "gpui-pre-platform", version = "0.3.8", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui = { package = "gpui-kit", version = "0.7.3", default-features = false, features = ["gpui-fast"] }
+gpui_platform = { package = "gpui-fast-platform", version = "0.1.7", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 env_logger = "0.11"
 log = "0.4"
 smol = "2"

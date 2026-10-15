@@ -397,7 +397,7 @@ impl PullRequestView {
             page.tab = Some(Tab::Files);
             page.files_view.collapsed.insert(anchor.path.clone(), false);
             if let (Some(index), Some(list)) = (index, page.files_view.list.as_ref()) {
-                list.scroll_to_file(index);
+                list.scroll_to_file(index, cx);
             }
         }
         cx.notify();

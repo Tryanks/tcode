@@ -1004,6 +1004,7 @@ approval:
   cancel_turn: "Cancel turn"
 diff:
   title: "Diff"
+  no_text: "Text diff unavailable (binary or too large)."
   panel_tabs: "Right panel tabs"
   scope_menu: "Diff scope"
   base_branches: "Base branches"

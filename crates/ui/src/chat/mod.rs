@@ -4698,7 +4698,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_live_file_edit_lays_out_only_the_diff_lines_on_screen(cx: &mut TestAppContext) {
+    fn scrolling_a_live_file_diff_keeps_the_timeline_still_and_replaces_the_patch(
+        cx: &mut TestAppContext,
+    ) {
         use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, VisualTestContext};
         use gpui::{point, px, size};
 
@@ -4736,12 +4738,6 @@ mod tests {
         cx.simulate_resize(size(px(600.), px(900.)));
         draw(cx);
 
-        assert!(cx.debug_bounds("file-edit-diff-line-0").is_some());
-        assert!(
-            cx.debug_bounds("file-edit-diff-line-300").is_none(),
-            "an inline diff must not lay out all 801 lines"
-        );
-
         // Both axes scroll inside the diff; the timeline stays put.
         let timeline_top = |cx: &mut VisualTestContext| {
             let top = view.read_with(cx, |chat, _| chat.list_state.logical_scroll_top());
@@ -4768,17 +4764,7 @@ mod tests {
             draw(cx);
         };
         wheel(point(px(0.), px(-2_000.)), cx);
-        assert!(cx.debug_bounds("file-edit-diff-line-0").is_none());
-        let line = cx
-            .debug_bounds("file-edit-diff-line-120")
-            .expect("a line scrolled into the diff");
         wheel(point(px(-200.), px(0.)), cx);
-        let scrolled = cx.debug_bounds("file-edit-diff-line-120").unwrap();
-        assert!(
-            scrolled.left() < line.left(),
-            "{scrolled:?} did not scroll left of {line:?}"
-        );
-        assert_eq!(scrolled.top(), line.top());
         assert_eq!(timeline_top(cx), before);
 
         // The provider reports a different patch for the same edit.
@@ -4797,55 +4783,18 @@ mod tests {
             store.set_session_replica_for_test(session_id, timeline, cx);
         });
         draw(cx);
-        assert!(cx.debug_bounds("file-edit-diff-line-1").is_some());
-        assert!(cx.debug_bounds("file-edit-diff-line-2").is_none());
-    }
-
-    #[gpui::test]
-    fn a_built_inline_diff_goes_once_its_row_leaves_the_screen(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-
-        let mut timeline = Timeline::default();
-        timeline.turns = vec![TurnMeta {
-            running: true,
-            ..TurnMeta::default()
-        }];
-        timeline.entries = vec![
-            entry("user", user_item("go")),
-            entry(
-                "edit",
-                EntryContent::Item(ItemContent::FileChange {
-                    changes: vec![agent::FileChange {
-                        path: "src/lib.rs".into(),
-                        kind: agent::FileChangeKind::Modify,
-                        diff: Some("@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n".into()),
-                    }],
-                    status: ItemStatus::Completed,
-                }),
-            ),
-        ];
-        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        draw(cx);
-        assert!(cx.debug_bounds("file-edit-diff").is_some());
-        assert_eq!(view.read_with(cx, |chat, _| chat.inline_diffs.len()), 1);
-
-        // Newer activities fold the open edit into the collapsed Work Log,
-        // so its row never renders again.
-        for index in 0..6 {
-            timeline.entries.push(command(&format!("command-{index}")));
-        }
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
-            cx.notify();
-        });
-        draw(cx);
-        draw(cx);
-        assert!(cx.debug_bounds("file-edit-diff").is_none());
-        assert_eq!(view.read_with(cx, |chat, _| chat.inline_diffs.len()), 0);
+        let bounds = cx
+            .debug_bounds("file-edit-diff")
+            .expect("updated inline diff");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.simulate_keystrokes("cmd-a cmd-c");
+        assert!(cx.update(|_, cx| {
+            cx.read_from_clipboard()
+                .unwrap()
+                .text()
+                .unwrap()
+                .contains("fn new() {}")
+        }));
     }
 
     #[gpui::test]
