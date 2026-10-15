@@ -4163,7 +4163,7 @@ version = "0.3.7"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.1",
- "core-graphics 0.24.0",
+ "core-graphics 0.25.0",
  "core-text",
  "futures",
  "gpui-base",
