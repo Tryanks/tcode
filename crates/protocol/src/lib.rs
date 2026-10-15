@@ -147,6 +147,7 @@ pub use wire::{
 // instruction channel, an MCP server's instructions, Codex's developer
 // instructions).
 //
+// Unreleased: SessionMeta carries pull_request_watches_paused for retained watch subscriptions.
 // Unreleased: ReadFileBytes accepts an optional max_bytes read budget, capped by network bridges.
 // Unreleased: ReadItemImagePreview returns optional previews of recorded tool images.
 // Unreleased: ReadImagePreview returns optional size-specific static attachment previews.

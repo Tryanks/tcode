@@ -226,6 +226,7 @@ impl AppState {
         // session so the sidebar row appears; the provider then starts below.
         self.commit_draft(target_id, cx);
         self.reactivate_session(target_id, cx);
+        self.resume_pull_request_watches(target_id, cx);
 
         let Some(active) = self.resident_mut(target_id) else {
             return;
@@ -499,9 +500,8 @@ impl AppState {
             let meta = meta.clone();
             self.persist_meta(&meta, cx);
         }
-        self.clear_pull_request_watch_stop(session_id);
         if let QueuedMessageKind::PullRequestWake { key, id } = &message.kind {
-            self.acknowledge_pull_request_wake(session_id, key, id, cx);
+            self.acknowledge_pull_request_wake(session_id, key, id, &message.text, cx);
         }
         if let Some(window) = message.context_window_changed {
             self.record_event(session_id, &AgentEvent::ContextWindowChanged { window }, cx);
@@ -765,10 +765,11 @@ impl AppState {
         target_id: &str,
         cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
-        self.stop_pull_request_watches(target_id, cx);
+        self.pause_pull_request_watches(target_id, cx);
         // An idle provider never answers an interrupt, which would leave the thread stopping.
         let Some(active) = self.resident(target_id).filter(|active| {
             active.turn_in_flight
+                || active.delivery_in_flight.is_some()
                 || active.timeline.turn_running
                 || active.background_task_count > 0
         }) else {

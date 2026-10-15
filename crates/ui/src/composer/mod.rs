@@ -788,7 +788,7 @@ impl Composer {
         let stopping = (turn_running || self.watching(cx)) && !has_text;
         let stop_pending = self.workspace_store.read(cx).composer_state().stopping;
         let (label, id): (_, &'static str) = if stopping {
-            (crate::tr!("composer.stop"), "stop-turn")
+            (self.stop_label(turn_running), "stop-turn")
         } else if turn_running {
             (crate::tr!("mobile.queue"), "steer-turn")
         } else {
@@ -861,23 +861,32 @@ impl Composer {
             .into_any_element()
     }
 
-    /// Stop also ends the thread's pull request watches, so a watched thread offers it between
-    /// turns.
     fn watching(&self, cx: &App) -> bool {
         let store = self.workspace_store.read(cx);
         store.active_session_id().is_some_and(|id| {
-            tcode_core::pull_request::watched(store.pull_requests(&id))
-                .next()
-                .is_some()
+            store
+                .thread_meta(&id)
+                .is_some_and(|meta| !meta.pull_request_watches_paused)
+                && tcode_core::pull_request::watched(store.pull_requests(&id))
+                    .next()
+                    .is_some()
         })
     }
 
-    fn render_stop(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn stop_label(&self, turn_running: bool) -> Cow<'static, str> {
+        crate::tr!(if turn_running {
+            "composer.stop"
+        } else {
+            "composer.pause_monitoring"
+        })
+    }
+
+    fn render_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         crate::material::accessible_clickable(
             div(),
             "stop-turn",
             Role::Button,
-            crate::tr!("composer.stop"),
+            self.stop_label(turn_running),
             cx,
         )
         .debug_selector(|| "stop-turn".into())
@@ -957,7 +966,9 @@ impl Composer {
                     })),
                 );
             }
-            return row.child(self.render_stop(cx)).into_any_element();
+            return row
+                .child(self.render_stop(turn_running, cx))
+                .into_any_element();
         }
 
         // First-send worktree preparation temporarily disables the send control.
@@ -982,7 +993,7 @@ impl Composer {
 
         let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
         if !has_text && self.watching(cx) {
-            return self.render_stop(cx).into_any_element();
+            return self.render_stop(turn_running, cx).into_any_element();
         }
         let (bg, fg) = if has_text {
             (cx.theme().primary, cx.theme().primary_foreground)
@@ -1662,85 +1673,104 @@ mod replica_tests {
         assert_eq!(sent(), [(id, Some(serde_json::Value::String(chosen)))]);
     }
 
-    /// Between turns, Stop is how the user ends the watches a thread is waiting on.
     #[gpui::test]
     fn a_thread_waiting_on_a_watch_offers_stop_between_turns(cx: &mut TestAppContext) {
+        use crate::store::tests::LocalHostDriver;
         use tcode_core::pull_request::{PullRequestKey, PullRequestSource, link_pull_request};
-        use tcode_protocol::{IndexSnapshot, IndexSummary};
-        let (store, incoming, outgoing, status) = attach(cx);
-        let session_id = status.session_id.clone();
-        let mut meta =
-            tcode_core::project::SessionMeta::new(status.provider, status.cwd.clone(), None);
-        meta.id = session_id.clone();
-        link_pull_request(
-            &mut meta.pull_requests,
-            PullRequestKey::new("github.com", "sample/project", 1),
-            "https://github.com/sample/project/pull/1".into(),
-            PullRequestSource::Agent,
-            1,
-            true,
-        );
-        meta.pull_requests[0].watch =
-            Some(tcode_core::pull_request_watch::PullRequestWatch::new(0));
-        let mut activity = status.activity.clone();
-        activity.waiting = true;
-        replace(
-            &incoming,
-            Topic::Index,
-            ServerEvent::IndexSnapshot(IndexSnapshot {
-                summary: IndexSummary {
-                    activity: [(session_id.clone(), activity)].into(),
-                    ..Default::default()
-                },
-                sessions: vec![meta],
-                projects: Vec::new(),
-            }),
-        );
-        replace(
-            &incoming,
-            Topic::SessionStatus {
-                session_id: session_id.clone(),
-            },
-            ServerEvent::SessionStatusReplaced(Box::new(status)),
-        );
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
-        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
-        while outgoing.try_recv().is_ok() {}
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
         for compact in [false, true] {
-            composer.update(cx, |composer, cx| composer.set_compact(compact, cx));
-            cx.update(|window, cx| _ = window.draw(cx));
-            let stop = cx.debug_bounds("stop-turn").expect("Stop is offered");
-            assert!(cx.debug_bounds("send-message").is_none());
-            cx.simulate_click(stop.center(), Modifiers::default());
-            cx.run_until_parked();
-            let sent: Vec<_> = std::iter::from_fn(|| outgoing.try_recv().ok())
-                .map(|line| tcode_protocol::decode_client_line(&line).unwrap().payload)
-                .collect();
-            assert!(
-                matches!(
-                    &sent[..],
-                    [tcode_protocol::ClientPayload::Command(
-                        tcode_protocol::Command::Interrupt { session_id: stopped }
-                    )] if *stopped == session_id
-                ),
-                "{sent:?}"
+            let root = crate::store::tests::scratch_root("composer-pause-watch");
+            let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+            let mut meta = tcode_core::project::SessionMeta::new(
+                ProviderKind::Codex,
+                std::env::temp_dir(),
+                None,
             );
-
+            let session_id = meta.id.clone();
+            link_pull_request(
+                &mut meta.pull_requests,
+                PullRequestKey::new("review.invalid", "sample/project", 1),
+                "https://review.invalid/sample/project/pull/1".into(),
+                PullRequestSource::Agent,
+                1,
+                true,
+            );
+            meta.pull_requests[0].watch =
+                Some(tcode_core::pull_request_watch::PullRequestWatch::new(0));
+            disk.upsert_meta(&meta).unwrap();
+            let host =
+                tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
+                    .unwrap();
+            let mut driver = LocalHostDriver::new(&host);
+            let store = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    driver.link.clone(),
+                    crate::store::WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    false,
+                    cx,
+                )
+            });
+            driver.wait_until(cx, &store, "workspace baseline", |cx| {
+                store.read_with(cx, |store, _| store.baseline_ready())
+            });
+            store.update(cx, |store, _| store.select_session(session_id.clone()));
+            driver.wait_until(cx, &store, "watched thread", |cx| {
+                store.read_with(cx, |store, _| {
+                    store
+                        .session_status()
+                        .is_some_and(|status| status.session_id == session_id)
+                })
+            });
+            let (composer, cx) =
+                cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+            composer.update(cx, |composer, cx| composer.set_compact(compact, cx));
+            cx.simulate_resize(gpui::size(px(if compact { 393. } else { 1200. }), px(800.)));
+            cx.update(|window, cx| _ = window.draw(cx));
+            assert!(store.read_with(cx, |store, _| store.waiting_for(&session_id)));
+            assert!(
+                cx.debug_bounds("stop-turn").is_some(),
+                "Stop is offered between turns"
+            );
             composer.update_in(cx, |composer, window, cx| {
                 composer.set_input_text("Check the build".into(), window, cx)
             });
             cx.update(|window, cx| _ = window.draw(cx));
             assert!(
                 cx.debug_bounds("send-message").is_some(),
-                "typed text sends rather than stops"
+                "typed text sends"
             );
             assert!(cx.debug_bounds("stop-turn").is_none());
             composer.update_in(cx, |composer, window, cx| {
                 composer.set_input_text(String::new(), window, cx)
             });
+            cx.update(|window, cx| _ = window.draw(cx));
+            let stop = cx.debug_bounds("stop-turn").unwrap();
+            cx.simulate_click(stop.center(), Modifiers::default());
+            driver.wait_until(cx, &store, "monitoring paused", |cx| {
+                store.read_with(cx, |store, _| {
+                    store
+                        .thread_meta(&session_id)
+                        .is_some_and(|meta| meta.pull_request_watches_paused)
+                })
+            });
+            cx.update(|window, cx| _ = window.draw(cx));
+            assert!(!store.read_with(cx, |store, _| store.waiting_for(&session_id)));
+            assert!(store.read_with(cx, |store, _| {
+                store.pull_requests(&session_id)[0].watch.is_some()
+            }));
+            assert!(
+                cx.debug_bounds("stop-turn").is_none(),
+                "paused monitoring is idle"
+            );
+            assert!(
+                cx.debug_bounds("send-message").is_some(),
+                "the next turn can resume monitoring"
+            );
+            driver.shutdown(cx, &store, &host);
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 

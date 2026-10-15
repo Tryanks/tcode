@@ -474,9 +474,10 @@ impl<'a> ActivityProjection<'a> {
             }),
             waiting: resident.is_some_and(|session| session.background_task_count > 0)
                 || self.children_hold(&meta.id)
-                || tcode_core::pull_request::watched(&meta.pull_requests)
-                    .next()
-                    .is_some(),
+                || (!meta.pull_request_watches_paused
+                    && tcode_core::pull_request::watched(&meta.pull_requests)
+                        .next()
+                        .is_some()),
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
             failed: self

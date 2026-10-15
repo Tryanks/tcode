@@ -942,6 +942,7 @@ impl AppState {
     pub(super) fn save_pull_request_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
         if let Some(resident) = self.meta_mut(&meta.id) {
             resident.pull_requests.clone_from(&meta.pull_requests);
+            resident.pull_request_watches_paused = meta.pull_request_watches_paused;
             resident
                 .branch_pull_request
                 .clone_from(&meta.branch_pull_request);

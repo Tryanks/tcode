@@ -91,6 +91,9 @@ pub struct SessionMeta {
         deserialize_with = "crate::pull_request::drop_discovered_links"
     )]
     pub pull_requests: Vec<crate::pull_request::ThreadPullRequestLink>,
+    /// Interrupt pauses monitoring for the thread, including watches registered afterwards.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pull_request_watches_paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_pull_request: Option<Box<crate::pull_request::BranchPullRequest>>,
     /// Reviews being written in this thread, one per pull request it shows.
@@ -291,6 +294,7 @@ impl SessionMeta {
             id: uuid::Uuid::new_v4().to_string(),
             title: format!("New {} session", provider.display_name()),
             pull_requests: Vec::new(),
+            pull_request_watches_paused: false,
             branch_pull_request: None,
             pull_request_reviews: Vec::new(),
             pull_request_operations: Vec::new(),

@@ -273,12 +273,12 @@ impl AppState {
                 ))
             };
         }
-        // Stop ends a thread's watches whether or not it has a run to interrupt.
         if matches!(command, Command::Interrupt { .. })
             && self.find_meta(session_id).is_some_and(|meta| {
-                tcode_core::pull_request::watched(&meta.pull_requests)
-                    .next()
-                    .is_some()
+                !meta.pull_request_watches_paused
+                    && tcode_core::pull_request::watched(&meta.pull_requests)
+                        .next()
+                        .is_some()
             })
         {
             return Ok(());
