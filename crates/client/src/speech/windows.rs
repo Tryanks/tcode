@@ -289,9 +289,9 @@ fn phrase_text(result: &SpeechRecognitionResult) -> Option<HSTRING> {
 fn joined(separator_due: bool, separator: &str, text: &HSTRING) -> String {
     let text = text.to_string_lossy();
     if separator_due {
-        format!("{separator}{text}").into()
+        format!("{separator}{text}")
     } else {
-        text.into()
+        text
     }
 }
 
