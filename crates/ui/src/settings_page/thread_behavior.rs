@@ -103,9 +103,9 @@ impl SettingsPage {
         }
         let merge_reset = self.reset_action(
             "reset-auto-settle-on-merge",
-            !settings.auto_settle_on_merge,
+            settings.auto_settle_on_merge,
             cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_auto_settle_on_merge(true), cx),
+            |this, _, cx| this.dispatch_settings(|store| store.set_auto_settle_on_merge(false), cx),
         );
         rows.push(self.toggle_row(
             "auto-settle-on-merge",

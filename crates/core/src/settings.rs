@@ -1103,7 +1103,7 @@ pub struct Settings {
     pub fallback_review_advisor: bool,
     #[serde(default = "default_auto_settle_after_days")]
     pub auto_settle_after_days: Option<f64>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_settle_on_merge: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub project_settlement_overrides: BTreeMap<String, ProjectSettlementSettings>,
@@ -1239,7 +1239,7 @@ impl Default for Settings {
             resume_on_limit_reset: true,
             fallback_review_advisor: false,
             auto_settle_after_days: default_auto_settle_after_days(),
-            auto_settle_on_merge: true,
+            auto_settle_on_merge: false,
             project_settlement_overrides: BTreeMap::new(),
             project_merge_methods: BTreeMap::new(),
             remove_agent_credits_on_merge: false,
@@ -1641,7 +1641,7 @@ mod tests {
     fn older_settings_preserve_access_policy_and_accept_partial_feature_blocks() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
         assert_eq!(legacy.auto_settle_after_days, Some(3.0));
-        assert!(legacy.auto_settle_on_merge);
+        assert!(!legacy.auto_settle_on_merge);
         assert!(!legacy.sidebar_provider_marks);
         assert!(!legacy.sidebar_collapsed);
         assert!(!legacy.remote_hosting_enabled);
