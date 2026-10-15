@@ -148,14 +148,19 @@ not for a machine.
 
 ## Docker
 
-`Dockerfile` builds the binary on a Rust image and ships it on
-`debian:bookworm-slim`, exposing 80, 443 and 7842/udp. Mount the config at
+Releases publish `ghcr.io/tryanks/tcode-traverse:<version>` and `:latest` for
+Linux amd64 and arm64, using the same binaries as the release archives.
+The runtime is `debian:trixie-slim`, exposing 80, 443 and 7842/udp. Mount the config at
 `/etc/tcode-traverse/traverse.toml` and the data directory at
 `/var/lib/tcode-traverse`:
 
 ```sh
-docker build -f crates/traverse-server/Dockerfile -t tcode-traverse .
 docker run -p 80:80 -p 443:443 -p 7842:7842/udp \
   -v "$PWD/traverse.toml:/etc/tcode-traverse/traverse.toml:ro" \
-  -v tcode-traverse-data:/var/lib/tcode-traverse tcode-traverse
+  -v tcode-traverse-data:/var/lib/tcode-traverse ghcr.io/tryanks/tcode-traverse:latest
 ```
+
+For a local source build, run
+`docker build -f crates/traverse-server/Dockerfile -t tcode-traverse .`.
+Release builds pass `--build-arg BINARY_SOURCE=release`, with the binary
+staged at `dist/<amd64|arm64>/tcode-traverse`.
