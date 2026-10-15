@@ -1247,6 +1247,19 @@ pub fn handle_back(cx: &mut App) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a platform edge swipe in the window would pop a compact page. An
+/// overlay keeps the edge: its own dismissal answers Back first.
+pub fn can_swipe_back(cx: &App) -> bool {
+    let Some((_, shell)) = current_window_shell(cx) else {
+        return false;
+    };
+    let shell = shell.read(cx);
+    shell.compact(cx)
+        && !shell.window_state.read(cx).palette_open
+        && !gpui_base::GlobalState::is_in_deferred_context(cx)
+        && shell.nav.read(cx).depth() > 1
+}
+
 /// The per-thread notification slot for its pull request watch.
 struct PullRequestWatchNotice;
 
@@ -2235,6 +2248,7 @@ impl AppShell {
     // gpui-base 0.7.1 has no edge gesture or interactive pop API: NavPage progress
     // is read-only and driven by Presence's clock. Remove this wrapper when
     // NavStack supports touch-back; until then release commits its animated pop.
+    // iOS takes the edge with UIKit's own recognizer instead (`can_swipe_back`).
     fn swipe_back_stack(
         &self,
         stack: impl IntoElement,
@@ -2306,10 +2320,32 @@ impl AppShell {
                                         && swipe.velocity >= 600.
                                         && now.duration_since(swipe.last_moved_at)
                                             <= Duration::from_millis(100);
-                                    if event.touch_phase == TouchPhase::Ended
-                                        && (swipe.travel >= swipe.width / 3. || fast)
-                                    {
-                                        shell.back(window, cx);
+                                    let commit = swipe.travel >= swipe.width / 3. || fast;
+                                    let origin = swipe.origin;
+                                    if event.touch_phase == TouchPhase::Ended {
+                                        if commit {
+                                            shell.back(window, cx);
+                                        }
+                                        // GPUI flings every released pan, this one too, and
+                                        // spends the next touch, a tap included, on catching
+                                        // that invisible fling. A touch that starts and
+                                        // cancels at once catches it instead.
+                                        window.defer(cx, move |window, cx| {
+                                            for phase in
+                                                [TouchPhase::Started, TouchPhase::Cancelled]
+                                            {
+                                                window.dispatch_event(
+                                                    gpui::PlatformInput::Touch(gpui::TouchEvent {
+                                                        id: gpui::TouchId(u64::MAX),
+                                                        phase,
+                                                        position: origin,
+                                                        predicted_position: None,
+                                                        force: None,
+                                                    }),
+                                                    cx,
+                                                );
+                                            }
+                                        });
                                     }
                                 }
                             });
@@ -2377,7 +2413,13 @@ impl AppShell {
             .on_action(cx.listener(Self::on_thread_undo))
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
-            .child(self.swipe_back_stack(stack, cx))
+            .map(|el| {
+                if cfg!(target_os = "ios") {
+                    el.child(stack)
+                } else {
+                    el.child(self.swipe_back_stack(stack, cx))
+                }
+            })
             .when(palette_open, |el| {
                 el.children(
                     self.attachment
@@ -5267,6 +5309,72 @@ mod tests {
             assert_eq!(shell.window_state.read(cx).history().len(), 1);
             assert_eq!(shell.nav.read(cx).depth(), 1);
         });
+    }
+
+    #[gpui::test]
+    fn platform_edge_swipe_pops_only_an_uncovered_compact_page(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 393.);
+        cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
+        let can_swipe = |cx: &mut VisualTestContext| cx.update(|_, cx| can_swipe_back(cx));
+        cx.update(|window, cx| shell.update(cx, |shell, cx| while shell.back(window, cx) {}));
+        draw(cx);
+        assert!(!can_swipe(cx));
+        shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        assert!(can_swipe(cx));
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.open_palette(cx));
+        draw(cx);
+        assert!(!can_swipe(cx));
+        state.update(cx, |state, cx| state.close_palette(cx));
+        draw(cx);
+        assert!(can_swipe(cx));
+        let depth = shell.read_with(cx, |shell, cx| shell.nav.read(cx).depth());
+        assert!(cx.cx.update(handle_back));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.nav.read(cx).depth(), depth - 1)
+        });
+    }
+
+    #[gpui::test]
+    fn compact_tap_right_after_flung_edge_swipe_reaches_revealed_page(cx: &mut TestAppContext) {
+        use gpui::TouchPhase::{Ended, Moved, Started};
+
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 393.);
+        let root = shell.read_with(cx, |shell, cx| shell.nav.read(cx).depth());
+        for destination in [Destination::Thread, Destination::Panel] {
+            shell.update(cx, |shell, cx| shell.go(destination, cx));
+            draw(cx);
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
+        }
+        // Touch hardware reports a moving finger every 8–16ms, so the release
+        // carries a fling velocity.
+        let mut swipe = vec![(Started, 10., 300., 0)];
+        swipe.extend((1..=10).map(|step| (Moved, 10. + 20. * step as f32, 300., 8)));
+        swipe.push((Ended, 210., 300., 8));
+        touch_drag(cx, 1, &swipe);
+        cx.executor().advance_clock(Duration::from_millis(300));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.nav.read(cx).depth(), root + 1)
+        });
+        let back = cx
+            .debug_bounds("compact-back")
+            .expect("Back on revealed page");
+        let x = f32::from(back.center().x);
+        let y = f32::from(back.center().y);
+        touch_drag(cx, 2, &[(Started, x, y, 0), (Ended, x, y, 50)]);
+        shell.read_with(cx, |shell, cx| assert_eq!(shell.nav.read(cx).depth(), root));
     }
 
     #[gpui::test]
