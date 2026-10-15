@@ -436,9 +436,7 @@ pub(crate) fn render_list<H: DiffListHost>(
     })
     .flex_1()
     .min_h_0()
-    .h_full()
-    .text_size(px(13.))
-    .font_family(cx.theme().mono_font_family.clone());
+    .h_full();
     if wrap {
         rows = rows.w_full();
     } else {
@@ -450,6 +448,8 @@ pub(crate) fn render_list<H: DiffListHost>(
     // wheel/trackpad deltas (or Shift-wheel) still scroll this viewport.
     div()
         .id(id)
+        .text_size(px(13.))
+        .font_family(cx.theme().mono_font_family.clone())
         .debug_selector(move || id.into())
         .key_context("TcodeDiff")
         .track_focus(&diff.focus)
@@ -640,7 +640,7 @@ fn render_item<H: DiffListHost>(
             let old = left.and_then(|ix| document.all_rows[ix].old);
             let new = right.and_then(|ix| document.all_rows[ix].new);
             v_flex()
-                .min_w_full()
+                .w_full()
                 .child(rendered)
                 .children(host.row_extras(*file, old, new, cx))
                 .into_any_element()
@@ -835,7 +835,7 @@ fn render_gap<H: DiffListHost>(
 /// edge with the sentence cut in half.
 pub(crate) fn render_notice(message: impl Into<gpui::SharedString>, cx: &App) -> gpui::Div {
     h_flex()
-        .min_w_full()
+        .w_full()
         .px(px(material::CARD_INSET))
         .py_2()
         .gap_1p5()
@@ -883,7 +883,7 @@ fn render_split_row<H: DiffListHost>(
         )
     };
     h_flex()
-        .min_w_full()
+        .w_full()
         .items_stretch()
         .child(cell(pair.left, ReviewSide::Old, cx))
         .child(div().w_px().bg(cx.theme().border.opacity(0.)))
@@ -978,7 +978,7 @@ fn render_code_row<H: DiffListHost>(
         cell = cell.flex_1().min_w_0().child(gutter(side, cx));
     } else {
         cell = cell
-            .min_w_full()
+            .w_full()
             .border_l_2()
             .border_color(accent.unwrap_or(gpui::transparent_black()))
             .child(gutter(ReviewSide::Old, cx))
@@ -1080,12 +1080,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn keyboard_copy_keeps_original_whitespace_on_the_selected_side(cx: &mut TestAppContext) {
+    fn wrapped_split_keeps_columns_visible_and_copies_original_text(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::shortcut::init);
         for (old, new, ignore_whitespace) in [
             ("let 名 = 1;\n", "let 名\t= 2;\n", false),
             ("let 名 = 1;\n", "let  名\t=1;\n", true),
+            (
+                "let description = \"a long line wraps inside the original column while its counterpart stays visible\";\n",
+                "let description = \"a long line wraps inside the modified column while its counterpart stays visible\";\n",
+                false,
+            ),
         ] {
             let (viewer, cx) = cx.add_window_view(|window, cx| {
                 let file = build_file(
@@ -1113,6 +1118,12 @@ mod tests {
             cx.update(|window, cx| {
                 let _ = window.draw(cx);
             });
+            let left = cx.debug_bounds("diff-line-old-copy.rs-1").unwrap();
+            let right = cx.debug_bounds("diff-line-new-copy.rs-1").unwrap();
+            assert!(
+                ((right.origin.x - left.origin.x) - px(300.5)).abs() <= px(1.),
+                "wrapped counterparts must start in equal halves of the 600px viewport: {left:?}, {right:?}"
+            );
             for (selector, source) in [
                 ("diff-line-old-copy.rs-1", old),
                 ("diff-line-new-copy.rs-1", new),
