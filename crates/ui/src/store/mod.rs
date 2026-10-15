@@ -6206,6 +6206,112 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    fn reconnect_on_a_delayed_link_restores_workspace_readiness(cx: &mut TestAppContext) {
+        use tcode_client::{ConnectionFailure, ConnectionState};
+        let root = scratch_root("delayed-reconnect");
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        disk.upsert_project(&project_at("p", &root)).unwrap();
+        disk.upsert_meta(&thread(&root, "one", "p", None)).unwrap();
+        let host = test_host(disk);
+        let mux =
+            tcode_traverse::mux::HostMux::new(host.attachments.clone(), host.from_host.clone());
+        let connection = mux.attach(
+            tcode_protocol::Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
+        let (incoming, from_host) = async_channel::unbounded();
+        let (outgoing, requests) = tcode_client::outgoing::channel();
+        let link = tcode_client::HostLink::new(outgoing, from_host);
+        let state_link = link.clone();
+        let replies = async move {
+            while let Ok(line) = connection.from_host.recv().await {
+                smol::Timer::after(std::time::Duration::from_millis(30)).await;
+                if matches!(
+                    state_link.connection_state(),
+                    ConnectionState::Syncing { .. }
+                ) {
+                    state_link.set_connection_state(ConnectionState::Connected { path: None });
+                }
+                if incoming.send(line).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let mut driver = LocalHostDriver::from_link(link);
+        let pump = driver.pump;
+        // A busy transport may not read until the whole recovery flight is queued.
+        let forwards = async move {
+            while let Ok(line) = requests.recv().await {
+                if tcode_client::outgoing::subscription_key(&line).is_none() {
+                    requests.sent(&line);
+                }
+                if connection.to_host.send(line).await.is_err() {
+                    break;
+                }
+            }
+        };
+        driver.pump = Box::pin(smol::future::race(
+            pump,
+            smol::future::race(forwards, replies),
+        ));
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Remote {
+                    host_id: "test".into(),
+                    host_name: "test".into(),
+                },
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace, "initial workspace baseline", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
+        });
+        workspace.update(cx, |store, _| store.select_session("one".into()));
+        driver.wait_until(cx, &workspace, "initial selected thread baseline", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
+        });
+        driver
+            .link
+            .set_connection_state(ConnectionState::Reconnecting {
+                attempt: 2,
+                reason: Some(ConnectionFailure::Timeout),
+            });
+        cx.run_until_parked();
+        assert!(!workspace.read_with(cx, |store, _| store.baseline_ready()));
+        driver
+            .link
+            .set_connection_state(ConnectionState::Syncing { path: None });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            driver.step(cx, &workspace);
+            if workspace.read_with(cx, |store, _| store.baseline_ready()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reconnect baseline stalled: {:?}",
+                workspace.read_with(cx, |store, _| store.baseline_topics.clone())
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let link = driver.link.clone();
+        driver
+            .await_with_events(cx, &workspace, link.command(Command::ShutdownAllAndFlush))
+            .unwrap();
+        driver.link.close();
+        drop(driver);
+        // A remote client closes its attachment; the local owner closes the host.
+        host.to_host.close();
+        host.from_host.close();
+        host.stopped.recv_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
     fn reconnect_replays_current_index_fingerprint_and_retains_replicas_until_baselines_arrive(
         cx: &mut TestAppContext,
     ) {
