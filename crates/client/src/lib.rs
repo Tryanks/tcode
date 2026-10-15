@@ -1,5 +1,6 @@
 //! Transport-agnostic client endpoint for a tcode host.
 
+pub mod attachment;
 pub mod heartbeat;
 pub mod host;
 pub mod original;

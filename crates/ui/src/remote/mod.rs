@@ -1470,7 +1470,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let (to_host, _host_rx) = async_channel::unbounded::<String>();
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
-        let mux = HostMux::new(to_host.clone(), from_host.clone());
+        let (attachments, _attachment_rx) = async_channel::unbounded();
+        let mux = HostMux::new(attachments, from_host.clone());
         cx.update(crate::theme::init);
         cx.update(|cx| {
             cx.set_global(RemoteController::new(

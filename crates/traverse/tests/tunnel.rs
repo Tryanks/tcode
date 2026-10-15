@@ -44,7 +44,7 @@ impl Drop for TestDir {
 struct Machine {
     host: Option<TraverseHost>,
     _backend: (
-        async_channel::Receiver<String>,
+        async_channel::Receiver<tcode_client::attachment::AttachmentMessage>,
         async_channel::Sender<String>,
     ),
     _dir: TestDir,
@@ -53,7 +53,8 @@ struct Machine {
 impl Machine {
     fn start() -> Self {
         let dir = TestDir::new("host");
-        let (to_host, host_rx) = async_channel::unbounded::<String>();
+        let (to_host, host_rx) =
+            async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
         let (host_tx, from_host) = async_channel::unbounded::<String>();
         let host = TraverseHost::start(
             HostMux::new(to_host, from_host),
