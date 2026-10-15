@@ -1,6 +1,8 @@
 use agent::AgentEvent;
 
-use super::Timeline;
+use super::boundaries::TurnBoundaryChange;
+use super::{Timeline, TurnBoundaries};
+use serde::{Deserialize, Serialize};
 
 /// Follows a fold to name the turn-changes snapshot each new one supersedes.
 ///
@@ -9,7 +11,7 @@ use super::Timeline;
 /// on the same turn the earlier one's diffs never reach a timeline again. The
 /// turn is the one the fold itself resolves the snapshot to, in the same
 /// lifetime: a rewind ends a turn's lifetime even when its index is reused.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnSnapshots<K> {
     /// The latest snapshot on each turn the fold holds.
     latest: Vec<Option<K>>,
@@ -22,6 +24,30 @@ impl<K> Default for TurnSnapshots<K> {
 }
 
 impl<K> TurnSnapshots<K> {
+    /// Apply just the turn policy, retaining the snapshot keys on its turns.
+    pub fn apply_boundaries(
+        &mut self,
+        boundaries: &mut TurnBoundaries,
+        event: &AgentEvent,
+        key: K,
+    ) -> (TurnBoundaryChange, Option<K>) {
+        let change = boundaries.apply(event);
+        let superseded = self.track(
+            boundaries.len(),
+            matches!(event, AgentEvent::TurnChangesUpdated { .. })
+                .then_some(change.target)
+                .flatten(),
+            key,
+        );
+        (change, superseded)
+    }
+
+    fn track(&mut self, turns: usize, target: Option<usize>, key: K) -> Option<K> {
+        self.latest.truncate(turns);
+        self.latest.resize_with(turns, || None);
+        self.latest[target?].replace(key)
+    }
+
     /// Fold the event recorded at `ts`, which the caller knows as `key`, into
     /// `fold`. When it is a snapshot that supersedes an earlier one, the
     /// earlier one's key is returned.
@@ -37,10 +63,8 @@ impl<K> TurnSnapshots<K> {
             _ => None,
         };
         fold.apply_at(ts, event);
-        self.latest.truncate(fold.turns.len());
-        self.latest.resize_with(fold.turns.len(), || None);
-        let turn = target?.unwrap_or(fold.turns.len() - 1);
-        self.latest[turn].replace(key)
+        let target = target.map(|target| target.unwrap_or(fold.turns.len() - 1));
+        self.track(fold.turns.len(), target, key)
     }
 }
 

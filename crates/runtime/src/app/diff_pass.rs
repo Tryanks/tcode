@@ -5,8 +5,7 @@ use tcode_services::store::DiffPass;
 use super::*;
 
 /// The background pass that drops the diffs of superseded turn-changes
-/// snapshots from logs stored before appends dropped them themselves. Each
-/// thread is one store-writer operation, queued only once the one before it
+/// snapshots. Each thread is one store-writer operation, queued only once the one before it
 /// finished, so the pass never holds more than one log in memory and never
 /// delays the writes queued behind it by more than one thread.
 pub(super) struct DiffPassRun {
@@ -36,6 +35,10 @@ impl AppState {
                 .await;
             host_cx.enqueue(move |state, cx| match threads {
                 Ok(threads) => {
+                    if threads.is_empty() {
+                        log::info!("superseded diff cleanup complete: no work");
+                        return;
+                    }
                     state.diff_pass = Some(DiffPassRun {
                         remaining: threads.into(),
                         started: Instant::now(),
@@ -56,7 +59,15 @@ impl AppState {
     }
 
     pub(super) fn stop_diff_pass(&mut self) {
-        self.diff_pass = None;
+        if let Some(run) = self.diff_pass.take() {
+            log::info!(
+                "superseded diff cleanup interrupted: {} changed, {} unchanged, {} undecodable, {} failed; incomplete",
+                run.dropped,
+                run.unchanged,
+                run.undecodable,
+                run.failed,
+            );
+        }
     }
 
     fn continue_diff_pass(&mut self, cx: &mut HostCx) {
@@ -65,20 +76,35 @@ impl AppState {
         };
         let Some(session_id) = run.remaining.pop_front() else {
             let run = self.diff_pass.take().expect("checked above");
-            log::info!(
-                "dropped superseded diffs in {:.1?}: {} thread(s) changed ({} rows, {} -> {} bytes), \
+            let store = self.store.clone();
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
+                let complete = match host_cx
+                    .unblock(move || store.threads_without_diff_pass())
+                    .await
+                {
+                    Ok(remaining) => remaining.is_empty(),
+                    Err(error) => {
+                        log::warn!("could not check diff cleanup completion: {error}");
+                        false
+                    }
+                };
+                log::info!(
+                    "superseded diff cleanup {} in {:.1?}: {} thread(s) changed ({} rows, {} -> {} bytes), \
                  {} unchanged, {} left with an undecodable row, {} failed; the writer was held \
                  at most {:.1?}",
-                run.started.elapsed(),
-                run.dropped,
-                run.rows,
-                run.bytes_before,
-                run.bytes_after,
-                run.unchanged,
-                run.undecodable,
-                run.failed,
-                run.longest,
-            );
+                    if complete { "complete" } else { "incomplete" },
+                    run.started.elapsed(),
+                    run.dropped,
+                    run.rows,
+                    run.bytes_before,
+                    run.bytes_after,
+                    run.unchanged,
+                    run.undecodable,
+                    run.failed,
+                    run.longest,
+                );
+            });
             return;
         };
         let (completion, completed) = smol::channel::bounded(1);

@@ -62,7 +62,7 @@ impl AppState {
                 && let Some(started) = self.activity_backfill_started.take()
             {
                 log::info!(
-                    "thread activity backfill complete: {} rows, {} ms",
+                    "thread activity and turn index backfill complete: {} activity rows, {} ms",
                     self.sessions
                         .iter()
                         .filter(|meta| self.thread_activity.contains_key(&meta.id))

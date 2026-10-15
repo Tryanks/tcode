@@ -174,16 +174,7 @@ fn pinned_history_cuts_survive_mutation_and_close_releases_readers() {
         message: "old".repeat(1000),
     };
     store
-        .apply(&[
-            Mutation::append_event("thread", 1, &old).unwrap(),
-            Mutation::set_turn_index(
-                "thread",
-                TurnIndex {
-                    turns: 0,
-                    starts: vec![],
-                },
-            ),
-        ])
+        .apply(&[Mutation::append_event("thread", 1, &old).unwrap()])
         .unwrap();
     let cut = store.snapshot_log("thread").unwrap();
     store
@@ -1217,7 +1208,7 @@ fn rows(store: &SessionStore, id: &str) -> Vec<Vec<u8>> {
 #[test]
 fn superseded_snapshots_lose_their_diffs_in_place_once() {
     let dir = DataDir::new();
-    let store = dir.store();
+    let mut store = dir.store();
     let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
     meta.id = "codex".into();
     store
@@ -1251,13 +1242,52 @@ fn superseded_snapshots_lose_their_diffs_in_place_once() {
         DiffPass::Unchanged
     );
 
+    store.close().unwrap();
+    store = dir.store();
+    assert!(store.threads_without_diff_pass().unwrap().is_empty());
+    store.backfill_thread_activity(&["codex".into()]).unwrap();
+    let snapshot = parse_stored_line(
+        std::str::from_utf8(
+            SNAPSHOT_LOG
+                .split_inclusive(|byte| *byte == b'\n')
+                .next_back()
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .stored
+    .event;
+    store.append_event("codex", 8, &snapshot).unwrap();
+    let snapshots: Vec<_> = store
+        .read_events("codex")
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| match record.event {
+            AgentEvent::TurnChangesUpdated { changes, .. } => Some(changes[0].diff.is_some()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(snapshots, [false, true, false, false, true]);
+    assert!(store.threads_without_diff_pass().unwrap().is_empty());
+    let mut fresh = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    fresh.id = "fresh".into();
+    store.upsert_meta(&fresh).unwrap();
+    store
+        .append_event(
+            "fresh",
+            1,
+            &AgentEvent::TurnStarted {
+                turn_id: "fresh".into(),
+            },
+        )
+        .unwrap();
+    assert!(store.threads_without_diff_pass().unwrap().is_empty());
     store
         .apply(&[Mutation::replace_event_log("codex", SNAPSHOT_LOG.to_vec())])
         .unwrap();
     assert_eq!(store.threads_without_diff_pass().unwrap(), ["codex"]);
     store.drop_superseded_diffs("codex").unwrap();
-    store.apply(&[Mutation::forget_diff_pass("codex")]).unwrap();
-    assert_eq!(store.threads_without_diff_pass().unwrap(), ["codex"]);
 }
 
 /// A tolerant read folds without a row it cannot decode, so it could name
@@ -1297,52 +1327,78 @@ fn a_thread_with_an_undecodable_row_keeps_every_row() {
     }
 }
 
-/// A turn index stands for rows the host folded: an append keeps it, since
-/// the host writes the index that follows it in the same transaction, while
-/// a write that replaces the rows, copies another thread's over them or
-/// removes the thread forgets it.
 #[test]
-fn writes_the_host_did_not_fold_forget_the_turn_index() {
+fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
+    use tcode_core::session::Timeline;
+    const LOG: &str = include_str!("fixtures/turn-index.jsonl");
     let dir = DataDir::new();
-    let store = dir.store();
-    let index = TurnIndex {
-        turns: 2,
-        starts: vec![0, 5],
-    };
-    let event = agent::AgentEvent::TurnStarted {
-        turn_id: "next".into(),
-    };
-    for (label, write, kept) in [
-        (
-            "appended",
-            Mutation::append_event("thread", 9, &event).unwrap(),
-            true,
-        ),
-        (
-            "replaced",
-            Mutation::replace_event_log("thread", SNAPSHOT_LOG.to_vec()),
-            false,
-        ),
-        (
-            "cloned over",
-            Mutation::clone_events("other", "thread"),
-            false,
-        ),
-        ("removed", Mutation::remove_session("thread"), false),
-    ] {
+    let mut store = dir.store();
+    let mut fold = Timeline::default();
+    let mut starts = Vec::new();
+    for (row, line) in LOG.lines().enumerate() {
+        let record = parse_stored_line(line).unwrap().stored;
+        let turns = fold.turns.len();
+        fold.apply_stored(&record);
+        if fold.turns.len() > turns {
+            starts.push(row as u64);
+        }
         store
-            .apply(&[
-                Mutation::replace_event_log("thread", SNAPSHOT_LOG.to_vec()),
-                Mutation::set_turn_index("thread", index.clone()),
-            ])
+            .append_event("thread", row as u64, &record.event)
             .unwrap();
-        store.apply(&[write]).unwrap();
         assert_eq!(
             store.turn_index("thread").unwrap(),
-            kept.then(|| index.clone()),
-            "{label}"
+            Some(TurnIndex {
+                turns: fold.turns.len() as u64,
+                starts: starts.clone(),
+            }),
+            "row {row}"
         );
+        if row == 9 {
+            store.close().unwrap();
+            store = dir.store();
+        }
     }
+    let expected = TurnIndex {
+        turns: 2,
+        starts: vec![
+            2, 8, 15, 21, 26, 29, 31, 37, 42, 45, 48, 51, 54, 57, 61, 66, 71,
+        ],
+    };
+    assert_eq!(store.turn_index("thread").unwrap(), Some(expected.clone()));
+    store
+        .apply(&[
+            Mutation::replace_event_log("import", LOG.as_bytes().to_vec()),
+            Mutation::clone_events("thread", "fork"),
+        ])
+        .unwrap();
+    assert!(store.turn_index("import").unwrap().is_none());
+    let mut imported = SessionMeta::new(ProviderKind::Codex, dir.path().to_owned(), None);
+    imported.id = "import".into();
+    store.upsert_meta(&imported).unwrap();
+    store.backfill_thread_activity(&["import".into()]).unwrap();
+    for id in ["import", "fork"] {
+        assert_eq!(store.turn_index(id).unwrap(), Some(expected.clone()));
+    }
+    store
+        .run("seed an older fold version", |db| {
+            db.write(|db, connection| {
+                db.execute(
+                    connection,
+                    "UPDATE turn_index SET fold_version = 0 WHERE session_id = 'thread'",
+                    (),
+                )?;
+                Ok(())
+            })
+        })
+        .unwrap();
+    assert!(store.turn_index("thread").unwrap().is_none());
+    let mut meta = SessionMeta::new(ProviderKind::Codex, dir.path().to_owned(), None);
+    meta.id = "thread".into();
+    store.upsert_meta(&meta).unwrap();
+    store.backfill_thread_activity(&["thread".into()]).unwrap();
+    assert_eq!(store.turn_index("thread").unwrap(), Some(expected));
+    store.remove_session("thread").unwrap();
+    assert!(store.turn_index("thread").unwrap().is_none());
 }
 
 #[test]

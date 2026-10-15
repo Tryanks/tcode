@@ -671,7 +671,7 @@ impl AppState {
         let topic = Topic::SessionEvents {
             session_id: session_id.to_string(),
         };
-        let joined = if self.event_records.contains_key(session_id) {
+        if self.event_records.contains_key(session_id) {
             self.emit_domain(
                 topic,
                 ServerEvent::SessionEvent(history::wire_record(&record).into_owned()),
@@ -680,7 +680,7 @@ impl AppState {
             self.event_records
                 .get_mut(session_id)
                 .expect("checked above")
-                .push(record)
+                .push(record);
         } else {
             // A session nobody holds needs no row named: the append alone
             // keeps the record, and any later read of the log is queued
@@ -691,8 +691,7 @@ impl AppState {
             {
                 self.hold_record(session_id, record, cx);
             }
-            Joined::Unfolded
-        };
+        }
         self.enqueue_store_write(
             StoreWrite::AppendEvent {
                 id: session_id.to_string(),
@@ -700,7 +699,6 @@ impl AppState {
                 author,
                 origin,
                 event: Box::new(event.clone()),
-                joined,
             },
             cx,
         );

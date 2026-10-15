@@ -1,5 +1,5 @@
 use super::*;
-use tcode_services::store::{DiffPass, Mutation, TurnIndex};
+use tcode_services::store::{DiffPass, Mutation};
 
 /// A drain of the queue is committed in transactions of at most this many
 /// writes and about this many bytes; streamed deltas then share a commit
@@ -9,20 +9,13 @@ const MAX_BATCH_BYTES: usize = 4 << 20;
 
 pub(super) enum StoreWrite {
     /// One appended record, committed together with what it changes in the
-    /// session's other rows: the diffs of the snapshot it supersedes and the
-    /// turn index, or, when no fold tells, forgetting both.
+    /// session's turn boundaries and the diffs of the snapshot it supersedes.
     AppendEvent {
         id: String,
         ts: u64,
         author: Option<Author>,
         origin: Option<MessageOrigin>,
         event: Box<AgentEvent>,
-        joined: Joined,
-    },
-    /// The turn index of a log the host just read and folded whole.
-    SetTurnIndex {
-        id: String,
-        index: TurnIndex,
     },
     UpsertMeta {
         meta: Box<SessionMeta>,
@@ -121,9 +114,8 @@ impl StoreWrite {
                 author,
                 origin,
                 event,
-                joined,
             } => {
-                let mut mutations = match Mutation::append_authored_event(
+                match Mutation::append_authored_event(
                     id,
                     *ts,
                     event,
@@ -133,34 +125,7 @@ impl StoreWrite {
                 ) {
                     Ok(mutation) => vec![mutation],
                     Err(error) => return Some(Err(error.to_string())),
-                };
-                match joined {
-                    Joined::Folded {
-                        superseded,
-                        turn_index,
-                    } => {
-                        if let Some(superseded) = superseded {
-                            mutations.push(Mutation::drop_turn_diffs(
-                                id,
-                                superseded.position,
-                                &superseded.turn_id,
-                            ));
-                        }
-                        if let Some(index) = turn_index {
-                            mutations.push(Mutation::set_turn_index(id, index.clone()));
-                        }
-                    }
-                    Joined::Unfolded => {
-                        mutations.push(Mutation::forget_turn_index(id));
-                        if matches!(**event, AgentEvent::TurnChangesUpdated { .. }) {
-                            mutations.push(Mutation::forget_diff_pass(id));
-                        }
-                    }
                 }
-                mutations
-            }
-            StoreWrite::SetTurnIndex { id, index } => {
-                vec![Mutation::set_turn_index(id, index.clone())]
             }
             StoreWrite::UpsertMeta { meta, .. } => vec![Mutation::upsert_meta((**meta).clone())],
             StoreWrite::UpsertProject(project) => vec![Mutation::upsert_project(project.clone())],
@@ -187,9 +152,7 @@ impl StoreWrite {
 
     fn member(self) -> Member {
         let (failure, completion): (fn(String) -> RuntimeError, _) = match self {
-            StoreWrite::AppendEvent { .. } | StoreWrite::SetTurnIndex { .. } => {
-                (|error| RuntimeError::PersistEvent { error }, None)
-            }
+            StoreWrite::AppendEvent { .. } => (|error| RuntimeError::PersistEvent { error }, None),
             StoreWrite::UpsertMeta { initial: true, .. } => {
                 (|error| RuntimeError::PersistSession { error }, None)
             }
@@ -477,7 +440,6 @@ impl StoreWriter {
                 None
             }
             StoreWrite::AppendEvent { .. }
-            | StoreWrite::SetTurnIndex { .. }
             | StoreWrite::UpsertMeta { .. }
             | StoreWrite::UpsertProject(_)
             | StoreWrite::RemoveSessions { .. }

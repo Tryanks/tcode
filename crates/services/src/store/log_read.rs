@@ -22,7 +22,7 @@ struct EventAddress {
     pub item_id: Option<String>,
 }
 
-/// A writer-ordered cut. The end, V1 index and payload reads share a database
+/// A writer-ordered cut. The end, turn index and payload reads share a database
 /// snapshot; appends, diff stripping and replacement cannot move that cut.
 pub struct LogRead {
     store: SessionStore,
@@ -51,19 +51,7 @@ impl SessionStore {
                         Ok(())
                     },
                 )?;
-                let mut index = None;
-                db.query(
-                    &connection,
-                    "SELECT turns, starts FROM turn_index WHERE session_id = ?1",
-                    (id,),
-                    |row| {
-                        index = Some(TurnIndex {
-                            turns: integer(row, 0)? as u64,
-                            starts: serde_json::from_slice(&blob(row, 1)?).map_err(invalid_data)?,
-                        });
-                        Ok(())
-                    },
-                )?;
+                let index = super::turn_index::read(db, &connection, id)?;
                 Ok::<_, io::Error>((end, index))
             })();
             let (end, index) = match cut {

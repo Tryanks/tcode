@@ -1,14 +1,11 @@
 //! Turn-changes snapshots that a later snapshot supersedes are stored without
 //! their diffs. A row keeps its position; only its bytes shrink.
 //!
-//! The pass over rows stored before appends did this themselves covers the
-//! threads in `sessions`: event rows without a session are never served, and
-//! are left as they are.
+//! Event rows without a session are never served and are left as they are.
 
 use std::io;
 
-use agent::AgentEvent;
-use tcode_core::session::{StoredEvent, Timeline, TurnSnapshots, drop_turn_diffs};
+use tcode_core::session::{Timeline, TurnSnapshots, drop_turn_diffs};
 use turso::Connection;
 
 use super::db::{Db, blob, integer, text};
@@ -143,7 +140,7 @@ fn pass(db: &Db, connection: &Connection, id: &str) -> io::Result<DiffPass> {
     }
     let (mut rows, mut before, mut after) = (0, 0, 0);
     for position in superseded {
-        if let Some((old, new)) = rewrite_without_diffs(db, connection, id, position, |_| true)? {
+        if let Some((old, new)) = rewrite_without_diffs(db, connection, id, position)? {
             rows += 1;
             before += old;
             after += new;
@@ -160,32 +157,23 @@ fn pass(db: &Db, connection: &Connection, id: &str) -> io::Result<DiffPass> {
     })
 }
 
-/// Drop the diffs of the snapshot of `turn_id` at `position`, which the
-/// appending host's fold found superseded. A row holding anything else is left
-/// as it is.
 pub(super) fn drop_row_diffs(
     db: &Db,
     connection: &Connection,
     session_id: &str,
     position: u64,
-    turn_id: &str,
 ) -> io::Result<()> {
-    let expected = |stored: &StoredEvent| matches!(&stored.event, AgentEvent::TurnChangesUpdated { turn_id: stored, .. } if stored == turn_id);
-    if rewrite_without_diffs(db, connection, session_id, position, expected)?.is_none() {
-        log::debug!("event {position} of {session_id} has no diff of {turn_id} to drop");
-    }
-    Ok(())
+    rewrite_without_diffs(db, connection, session_id, position).map(drop)
 }
 
 /// Rewrite the row at `position` without the diffs of the snapshot it holds,
-/// when it holds one with diffs that `expected` accepts. Returns the row's
+/// when it holds one with diffs. Returns the row's
 /// byte length before and after.
 fn rewrite_without_diffs(
     db: &Db,
     connection: &Connection,
     session_id: &str,
     position: u64,
-    expected: impl Fn(&StoredEvent) -> bool,
 ) -> io::Result<Option<(u64, u64)>> {
     let mut line = None;
     db.query(
@@ -200,12 +188,9 @@ fn rewrite_without_diffs(
     let Some(line) = line else {
         return Ok(None);
     };
-    let Some((rewritten, stored)) = without_diffs(&line)? else {
+    let Some(rewritten) = without_diffs(&line)? else {
         return Ok(None);
     };
-    if !expected(&stored) {
-        return Ok(None);
-    }
     let lengths = (line.len() as u64, rewritten.len() as u64);
     db.execute(
         connection,
@@ -216,9 +201,8 @@ fn rewrite_without_diffs(
 }
 
 /// `line` rewritten without the diffs of the snapshot it holds, in the form it
-/// was stored in, and the record that reads back from it; `None` when the row
-/// holds no snapshot with a diff.
-fn without_diffs(line: &[u8]) -> io::Result<Option<(Vec<u8>, StoredEvent)>> {
+/// was stored in; `None` when the row holds no snapshot with a diff.
+fn without_diffs(line: &[u8]) -> io::Result<Option<Vec<u8>>> {
     let Ok(Some(record)) = decode_row(line) else {
         return Ok(None);
     };
@@ -244,7 +228,7 @@ fn without_diffs(line: &[u8]) -> io::Result<Option<(Vec<u8>, StoredEvent)>> {
             "a turn-changes snapshot without its diffs does not read back as itself",
         ));
     }
-    Ok(Some((rewritten, stored)))
+    Ok(Some(rewritten))
 }
 
 /// Forget that the thread's rows were dealt with, for a write that replaced
@@ -256,4 +240,15 @@ pub(super) fn forget_pass(db: &Db, connection: &Connection, session_id: &str) ->
         (session_id,),
     )
     .map(drop)
+}
+
+pub(super) fn mark_empty(db: &Db, connection: &Connection, session_id: &str) -> io::Result<()> {
+    db.execute(
+        connection,
+        "INSERT INTO diff_pass (session_id, undecodable_position) \
+         SELECT ?1, NULL WHERE NOT EXISTS (SELECT 1 FROM events WHERE session_id = ?1) \
+         ON CONFLICT (session_id) DO NOTHING",
+        (session_id,),
+    )?;
+    Ok(())
 }

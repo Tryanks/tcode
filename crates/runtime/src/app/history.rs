@@ -336,25 +336,6 @@ fn wire_window(
     })
 }
 
-/// A stored turn-changes snapshot that an append supersedes.
-pub(super) struct SupersededRow {
-    pub(super) position: u64,
-    pub(super) turn_id: String,
-}
-
-/// What an appended record does to the session's other stored rows, as the
-/// fold of the log it joins tells.
-pub(super) enum Joined {
-    /// It joined a resident log.
-    Folded {
-        superseded: Option<SupersededRow>,
-        /// The turn index after it, when it changed the turns.
-        turn_index: Option<TurnIndex>,
-    },
-    /// No log was resident to fold it into, so neither is known.
-    Unfolded,
-}
-
 /// What a window is cut from: the records of the rows before `end` of a log,
 /// all of them or only its last ones, with the turns of the whole log.
 ///
@@ -516,14 +497,10 @@ pub(super) struct SessionLog {
     /// can tell whether it opens a turn, and cloned by timeline loads instead
     /// of folding the records again.
     fold: Timeline,
-    /// The snapshot each turn of `fold` holds, as its record index and the
-    /// stored row it is in.
-    snapshots: TurnSnapshots<(usize, u64)>,
+    /// The record index of each turn's latest snapshot.
+    snapshots: TurnSnapshots<usize>,
     /// The stored row the next append takes.
     next_row: u64,
-    /// Every stored row decoded when the log was read, so `fold` names the
-    /// same superseded snapshots as the store's own pass would.
-    decoded: bool,
     /// The end flushed by the release barrier in flight, if any.
     release_barrier: Option<u64>,
 }
@@ -538,7 +515,6 @@ impl SessionLog {
             fold: Timeline::default(),
             snapshots: TurnSnapshots::default(),
             next_row: log.next_row,
-            decoded: log.undecodable == 0,
             release_barrier: None,
         };
         for (record, row) in log.records.into_iter().zip(log.rows) {
@@ -547,51 +523,29 @@ impl SessionLog {
         session_log
     }
 
-    /// Append a record, returning what the store should change besides
-    /// appending it.
-    pub(super) fn push(&mut self, record: SessionEventRecord) -> Joined {
-        let (turns, starts) = (self.fold.turns.len(), self.turn_starts.len());
+    pub(super) fn push(&mut self, record: SessionEventRecord) {
         let row = self.next_row;
         self.next_row += 1;
-        let superseded =
-            self.push_at(record, row)
-                .filter(|_| self.decoded)
-                .map(|(index, position)| {
-                    let AgentEvent::TurnChangesUpdated { turn_id, .. } = &self.records[index].event
-                    else {
-                        unreachable!("only snapshots are superseded")
-                    };
-                    SupersededRow {
-                        position,
-                        turn_id: turn_id.clone(),
-                    }
-                });
-        let turn_index = (self.fold.turns.len() != turns || self.turn_starts.len() != starts)
-            .then(|| self.turn_index());
-        Joined::Folded {
-            superseded,
-            turn_index,
-        }
+        self.push_at(record, row);
     }
 
-    fn push_at(&mut self, record: SessionEventRecord, row: u64) -> Option<(usize, u64)> {
+    fn push_at(&mut self, record: SessionEventRecord, row: u64) {
         let turns = self.fold.turns.len();
         let index = self.records.len();
-        let superseded =
-            self.snapshots
-                .apply_at(&mut self.fold, record.ts, &record.event, (index, row));
+        let superseded = self
+            .snapshots
+            .apply_at(&mut self.fold, record.ts, &record.event, index);
         if self.fold.turns.len() > turns {
             self.turn_starts.push(row);
         }
         self.retained_bytes += wire_len(&record) + 1;
         self.records.push(record);
         self.rows.push(row);
-        if let Some((earlier, _)) = superseded {
+        if let Some(earlier) = superseded {
             self.retained_bytes -= wire_len(&self.records[earlier]);
             drop_turn_diffs(&mut self.records[earlier].event);
             self.retained_bytes += wire_len(&self.records[earlier]);
         }
-        superseded
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
@@ -615,13 +569,6 @@ impl SessionLog {
     /// The row just past the last record: the log's end cursor.
     pub(super) fn end(&self) -> u64 {
         self.next_row
-    }
-
-    pub(super) fn turn_index(&self) -> TurnIndex {
-        TurnIndex {
-            turns: self.fold.turns.len() as u64,
-            starts: self.turn_starts.clone(),
-        }
     }
 
     fn view(&self) -> LogView<'_> {
@@ -1008,14 +955,6 @@ impl AppState {
         for query in hydration.queries {
             query(Ok(&log));
         }
-        // Queued after every append the log holds, so it covers all of them.
-        self.enqueue_store_write(
-            StoreWrite::SetTurnIndex {
-                id: session_id.clone(),
-                index: log.turn_index(),
-            },
-            cx,
-        );
         if !retained {
             return;
         }
@@ -1161,6 +1100,10 @@ impl AppState {
                         {
                             hydration.replies.remove(position);
                             hydration.live = true;
+                            log::debug!(
+                                "bounded history for {session_id}: {} records in rows {}..{} of {}, before hydration",
+                                tail.records.len(), tail.from, tail.covered_end, tail.end,
+                            );
                             state.reply_with(
                                 tail.view().events_window(&subscription),
                                 request_id,
@@ -1301,7 +1244,7 @@ impl AppState {
                     .get(&read_id)
                     .map(|hydration| &hydration.pending[accepted..])
                     .unwrap_or_default();
-                // V1 starts do not describe the final turn's closing state.
+                // Turn starts do not describe the final turn's closing state.
                 // A later mention could reuse the id in a newly opened turn.
                 if suffix.iter().any(|record| {
                     record.item_id() == Some(addressed_id.as_str())
@@ -1503,6 +1446,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn append_index_matches_the_full_session_log_fixture() {
+        let root =
+            std::env::temp_dir().join(format!("turn-boundary-fixture-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        for (row, line) in include_str!("../../../services/src/store/fixtures/turn-index.jsonl")
+            .lines()
+            .enumerate()
+        {
+            let event = serde_json::from_str::<AgentEvent>(line).unwrap();
+            store.append_event("fixture", row as u64, &event).unwrap();
+        }
+        let log = SessionLog::new(store.read_log("fixture").unwrap());
+        assert_eq!(
+            store.turn_index("fixture").unwrap(),
+            Some(TurnIndex {
+                turns: log.fold.turns.len() as u64,
+                starts: log.turn_starts,
+            })
+        );
+        store.close().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cold_continuation_covers_only_the_rows_it_read() {
         let root = std::env::temp_dir().join(format!("cold-cursor-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
@@ -1514,17 +1481,15 @@ mod tests {
             "{oversized}\n\n{{\"type\":\"delta\",\"item_id\":\"answer\",\"kind\":\"assistant_text\",\"text\":\"a\"}}\n{{\"type\":\"delta\",\"item_id\":\"answer\",\"kind\":\"assistant_text\",\"text\":\"b\"}}\n{{\"type\":\"warning\",\"message\":\"last\"}}\n"
         );
         store
-            .apply(&[
-                tcode_services::store::Mutation::replace_event_log("thread", fixture.into_bytes()),
-                tcode_services::store::Mutation::set_turn_index(
-                    "thread",
-                    TurnIndex {
-                        turns: 1,
-                        starts: vec![2],
-                    },
-                ),
-            ])
+            .apply(&[tcode_services::store::Mutation::replace_event_log(
+                "thread",
+                fixture.into_bytes(),
+            )])
             .unwrap();
+        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        meta.id = "thread".into();
+        store.upsert_meta(&meta).unwrap();
+        store.backfill_thread_activity(&["thread".into()]).unwrap();
         let cut = store.snapshot_log("thread").unwrap();
         let mut subscription = Subscription {
             topic: Topic::SessionEvents {
