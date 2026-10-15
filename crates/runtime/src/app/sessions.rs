@@ -215,7 +215,9 @@ impl AppState {
                 message: format!("{} is not a directory on this host", root.display()),
             });
         }
-        let project = Project::from_root(root);
+        let quick_chat = self.user_directories.scratch_root().ok().as_ref() == Some(&root);
+        let mut project = Project::from_root(root);
+        project.quick_chat = quick_chat;
         let id = project.id.clone();
         self.enqueue_store_write(StoreWrite::UpsertProject(project.clone()), cx);
         self.projects.push(project);
@@ -452,6 +454,8 @@ impl AppState {
                 if project.name == project_name_from_root(&old_root) {
                     project.name = project_name_from_root(&root);
                 }
+                project.quick_chat =
+                    self.user_directories.scratch_root().ok().as_ref() == Some(&root);
                 project.root = root;
                 let project = project.clone();
                 self.enqueue_store_write(StoreWrite::UpsertProject(project), cx);

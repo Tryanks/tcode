@@ -2091,8 +2091,13 @@ impl SessionsSidebar {
             .iter()
             .any(|meta| !flags.get(&meta.id).is_some_and(|flags| flags.working));
 
-        let header_label =
-            crate::tr!("sidebar.project", name = group.project.name.clone()).into_owned();
+        let quick_chat = group.project.quick_chat;
+        let name = crate::project_icon::group_label(&group.project);
+        let header_label = if quick_chat {
+            name.clone()
+        } else {
+            crate::tr!("sidebar.project", name = name.clone()).into_owned()
+        };
         let header = crate::material::accessible_clickable(
             h_flex(),
             gpui::SharedString::from(format!("project-header-{project_id}")),
@@ -2103,7 +2108,13 @@ impl SessionsSidebar {
         .aria_expanded(!collapsed)
         .debug_selector({
             let project_id = project_id.clone();
-            move || format!("project-header-{project_id}")
+            move || {
+                if quick_chat {
+                    "quick-chats-header".into()
+                } else {
+                    format!("project-header-{project_id}")
+                }
+            }
         })
         .group(group_key.clone())
         .h(px(30.))
@@ -2131,7 +2142,7 @@ impl SessionsSidebar {
                 .text_sm()
                 .font_medium()
                 .text_color(cx.theme().sidebar_foreground)
-                .child(group.project.name.clone()),
+                .child(name),
         )
         .children(self.shared_badge(&project_id, cx))
         // Unread dot when any child thread is unread (hidden on hover so
@@ -2149,7 +2160,11 @@ impl SessionsSidebar {
                 h_flex(),
                 gpui::SharedString::from(format!("new-thread-{project_id}")),
                 Role::Button,
-                crate::tr!("sidebar.create_thread"),
+                if quick_chat {
+                    crate::tr!("sidebar.quick_chat")
+                } else {
+                    crate::tr!("sidebar.create_thread")
+                },
                 cx,
             )
             .size_5()
@@ -2165,15 +2180,27 @@ impl SessionsSidebar {
             .group_hover(group_key.clone(), |s| s.opacity(1.))
             .focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
             .hover(|s| s.bg(cx.theme().sidebar_accent))
-            .tooltip(|window, cx| {
-                Tooltip::new(crate::tr!("sidebar.create_thread").into_owned()).build(window, cx)
+            .tooltip(move |window, cx| {
+                Tooltip::new(
+                    if quick_chat {
+                        crate::tr!("sidebar.quick_chat")
+                    } else {
+                        crate::tr!("sidebar.create_thread")
+                    }
+                    .into_owned(),
+                )
+                .build(window, cx)
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 crate::widgets::stop_click_propagation(window, cx);
                 let cwd = plus_cwd.clone();
                 let project_id = plus_project_id.clone();
                 this.store.update(cx, |store, cx| {
-                    store.start_draft(project_id, cwd, cx);
+                    if quick_chat {
+                        store.start_scratch_draft(cx);
+                    } else {
+                        store.start_draft(project_id, cwd, cx);
+                    }
                 });
                 this.window_state
                     .update(cx, |state, cx| state.open_thread(cx));
@@ -2184,6 +2211,9 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground),
             ),
         );
+        if quick_chat {
+            return header.into_any_element();
+        }
         let scope = self.store.read(cx).scope().clone();
         header
             .context_menu(move |menu, _window, cx| {
@@ -3327,7 +3357,9 @@ impl SessionsSidebar {
                             })
                         })
                         .flatten()
-                        .map(|group| SharedString::from(group.project.name.clone()));
+                        .map(|group| {
+                            SharedString::from(crate::project_icon::label(&group.project))
+                        });
                     let timestamp = if recent {
                         tcode_core::thread_sort::shown_timestamp(meta)
                     } else {
@@ -3399,7 +3431,8 @@ impl SessionsSidebar {
                 for group in &groups {
                     let key = group.project.id.as_str();
                     let count = group.sessions.len();
-                    let collapsed = groups.len() > 1 && collapsed_projects.contains(key);
+                    let has_header = groups.len() > 1 || group.project.quick_chat;
+                    let collapsed = has_header && collapsed_projects.contains(key);
                     let start = rows.len();
                     if !collapsed {
                         let (active, mut settled) = project_group_threads(&group.sessions);
@@ -3421,18 +3454,19 @@ impl SessionsSidebar {
                             }
                         }
                     }
-                    if groups.len() > 1 {
+                    if has_header {
                         rows.insert(
                             start,
                             CompactListRow::Project(CompactProjectRow {
                                 project_id: group.project.id.clone(),
                                 row_id: format!("compact-group-{}", group.project.id).into(),
-                                name: group.project.name.clone().into(),
-                                label: crate::tr!(
-                                    "sidebar.project",
-                                    name = group.project.name.clone()
-                                )
-                                .into_owned()
+                                name: crate::project_icon::group_label(&group.project).into(),
+                                label: if group.project.quick_chat {
+                                    crate::tr!("sidebar.quick_chats").into_owned()
+                                } else {
+                                    crate::tr!("sidebar.project", name = group.project.name.clone())
+                                        .into_owned()
+                                }
                                 .into(),
                                 count: count.to_string().into(),
                                 collapsed,
@@ -3823,6 +3857,10 @@ impl SessionsSidebar {
                 .min_w_0()
                 .truncate()
                 .font_medium()
+                .debug_selector({
+                    let name = row.name.clone();
+                    move || format!("compact-group-{name}")
+                })
                 .child(row.name.clone()),
         )
         .children(self.shared_badge(&row.project_id, cx))
@@ -4110,7 +4148,7 @@ impl Render for SessionsSidebar {
             return self.render_compact(window, cx);
         }
 
-        let (layout, active_id, groups, flat_sessions, projects, flags) = {
+        let (layout, active_id, groups, flat_sessions, flags) = {
             let store = self.store.read(cx);
             let sessions = store.sidebar_sessions();
             let flags = session_flags(&sessions, store);
@@ -4119,7 +4157,6 @@ impl Render for SessionsSidebar {
                 store.roster_session_id(),
                 store.grouped_sessions(),
                 store.flat_sessions(),
-                store.projects(),
                 flags,
             )
         };
@@ -4305,9 +4342,14 @@ impl Render for SessionsSidebar {
                     if let Some(id) = self.reveal_pinned.clone() {
                         self.reveal_pinned_row(&self.flat_list_state.clone(), pinned_row(&id));
                     }
-                    let project_names = projects
-                        .into_iter()
-                        .map(|project| (project.id, project.name))
+                    let project_names = groups
+                        .iter()
+                        .map(|group| {
+                            (
+                                group.project.id.clone(),
+                                crate::project_icon::label(&group.project),
+                            )
+                        })
                         .collect::<HashMap<_, _>>();
                     let active_id = active_id.clone();
                     let thread_list = list(
@@ -5081,9 +5123,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Exercise Recent and its persisted layout toggle at phone geometry,
-    /// returning whether By project draws a section header.
-    fn compact_list_has_project_headers(cx: &mut TestAppContext, projects: usize) -> bool {
+    fn compact_list_has_project_headers(
+        cx: &mut TestAppContext,
+        projects: usize,
+        quick_chat: bool,
+    ) -> bool {
         cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
             "tcode-sidebar-{projects}-project-{}",
@@ -5095,7 +5139,11 @@ mod tests {
         )
         .expect("spawn sidebar test host");
         let seeded: Vec<Project> = (0..projects)
-            .map(|index| Project::from_root(root.join(format!("project-{index}"))))
+            .map(|index| {
+                let mut project = Project::from_root(root.join(format!("project-{index}")));
+                project.quick_chat = quick_chat && index == 0;
+                project
+            })
             .collect();
         let sessions = seeded
             .iter()
@@ -5150,7 +5198,11 @@ mod tests {
         for index in 0..projects {
             assert!(
                 cx.debug_bounds(if index == 0 {
-                    "compact-project-project-0"
+                    if quick_chat {
+                        "compact-project-Quick chat"
+                    } else {
+                        "compact-project-project-0"
+                    }
                 } else {
                     "compact-project-project-1"
                 })
@@ -5182,6 +5234,18 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let headers = cx.debug_bounds("compact-group-header").is_some();
+        if quick_chat {
+            assert!(store.read_with(cx, |store, _| {
+                store.projects().iter().all(|p| !p.quick_chat)
+            }));
+            assert!(store.read_with(cx, |store, _| {
+                store
+                    .grouped_sessions()
+                    .iter()
+                    .any(|g| g.project.quick_chat)
+            }));
+            assert!(cx.debug_bounds("compact-group-Quick chats").is_some());
+        }
         if projects > 1 {
             for collapsed in [true, false] {
                 let header = cx.debug_bounds("compact-group-header").unwrap();
@@ -5227,21 +5291,22 @@ mod tests {
         headers
     }
 
-    /// A project header separates one project from the next. With a single
-    /// project there is nothing to separate, so the compact list shows its
-    /// threads directly; a second project brings the headers back.
     #[gpui::test]
     fn compact_recent_orders_projects_and_switches_to_persisted_grouped_view(
         cx: &mut TestAppContext,
     ) {
         assert!(
-            !compact_list_has_project_headers(cx, 1),
+            !compact_list_has_project_headers(cx, 1, false),
             "a single project needs no header to separate it from anything"
         );
         assert!(
-            compact_list_has_project_headers(cx, 2),
+            compact_list_has_project_headers(cx, 2, false),
             "two projects need their headers back"
         );
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        assert!(compact_list_has_project_headers(cx, 1, true));
+        assert!(compact_list_has_project_headers(cx, 2, true));
     }
 
     #[gpui::test]
@@ -6254,6 +6319,7 @@ mod tests {
         let projects = ["lead", "mixed", "many"].map(|id| {
             let mut project = Project::from_root(PathBuf::from(format!("/{id}")));
             project.id = id.into();
+            project.quick_chat = id == "lead";
             project
         });
         let thread = |id: &str, project: &str, updated: u64| {
@@ -6422,7 +6488,15 @@ mod tests {
                     previous = Some(top);
                 }
             };
-            // The shelf sits under its project's active rows.
+            assert!(
+                cx.debug_bounds(if compact {
+                    "compact-group-Quick chats"
+                } else {
+                    "quick-chats-header"
+                })
+                .is_some()
+            );
+            assert!(cx.debug_bounds("project-header-lead").is_none());
             let shelf = cx.debug_bounds("settled-lead").unwrap().top();
             let pinned = if compact {
                 "compact-row-lead-pinned"

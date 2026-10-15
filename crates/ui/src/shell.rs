@@ -4615,6 +4615,7 @@ mod tests {
                 id: format!("project-{index}"),
                 name: format!("Project {index}"),
                 root: root.join(format!("project-{index}")),
+                quick_chat: false,
                 icon_path: None,
                 permission_defaults: Default::default(),
                 created_at: index as u64,

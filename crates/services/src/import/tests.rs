@@ -261,6 +261,7 @@ fn import_is_idempotent_and_replays_into_timeline() {
         id: "project-1".into(),
         name: "Project".into(),
         root: cwd,
+        quick_chat: false,
         icon_path: None,
         permission_defaults: Default::default(),
         created_at: 1,

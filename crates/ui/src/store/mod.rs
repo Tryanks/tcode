@@ -1713,8 +1713,14 @@ impl WorkspaceStore {
             .index_replica
             .1
             .iter()
+            .filter(|project| !project.quick_chat)
             .find(|project| Some(project.id.as_str()) == remembered)
-            .or_else(|| self.index_replica.1.first())
+            .or_else(|| {
+                self.index_replica
+                    .1
+                    .iter()
+                    .find(|project| !project.quick_chat)
+            })
             .cloned()
         else {
             return;
@@ -2545,7 +2551,12 @@ impl WorkspaceStore {
     }
 
     pub fn projects(&self) -> Vec<Project> {
-        self.index_replica.1.clone()
+        self.index_replica
+            .1
+            .iter()
+            .filter(|project| !project.quick_chat)
+            .cloned()
+            .collect()
     }
 
     pub fn is_project_collapsed(&self, project_id: &str) -> bool {
@@ -6618,6 +6629,7 @@ pub(crate) mod tests {
             id: id.into(),
             name: id.into(),
             root: root.to_path_buf(),
+            quick_chat: false,
             icon_path: None,
             permission_defaults: Default::default(),
             created_at: 0,
