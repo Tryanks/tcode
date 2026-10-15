@@ -102,8 +102,12 @@ impl AppState {
                     if state.find_meta(&id).is_none() {
                         continue;
                     }
+                    let activity = activities.remove(&id);
+                    if activity.is_none() && !failed {
+                        continue;
+                    }
                     if state.decision_revision(&id) == revision
-                        && let Some(activity) = activities.remove(&id)
+                        && let Some(Some(activity)) = activity
                     {
                         state.thread_activity.insert(id.clone(), activity);
                         changed = true;

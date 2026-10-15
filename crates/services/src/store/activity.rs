@@ -190,12 +190,12 @@ impl SessionStore {
         })
     }
 
-    /// Missing entries must be retried: their logs changed while the reader folded them.
-    /// A current row checkpoints migration without holding the writer during log decoding.
+    /// A `None` activity must be retried because its log changed during the fold.
+    /// Sessions absent from the store are omitted from the result.
     pub fn backfill_thread_activity(
         &self,
         ids: &[String],
-    ) -> io::Result<HashMap<String, ThreadActivity>> {
+    ) -> io::Result<HashMap<String, Option<ThreadActivity>>> {
         self.run("backfill thread activity", |db| {
             let mut activities = HashMap::new();
             for id in ids {
@@ -231,9 +231,7 @@ impl SessionStore {
                     save(db, connection, id, parent, &activity)?;
                     Ok(Some(activity))
                 })?;
-                if let Some(activity) = published {
-                    activities.insert(id.clone(), activity);
-                }
+                activities.insert(id.clone(), published);
             }
             Ok(activities)
         })
