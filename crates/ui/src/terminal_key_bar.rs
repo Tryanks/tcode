@@ -555,10 +555,7 @@ mod tests {
         use gpui::Focusable as _;
         use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-terminal-keybar-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("terminal-keybar");
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
             tcode_runtime::pipe::HostServices::default(),

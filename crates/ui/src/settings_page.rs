@@ -3281,10 +3281,7 @@ mod tests {
     #[gpui::test]
     fn add_agent_dialog_keeps_catalog_and_custom_action_inside(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-agent-dialog-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("agent-dialog");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
@@ -3334,10 +3331,7 @@ mod tests {
     #[gpui::test]
     fn compact_list_groups_sections_omits_inapplicable_and_folds_advanced(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-settings-sections-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("settings-sections");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
@@ -3472,10 +3466,7 @@ mod tests {
     /// typed — no matter how many snapshots follow.
     #[gpui::test]
     fn editable_settings_wait_for_the_host_and_then_keep_the_user_edit(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-settings-hydration-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("settings-hydration");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),

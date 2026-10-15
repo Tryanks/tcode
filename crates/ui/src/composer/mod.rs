@@ -1426,13 +1426,7 @@ mod replica_tests {
     ) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        static NEXT_STORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-composer-replica-{}-{}-{}",
-            std::process::id(),
-            tcode_services::store::now_millis(),
-            NEXT_STORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        ));
+        let root = crate::store::tests::scratch_root("composer-replica");
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
             tcode_runtime::pipe::HostServices::default(),

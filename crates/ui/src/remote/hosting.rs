@@ -1461,10 +1461,7 @@ mod tests {
     #[gpui::test]
     fn edits_apply_themselves_and_the_pairing_switch_drives_the_transport(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let root = std::env::temp_dir().join(format!(
-            "tcode-hosting-pairing-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("hosting-pairing");
         std::fs::create_dir_all(&root).unwrap();
         // Idle pipes: the host is never attached to here.
         let (to_host, _host_rx) = async_channel::unbounded::<String>();

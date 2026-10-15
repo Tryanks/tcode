@@ -295,11 +295,9 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         let host = tcode_runtime::pipe::spawn_host(
-            tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
-                "tcode-dictation-test-{}-{}",
-                std::process::id(),
-                tcode_services::store::now_millis()
-            )))
+            tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
+                "dictation-test",
+            ))
             .unwrap(),
             tcode_runtime::pipe::HostServices::default(),
         )
@@ -310,7 +308,26 @@ mod tests {
             (id, timeline)
         }))
         .unwrap();
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        driver.wait_until(cx, &store, "selected conversation", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.chat_loading()
+            })
+        });
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
         });
@@ -410,5 +427,6 @@ mod tests {
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             ""
         );
+        driver.shutdown(cx, &store, &host);
     }
 }
