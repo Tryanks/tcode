@@ -7,7 +7,10 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{
+    Arc, Mutex, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 
 use futures_lite::future::block_on;
 use turso::{Builder, Connection, Database, Row, Value};
@@ -53,6 +56,8 @@ pub(super) fn is_broken(error: &io::Error) -> bool {
 
 pub(super) struct Db {
     path: PathBuf,
+    cancelled: AtomicBool,
+    pinned: Mutex<Vec<Weak<Mutex<Option<Connection>>>>>,
     database: Database,
     /// Every write goes through this one connection, one transaction at a
     /// time. Turso's `busy_timeout` spins the CPU, so a second writer is never
@@ -86,6 +91,8 @@ impl Db {
             .map_err(|error| sql_error(path, "connect", error))?;
         let db = Self {
             path: path.to_path_buf(),
+            cancelled: AtomicBool::new(false),
+            pinned: Mutex::default(),
             database,
             writer: Mutex::new(writer),
             readers: Mutex::new(Vec::new()),
@@ -118,6 +125,39 @@ impl Db {
             }
         }
         Ok(db)
+    }
+
+    pub(super) fn connect_reader(&self) -> io::Result<Connection> {
+        self.database
+            .connect()
+            .map_err(|error| sql_error(&self.path, "connect reader", error))
+    }
+
+    pub(super) fn pin_reader(&self, connection: Connection) -> Arc<Mutex<Option<Connection>>> {
+        let reader = Arc::new(Mutex::new(Some(connection)));
+        let mut pinned = self.pinned.lock().unwrap();
+        pinned.retain(|reader| reader.strong_count() > 0);
+        pinned.push(Arc::downgrade(&reader));
+        reader
+    }
+
+    pub(super) fn cancel_reads(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub(super) fn close_readers(&self) {
+        for reader in self
+            .pinned
+            .lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|reader| reader.upgrade())
+        {
+            if let Some(connection) = reader.lock().unwrap().take() {
+                let _ = self.execute(&connection, "ROLLBACK", ());
+            }
+        }
+        self.readers.lock().unwrap().clear();
     }
 
     fn writer(&self) -> io::Result<std::sync::MutexGuard<'_, Connection>> {
@@ -246,6 +286,16 @@ impl Db {
                 .await
                 .map_err(|error| sql_error(&self.path, sql, error))?
             {
+                if self.cancelled.load(Ordering::Acquire) && sql.starts_with("SELECT") {
+                    drop(rows);
+                    statement
+                        .reset()
+                        .map_err(|error| sql_error(&self.path, sql, error))?;
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "store read cancelled",
+                    ));
+                }
                 if !each(&row)? {
                     drop(rows);
                     statement

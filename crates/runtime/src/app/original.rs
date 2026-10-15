@@ -204,7 +204,7 @@ impl AppState {
         cx: &mut HostCx,
     ) -> async_channel::Receiver<Result<u64, String>> {
         let (end, snapshot) = async_channel::bounded(1);
-        self.enqueue_store_write(StoreWrite::SnapshotLog { id: id.into(), end }, cx);
+        self.enqueue_store_write(StoreWrite::LogEnd { id: id.into(), end }, cx);
         snapshot
     }
 }

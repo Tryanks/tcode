@@ -6624,22 +6624,26 @@ mod tests {
         let events_topic = Topic::SessionEvents {
             session_id: "long".into(),
         };
+        let mut resumed_id = None;
         let resumed: Vec<_> = std::iter::from_fn(|| outgoing.try_recv().ok())
-            .filter_map(
-                |line| match tcode_protocol::decode_client_line(&line).unwrap().payload {
+            .filter_map(|line| {
+                let message = tcode_protocol::decode_client_line(&line).unwrap();
+                match message.payload {
                     ClientPayload::Subscribe(subscription)
                         if subscription.topic == events_topic =>
                     {
+                        resumed_id = Some(message.id);
                         Some(subscription.after)
                     }
                     _ => None,
-                },
-            )
+                }
+            })
             .collect();
         assert_eq!(resumed, [Some(4 * 400)]);
-        event(
-            events_topic,
-            ServerEvent::SessionSnapshot {
+        send(HostMessage::Event(EventEnvelope {
+            request_id: resumed_id,
+            topic: events_topic,
+            event: ServerEvent::SessionSnapshot {
                 from: 4 * 400,
                 end: 4 * 400,
                 records: vec![],
@@ -6647,7 +6651,7 @@ mod tests {
                 total_turns: 400,
                 truncated: false,
             },
-        );
+        }));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         assert_eq!(replica(cx).unwrap(), tail);

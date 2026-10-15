@@ -12,22 +12,6 @@ impl AppState {
         self.terminal_registry.terminal(terminal_id)
     }
 
-    /// The captured output of one stored command execution. Clients address it
-    /// by timeline entry id and never send the text back for rendering.
-    pub(crate) fn stored_command_output(&self, session_id: &str, item_id: &str) -> Option<String> {
-        self.resident(session_id)?
-            .timeline
-            .entries
-            .iter()
-            .find(|entry| entry.id == item_id)
-            .and_then(|entry| match &entry.content {
-                EntryContent::Item(ItemContent::CommandExecution { output, .. }) => {
-                    Some(output.clone())
-                }
-                _ => None,
-            })
-    }
-
     fn terminal_subscribed(&self, terminal_id: u64) -> bool {
         self.subscriptions
             .contains(&Topic::Terminal { terminal_id })
