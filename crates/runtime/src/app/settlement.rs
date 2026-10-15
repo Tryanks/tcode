@@ -9,29 +9,70 @@ impl AppState {
         self.load_next_activity_batch(cx);
     }
 
+    fn activity_streaming(&self, id: &str) -> bool {
+        self.resident(id).is_some_and(|session| {
+            session.turn_in_flight
+                || session.delivery_in_flight.is_some()
+                || matches!(session.runtime, Runtime::Starting { .. })
+                || (session.timeline.turn_running && matches!(session.runtime, Runtime::Live(_)))
+        })
+    }
+
     pub(super) fn queue_activity_load(&mut self, id: &str, cx: &mut HostCx) {
-        self.activity_pending.insert(id.to_owned());
+        if self.activity_in_flight.contains(id) {
+            return;
+        }
+        if self.activity_streaming(id) {
+            self.activity_deferred.insert(id.to_owned());
+            return;
+        }
+        self.activity_deferred.remove(id);
+        if self.activity_queued.insert(id.to_owned()) {
+            self.activity_priority.push_back(id.to_owned());
+        } else if !self.activity_priority.iter().any(|pending| pending == id) {
+            self.activity_pending.retain(|pending| pending != id);
+            self.activity_priority.push_back(id.to_owned());
+        }
         self.load_next_activity_batch(cx);
     }
 
     fn load_next_activity_batch(&mut self, cx: &mut HostCx) {
-        if self.activity_loading || self.activity_pending.is_empty() || self.store_failed {
+        if !self.activity_in_flight.is_empty() || self.store_failed {
             return;
         }
-        let ids: Vec<_> = self
-            .activity_pending
-            .iter()
-            .take(ACTIVITY_BATCH_SIZE)
-            .cloned()
-            .collect();
-        let revisions: Vec<_> = ids
-            .iter()
-            .map(|id| {
-                self.activity_pending.remove(id);
-                (id.clone(), self.decision_revision(id))
-            })
-            .collect();
-        self.activity_loading = true;
+        let mut revisions = Vec::new();
+        while revisions.len() < ACTIVITY_BATCH_SIZE {
+            let Some(id) = self
+                .activity_priority
+                .pop_front()
+                .or_else(|| self.activity_pending.pop_front())
+            else {
+                break;
+            };
+            self.activity_queued.remove(&id);
+            if self.activity_streaming(&id) {
+                self.activity_deferred.insert(id);
+                continue;
+            }
+            revisions.push((id.clone(), self.decision_revision(&id)));
+            self.activity_in_flight.insert(id);
+        }
+        if revisions.is_empty() {
+            if self.activity_deferred.is_empty()
+                && let Some(started) = self.activity_backfill_started.take()
+            {
+                log::info!(
+                    "thread activity backfill complete: {} rows, {} ms",
+                    self.sessions
+                        .iter()
+                        .filter(|meta| self.thread_activity.contains_key(&meta.id))
+                        .count(),
+                    started.elapsed().as_millis()
+                );
+            }
+            return;
+        }
+        let ids: Vec<_> = revisions.iter().map(|(id, _)| id.clone()).collect();
         let store = self.store.clone();
         let flush = self.store_write_barrier(cx);
         let host_cx = cx.clone();
@@ -47,24 +88,43 @@ impl AppState {
                 ))),
             };
             host_cx.enqueue(move |state, cx| {
-                state.activity_loading = false;
-                match result {
-                    Ok(mut activities) => {
-                        for (id, revision) in revisions {
-                            if state.find_meta(&id).is_none() {
-                                continue;
-                            }
-                            if state.decision_revision(&id) != revision {
-                                state.activity_pending.insert(id);
-                            } else if let Some(activity) = activities.remove(&id) {
-                                state.thread_activity.insert(id.clone(), activity);
-                                state.evaluate_thread_settlement(&id, cx);
-                            }
-                        }
+                state.activity_in_flight.clear();
+                let failed = result.is_err();
+                let mut activities = match result {
+                    Ok(activities) => activities,
+                    Err(error) => {
+                        log::warn!("thread activity backfill: {error}");
+                        HashMap::new()
                     }
-                    Err(error) => log::warn!("thread activity backfill: {error}"),
+                };
+                let mut changed = false;
+                for (id, revision) in revisions {
+                    if state.find_meta(&id).is_none() {
+                        continue;
+                    }
+                    if state.decision_revision(&id) == revision
+                        && let Some(activity) = activities.remove(&id)
+                    {
+                        state.thread_activity.insert(id.clone(), activity);
+                        changed = true;
+                    } else if state.activity_streaming(&id) {
+                        state.activity_deferred.insert(id);
+                    } else if state.activity_queued.insert(id.clone()) {
+                        state.activity_priority.push_back(id);
+                    }
                 }
-                state.load_next_activity_batch(cx);
+                if changed {
+                    state.evaluate_all_settlement(cx);
+                }
+                if failed {
+                    let host_cx = cx.clone();
+                    HostCx::spawn_detached(cx, async move {
+                        smol::Timer::after(Duration::from_secs(1)).await;
+                        host_cx.enqueue(|state, cx| state.load_next_activity_batch(cx));
+                    });
+                } else {
+                    state.load_next_activity_batch(cx);
+                }
             });
         });
     }
@@ -77,9 +137,11 @@ impl AppState {
             .iter()
             .map(|meta| (meta.id.clone(), self.settlement_due(meta, now, &projection)))
             .collect();
+        self.settlement_deadlines.clear();
         for (id, due) in decisions {
-            self.arm_settlement(&id, due, now, cx);
+            self.record_settlement_deadline(&id, due, now, cx);
         }
+        self.rearm_settlement_timer(cx);
     }
 
     pub(super) fn evaluate_thread_settlement(&mut self, id: &str, cx: &mut HostCx) {
@@ -88,6 +150,9 @@ impl AppState {
         while let Some(id) = next.take() {
             if !visited.insert(id.clone()) {
                 break;
+            }
+            if self.activity_deferred.contains(&id) && !self.activity_streaming(&id) {
+                self.queue_activity_load(&id, cx);
             }
             let meta = self.find_meta(&id);
             next = meta
@@ -98,44 +163,56 @@ impl AppState {
             let due = meta
                 .as_ref()
                 .and_then(|meta| self.settlement_due(meta, now, &projection));
-            self.arm_settlement(&id, due, now, cx);
+            self.record_settlement_deadline(&id, due, now, cx);
+        }
+        self.rearm_settlement_timer(cx);
+    }
+
+    fn record_settlement_deadline(
+        &mut self,
+        id: &str,
+        due: Option<SettlementDue>,
+        now: u64,
+        cx: &mut HostCx,
+    ) {
+        self.settlement_deadlines.remove(id);
+        if let Some(due) = due {
+            if due.due_at <= now {
+                self.settle_session_at(id, due.activity_at / 1000, cx);
+            } else {
+                self.settlement_deadlines.insert(id.to_owned(), due.due_at);
+            }
         }
     }
 
-    fn arm_settlement(&mut self, id: &str, due: Option<SettlementDue>, now: u64, cx: &mut HostCx) {
-        let Some(due) = due else {
-            self.settlement_timers.remove(id);
+    pub(super) fn rearm_settlement_timer(&mut self, cx: &mut HostCx) {
+        let now = now_millis();
+        let deadline = self.settlement_deadlines.values().copied().min();
+        if self.settlement_timer.as_ref().map(|(at, _)| *at) == deadline {
+            return;
+        }
+        self.settlement_timer = None;
+        let Some(deadline) = deadline else {
             return;
         };
-        if due.due_at <= now {
-            self.settlement_timers.remove(id);
-            self.settle_session_at(id, due.activity_at / 1000, cx);
-            return;
-        }
-        if self
-            .settlement_timers
-            .get(id)
-            .is_some_and(|(deadline, _)| *deadline == due.due_at)
-        {
-            return;
-        }
-        let id = id.to_owned();
-        let timer_id = id.clone();
+        // Monotonic timers exclude system sleep; bound the wait before checking wall time again.
+        let delay =
+            Duration::from_millis(deadline.saturating_sub(now)).min(Duration::from_secs(5 * 60));
         let host_cx = cx.clone();
         let task = cx.spawn_background(async move {
-            smol::Timer::after(Duration::from_millis(due.due_at.saturating_sub(now))).await;
+            smol::Timer::after(delay).await;
             host_cx.enqueue(move |state, cx| {
                 if state
-                    .settlement_timers
-                    .get(&timer_id)
-                    .is_some_and(|(deadline, _)| *deadline == due.due_at)
+                    .settlement_timer
+                    .as_ref()
+                    .is_some_and(|(at, _)| *at == deadline)
                 {
-                    state.settlement_timers.remove(&timer_id);
-                    state.evaluate_thread_settlement(&timer_id, cx);
+                    state.settlement_timer = None;
+                    state.evaluate_all_settlement(cx);
                 }
             });
         });
-        self.settlement_timers.insert(id, (due.due_at, task));
+        self.settlement_timer = Some((deadline, task));
     }
 
     fn settlement_due(

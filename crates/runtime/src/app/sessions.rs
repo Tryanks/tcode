@@ -1472,8 +1472,17 @@ impl AppState {
             .retain(|meta| !deleted.contains(meta.id.as_str()));
         self.thread_activity
             .retain(|id, _| !deleted.contains(id.as_str()));
-        self.settlement_timers
+        self.settlement_deadlines
             .retain(|id, _| !deleted.contains(id.as_str()));
+        self.rearm_settlement_timer(cx);
+        self.activity_pending
+            .retain(|id| !deleted.contains(id.as_str()));
+        self.activity_priority
+            .retain(|id| !deleted.contains(id.as_str()));
+        self.activity_queued
+            .retain(|id| !deleted.contains(id.as_str()));
+        self.activity_deferred
+            .retain(|id| !deleted.contains(id.as_str()));
         self.decision_revisions
             .retain(|id, _| !deleted.contains(id.as_str()));
         self.callback_generations
@@ -1933,6 +1942,8 @@ impl AppState {
         let terminal_preferences = self.terminal_preferences_for(&draft);
         let restored_terminal = self.restore_terminal_workspace(&mut draft);
         let session_id = draft.meta.id.clone();
+        self.thread_activity
+            .insert(session_id.clone(), Default::default());
         if self.archived_sharing_affected(&draft.meta) {
             self.archived_revision += 1;
         }

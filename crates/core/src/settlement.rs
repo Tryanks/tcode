@@ -288,6 +288,48 @@ mod tests {
     }
 
     #[test]
+    fn settlement_deadlines_include_future_inactivity_and_queued_turn_grace() {
+        let meta = thread(&[]);
+        let activity = ThreadActivity {
+            last_run_completed_at: Some(NOW - HOUR),
+            ..Default::default()
+        };
+        assert_eq!(
+            automatic_settlement_due(
+                &meta,
+                &activity,
+                SettlementBlockers::default(),
+                NOW,
+                Some(3.0),
+                true
+            ),
+            Some(SettlementDue {
+                due_at: NOW - HOUR + 3 * 86_400_000 + 1,
+                activity_at: NOW - HOUR
+            })
+        );
+        let merged = thread(&[Some((PullRequestState::Merged, Some(NOW - HOUR)))]);
+        let queued = ThreadActivity {
+            last_message_at: Some(NOW),
+            ..Default::default()
+        };
+        assert_eq!(
+            automatic_settlement_due(
+                &merged,
+                &queued,
+                SettlementBlockers::default(),
+                NOW,
+                None,
+                true
+            ),
+            Some(SettlementDue {
+                due_at: NOW + 120_001,
+                activity_at: NOW
+            })
+        );
+    }
+
+    #[test]
     fn inactivity_settles_at_the_last_activity_unless_blocked() {
         let meta = SessionMeta::new(agent::ProviderKind::Codex, "/sample".into(), None);
         let activity = ThreadActivity {

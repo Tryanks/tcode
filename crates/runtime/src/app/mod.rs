@@ -1,6 +1,6 @@
 //! Application state: session registry, active session runtime, event pump.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -354,9 +354,14 @@ pub struct AppState {
     store_failed: bool,
     pub sessions: SessionIndex,
     archived_revision: u64,
-    activity_pending: HashSet<String>,
-    activity_loading: bool,
-    settlement_timers: HashMap<String, (u64, HostTask<()>)>,
+    activity_pending: VecDeque<String>,
+    activity_priority: VecDeque<String>,
+    activity_queued: HashSet<String>,
+    activity_in_flight: HashSet<String>,
+    activity_deferred: HashSet<String>,
+    activity_backfill_started: Option<Instant>,
+    settlement_deadlines: HashMap<String, u64>,
+    settlement_timer: Option<(u64, HostTask<()>)>,
     decision_revisions: HashMap<String, u64>,
     callback_generations: HashMap<String, u64>,
     thread_activity: Revisioned<HashMap<String, tcode_core::settlement::ThreadActivity>>,
@@ -532,14 +537,13 @@ impl AppState {
             store.root().display()
         );
         let thread_activity = store.load_thread_activity()?;
-        let activity_pending: HashSet<_> = sessions
+        let activity_pending: VecDeque<_> = sessions
             .iter()
             .filter(|meta| !thread_activity.contains_key(&meta.id))
             .map(|meta| meta.id.clone())
             .collect();
         log::info!(
-            "settlement sweep: {} threads, {} activity rows loaded, {} backfill remaining",
-            sessions.len(),
+            "thread activity: {} rows loaded, {} to backfill",
             thread_activity.len(),
             activity_pending.len()
         );
@@ -564,9 +568,14 @@ impl AppState {
             sessions: sessions.into(),
             projects,
             archived_revision: 0,
+            activity_backfill_started: (!activity_pending.is_empty()).then(Instant::now),
+            activity_queued: activity_pending.iter().cloned().collect(),
             activity_pending,
-            activity_loading: false,
-            settlement_timers: HashMap::new(),
+            activity_priority: VecDeque::new(),
+            activity_in_flight: HashSet::new(),
+            activity_deferred: HashSet::new(),
+            settlement_deadlines: HashMap::new(),
+            settlement_timer: None,
             decision_revisions: HashMap::new(),
             callback_generations: HashMap::new(),
             thread_activity: thread_activity.into(),
@@ -700,7 +709,7 @@ impl AppState {
     /// Drain the store writer, then checkpoint and close the database. Only
     /// after the host loop has stopped, so nothing enqueues behind it.
     pub(crate) fn close_store(&mut self) -> std::io::Result<()> {
-        self.settlement_timers.clear();
+        self.settlement_timer = None;
         self.store_writes.close();
         if let Some(writer) = self.store_writer.take()
             && writer.join().is_err()

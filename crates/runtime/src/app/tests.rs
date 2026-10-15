@@ -10661,11 +10661,8 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     restarted.stopped.recv_blocking().unwrap();
 }
 
-/// A thread whose PR merged before the human resumed it stays open after a
-/// restart, however many records the resumed run wrote after the message;
-/// a dispatched child's lead still sees when its run started.
 #[test]
-fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
+fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() {
     use tcode_core::pull_request::{
         Mergeability, PullRequestKey, PullRequestSnapshot, PullRequestSource, PullRequestState,
         link_pull_request,
@@ -12108,16 +12105,6 @@ fn an_old_profiles_activity_backfills_and_updates_the_index() {
     store
         .migrate(|_| {}, &std::sync::atomic::AtomicBool::new(false))
         .unwrap();
-    let state = AppState::new((*store).clone()).unwrap();
-    assert!(
-        state
-            .index_snapshot()
-            .summary
-            .activity
-            .values()
-            .all(|activity| !activity.failed)
-    );
-    drop(state);
     let host =
         crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
     let link = host.link();

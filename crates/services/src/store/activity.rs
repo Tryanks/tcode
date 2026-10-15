@@ -1,7 +1,6 @@
 use std::{collections::HashMap, io};
 
 use tcode_core::{
-    project::SessionMeta,
     session::StoredEvent,
     settlement::{THREAD_ACTIVITY_FOLD_VERSION, ThreadActivity},
 };
@@ -35,21 +34,32 @@ pub(super) fn create_table(db: &Db, connection: &Connection) -> io::Result<()> {
     Ok(())
 }
 
-fn has_parent(db: &Db, connection: &Connection, id: &str) -> io::Result<bool> {
-    let mut has_parent = false;
+fn session_parent(db: &Db, connection: &Connection, id: &str) -> io::Result<Option<bool>> {
+    let mut parent = None;
     db.query(
         connection,
-        "SELECT body FROM sessions WHERE id = ?1",
+        "SELECT json_extract(body, '$.parent_session_id') IS NOT NULL FROM sessions WHERE id = ?1",
         [id],
         |row| {
-            has_parent = serde_json::from_slice::<SessionMeta>(&blob(row, 0)?)
-                .map_err(invalid_data)?
-                .parent_session_id
-                .is_some();
+            parent = Some(integer(row, 0)? != 0);
             Ok(())
         },
     )?;
-    Ok(has_parent)
+    Ok(parent)
+}
+
+fn log_end(db: &Db, connection: &Connection, id: &str) -> io::Result<i64> {
+    let mut end = 0;
+    db.query(
+        connection,
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM events WHERE session_id = ?1",
+        [id],
+        |row| {
+            end = integer(row, 0)?;
+            Ok(())
+        },
+    )?;
+    Ok(end)
 }
 
 fn read(
@@ -64,7 +74,10 @@ fn read(
         "SELECT body FROM thread_activity WHERE session_id = ?1 AND fold_version = ?2 AND has_parent = ?3",
         (id, i64::from(THREAD_ACTIVITY_FOLD_VERSION), i64::from(parent)),
         |row| {
-            activity = Some(serde_json::from_slice(&blob(row, 0)?).map_err(invalid_data)?);
+            match serde_json::from_slice(&blob(row, 0)?) {
+                Ok(value) => activity = Some(value),
+                Err(error) => log::warn!("thread activity for {id} will be rebuilt: {error}"),
+            }
             Ok(())
         },
     )?;
@@ -88,8 +101,7 @@ fn save(
     Ok(())
 }
 
-pub(super) fn recompute(db: &Db, connection: &Connection, id: &str) -> io::Result<ThreadActivity> {
-    let parent = has_parent(db, connection, id)?;
+fn fold(db: &Db, connection: &Connection, id: &str, parent: bool) -> io::Result<ThreadActivity> {
     let mut records = Vec::new();
     db.query(
         connection,
@@ -104,7 +116,12 @@ pub(super) fn recompute(db: &Db, connection: &Connection, id: &str) -> io::Resul
             Ok(())
         },
     )?;
-    let activity = ThreadActivity::fold_stored(&records, parent);
+    Ok(ThreadActivity::fold_stored(&records, parent))
+}
+
+pub(super) fn recompute(db: &Db, connection: &Connection, id: &str) -> io::Result<ThreadActivity> {
+    let parent = session_parent(db, connection, id)?.unwrap_or(false);
+    let activity = fold(db, connection, id, parent)?;
     save(db, connection, id, parent, &activity)?;
     Ok(activity)
 }
@@ -115,27 +132,24 @@ pub(super) fn append(
     id: &str,
     record: Option<&StoredEvent>,
 ) -> io::Result<()> {
+    let Some(record) = record else {
+        return Ok(());
+    };
     let mut stored = None;
     db.query(
         connection,
         "SELECT has_parent, body FROM thread_activity WHERE session_id = ?1 AND fold_version = ?2",
         (id, i64::from(THREAD_ACTIVITY_FOLD_VERSION)),
         |row| {
-            stored = Some((
-                integer(row, 0)? != 0,
-                serde_json::from_slice::<ThreadActivity>(&blob(row, 1)?).map_err(invalid_data)?,
-            ));
+            if let Ok(activity) = serde_json::from_slice::<ThreadActivity>(&blob(row, 1)?) {
+                stored = Some((integer(row, 0)? != 0, activity));
+            }
             Ok(())
         },
     )?;
     if let Some((parent, mut activity)) = stored {
-        if let Some(record) = record {
-            activity.apply(record, parent);
-            save(db, connection, id, parent, &activity)?;
-        }
-    } else {
-        // The appended record is already in the log covered by this fold.
-        recompute(db, connection, id)?;
+        activity.apply(record, parent);
+        save(db, connection, id, parent, &activity)?;
     }
     Ok(())
 }
@@ -159,10 +173,15 @@ impl SessionStore {
                     "SELECT session_id, body FROM thread_activity WHERE fold_version = ?1",
                     [i64::from(THREAD_ACTIVITY_FOLD_VERSION)],
                     |row| {
-                        activities.insert(
-                            text(row, 0)?,
-                            serde_json::from_slice(&blob(row, 1)?).map_err(invalid_data)?,
-                        );
+                        let id = text(row, 0)?;
+                        match serde_json::from_slice(&blob(row, 1)?) {
+                            Ok(activity) => {
+                                activities.insert(id, activity);
+                            }
+                            Err(error) => {
+                                log::warn!("thread activity for {id} will be rebuilt: {error}")
+                            }
+                        }
                         Ok(())
                     },
                 )?;
@@ -171,38 +190,52 @@ impl SessionStore {
         })
     }
 
-    /// Each committed row is also the migration checkpoint for this fold version.
-    /// The writer transaction prevents a concurrent append from being lost.
+    /// Missing entries must be retried: their logs changed while the reader folded them.
+    /// A current row checkpoints migration without holding the writer during log decoding.
     pub fn backfill_thread_activity(
         &self,
         ids: &[String],
     ) -> io::Result<HashMap<String, ThreadActivity>> {
         self.run("backfill thread activity", |db| {
-            db.write(|db, connection| {
-                let mut activities = HashMap::new();
-                for id in ids {
-                    let mut exists = false;
-                    db.query(
-                        connection,
-                        "SELECT 1 FROM sessions WHERE id = ?1",
-                        [id.as_str()],
-                        |row| {
-                            exists = integer(row, 0)? == 1;
-                            Ok(())
-                        },
-                    )?;
-                    if !exists {
-                        continue;
+            let mut activities = HashMap::new();
+            for id in ids {
+                let candidate = db.read(|db, connection| {
+                    db.execute(connection, "BEGIN", ())?;
+                    let result = (|| {
+                        let Some(parent) = session_parent(db, connection, id)? else {
+                            return Ok(None);
+                        };
+                        let end = log_end(db, connection, id)?;
+                        let activity = match read(db, connection, id, parent)? {
+                            Some(activity) => activity,
+                            None => fold(db, connection, id, parent)?,
+                        };
+                        Ok(Some((parent, end, activity)))
+                    })();
+                    db.execute(connection, "ROLLBACK", ())?;
+                    result
+                })?;
+                let Some((parent, end, activity)) = candidate else {
+                    continue;
+                };
+                let published = db.write(|db, connection| {
+                    if session_parent(db, connection, id)? != Some(parent) {
+                        return Ok(None);
                     }
-                    let parent = has_parent(db, connection, id)?;
-                    let activity = match read(db, connection, id, parent)? {
-                        Some(activity) => activity,
-                        None => recompute(db, connection, id)?,
-                    };
+                    if let Some(current) = read(db, connection, id, parent)? {
+                        return Ok(Some(current));
+                    }
+                    if log_end(db, connection, id)? != end {
+                        return Ok(None);
+                    }
+                    save(db, connection, id, parent, &activity)?;
+                    Ok(Some(activity))
+                })?;
+                if let Some(activity) = published {
                     activities.insert(id.clone(), activity);
                 }
-                Ok(activities)
-            })
+            }
+            Ok(activities)
         })
     }
 }
@@ -212,6 +245,7 @@ mod tests {
     use super::*;
     use crate::store::Mutation;
     use agent::ProviderKind;
+    use tcode_core::project::SessionMeta;
 
     const LOG: &str = concat!(
         "{\"ts\":100,\"event\":{\"type\":\"item_completed\",\"id\":\"human\",\"content\":{\"kind\":\"user_message\",\"text\":\"request\"}}}\n",
@@ -327,6 +361,7 @@ mod tests {
                         "UPDATE thread_activity SET fold_version = 0",
                         (),
                     )?;
+                    db.execute(connection, "UPDATE thread_activity SET fold_version = ?2, body = ?3 WHERE session_id = ?1", (ids[2].as_str(), i64::from(THREAD_ACTIVITY_FOLD_VERSION), b"not-json".as_slice()))?;
                     Ok(())
                 })
             })
@@ -352,6 +387,7 @@ mod tests {
                 },
             )
             .unwrap();
+        assert!(!store.load_thread_activity().unwrap().contains_key(&ids[1]));
         store.backfill_thread_activity(&ids).unwrap();
         let activities = store.load_thread_activity().unwrap();
         for id in ids {

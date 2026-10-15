@@ -1431,15 +1431,10 @@ fn apply_op(
             let mut previous_parent = None;
             db.query(
                 connection,
-                "SELECT body FROM sessions WHERE id = ?1",
+                "SELECT json_extract(body, '$.parent_session_id') IS NOT NULL FROM sessions WHERE id = ?1",
                 [meta.id.as_str()],
                 |row| {
-                    previous_parent = Some(
-                        serde_json::from_slice::<SessionMeta>(&blob(row, 0)?)
-                            .map_err(invalid_data)?
-                            .parent_session_id
-                            .is_some(),
-                    );
+                    previous_parent = Some(integer(row, 0)? != 0);
                     Ok(())
                 },
             )?;

@@ -293,6 +293,8 @@ impl AppState {
             |(agent_type, description)| mirror_title(agent_type, description),
         );
 
+        self.thread_activity
+            .insert(meta.id.clone(), Default::default());
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
                 meta: Box::new(meta.clone()),
