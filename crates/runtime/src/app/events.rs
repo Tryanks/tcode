@@ -8,7 +8,11 @@ impl AppState {
             AgentEvent::TurnCompleted { .. }
                 | AgentEvent::SessionClosed { .. }
                 | AgentEvent::ProviderStartFailed { .. }
-                | AgentEvent::BackgroundTasksChanged { count: 0 }
+                | AgentEvent::BackgroundTasksChanged { .. }
+                | AgentEvent::ApprovalRequested(_)
+                | AgentEvent::ApprovalResolved { .. }
+                | AgentEvent::UserInputRequested { .. }
+                | AgentEvent::UserInputResolved { .. }
                 | AgentEvent::TurnRetry { retry: None }
         ) {
             let id = session_id.to_owned();
@@ -645,7 +649,9 @@ impl AppState {
             event: event.clone(),
             elided: None,
         };
-        if let Some(activity) = self.thread_activity.get_mut(session_id) {
+        if tcode_core::settlement::ThreadActivity::moves_clock(event)
+            && let Some(activity) = self.thread_activity.get_mut(session_id)
+        {
             let message = matches!(
                 event,
                 AgentEvent::ItemCompleted(ThreadItem {
@@ -698,6 +704,13 @@ impl AppState {
             },
             cx,
         );
+        if !self.thread_activity.contains_key(session_id) {
+            self.queue_activity_load(session_id, cx);
+        }
+        if tcode_core::settlement::ThreadActivity::moves_clock(event) {
+            let id = session_id.to_owned();
+            cx.enqueue(move |state, cx| state.evaluate_thread_settlement(&id, cx));
+        }
         if let Some(session) = self.resident_mut(session_id) {
             session.timeline.apply_at(Some(ts), event);
         } else {

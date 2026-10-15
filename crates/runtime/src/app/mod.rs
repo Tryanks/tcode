@@ -354,9 +354,9 @@ pub struct AppState {
     store_failed: bool,
     pub sessions: SessionIndex,
     archived_revision: u64,
-    settlement_sweep_running: bool,
-    settlement_sweep_pending: bool,
-    settlement_timer_generation: u64,
+    activity_pending: HashSet<String>,
+    activity_loading: bool,
+    settlement_timers: HashMap<String, (u64, HostTask<()>)>,
     decision_revisions: HashMap<String, u64>,
     callback_generations: HashMap<String, u64>,
     thread_activity: Revisioned<HashMap<String, tcode_core::settlement::ThreadActivity>>,
@@ -531,6 +531,18 @@ impl AppState {
             projects.len(),
             store.root().display()
         );
+        let thread_activity = store.load_thread_activity()?;
+        let activity_pending: HashSet<_> = sessions
+            .iter()
+            .filter(|meta| !thread_activity.contains_key(&meta.id))
+            .map(|meta| meta.id.clone())
+            .collect();
+        log::info!(
+            "settlement sweep: {} threads, {} activity rows loaded, {} backfill remaining",
+            sessions.len(),
+            thread_activity.len(),
+            activity_pending.len()
+        );
         let (store_writes, store_write_receiver) = smol::channel::unbounded();
         let (store_write_failures, store_write_failure_receiver) = smol::channel::unbounded();
         let session_search = Arc::new(std::sync::Mutex::new(SessionSearch::new(store.clone())));
@@ -552,12 +564,12 @@ impl AppState {
             sessions: sessions.into(),
             projects,
             archived_revision: 0,
-            settlement_sweep_running: false,
-            settlement_sweep_pending: false,
-            settlement_timer_generation: 0,
+            activity_pending,
+            activity_loading: false,
+            settlement_timers: HashMap::new(),
             decision_revisions: HashMap::new(),
             callback_generations: HashMap::new(),
-            thread_activity: Default::default(),
+            thread_activity: thread_activity.into(),
             space_scopes: HashMap::new(),
             space_policy_revisions: HashMap::new(),
             space_archives_revision: None,
@@ -653,6 +665,12 @@ impl AppState {
     }
 
     fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut HostCx) {
+        let activity_id = match &write {
+            StoreWrite::UpsertMeta { meta, .. } if !self.thread_activity.contains_key(&meta.id) => {
+                Some(meta.id.clone())
+            }
+            _ => None,
+        };
         self.start_store_writer(cx);
         if let Err(rejected) = self.store_writes.try_send(write) {
             log::error!("session store writer stopped before accepting a write");
@@ -662,6 +680,9 @@ impl AppState {
             {
                 self.report_error(error, cx);
             }
+        }
+        if let Some(id) = activity_id {
+            self.queue_activity_load(&id, cx);
         }
     }
 
@@ -679,6 +700,7 @@ impl AppState {
     /// Drain the store writer, then checkpoint and close the database. Only
     /// after the host loop has stopped, so nothing enqueues behind it.
     pub(crate) fn close_store(&mut self) -> std::io::Result<()> {
+        self.settlement_timers.clear();
         self.store_writes.close();
         if let Some(writer) = self.store_writer.take()
             && writer.join().is_err()

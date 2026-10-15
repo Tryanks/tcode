@@ -255,6 +255,7 @@ enum Op {
         session_id: String,
         line: Vec<u8>,
         projection: Option<(String, Vec<u8>)>,
+        activity_record: Option<Box<StoredEvent>>,
     },
     ReplaceEventLog {
         session_id: String,
@@ -307,6 +308,17 @@ impl Mutation {
             session_id: session_id.to_owned(),
             line,
             projection,
+            activity_record: tcode_core::settlement::ThreadActivity::moves_clock(event).then(
+                || {
+                    Box::new(StoredEvent {
+                        ts: Some(ts),
+                        event: event.clone(),
+                        origin,
+                        author: author.cloned(),
+                        elided: None,
+                    })
+                },
+            ),
         }))
     }
 
@@ -1178,7 +1190,7 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
         db.execute(connection, KEPT_WORKTREES, ())?;
         db.execute(connection, superseded::DIFF_PASS_TABLE, ())?;
         db.execute(connection, turn_index::TURN_INDEX_TABLE, ())?;
-        activity::create_cache(db, connection)?;
+        activity::create_table(db, connection)?;
         projection::create_cache(db, connection)
     })?;
     migrate::warn_about_stray_sources(root);
@@ -1327,6 +1339,7 @@ fn apply_op(
             session_id,
             line,
             projection,
+            activity_record,
         } => {
             let mut last = None;
             db.query(
@@ -1366,6 +1379,7 @@ fn apply_op(
                 }
             };
             insert_segments(db, connection, session_id, next, [line])?;
+            activity::append(db, connection, session_id, activity_record.as_deref())?;
             if let Some((version, body)) = projection
                 && let Err(error) = db.execute(
                     connection,
@@ -1383,6 +1397,7 @@ fn apply_op(
                 (session_id.as_str(),),
             )?;
             insert_segments(db, connection, session_id, 0, segments(bytes))?;
+            activity::recompute(db, connection, session_id)?;
             superseded::forget_pass(db, connection, session_id)?;
             turn_index::forget(db, connection, session_id)?;
         }
@@ -1398,6 +1413,7 @@ fn apply_op(
                  SELECT ?2, position, line FROM events WHERE session_id = ?1",
                 (src.as_str(), dst.as_str()),
             )?;
+            activity::recompute(db, connection, dst)?;
             superseded::forget_pass(db, connection, dst)?;
             turn_index::forget(db, connection, dst)?;
         }
@@ -1412,6 +1428,21 @@ fn apply_op(
         }
         Op::ForgetTurnIndex(session_id) => turn_index::forget(db, connection, session_id)?,
         Op::UpsertMeta(meta) => {
+            let mut previous_parent = None;
+            db.query(
+                connection,
+                "SELECT body FROM sessions WHERE id = ?1",
+                [meta.id.as_str()],
+                |row| {
+                    previous_parent = Some(
+                        serde_json::from_slice::<SessionMeta>(&blob(row, 0)?)
+                            .map_err(invalid_data)?
+                            .parent_session_id
+                            .is_some(),
+                    );
+                    Ok(())
+                },
+            )?;
             let body = serde_json::to_vec(meta.as_ref()).map_err(invalid_data)?;
             db.execute(
                 connection,
@@ -1419,6 +1450,9 @@ fn apply_op(
                  ON CONFLICT (id) DO UPDATE SET body = excluded.body",
                 (meta.id.as_str(), body),
             )?;
+            if previous_parent != Some(meta.parent_session_id.is_some()) {
+                activity::recompute(db, connection, &meta.id)?;
+            }
         }
         Op::UpsertProject(project) => {
             if let Some(previous) = stored_project(db, connection, &project.id)?
@@ -1435,6 +1469,7 @@ fn apply_op(
             )?;
         }
         Op::RemoveSession(id) => {
+            activity::remove(db, connection, id)?;
             db.execute(
                 connection,
                 "DELETE FROM events WHERE session_id = ?1",

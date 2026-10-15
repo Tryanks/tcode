@@ -1,134 +1,141 @@
 use super::*;
-use tcode_core::settlement::{SettlementBlockers, automatic_settlement_at};
+use tcode_core::settlement::{SettlementBlockers, SettlementDue, automatic_settlement_due};
+
+const ACTIVITY_BATCH_SIZE: usize = 16;
 
 impl AppState {
-    pub(crate) fn start_settlement_sweeps(&mut self, cx: &mut HostCx) {
-        self.request_settlement_sweep(cx);
+    pub(crate) fn start_activity(&mut self, cx: &mut HostCx) {
+        self.evaluate_all_settlement(cx);
+        self.load_next_activity_batch(cx);
     }
 
-    /// Evaluate every thread: project activity for threads that have none
-    /// from the end of their logs, then settle the ones that are due. Repeats
-    /// one minute after it drains.
-    pub(super) fn request_settlement_sweep(&mut self, cx: &mut HostCx) {
-        if self.settlement_sweep_running {
-            self.settlement_sweep_pending = true;
+    pub(super) fn queue_activity_load(&mut self, id: &str, cx: &mut HostCx) {
+        self.activity_pending.insert(id.to_owned());
+        self.load_next_activity_batch(cx);
+    }
+
+    fn load_next_activity_batch(&mut self, cx: &mut HostCx) {
+        if self.activity_loading || self.activity_pending.is_empty() || self.store_failed {
             return;
         }
-        if self.store_failed {
-            return;
-        }
-        self.settlement_sweep_running = true;
-        self.settlement_timer_generation += 1;
-        let started = Instant::now();
-        let missing: Vec<_> = self
-            .sessions
+        let ids: Vec<_> = self
+            .activity_pending
             .iter()
-            .filter(|meta| {
-                meta.archived_at.is_none() && !self.thread_activity.contains_key(&meta.id)
-            })
-            .map(|meta| {
-                (
-                    meta.id.clone(),
-                    meta.parent_session_id.is_some(),
-                    self.decision_revision(&meta.id),
-                )
+            .take(ACTIVITY_BATCH_SIZE)
+            .cloned()
+            .collect();
+        let revisions: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                self.activity_pending.remove(id);
+                (id.clone(), self.decision_revision(id))
             })
             .collect();
+        self.activity_loading = true;
         let store = self.store.clone();
-        let (flushed, flush) = smol::channel::bounded(1);
-        self.enqueue_store_write(StoreWrite::Flush(flushed), cx);
+        let flush = self.store_write_barrier(cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let activities = if matches!(flush.recv().await, Ok(Ok(()))) {
-                host_cx
-                    .unblock(move || {
-                        let threads: Vec<_> = missing
-                            .iter()
-                            .map(|(id, has_parent, _)| (id.clone(), *has_parent))
-                            .collect();
-                        match store.thread_activities(&threads) {
-                            Ok(activities) => missing
-                                .into_iter()
-                                .zip(activities)
-                                .map(|((id, _, revision), activity)| (id, revision, activity))
-                                .collect::<Vec<_>>(),
-                            Err(error) => missing
-                                .into_iter()
-                                .map(|(id, _, revision)| {
-                                    (id, revision, Err(std::io::Error::other(error.to_string())))
-                                })
-                                .collect(),
-                        }
-                    })
-                    .await
-            } else {
-                Vec::new()
+            let result = match flush.recv().await {
+                Ok(Ok(())) => {
+                    host_cx
+                        .unblock(move || store.backfill_thread_activity(&ids))
+                        .await
+                }
+                error => Err(std::io::Error::other(format!(
+                    "activity write barrier failed: {error:?}"
+                ))),
             };
-            let projected = started.elapsed();
             host_cx.enqueue(move |state, cx| {
-                for (id, revision, activity) in activities {
-                    if state.find_meta(&id).is_none() || state.thread_activity.contains_key(&id) {
-                        continue;
-                    }
-                    // A record appended while the log was read is missing from it.
-                    if state.decision_revision(&id) != revision {
-                        state.settlement_sweep_pending = true;
-                        continue;
-                    }
-                    match activity {
-                        Ok(activity) => {
-                            state.thread_activity.insert(id, activity);
+                state.activity_loading = false;
+                match result {
+                    Ok(mut activities) => {
+                        for (id, revision) in revisions {
+                            if state.find_meta(&id).is_none() {
+                                continue;
+                            }
+                            if state.decision_revision(&id) != revision {
+                                state.activity_pending.insert(id);
+                            } else if let Some(activity) = activities.remove(&id) {
+                                state.thread_activity.insert(id.clone(), activity);
+                                state.evaluate_thread_settlement(&id, cx);
+                            }
                         }
-                        Err(error) => log::warn!("settlement activity read for {id}: {error}"),
                     }
+                    Err(error) => log::warn!("thread activity backfill: {error}"),
                 }
-                let now = now_millis();
-                let projection = super::snapshots::ActivityProjection::new(state);
-                let due: Vec<_> = state
-                    .sessions
-                    .iter()
-                    .filter_map(|meta| state.settlement_due(meta, now, &projection))
-                    .collect();
-                for (id, at) in due {
-                    state.settle_session_at(&id, at / 1000, cx);
-                }
-                log::info!(
-                    "settlement sweep: {} threads, {} activity projections, read {} ms, total {} ms",
-                    state.sessions.len(),
-                    state.thread_activity.len(),
-                    projected.as_millis(),
-                    started.elapsed().as_millis()
-                );
-                state.settlement_sweep_running = false;
-                if std::mem::take(&mut state.settlement_sweep_pending) {
-                    state.request_settlement_sweep(cx);
-                    return;
-                }
-                let generation = state.settlement_timer_generation;
-                let timer_cx = cx.clone();
-                HostCx::spawn_detached(cx, async move {
-                    smol::Timer::after(Duration::from_secs(60)).await;
-                    timer_cx.enqueue(move |state, cx| {
-                        if state.settlement_timer_generation == generation {
-                            state.request_settlement_sweep(cx);
-                        }
-                    });
-                });
+                state.load_next_activity_batch(cx);
             });
         });
     }
 
-    /// Settle one thread now if it is due; for changes that concern only it.
-    pub(super) fn evaluate_thread_settlement(&mut self, id: &str, cx: &mut HostCx) {
+    pub(super) fn evaluate_all_settlement(&mut self, cx: &mut HostCx) {
+        let now = now_millis();
         let projection = super::snapshots::ActivityProjection::new(self);
-        let due = self
+        let decisions: Vec<_> = self
             .sessions
             .iter()
-            .find(|meta| meta.id == id)
-            .and_then(|meta| self.settlement_due(meta, now_millis(), &projection));
-        if let Some((id, at)) = due {
-            self.settle_session_at(&id, at / 1000, cx);
+            .map(|meta| (meta.id.clone(), self.settlement_due(meta, now, &projection)))
+            .collect();
+        for (id, due) in decisions {
+            self.arm_settlement(&id, due, now, cx);
         }
+    }
+
+    pub(super) fn evaluate_thread_settlement(&mut self, id: &str, cx: &mut HostCx) {
+        let mut next = Some(id.to_owned());
+        let mut visited = HashSet::new();
+        while let Some(id) = next.take() {
+            if !visited.insert(id.clone()) {
+                break;
+            }
+            let meta = self.find_meta(&id);
+            next = meta
+                .as_ref()
+                .and_then(|meta| meta.parent_session_id.clone());
+            let now = now_millis();
+            let projection = super::snapshots::ActivityProjection::new(self);
+            let due = meta
+                .as_ref()
+                .and_then(|meta| self.settlement_due(meta, now, &projection));
+            self.arm_settlement(&id, due, now, cx);
+        }
+    }
+
+    fn arm_settlement(&mut self, id: &str, due: Option<SettlementDue>, now: u64, cx: &mut HostCx) {
+        let Some(due) = due else {
+            self.settlement_timers.remove(id);
+            return;
+        };
+        if due.due_at <= now {
+            self.settlement_timers.remove(id);
+            self.settle_session_at(id, due.activity_at / 1000, cx);
+            return;
+        }
+        if self
+            .settlement_timers
+            .get(id)
+            .is_some_and(|(deadline, _)| *deadline == due.due_at)
+        {
+            return;
+        }
+        let id = id.to_owned();
+        let timer_id = id.clone();
+        let host_cx = cx.clone();
+        let task = cx.spawn_background(async move {
+            smol::Timer::after(Duration::from_millis(due.due_at.saturating_sub(now))).await;
+            host_cx.enqueue(move |state, cx| {
+                if state
+                    .settlement_timers
+                    .get(&timer_id)
+                    .is_some_and(|(deadline, _)| *deadline == due.due_at)
+                {
+                    state.settlement_timers.remove(&timer_id);
+                    state.evaluate_thread_settlement(&timer_id, cx);
+                }
+            });
+        });
+        self.settlement_timers.insert(id, (due.due_at, task));
     }
 
     fn settlement_due(
@@ -136,7 +143,7 @@ impl AppState {
         meta: &SessionMeta,
         now: u64,
         projection: &super::snapshots::ActivityProjection<'_>,
-    ) -> Option<(String, u64)> {
+    ) -> Option<SettlementDue> {
         let activity = self.thread_activity.get(&meta.id)?;
         let resident = self.resident(&meta.id);
         let blockers = SettlementBlockers {
@@ -180,7 +187,6 @@ impl AppState {
         let on_merge = project
             .and_then(|settings| settings.auto_settle_on_merge)
             .unwrap_or(self.settings.auto_settle_on_merge);
-        automatic_settlement_at(meta, activity, blockers, now, days, on_merge)
-            .map(|at| (meta.id.clone(), at))
+        automatic_settlement_due(meta, activity, blockers, now, days, on_merge)
     }
 }
