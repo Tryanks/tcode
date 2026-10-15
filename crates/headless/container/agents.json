@@ -1,0 +1,8 @@
+{
+  "claude": { "package": "@anthropic-ai/claude-code", "version": "2.1.300", "commands": ["claude"] },
+  "codex": { "package": "@openai/codex", "version": "0.162.1", "commands": ["codex"] },
+  "pi": { "package": "@earendil-works/pi-coding-agent", "version": "1.2.0", "commands": ["pi"] },
+  "opencode": { "package": "opencode-ai", "version": "1.19.0", "commands": ["opencode"] },
+  "cursor": { "version": "2026.10.14-941492e", "commands": ["cursor-agent", "agent"] },
+  "grok": { "package": "@xai-official/grok", "version": "1.0.52", "commands": ["grok"] }
+}

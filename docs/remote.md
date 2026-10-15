@@ -130,6 +130,10 @@ devices only; it does not serve the browser app.
 
 ## Run Tcode without the desktop app
 
+For a NAS or homelab, use the published Docker images and the commented
+[Compose template](../docker-compose.yml). The [Docker guide](docker.md)
+covers persistence, agent selection, login and `PUID`/`PGID` ownership.
+
 ### Install and start
 
 1. Download an archive from
