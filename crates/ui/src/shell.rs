@@ -6670,6 +6670,8 @@ mod tests {
             path: "/tmp/tcode-compact-panel/a/deeply/nested/module/tree/with/an/absurdly/long/file_name.rs".into(),
         });
         draw_until(&shell, cx, &host, "diff-body", None);
+        cx.executor().advance_clock(NAV_TRANSITION);
+        draw(cx);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(
                 shell.window_state.read(cx).destination(),
