@@ -1104,6 +1104,12 @@ fn served_model_changed(expected: &str, served: &str) -> bool {
             .eq_ignore_ascii_case(strip_context_window_suffix(served))
 }
 
+#[derive(Default)]
+struct AssistantMessageState {
+    blocks_seen: usize,
+    model: Option<String>,
+}
+
 pub(crate) struct Mapper {
     session_id: Option<String>,
     current_message_id: Option<String>,
@@ -1114,7 +1120,7 @@ pub(crate) struct Mapper {
     /// stream numbers the blocks 0, 1, 2… The completed item has to reuse the
     /// stream's numbering or the timeline shows the same text twice: once from
     /// the deltas (`msg:1`) and once from the completion (`msg:0`).
-    assistant_blocks_seen: HashMap<String, usize>,
+    assistant_messages: HashMap<String, AssistantMessageState>,
     turn_counter: usize,
     current_turn_id: Option<String>,
     /// The next replayed top-level user message carries this turn's provider
@@ -1199,7 +1205,7 @@ impl Mapper {
         Mapper {
             session_id: None,
             current_message_id: None,
-            assistant_blocks_seen: HashMap::new(),
+            assistant_messages: HashMap::new(),
             turn_counter: 0,
             current_turn_id: None,
             awaiting_turn_checkpoint: false,
@@ -1662,7 +1668,7 @@ impl Mapper {
             return Vec::new();
         }
         self.fallback_detected = true;
-        vec![AgentEvent::ModelFallbackDetected {
+        let mut events = vec![AgentEvent::ModelFallbackDetected {
             expected: expected.to_owned(),
             actual: actual.to_owned(),
             category: msg
@@ -1677,7 +1683,9 @@ impl Mapper {
                 .get("parent_tool_use_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-        }]
+        }];
+        events.extend(self.observe_served_model(&json!({ "model": actual })));
+        events
     }
 
     fn accept_pending_steers(&mut self) -> Vec<AgentEvent> {
@@ -2156,6 +2164,28 @@ impl Mapper {
         }
     }
 
+    fn observe_fallback_block(&mut self, block: &Value) -> Vec<AgentEvent> {
+        let (Some(expected), Some(actual)) = (
+            block.pointer("/from/model").and_then(Value::as_str),
+            block.pointer("/to/model").and_then(Value::as_str),
+        ) else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        if !self.fallback_detected && served_model_changed(expected, actual) {
+            self.fallback_detected = true;
+            events.push(AgentEvent::ModelFallbackDetected {
+                expected: expected.to_owned(),
+                actual: actual.to_owned(),
+                category: None,
+                checkpoint_id: None,
+                parent_tool_use_id: None,
+            });
+        }
+        events.extend(self.observe_served_model(&block["to"]));
+        events
+    }
+
     fn observe_served_model(&mut self, message: &Value) -> Vec<AgentEvent> {
         let Some(model) = message
             .get("model")
@@ -2209,25 +2239,27 @@ impl Mapper {
                 .and_then(Value::as_str)
                 .map(ClassifierCategory::parse);
         }
-        out.extend(self.observe_served_model(message));
-        out.extend(self.observe_stop_reason(message.get("stop_reason").and_then(Value::as_str)));
         let msg_id = message
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or("msg")
             .to_string();
-        let content = match message.get("content").and_then(Value::as_array) {
-            Some(c) => c,
-            None => return out,
-        };
-        // Continue the stream's block numbering across the CLI's split
-        // `assistant` lines (see `assistant_blocks_seen`).
-        let seen = self
-            .assistant_blocks_seen
-            .entry(msg_id.clone())
-            .or_default();
-        let first_index = *seen;
-        *seen += content.len();
+        let state = self.assistant_messages.entry(msg_id.clone()).or_default();
+        let model = message.get("model").and_then(Value::as_str);
+        let model_changed = state.model.as_deref() != model;
+        if model_changed {
+            state.model = model.map(str::to_owned);
+        }
+        let content = message.get("content").and_then(Value::as_array);
+        let first_index = state.blocks_seen;
+        state.blocks_seen += content.map_or(0, Vec::len);
+        // Split assistant blocks retain the message_start model even after a
+        // fallback boundary; observing an unchanged header would undo the switch.
+        if model_changed {
+            out.extend(self.observe_served_model(message));
+        }
+        out.extend(self.observe_stop_reason(message.get("stop_reason").and_then(Value::as_str)));
+        let Some(content) = content else { return out };
 
         for (offset, block) in content.iter().enumerate() {
             let index = first_index + offset;
@@ -2264,6 +2296,7 @@ impl Mapper {
                 Some("tool_use") => {
                     out.extend(self.on_tool_use(block));
                 }
+                Some("fallback") => out.extend(self.observe_fallback_block(block)),
                 _ => {}
             }
         }
@@ -2781,7 +2814,7 @@ impl Mapper {
             .take()
             .unwrap_or_else(|| format!("turn-{}", self.turn_counter.max(1)));
         // No message outlives its turn, so the block counters can go.
-        self.assistant_blocks_seen.clear();
+        self.assistant_messages.clear();
         let mut status = result_status(msg, self.stop_reason.as_deref());
         if std::mem::take(&mut self.interrupt_pending) && status != TurnStatus::Completed {
             status = TurnStatus::Interrupted;
@@ -3785,8 +3818,83 @@ mod tests {
     }
 
     #[test]
-    fn model_refusal_fallback_emits_model_fallback_detected() {
+    fn mid_stream_fallback_is_published_before_the_response_finishes() {
+        // Claude Code 2.1.299 against a local SSE endpoint using the documented
+        // fallback boundary; only stream, assistant and result messages retained.
+        let fixture = include_str!("../tests/fixtures/claude/mid-stream-fallback.jsonl");
+        for requested in [Some("claude-fable-5".into()), None] {
+            let mut mapper = Mapper::new_configured("default".into(), false, requested);
+            mapper.start_turn();
+            let mut switched = false;
+            let mut completed = false;
+            for line in fixture.lines() {
+                let message: Value = serde_json::from_str(line).unwrap();
+                let boundary = message
+                    .pointer("/message/content/0/type")
+                    .and_then(Value::as_str)
+                    == Some("fallback");
+                let events = mapper.on_message(message);
+                if boundary {
+                    assert!(!completed);
+                    let notices = events
+                        .iter()
+                        .filter(|event| {
+                            matches!(
+                                event,
+                                AgentEvent::ModelFallbackDetected { .. }
+                                    | AgentEvent::ServedModel { .. }
+                            )
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    assert!(
+                        !events
+                            .iter()
+                            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }))
+                    );
+                    assert_eq!(
+                        notices,
+                        [
+                            AgentEvent::ModelFallbackDetected {
+                                expected: "claude-fable-5".into(),
+                                actual: "claude-opus-4-8".into(),
+                                category: None,
+                                checkpoint_id: None,
+                                parent_tool_use_id: None,
+                            },
+                            AgentEvent::ServedModel {
+                                model: "claude-opus-4-8".into(),
+                                reason: None
+                            },
+                        ]
+                    );
+                    switched = true;
+                } else if switched {
+                    assert!(
+                        !events.iter().any(|event| matches!(
+                            event,
+                            AgentEvent::ModelFallbackDetected { .. }
+                                | AgentEvent::ServedModel { .. }
+                        )),
+                        "later blocks must not repeat or undo the switch: {events:?}"
+                    );
+                }
+                if events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }))
+                {
+                    assert!(switched, "the switch must be visible before completion");
+                    completed = true;
+                }
+            }
+            assert!(switched && completed);
+        }
+    }
+
+    #[test]
+    fn model_refusal_fallback_publishes_served_model_before_completion() {
         let mut mapper = Mapper::new();
+        mapper.start_turn();
         let events = feed(
             &mut mapper,
             r#"{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","direction":"retry","scope":"session","original_model":"claude-fable-5","fallback_model":"claude-opus-4-8","request_id":"req_123","api_refusal_category":"cyber","api_refusal_explanation":null,"refused_user_message_uuid":"cf7703ac-420b-4038-9f32-582077b27352","content":"Safeguards flagged this message. Switched models.","session_id":"session-1","uuid":"system-1"}"#,
@@ -3794,13 +3902,19 @@ mod tests {
 
         assert_eq!(
             events,
-            [AgentEvent::ModelFallbackDetected {
-                expected: "claude-fable-5".into(),
-                actual: "claude-opus-4-8".into(),
-                category: Some(ClassifierCategory::Cyber),
-                checkpoint_id: Some("cf7703ac-420b-4038-9f32-582077b27352".into()),
-                parent_tool_use_id: None,
-            }]
+            [
+                AgentEvent::ModelFallbackDetected {
+                    expected: "claude-fable-5".into(),
+                    actual: "claude-opus-4-8".into(),
+                    category: Some(ClassifierCategory::Cyber),
+                    checkpoint_id: Some("cf7703ac-420b-4038-9f32-582077b27352".into()),
+                    parent_tool_use_id: None,
+                },
+                AgentEvent::ServedModel {
+                    model: "claude-opus-4-8".into(),
+                    reason: None,
+                }
+            ]
         );
     }
 
@@ -6054,6 +6168,13 @@ mod tests {
             [AgentEvent::ServedModel { model, reason: None }] if model == "claude-sonnet-4"
         ));
         assert!(repeat.is_empty());
+        let changed = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","id":"msg-1","content":[]}}"#,
+        );
+        assert!(
+            matches!(changed.as_slice(), [AgentEvent::ServedModel { model, reason: None }] if model == "claude-opus-4-8")
+        );
     }
 
     #[test]
