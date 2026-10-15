@@ -24,9 +24,6 @@ pub struct HostServices {
     pub background_startup_probes: bool,
     /// Generate AI-authored titles for new threads and explicit regeneration.
     pub ai_title_generation: bool,
-    /// Drop the diffs of superseded turn-changes snapshots from logs stored
-    /// before appends dropped them, one thread at a time in the background.
-    pub drop_superseded_diffs: bool,
     /// URL/tokens and the broker receiver stay host-side. Requests reach
     /// subscribed WebViews through the preview reverse-RPC topic.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
@@ -229,9 +226,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.refresh_provider_usage(&mut cx);
                 state.refresh_provider_status(&mut cx);
             }
-            if services.drop_superseded_diffs {
-                state.start_diff_pass(&mut cx);
-            }
+            state.start_diff_pass(&mut cx);
             state.sync_terminal_handles();
             state.start_activity(&mut cx);
             let _ = ready_tx.send(Ok(()));

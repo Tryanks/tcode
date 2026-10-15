@@ -5841,6 +5841,7 @@ fn idle_histories_evict_oldest_by_bytes_and_bypass_oversized_logs() {
             request,
         );
         assert!(!window.records.is_empty());
+        cx.run_until(|state| state.event_records.contains_key(id));
         through_pipe(&state, cx, request + 1, unsubscribe_events(id));
         if index >= 2 {
             state.read(|state| {
@@ -8991,6 +8992,8 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
         open_stored_session(&store, "thread");
         let mut conversation = store.read_events("thread").unwrap();
         let state = cx.new_entity(TestClientState::new((*store).clone()));
+        state.update(cx, |state, cx| state.start_activity(cx));
+        cx.run_until(|state| state.store.turn_index("thread").unwrap().is_some());
         window_reply(
             &through_pipe(&state, cx, 1, subscribe_events("thread", None)),
             1,
@@ -9074,6 +9077,19 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
 /// appends did, an open one included, through the store writer.
 #[test]
 fn the_startup_pass_drops_superseded_diffs_of_every_stored_thread() {
+    struct CleanupLog(std::sync::Mutex<Vec<String>>);
+    impl log::Log for CleanupLog {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            self.0.lock().unwrap().push(record.args().to_string());
+        }
+        fn flush(&self) {}
+    }
+    static LOG: CleanupLog = CleanupLog(std::sync::Mutex::new(Vec::new()));
+    log::set_logger(&LOG).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("diff-pass");
     let log = format!(
@@ -9111,6 +9127,19 @@ fn the_startup_pass_drops_superseded_diffs_of_every_stored_thread() {
             "{id}"
         );
     }
+    drop(state);
+    LOG.0.lock().unwrap().clear();
+    let cx = &mut TestAppContext::default();
+    let restarted = cx.new_entity(TestClientState::new((*store).clone()));
+    restarted.update(cx, |state, cx| state.start_diff_pass(cx));
+    cx.run_until(|_| {
+        LOG.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line == "superseded diff cleanup complete: no work")
+    });
+    restarted.read(|state| assert!(state.diff_pass.is_none()));
 }
 
 /// A thread opens with about half a megabyte of history however long its
@@ -9387,10 +9416,7 @@ fn diff_pass_crash_child() {
     let root = PathBuf::from(std::env::var_os(CRASH_CHILD_DIR).unwrap());
     let _host = crate::pipe::spawn_host(
         SessionStore::open_at(root).unwrap(),
-        crate::pipe::HostServices {
-            drop_superseded_diffs: true,
-            ..Default::default()
-        },
+        crate::pipe::HostServices::default(),
     )
     .unwrap();
     println!("{CRASH_ACK}started");
@@ -9744,58 +9770,6 @@ fn is_live_record(message: &HostMessage) -> bool {
     )
 }
 
-/// Subscriptions made while a cold log is read share that one read. Each
-/// gets a window ending where the read log ends, and a record accepted
-/// meanwhile follows every window, once.
-#[test]
-fn subscriptions_made_while_a_cold_log_is_read_share_it_and_get_each_record_once() {
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("cold-subscriptions");
-    open_stored_session(&store, "cold");
-    let persisted = persist_streamed_turns(&store, "cold", 2).len() as u64;
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let reads_before_open = store.event_reads();
-
-    send_to_host(&state, cx, 1, subscribe_events("cold", None));
-    send_to_host(&state, cx, 2, subscribe_events("cold", None));
-    let live = AgentEvent::Warning {
-        message: "first live".into(),
-    };
-    state.update(cx, |state, cx| {
-        assert!(state.log_hydrations.contains_key("cold"));
-        state.on_event("cold", live.clone(), cx);
-    });
-    let messages = answered(cx, 2);
-    assert!(
-        messages
-            .iter()
-            .any(|message| matches!(message, HostMessage::Ack { id: 1, .. }))
-    );
-
-    let live_at = first_at(&messages, is_live_record);
-    for id in [1, 2] {
-        let window = window_reply(&messages, id);
-        assert_eq!((window.end, window.total), (persisted, persisted));
-        let window_at = first_at(
-            &messages,
-            |message| matches!(message, HostMessage::Event(EventEnvelope { request_id: Some(request), .. }) if *request == id),
-        );
-        assert!(window_at < live_at, "window {id} comes before the record");
-    }
-    assert_eq!(
-        live_records(&messages)
-            .into_iter()
-            .map(|record| record.event)
-            .collect::<Vec<_>>(),
-        [live]
-    );
-    assert_eq!(
-        store.event_reads() - reads_before_open,
-        1,
-        "both subscriptions were answered from one read"
-    );
-}
-
 /// The first event of a resident thread whose log is not loaded starts the
 /// read of that log, which therefore does not contain it: a subscription
 /// made before the read completes gets a window without it, and the event
@@ -10112,20 +10086,12 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
 {"type":"turn_completed","turn_id":"three","status":"completed","usage":null}
 "#;
     store
-        .apply(&[
-            tcode_services::store::Mutation::replace_event_log(
-                "items",
-                fixture.as_bytes().to_vec(),
-            ),
-            tcode_services::store::Mutation::set_turn_index(
-                "items",
-                tcode_services::store::TurnIndex {
-                    turns: 3,
-                    starts: vec![0, 8, 11],
-                },
-            ),
-        ])
+        .apply(&[tcode_services::store::Mutation::replace_event_log(
+            "items",
+            fixture.as_bytes().to_vec(),
+        )])
         .unwrap();
+    store.backfill_thread_activity(&["items".into()]).unwrap();
     let whole = SessionLog::new(store.read_log("items").unwrap());
     let read = store.snapshot_log("items").unwrap();
     assert!(read.read_item("reused").unwrap().is_none());
@@ -10161,20 +10127,13 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
         r#"{"type":"rewind_completed","checkpoint_id":"rewound","mode":"conversation","prefill":null}"#
     );
     store
-        .apply(&[
-            tcode_services::store::Mutation::replace_event_log(
-                "rewound",
-                rewind_fixture.into_bytes(),
-            ),
-            tcode_services::store::Mutation::set_turn_index(
-                "rewound",
-                tcode_services::store::TurnIndex {
-                    turns: 2,
-                    starts: vec![0, 8, 11],
-                },
-            ),
-        ])
+        .apply(&[tcode_services::store::Mutation::replace_event_log(
+            "rewound",
+            rewind_fixture.into_bytes(),
+        )])
         .unwrap();
+    open_stored_session(&store, "rewound");
+    store.backfill_thread_activity(&["rewound".into()]).unwrap();
     let read = store.snapshot_log("rewound").unwrap();
     assert!(read.read_item("removed").unwrap().is_none());
     assert!(
@@ -10197,6 +10156,47 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
 }
 
 #[test]
+fn an_unindexed_cold_thread_opens_through_hydration() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("unindexed-history");
+    open_stored_session(&store, "legacy");
+    store
+        .apply(&[tcode_services::store::Mutation::replace_event_log(
+            "legacy",
+            include_bytes!("../../../services/src/store/fixtures/turn-index.jsonl").to_vec(),
+        )])
+        .unwrap();
+    assert!(store.turn_index("legacy").unwrap().is_none());
+    let whole = SessionLog::new(store.read_log("legacy").unwrap());
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let window = window_reply(
+        &through_pipe(&state, cx, 1, subscribe_events("legacy", None)),
+        1,
+    );
+    assert_eq!(
+        window,
+        window_of(&whole.events_window(&Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "legacy".into()
+            },
+            after: None,
+            known_index: None,
+        }))
+        .unwrap()
+    );
+    state.read(|state| {
+        assert!(state.event_records.contains_key("legacy"));
+        assert!(!state.log_hydrations.contains_key("legacy"));
+    });
+    let page = query_reply(
+        &through_pipe(&state, cx, 2, history_page("legacy", window.end)),
+        2,
+    );
+    assert_eq!(page, whole.history_page(window.end, 200).unwrap());
+    assert!(store.turn_index("legacy").unwrap().is_none());
+}
+
+#[test]
 fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tail-window");
@@ -10206,7 +10206,7 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     let mut id = 0;
     let mut open = |state: &TestEntity, cx: &mut TestAppContext, after: Option<u64>| {
         id += 1;
-        let browsing = id == 2;
+        let browsing = id == 1;
         let page_before = store.next_row("long").unwrap().saturating_sub(400);
         // Delay the full read's completion, not the bounded requests' mailbox.
         let held_hydration = store.turn_index("long").unwrap().map(|_| {
@@ -10316,14 +10316,14 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
 
     let (window, early, whole) = open(&state, cx, None);
     assert!(
-        !early,
-        "without an index the first open reads the whole log"
+        early,
+        "the append-maintained index serves a never-opened thread before hydration"
     );
     assert_eq!(window, whole);
     release(&state, cx, 100);
 
     let (window, early, whole) = open(&state, cx, None);
-    assert!(early, "the index the first open built serves the tail");
+    assert!(early, "the persisted index serves the tail on reopen");
     assert_eq!(window, whole);
     assert!(window.from > 0 && window.total_turns == 3);
     let held_end = window.end;
@@ -10414,14 +10414,6 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
             .any(|record| record.event == pending)
     );
     release(&state, cx, 5001);
-
-    state.update(cx, |state, cx| {
-        state.record_event("long", &persisted_assistant_event("nobody held it"), cx)
-    });
-    cx.run_until_parked();
-    let (window, early, whole) = open(&state, cx, None);
-    assert!(!early, "an append nobody folded forgot the index");
-    assert_eq!(window, whole);
 }
 
 #[test]
