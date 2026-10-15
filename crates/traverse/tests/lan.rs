@@ -42,10 +42,11 @@ fn start_host(
     bind_port: Option<u16>,
 ) -> (
     TraverseHost,
-    async_channel::Receiver<String>,
+    async_channel::Receiver<tcode_client::attachment::AttachmentMessage>,
     async_channel::Sender<String>,
 ) {
-    let (to_host, host_rx) = async_channel::unbounded::<String>();
+    let (to_host, host_rx) =
+        async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
     let (host_tx, from_host) = async_channel::unbounded::<String>();
     let host = TraverseHost::start(
         HostMux::new(to_host, from_host),

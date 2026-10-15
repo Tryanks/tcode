@@ -154,7 +154,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     }
     let host =
         spawn_host(store, services).map_err(|error| format!("machine startup failed: {error}"))?;
-    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone())
+    let mux = HostMux::new(host.attachments.clone(), host.from_host.clone())
         .with_original_backend(std::sync::Arc::new(host.clone()));
     let relayed = !traverse.is_empty();
     let traverse_host = Arc::new(
@@ -238,7 +238,10 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     println!("Press Ctrl-C to stop");
     wait_for_interrupt();
 
-    let shutdown_connection = mux.attach(tcode_protocol::Principal::Full);
+    let shutdown_connection = mux.attach(
+        tcode_protocol::Principal::Full,
+        tcode_client::attachment::AttachmentPolicy::network(),
+    );
     let shutdown_id = 1_u64;
     let shutdown_line = serde_json::to_string(&tcode_protocol::ClientMessage {
         principal: None,

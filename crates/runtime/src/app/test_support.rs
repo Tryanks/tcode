@@ -242,6 +242,7 @@ impl TestEntity {
                 id,
                 payload,
             },
+            tcode_client::attachment::AttachmentPolicy::LOCAL,
         );
     }
 

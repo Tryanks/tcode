@@ -3,6 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
+use tcode_client::attachment::{AttachmentMessage, AttachmentPolicy, AttachmentSender};
 use tcode_core::thread_sort::ThreadSection;
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, ProtocolError,
@@ -71,7 +72,8 @@ struct OriginalAdmission {
 #[derive(Clone)]
 pub struct SpawnedHost {
     originals: async_channel::Sender<OriginalIngress>,
-    pub to_host: async_channel::Sender<String>,
+    pub attachments: async_channel::Sender<AttachmentMessage>,
+    pub to_host: AttachmentSender,
     pub from_host: async_channel::Receiver<String>,
     pub stopped: async_channel::Receiver<()>,
     link: Arc<OnceLock<HostLink>>,
@@ -170,7 +172,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     assert_send::<AppState>();
 
     let (original_tx, original_rx) = async_channel::bounded::<OriginalIngress>(8);
-    let (client_tx, client_rx) = async_channel::unbounded::<String>();
+    let (attachment_tx, attachment_rx) = async_channel::unbounded::<AttachmentMessage>();
     let (event_tx, event_rx) = async_channel::unbounded::<String>();
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
     let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostFn>();
@@ -231,7 +233,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             state.start_activity(&mut cx);
             let _ = ready_tx.send(Ok(()));
             let mut state =
-                smol::block_on(host_loop(state, cx, client_rx, mailbox_rx, original_rx));
+                smol::block_on(host_loop(state, cx, attachment_rx, mailbox_rx, original_rx));
             if let Err(error) = state.close_store() {
                 log::error!("could not close the session store cleanly: {error}");
             }
@@ -246,7 +248,8 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
 
     Ok(SpawnedHost {
         originals: original_tx,
-        to_host: client_tx,
+        to_host: AttachmentSender::new(attachment_tx.clone(), AttachmentPolicy::LOCAL),
+        attachments: attachment_tx,
         from_host: event_rx,
         stopped: stopped_rx,
         link: Arc::new(OnceLock::new()),
@@ -258,14 +261,14 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
 async fn host_loop(
     mut state: AppState,
     mut cx: HostCx,
-    client: smol::channel::Receiver<String>,
+    client: async_channel::Receiver<AttachmentMessage>,
     mailbox: smol::channel::Receiver<HostFn>,
     originals: async_channel::Receiver<OriginalIngress>,
 ) -> AppState {
     let mut domain_diff = DomainDiff::new(&state);
     loop {
         enum Input {
-            Client(Result<String, smol::channel::RecvError>),
+            Client(Result<AttachmentMessage, smol::channel::RecvError>),
             Internal(Result<HostFn, smol::channel::RecvError>),
             Original(OriginalIngress),
         }
@@ -281,8 +284,8 @@ async fn host_loop(
         .await
         {
             Input::Client(message) => match message {
-                Ok(line) => match decode_client_line(&line) {
-                    Ok(message) => handle_client_message(&mut state, &mut cx, message),
+                Ok(AttachmentMessage { line, policy }) => match decode_client_line(&line) {
+                    Ok(message) => handle_client_message(&mut state, &mut cx, message, policy),
                     Err(error) => cx.send_message(HostMessage::Ack {
                         id: malformed_message_id(&line).unwrap_or(0),
                         result: Err(error),
@@ -324,7 +327,12 @@ fn malformed_message_id(line: &str) -> Option<u64> {
         .as_u64()
 }
 
-pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, message: ClientMessage) {
+pub(crate) fn handle_client_message(
+    state: &mut AppState,
+    cx: &mut HostCx,
+    message: ClientMessage,
+    policy: AttachmentPolicy,
+) {
     let ClientMessage {
         id,
         payload,
@@ -419,7 +427,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
             }
         }
         ClientPayload::Query(query) => {
-            let task = dispatch_query(state, cx, query);
+            let task = dispatch_query(state, cx, query, policy);
             let response_cx = cx.clone();
             cx.spawn_detached(async move {
                 response_cx.send_message(HostMessage::QueryResult {
@@ -944,6 +952,7 @@ fn dispatch_query(
     app: &mut AppState,
     cx: &mut HostCx,
     query: Query,
+    policy: AttachmentPolicy,
 ) -> crate::host::HostTask<Result<QueryResponse, ProtocolError>> {
     match query {
         Query::SessionHistoryPage {
@@ -1055,7 +1064,9 @@ fn dispatch_query(
             let task = cx.unblock(move || {
                 tcode_services::user_files::read_bounded(
                     &path,
-                    tcode_services::git::MAX_FILE_TEXT_BYTES,
+                    policy
+                        .read_limit(Some(tcode_services::git::MAX_FILE_TEXT_BYTES))
+                        .unwrap(),
                 )
             });
             cx.spawn_background(async move {
@@ -1065,6 +1076,7 @@ fn dispatch_query(
             })
         }
         Query::ReadFileBytes { path, max_bytes } => {
+            let max_bytes = policy.read_limit(max_bytes);
             let task = cx.unblock(move || match max_bytes {
                 Some(limit) => tcode_services::user_files::read_bounded(&path, limit),
                 None => std::fs::read(path),
@@ -1125,7 +1137,13 @@ fn dispatch_query(
             item_id,
             image_index,
             max_bytes,
-        } => app.item_image(&session_id, item_id, image_index, max_bytes, cx),
+        } => app.item_image(
+            &session_id,
+            item_id,
+            image_index,
+            policy.read_limit(max_bytes),
+            cx,
+        ),
         Query::ReadItemImagePreview {
             session_id,
             item_id,

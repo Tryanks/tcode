@@ -8,7 +8,10 @@ use tcode_protocol::{
 use tcode_traverse::HostMux;
 
 pub(super) fn linked(mux: &HostMux) -> HostLink {
-    let connection = mux.attach(tcode_protocol::Principal::Full);
+    let connection = mux.attach(
+        tcode_protocol::Principal::Full,
+        tcode_client::attachment::AttachmentPolicy::network(),
+    );
     let link = HostLink::new(connection.to_host, connection.from_host);
     let pump = link.clone();
     smol::spawn(async move { pump.pump().await }).detach();
@@ -45,7 +48,7 @@ pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
         HostServices::default(),
     )
     .unwrap();
-    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let mux = HostMux::new(host.attachments.clone(), host.from_host.clone());
     let link = linked(&mux);
     let CommandResponse::ProjectId(Some(project_id)) = link
         .command_blocking(Command::CreateProject {
@@ -314,9 +317,12 @@ fn oversized_remote_reads_are_rejected_and_local_reads_are_complete() {
         )
         .unwrap();
     let host = spawn_host(store, HostServices::default()).unwrap();
-    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let mux = HostMux::new(host.attachments.clone(), host.from_host.clone());
     let remote = linked(&mux);
-    let connection = mux.attach_local(tcode_protocol::Principal::Full);
+    let connection = mux.attach(
+        tcode_protocol::Principal::Full,
+        tcode_client::attachment::AttachmentPolicy::LOCAL,
+    );
     let local = HostLink::new(connection.to_host, connection.from_host);
     let pump = local.clone();
     smol::spawn(async move { pump.pump().await }).detach();
@@ -354,6 +360,50 @@ fn oversized_remote_reads_are_rejected_and_local_reads_are_complete() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn runtime_read_budget_comes_from_the_attachment() {
+    let root = std::env::temp_dir().join(format!("tcode-policy-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::open_at(root.clone()).unwrap();
+    let path = root.join("original.bin");
+    let bytes = b"original";
+    std::fs::write(&path, bytes).unwrap();
+    let host = spawn_host(store, HostServices::default()).unwrap();
+    let line = tcode_protocol::encode_line(&ClientMessage {
+        id: 1,
+        key: None,
+        principal: None,
+        payload: ClientPayload::Query(Query::ReadFileBytes {
+            path,
+            max_bytes: Some(u64::MAX),
+        }),
+    })
+    .unwrap();
+    let network = AttachmentPolicy {
+        read_budget: Some(2),
+        ..AttachmentPolicy::network()
+    };
+    for (policy, expected) in [
+        (
+            AttachmentPolicy::LOCAL,
+            Ok(QueryResponse::FileBytes(bytes.to_vec())),
+        ),
+        (network, Err("file_too_large".to_string())),
+    ] {
+        let attachment = AttachmentSender::new(host.attachments.clone(), policy);
+        attachment.try_send(line.clone()).unwrap();
+        let result = loop {
+            if let HostMessage::QueryResult { id: 1, result } =
+                tcode_protocol::decode_host_line(&host.from_host.recv_blocking().unwrap()).unwrap()
+            {
+                break result;
+            }
+        };
+        assert_eq!(result.map_err(|error| error.code), expected);
+    }
+    host.shutdown_blocking().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// A host with a project but no session, plus the temp root the store owns.
 /// The root is deliberately distinct per test so a sentinel found by search
 /// can only have come from this host's own store.
@@ -366,7 +416,7 @@ fn project_fixture() -> (SpawnedHost, HostMux, HostLink, PathBuf, String) {
         HostServices::default(),
     )
     .unwrap();
-    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let mux = HostMux::new(host.attachments.clone(), host.from_host.clone());
     let link = linked(&mux);
     let CommandResponse::ProjectId(Some(project_id)) = link
         .command_blocking(Command::CreateProject { root: project })
@@ -593,7 +643,10 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
 
     // The initiator is a raw mux connection so the test can genuinely drop it
     // mid-run; completion must not depend on it still being attached.
-    let initiator = mux.attach(tcode_protocol::Principal::Full);
+    let initiator = mux.attach(
+        tcode_protocol::Principal::Full,
+        tcode_client::attachment::AttachmentPolicy::network(),
+    );
     initiator
         .to_host
         .send_blocking(

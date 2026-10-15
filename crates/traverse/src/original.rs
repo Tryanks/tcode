@@ -21,6 +21,7 @@ pub(crate) async fn serve(
     device: String,
     principal: Principal,
     target: OriginalTarget,
+    policy: tcode_client::attachment::AttachmentPolicy,
     mut send: SendStream,
 ) -> io::Result<()> {
     let _ = send.set_priority(-10);
@@ -31,7 +32,7 @@ pub(crate) async fn serve(
             _ => Err(io::Error::other("original cancelled")),
         },
         result = async {
-            let admitted = match timed(mux.open_original(device, principal, target)).await? {
+            let admitted = match timed(mux.open_original(device, principal, target, policy)).await? {
                 Ok(source) => source,
                 Err(error) => {
                     wire::write_line(&mut send, &OriginalReply::OriginalFailed { error }).await?;

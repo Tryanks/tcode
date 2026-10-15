@@ -38,12 +38,14 @@ impl Drop for TestDir {
 }
 
 fn fake_host() -> (HostMux, Arc<std::sync::Mutex<Vec<String>>>) {
-    let (to_host, host_rx) = async_channel::unbounded::<String>();
+    let (to_host, host_rx) =
+        async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
     let (host_tx, from_host) = async_channel::unbounded::<String>();
     let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = keys.clone();
     std::thread::spawn(move || {
-        while let Ok(line) = host_rx.recv_blocking() {
+        while let Ok(message) = host_rx.recv_blocking() {
+            let line = message.line;
             let request = tcode_protocol::decode_client_line(&line).unwrap();
             let id = request.id;
             if let Some(key) = request.key {

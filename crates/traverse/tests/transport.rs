@@ -43,14 +43,16 @@ fn fake_host() -> (
     Arc<AtomicUsize>,
     Arc<std::sync::Mutex<Vec<String>>>,
 ) {
-    let (to_host, host_rx) = async_channel::unbounded::<String>();
+    let (to_host, host_rx) =
+        async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
     let (host_tx, from_host) = async_channel::unbounded::<String>();
     let subscribe_count = Arc::new(AtomicUsize::new(0));
     let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
     let count = subscribe_count.clone();
     let seen_keys = keys.clone();
     std::thread::spawn(move || {
-        while let Ok(line) = host_rx.recv_blocking() {
+        while let Ok(message) = host_rx.recv_blocking() {
+            let line = message.line;
             let request = tcode_protocol::decode_client_line(&line).unwrap();
             let id = request.id;
             if let Some(key) = request.key {
@@ -867,7 +869,7 @@ fn space_invite(host: &TraverseHost, id: &str) -> PairInvite {
 
 fn scoped_ping(
     client: &Transport,
-    host_rx: &async_channel::Receiver<String>,
+    host_rx: &async_channel::Receiver<tcode_client::attachment::AttachmentMessage>,
     host_tx: &async_channel::Sender<String>,
     principal: &tcode_protocol::Principal,
     id: u64,
@@ -894,7 +896,7 @@ fn scoped_ping(
     tcode_traverse::block_on(async {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let line = host_rx.recv().await.unwrap();
+                let line = host_rx.recv().await.unwrap().line;
                 let request = tcode_protocol::decode_client_line(&line).unwrap();
                 assert_eq!(
                     request.payload,
@@ -1329,8 +1331,14 @@ fn a_backlogged_terminal_converges_without_losing_ordered_effects_or_other_termi
     let (to_host, host_rx) = async_channel::unbounded();
     let (host_tx, from_host) = async_channel::unbounded();
     let mux = HostMux::new(to_host, from_host);
-    let slow = mux.attach(Principal::Full);
-    let observer = mux.attach(Principal::Full);
+    let slow = mux.attach(
+        Principal::Full,
+        tcode_client::attachment::AttachmentPolicy::network(),
+    );
+    let observer = mux.attach(
+        Principal::Full,
+        tcode_client::attachment::AttachmentPolicy::network(),
+    );
     let receive = |connection: &tcode_traverse::mux::Connection| {
         tcode_traverse::block_on(async {
             let line = tokio::time::timeout(Duration::from_secs(5), connection.from_host.recv())
@@ -1358,7 +1366,7 @@ fn a_backlogged_terminal_converges_without_losing_ordered_effects_or_other_termi
             )
             .unwrap();
         let request =
-            tcode_protocol::decode_client_line(&host_rx.recv_blocking().unwrap()).unwrap();
+            tcode_protocol::decode_client_line(&host_rx.recv_blocking().unwrap().line).unwrap();
         host_tx
             .send_blocking(
                 encode_line(&HostMessage::Event(EventEnvelope {
@@ -1389,7 +1397,7 @@ fn a_backlogged_terminal_converges_without_losing_ordered_effects_or_other_termi
             )
             .unwrap();
         let request =
-            tcode_protocol::decode_client_line(&host_rx.recv_blocking().unwrap()).unwrap();
+            tcode_protocol::decode_client_line(&host_rx.recv_blocking().unwrap().line).unwrap();
         ping_ids.push(request.id);
     }
     for index in 0..2048 {
@@ -1527,7 +1535,7 @@ fn attachment_overflow_ends_the_main_stream_without_closing_the_quic_connection(
             assert!(matches!(wire::read_control::<HostLine>(&mut reader).await.unwrap(), HostLine::HelloOk { .. }));
             let mut send = wire::LineWriter::new(send);
             send.write_line(r#"{"id":1,"payload":{"type":"query","content":{"type":"ping"}}}"#).await.unwrap();
-            let request = tcode_protocol::decode_client_line(&host_rx.recv().await.unwrap()).unwrap();
+            let request = tcode_protocol::decode_client_line(&host_rx.recv().await.unwrap().line).unwrap();
             host_tx.send(serde_json::json!({
                 "type":"query_result", "content":{"id":request.id, "result":{"Ok":{"type":"text","content":"x".repeat(tcode_protocol::MAX_LINE_BYTES)}}}
             }).to_string()).await.unwrap();

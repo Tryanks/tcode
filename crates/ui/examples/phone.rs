@@ -49,9 +49,12 @@ fn main() {
                 }
                 let host =
                     tcode_runtime::pipe::spawn_host(store, services).expect("start local host");
-                let mux = tcode_traverse::HostMux::new(host.to_host, host.from_host);
+                let mux = tcode_traverse::HostMux::new(host.attachments, host.from_host);
                 Rc::new(move |_: &mut gpui::App| {
-                    let connection = mux.attach_local(tcode_protocol::Principal::Full);
+                    let connection = mux.attach(
+                        tcode_protocol::Principal::Full,
+                        tcode_client::attachment::AttachmentPolicy::LOCAL,
+                    );
                     let (_, state) = async_channel::unbounded();
                     Ok(tcode_client::host::Transport {
                         originals: None,

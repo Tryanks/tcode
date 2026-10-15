@@ -97,6 +97,7 @@ impl LoginClaim {
 }
 
 struct Shared {
+    policy: tcode_client::attachment::AttachmentPolicy,
     mux: HostMux,
     auth: Mutex<AuthStore>,
     static_bundle: Option<StaticBundle>,
@@ -166,6 +167,7 @@ pub fn serve(mux: HostMux, config: BrowserConfig) -> io::Result<BrowserServer> {
     let local_addr = listener.local_addr()?;
     let (shutdown, shutdown_rx) = async_channel::bounded::<()>(1);
     let shared = Arc::new(Shared {
+        policy: tcode_client::attachment::AttachmentPolicy::network(),
         mux,
         auth: Mutex::new(auth),
         static_bundle: config.static_bundle,
@@ -554,7 +556,9 @@ where
         .await
         .map_err(io::Error::other)?;
     let _live = Live::new(shared.clone(), device);
-    let connection = shared.mux.attach(tcode_protocol::Principal::Full);
+    let connection = shared
+        .mux
+        .attach(tcode_protocol::Principal::Full, shared.policy);
     // The token scopes retained-command keys across socket lifetimes, as the
     // device id does on Traverse, so no two devices can share a dedup cache.
     let scope = auth::hex_hash(token.as_bytes());

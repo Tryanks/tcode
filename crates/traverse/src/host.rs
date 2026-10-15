@@ -1438,6 +1438,7 @@ impl ProtocolHandler for MainHandler {
             shared: shared.clone(),
             connection: connection.clone(),
         };
+        let policy = tcode_client::attachment::AttachmentPolicy::network();
         let hello_done = Arc::new(AtomicBool::new(false));
         let principal = Arc::new(Mutex::new(None));
         let open_streams = Arc::new(AtomicUsize::new(0));
@@ -1458,6 +1459,7 @@ impl ProtocolHandler for MainHandler {
             let stream = StreamTask {
                 shared: shared.clone(),
                 connection: connection.clone(),
+                policy,
                 hello_done: hello_done.clone(),
                 principal: principal.clone(),
                 open_streams: open_streams.clone(),
@@ -1488,6 +1490,7 @@ impl Drop for Release {
 }
 
 struct StreamTask {
+    policy: tcode_client::attachment::AttachmentPolicy,
     shared: Arc<Shared>,
     connection: Connection,
     hello_done: Arc<AtomicBool>,
@@ -1592,6 +1595,7 @@ impl StreamTask {
                     self.connection.remote_id().to_string(),
                     principal,
                     target,
+                    self.policy,
                     send,
                 )
                 .await
@@ -1612,7 +1616,7 @@ impl StreamTask {
         let mut send = wire::LineWriter::new(send);
         let mut reader = wire::LineStream::new(reader);
         let full = matches!(principal, Principal::Full);
-        let attachment = self.shared.mux.attach(principal);
+        let attachment = self.shared.mux.attach(principal, self.policy);
         let scope = self.connection.remote_id().to_string();
         let (outbound, outbound_rx) = async_channel::unbounded::<String>();
         let writer = async {
@@ -1792,7 +1796,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let manifest_path = dir.join("relays.json");
-        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (to_host, _host_rx) =
+            async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
         let mut host = TraverseHost::start(
             HostMux::new(to_host, from_host),
@@ -1922,7 +1927,8 @@ mod tests {
             urls.sort();
             urls
         };
-        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (to_host, _host_rx) =
+            async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
         let mut host = TraverseHost::start(
             HostMux::new(to_host, from_host),

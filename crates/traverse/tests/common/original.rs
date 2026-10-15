@@ -31,13 +31,16 @@ pub fn recorded_host(root: &Path, bytes: &[u8]) -> (SpawnedHost, HostMux, String
         )
         .unwrap();
     let runtime = spawn_host(store, HostServices::default()).unwrap();
-    let mux = HostMux::new(runtime.to_host.clone(), runtime.from_host.clone())
+    let mux = HostMux::new(runtime.attachments.clone(), runtime.from_host.clone())
         .with_original_backend(Arc::new(runtime.clone()));
     (runtime, mux, meta.id, project.id)
 }
 
 pub fn stop(runtime: SpawnedHost, mux: &HostMux) {
-    let attachment = mux.attach_local(tcode_protocol::Principal::Full);
+    let attachment = mux.attach(
+        tcode_protocol::Principal::Full,
+        tcode_client::attachment::AttachmentPolicy::LOCAL,
+    );
     let link = tcode_client::HostLink::new(attachment.to_host, attachment.from_host);
     tcode_traverse::block_on(async {
         let pump = tcode_traverse::runtime().spawn({

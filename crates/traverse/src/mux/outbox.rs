@@ -3,12 +3,9 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
-use tcode_protocol::{
-    EventEnvelope, HostMessage, MAX_LINE_BYTES, ServerEvent, TerminalFrame, encode_line,
-};
+use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, TerminalFrame, encode_line};
 
-const MAX_QUEUED_BYTES: usize = 2 * MAX_LINE_BYTES;
-const MAX_QUEUED_MESSAGES: usize = 1024;
+use tcode_client::attachment::QueuePolicy;
 
 struct Line {
     text: String,
@@ -28,13 +25,13 @@ pub(super) struct Outbox {
     pending: Arc<Mutex<Pending>>,
     wake: Sender<()>,
     input: Receiver<String>,
-    bounded: bool,
+    queue: QueuePolicy,
 }
 
 impl Outbox {
     pub(super) fn new(
         input: Receiver<String>,
-        bounded: bool,
+        queue: QueuePolicy,
     ) -> (Self, impl Future<Output = ()> + Send, Receiver<String>) {
         let pending = Arc::new(Mutex::new(Pending::default()));
         let (wake, awakened) = async_channel::bounded(1);
@@ -43,7 +40,7 @@ impl Outbox {
             pending: pending.clone(),
             wake,
             input,
-            bounded,
+            queue,
         };
         let forward = async move {
             loop {
@@ -71,18 +68,6 @@ impl Outbox {
             }
         };
         (outbox, forward, received)
-    }
-
-    pub(super) fn file_bytes_limit(&self) -> Option<u64> {
-        self.bounded.then(|| {
-            let empty = tcode_protocol::HostMessage::QueryResult {
-                id: u64::MAX,
-                result: Ok(tcode_protocol::QueryResponse::FileBytes(Vec::new())),
-            };
-            let envelope = tcode_protocol::encode_line(&empty).unwrap().len();
-            // Reserve the largest reply id and base64's four bytes per three.
-            (MAX_LINE_BYTES.saturating_sub(envelope) / 4 * 3) as u64
-        })
     }
 
     pub(super) fn forget_terminal(&self, terminal_id: u64) {
@@ -148,10 +133,14 @@ impl Outbox {
                 pending.bytes -= old.text.len();
             }
         }
-        if self.bounded
-            && (text.len() > MAX_LINE_BYTES
-                || pending.bytes + text.len() > MAX_QUEUED_BYTES
-                || pending.lines.len() >= MAX_QUEUED_MESSAGES)
+        if let QueuePolicy::Disconnect {
+            max_line_bytes,
+            max_queued_bytes,
+            max_queued_messages,
+        } = self.queue
+            && (text.len() > max_line_bytes
+                || pending.bytes + text.len() > max_queued_bytes
+                || pending.lines.len() >= max_queued_messages)
         {
             drop(pending);
             self.close();

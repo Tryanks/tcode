@@ -148,7 +148,7 @@ pub use wire::{
 // instructions).
 //
 // Unreleased: SessionMeta carries pull_request_watches_paused for retained watch subscriptions.
-// Unreleased: ReadFileBytes accepts an optional max_bytes read budget, capped by network bridges.
+// Unreleased: ReadFileBytes accepts an optional max_bytes read budget, capped by the host attachment policy.
 // Unreleased: ReadItemImagePreview returns optional previews of recorded tool images.
 // Unreleased: ReadImagePreview returns optional size-specific static attachment previews.
 // Unreleased: ReadItemImage accepts the same optional network read budget.

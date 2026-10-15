@@ -5847,7 +5847,7 @@ mod tests {
         // Idle pipes: no remote client attaches through the mux here.
         let (to_host, _host_rx) = async_channel::unbounded::<String>();
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
-        let mux = HostMux::new(to_host.clone(), from_host.clone());
+        let mux = HostMux::new(host.attachments.clone(), from_host.clone());
         // A random port: the desktop's fixed one may be taken on this machine.
         let traverse = TraverseHost::start(
             mux.clone(),

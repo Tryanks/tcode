@@ -603,6 +603,7 @@ mod tests {
                     key: Some(format!("write-{index}")),
                     payload: ClientPayload::Command(command),
                 },
+                tcode_client::attachment::AttachmentPolicy::LOCAL,
             );
             assert!(
                 context
@@ -722,6 +723,7 @@ mod tests {
                     key: Some(format!("blocked-{index}")),
                     payload: ClientPayload::Command(command),
                 },
+                tcode_client::attachment::AttachmentPolicy::LOCAL,
             );
             assert!(context.drain_outgoing().iter().any(|message| matches!(message,
                 HostMessage::Ack { id: 42, result: Err(error) } if error.code == "provider_unavailable"

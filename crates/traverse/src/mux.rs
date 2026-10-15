@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_channel::{Receiver, Sender};
+use tcode_client::attachment::{AttachmentMessage, AttachmentPolicy};
 use tcode_protocol::{Principal, encode_line};
 
 mod outbox;
@@ -29,14 +30,20 @@ struct Inner {
     original_slots: std::sync::Mutex<HashMap<String, usize>>,
 }
 
+struct Attachment {
+    outbox: Outbox,
+    principal: serde_json::Value,
+    policy: AttachmentPolicy,
+}
+
 enum Ingress {
-    Add(u64, Outbox, Principal),
+    Add(u64, Box<Attachment>),
     Line(u64, String),
     Closed(u64),
 }
 
 impl HostMux {
-    pub fn new(to_host: Sender<String>, from_host: Receiver<String>) -> Self {
+    pub fn new(to_host: Sender<AttachmentMessage>, from_host: Receiver<String>) -> Self {
         let (ingress, ingress_rx) = async_channel::unbounded();
         std::thread::Builder::new()
             .name("tcode-mux".into())
@@ -65,10 +72,19 @@ impl HostMux {
         device: String,
         principal: Principal,
         target: tcode_protocol::OriginalTarget,
+        policy: AttachmentPolicy,
     ) -> Result<AdmittedOriginal, tcode_protocol::ProtocolError> {
+        if !policy.bulk_stream {
+            return Err(tcode_client::original::error(
+                "attachment has no bulk stream",
+            ));
+        }
         let permit = {
             let mut slots = self.inner.original_slots.lock().unwrap();
-            if slots.values().sum::<usize>() >= 8 || slots.get(&device).copied().unwrap_or(0) >= 2 {
+            if policy.transfers.is_some_and(|limits| {
+                slots.values().sum::<usize>() >= limits.total
+                    || slots.get(&device).copied().unwrap_or(0) >= limits.per_device
+            }) {
                 return Err(tcode_protocol::ProtocolError {
                     code: "busy".into(),
                     message: "too many original reads".into(),
@@ -92,21 +108,19 @@ impl HostMux {
         })
     }
 
-    pub fn attach(&self, principal: Principal) -> Connection {
-        self.attach_with_budget(principal, true)
-    }
-
-    /// In-process clients have no reconnect loop or network frame boundary.
-    pub fn attach_local(&self, principal: Principal) -> Connection {
-        self.attach_with_budget(principal, false)
-    }
-
-    fn attach_with_budget(&self, principal: Principal, bounded: bool) -> Connection {
+    pub fn attach(&self, principal: Principal, policy: AttachmentPolicy) -> Connection {
         let connection_id = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
         let (client_tx, client_rx) = async_channel::unbounded();
-        let (output_tx, forward, output_rx) = Outbox::new(client_rx.clone(), bounded);
+        let (output_tx, forward, output_rx) = Outbox::new(client_rx.clone(), policy.queue);
         let ingress = self.inner.ingress.clone();
-        let _ = ingress.try_send(Ingress::Add(connection_id, output_tx, principal));
+        let _ = ingress.try_send(Ingress::Add(
+            connection_id,
+            Box::new(Attachment {
+                outbox: output_tx,
+                principal: serde_json::to_value(principal).unwrap(),
+                policy,
+            }),
+        ));
         std::thread::Builder::new()
             .name(format!("tcode-mux-{connection_id}"))
             .spawn(move || {
@@ -162,13 +176,16 @@ impl Drop for OriginalPermit {
     }
 }
 
-async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Receiver<Ingress>) {
-    let mut clients = HashMap::<u64, Outbox>::new();
+async fn pump(
+    to_host: Sender<AttachmentMessage>,
+    from_host: Receiver<String>,
+    ingress: Receiver<Ingress>,
+) {
+    let mut clients = HashMap::<u64, Box<Attachment>>::new();
     let mut subscriptions = HashMap::<u64, HashSet<String>>::new();
     let mut routes = HashMap::<u64, (u64, u64)>::new();
     let mut pending_subscriptions = HashMap::<u64, String>::new();
-    let mut deferred_unsubscribes = HashMap::<String, serde_json::Value>::new();
-    let mut principals = HashMap::<u64, serde_json::Value>::new();
+    let mut deferred_unsubscribes = HashMap::<String, (serde_json::Value, AttachmentPolicy)>::new();
     let mut next_global_id = 1_u64;
 
     loop {
@@ -182,16 +199,17 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
             })
             .await;
         match input {
-            Input::Client(Ok(Ingress::Add(id, sender, principal))) => {
-                principals.insert(id, serde_json::to_value(principal).unwrap());
-                clients.insert(id, sender);
+            Input::Client(Ok(Ingress::Add(id, attachment))) => {
+                clients.insert(id, attachment);
                 subscriptions.insert(id, HashSet::new());
             }
             Input::Client(Ok(Ingress::Closed(id))) => {
-                clients.remove(&id);
-                let Some(principal) = principals.remove(&id) else {
+                let Some(attachment) = clients.remove(&id) else {
                     continue;
                 };
+                let Attachment {
+                    principal, policy, ..
+                } = *attachment;
                 let mut topics = subscriptions.remove(&id).unwrap_or_default();
                 pending_subscriptions.retain(|global_id, topic| {
                     if routes.get(global_id).is_some_and(|route| route.0 == id) {
@@ -204,7 +222,7 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                 for topic in topics {
                     if release_subscription(
                         topic,
-                        principal.clone(),
+                        (principal.clone(), policy),
                         &subscriptions,
                         &pending_subscriptions,
                         &mut deferred_unsubscribes,
@@ -219,7 +237,7 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                 routes.retain(|_, route| route.0 != id);
             }
             Input::Client(Ok(Ingress::Line(connection_id, line))) => {
-                if !principals.contains_key(&connection_id) {
+                if !clients.contains_key(&connection_id) {
                     continue;
                 }
                 let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -238,7 +256,7 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                             serde_json::from_str(&topic)
                             && let Some(sender) = clients.get(&connection_id)
                         {
-                            sender.forget_terminal(terminal_id);
+                            sender.outbox.forget_terminal(terminal_id);
                         }
                         pending_subscriptions.retain(|global_id, pending_topic| {
                             pending_topic != &topic
@@ -254,54 +272,41 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                                 .any(|pending| pending == &topic)
                         {
                             if !another_subscriber {
-                                deferred_unsubscribes
-                                    .insert(topic.clone(), principals[&connection_id].clone());
+                                deferred_unsubscribes.insert(
+                                    topic.clone(),
+                                    (
+                                        clients[&connection_id].principal.clone(),
+                                        clients[&connection_id].policy,
+                                    ),
+                                );
                             }
                             let ack = tcode_protocol::HostMessage::Ack {
                                 id: local_id,
                                 result: Ok(tcode_protocol::CommandResponse::Unit),
                             };
                             if let Some(sender) = clients.get(&connection_id) {
-                                let _ = sender.try_send(encode_line(&ack).unwrap(), None);
+                                let _ = sender.outbox.try_send(encode_line(&ack).unwrap(), None);
                             }
                             continue;
                         }
                         deferred_unsubscribes.remove(&topic);
                     }
                 }
-                let Some(principal) = principals.get(&connection_id) else {
+                let Some(attachment) = clients.get(&connection_id) else {
                     continue;
                 };
-                if value
-                    .pointer("/payload/type")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("query")
-                    && matches!(
-                        value
-                            .pointer("/payload/content/type")
-                            .and_then(serde_json::Value::as_str),
-                        Some("read_file_bytes" | "read_item_image")
-                    )
-                    && let Some(limit) = clients
-                        .get(&connection_id)
-                        .and_then(Outbox::file_bytes_limit)
-                    && let Some(content) = value
-                        .pointer_mut("/payload/content/content")
-                        .and_then(serde_json::Value::as_object_mut)
-                {
-                    let requested = content.get("max_bytes").and_then(serde_json::Value::as_u64);
-                    content.insert(
-                        "max_bytes".into(),
-                        requested
-                            .map_or(limit, |requested| requested.min(limit))
-                            .into(),
-                    );
-                }
-                value["principal"] = principal.clone();
+                value["principal"] = attachment.principal.clone();
                 value["id"] = next_global_id.into();
                 routes.insert(next_global_id, (connection_id, local_id));
                 next_global_id = next_global_id.wrapping_add(1).max(1);
-                if to_host.send(encode_line(&value).unwrap()).await.is_err() {
+                if to_host
+                    .send(AttachmentMessage {
+                        line: encode_line(&value).unwrap(),
+                        policy: attachment.policy,
+                    })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -350,10 +355,12 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                                         if let Ok(tcode_protocol::HostMessage::Event(envelope)) =
                                             serde_json::from_value(value.clone())
                                         {
-                                            let _ = sender.try_send_terminal(envelope);
+                                            let _ = sender.outbox.try_send_terminal(envelope);
                                         }
                                     } else {
-                                        let _ = sender.try_send(encode_line(&value).unwrap(), None);
+                                        let _ = sender
+                                            .outbox
+                                            .try_send(encode_line(&value).unwrap(), None);
                                     }
                                 }
                             }
@@ -386,10 +393,11 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                                         if let Ok(tcode_protocol::HostMessage::Event(envelope)) =
                                             serde_json::from_value(value.clone())
                                         {
-                                            let _ = sender.try_send_terminal(envelope);
+                                            let _ = sender.outbox.try_send_terminal(envelope);
                                         }
                                     } else {
-                                        let _ = sender.try_send(line.clone(), replace.clone());
+                                        let _ =
+                                            sender.outbox.try_send(line.clone(), replace.clone());
                                     }
                                 }
                             }
@@ -430,10 +438,10 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                             }
                         }
                         value["content"]["id"] = local_id.into();
-                        if clients.get(&connection_id).is_some_and(|sender| {
-                            sender.try_send(encode_line(&value).unwrap(), None).is_err()
-                        }) {
-                            clients.remove(&connection_id);
+                        if let Some(attachment) = clients.get(&connection_id) {
+                            let _ = attachment
+                                .outbox
+                                .try_send(encode_line(&value).unwrap(), None);
                         }
                     }
                     _ => {}
@@ -447,30 +455,32 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
 // subscription until other pending requests resolve, then release it if none succeeded.
 async fn release_subscription(
     topic: String,
-    principal: serde_json::Value,
+    attachment: (serde_json::Value, AttachmentPolicy),
     subscriptions: &HashMap<u64, HashSet<String>>,
     pending: &HashMap<u64, String>,
-    deferred: &mut HashMap<String, serde_json::Value>,
-    to_host: &Sender<String>,
-) -> Result<(), async_channel::SendError<String>> {
+    deferred: &mut HashMap<String, (serde_json::Value, AttachmentPolicy)>,
+    to_host: &Sender<AttachmentMessage>,
+) -> Result<(), async_channel::SendError<AttachmentMessage>> {
     if subscriptions.values().any(|topics| topics.contains(&topic)) {
         deferred.remove(&topic);
         return Ok(());
     }
     if pending.values().any(|pending| pending == &topic) {
-        deferred.insert(topic, principal);
+        deferred.insert(topic, attachment);
         return Ok(());
     }
     deferred.remove(&topic);
+    let (principal, policy) = attachment;
     let topic: serde_json::Value = serde_json::from_str(&topic).unwrap();
     to_host
-        .send(
-            encode_line(&serde_json::json!({
+        .send(AttachmentMessage {
+            line: encode_line(&serde_json::json!({
                 "id": 0, "principal": principal,
                 "payload": {"type":"unsubscribe", "content":{"topic":topic}},
             }))
             .unwrap(),
-        )
+            policy,
+        })
         .await
 }
 
@@ -495,8 +505,14 @@ mod tests {
         let (to_host, host_rx) = async_channel::unbounded();
         let (host_tx, from_host) = async_channel::unbounded();
         let mux = HostMux::new(to_host, from_host);
-        let one = mux.attach(tcode_protocol::Principal::Full);
-        let two = mux.attach(tcode_protocol::Principal::Full);
+        let one = mux.attach(
+            tcode_protocol::Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
+        let two = mux.attach(
+            tcode_protocol::Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
         let session_topic =
             serde_json::json!({"type":"session_events","content":{"session_id":"one"}});
         let send = |connection: &Connection, kind: &str, id: u64, topic: &serde_json::Value| {
@@ -513,7 +529,7 @@ mod tests {
         };
         let approve = |connection: &Connection| {
             let forwarded: serde_json::Value =
-                serde_json::from_str(&host_rx.recv_blocking().unwrap()).unwrap();
+                serde_json::from_str(&host_rx.recv_blocking().unwrap().line).unwrap();
             host_tx
                 .send_blocking(
                     encode_line(&tcode_protocol::HostMessage::Ack {
@@ -563,25 +579,34 @@ mod tests {
             host_rx.try_recv().is_err(),
             "disconnecting one client keeps the other's Index subscription"
         );
-        let pending = mux.attach(Principal::Full);
+        let pending = mux.attach(
+            Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
         let pending_topic =
             serde_json::json!({"type":"session_events","content":{"session_id":"cold"}});
         send(&pending, "subscribe", 5, &pending_topic);
-        let _: String = host_rx.recv_blocking().unwrap();
+        let _ = host_rx.recv_blocking().unwrap();
         drop(pending.to_host);
         let unsubscribe: serde_json::Value =
-            serde_json::from_str(&host_rx.recv_blocking().unwrap()).unwrap();
+            serde_json::from_str(&host_rx.recv_blocking().unwrap().line).unwrap();
         assert_eq!(unsubscribe["payload"]["type"], "unsubscribe");
         assert_eq!(unsubscribe["payload"]["content"]["topic"], pending_topic);
         assert_eq!(unsubscribe["principal"], serde_json::json!({"type":"full"}));
         assert!(pending.from_host.recv_blocking().is_err());
-        let delayed = mux.attach(Principal::Full);
-        let refused = mux.attach(Principal::Full);
+        let delayed = mux.attach(
+            Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
+        let refused = mux.attach(
+            Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
         send(&delayed, "subscribe", 6, &pending_topic);
-        let _: String = host_rx.recv_blocking().unwrap();
+        let _ = host_rx.recv_blocking().unwrap();
         send(&refused, "subscribe", 7, &pending_topic);
         let forwarded: serde_json::Value =
-            serde_json::from_str(&host_rx.recv_blocking().unwrap()).unwrap();
+            serde_json::from_str(&host_rx.recv_blocking().unwrap().line).unwrap();
         drop(delayed.to_host);
         assert!(delayed.from_host.recv_blocking().is_err());
         assert!(
@@ -607,7 +632,7 @@ mod tests {
             }
         ));
         let unsubscribe: serde_json::Value =
-            serde_json::from_str(&host_rx.recv_blocking().unwrap()).unwrap();
+            serde_json::from_str(&host_rx.recv_blocking().unwrap().line).unwrap();
         assert_eq!(unsubscribe["payload"]["type"], "unsubscribe");
         assert_eq!(unsubscribe["payload"]["content"]["topic"], pending_topic);
         drop(refused.to_host);
@@ -616,7 +641,7 @@ mod tests {
         let mut released = HashSet::new();
         for _ in 0..2 {
             let unsubscribe: serde_json::Value =
-                serde_json::from_str(&host_rx.recv_blocking().unwrap()).unwrap();
+                serde_json::from_str(&host_rx.recv_blocking().unwrap().line).unwrap();
             assert_eq!(unsubscribe["payload"]["type"], "unsubscribe");
             released.insert(unsubscribe["payload"]["content"]["topic"].to_string());
         }
@@ -636,8 +661,14 @@ mod tests {
         let (to_host, host_rx) = async_channel::unbounded();
         let (host_tx, from_host) = async_channel::unbounded();
         let mux = HostMux::new(to_host, from_host);
-        let one = mux.attach(Principal::Full);
-        let two = mux.attach(Principal::Full);
+        let one = mux.attach(
+            Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
+        let two = mux.attach(
+            Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
         let topic = Topic::SessionEvents {
             session_id: "private".into(),
         };
@@ -662,7 +693,7 @@ mod tests {
                 )
                 .unwrap();
             let request =
-                tcode_protocol::decode_client_line(&host_rx.recv_blocking().unwrap()).unwrap();
+                tcode_protocol::decode_client_line(&host_rx.recv_blocking().unwrap().line).unwrap();
             host_tx
                 .send_blocking(
                     encode_line(&HostMessage::Ack {
@@ -710,7 +741,7 @@ mod tests {
             )
             .unwrap();
         let request =
-            tcode_protocol::decode_client_line(&host_rx.recv_blocking().unwrap()).unwrap();
+            tcode_protocol::decode_client_line(&host_rx.recv_blocking().unwrap().line).unwrap();
         host_tx
             .send_blocking(
                 encode_line(&HostMessage::Ack {
@@ -747,7 +778,12 @@ mod tests {
                     device_name: "Phone".into(),
                 },
             ];
-            let clients = principals.clone().map(|principal| mux.attach(principal));
+            let clients = principals.clone().map(|principal| {
+                mux.attach(
+                    principal,
+                    tcode_client::attachment::AttachmentPolicy::network(),
+                )
+            });
             let requests = ["index", "providers"].map(|topic| {
                 serde_json::json!({
                     "id": local_id,
@@ -766,7 +802,7 @@ mod tests {
             }
             let mut ids = HashMap::new();
             for _ in 0..2 {
-                let forwarded = host_rx.recv_blocking().unwrap();
+                let forwarded = host_rx.recv_blocking().unwrap().line;
                 assert!(forwarded.ends_with('\n'));
                 let mut forwarded: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
                 let topic = forwarded["payload"]["content"]["topic"]["type"]
