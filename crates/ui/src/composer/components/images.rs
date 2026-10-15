@@ -546,9 +546,12 @@ impl Composer {
             return;
         };
         crate::image_viewer::open(
-            tcode_protocol::OriginalTarget::File {
-                path: image.path.clone(),
-            },
+            crate::image_viewer::ViewerSource::original(
+                tcode_protocol::OriginalTarget::File {
+                    path: image.path.clone(),
+                },
+                crate::store::image_preview(image.path.clone(), 18., false),
+            ),
             image.name.clone(),
             window,
             cx,

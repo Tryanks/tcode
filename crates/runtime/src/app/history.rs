@@ -1278,6 +1278,27 @@ impl AppState {
         decode_image_read(read, cx)
     }
 
+    pub(crate) fn image_preview(
+        &self,
+        path: std::path::PathBuf,
+        pixels: u32,
+        crop_to_square: bool,
+        cx: &HostCx,
+    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
+        let data_dir = self.store.root().clone();
+        let task = cx.unblock(move || {
+            tcode_services::image_previews::read(&path, pixels, crop_to_square, &data_dir)
+        });
+        cx.spawn_background(async move {
+            task.await
+                .map(QueryResponse::FileBytes)
+                .map_err(|error| ProtocolError {
+                    code: "preview_unavailable".into(),
+                    message: error.to_string(),
+                })
+        })
+    }
+
     pub(crate) fn item_image_preview(
         &mut self,
         session_id: &str,
@@ -1287,13 +1308,19 @@ impl AppState {
         height: u32,
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, ProtocolError>> {
+        let data_dir = self.store.root().clone();
         let read = self.query_item(
             session_id,
             item_id.clone(),
             move |log| {
                 let image = log.image_attachment(&item_id, image_index)?;
-                tcode_services::image_bytes::ImageRead::preview(&image.data_base64, width, height)
-                    .map_err(image_read_error)
+                tcode_services::image_bytes::ImageRead::preview(
+                    &image.data_base64,
+                    width,
+                    height,
+                    &data_dir,
+                )
+                .map_err(image_read_error)
             },
             cx,
         );

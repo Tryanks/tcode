@@ -44,7 +44,10 @@ const GLIDE: Duration = Duration::from_millis(200);
 #[derive(Clone)]
 pub(crate) enum ViewerSource {
     Image(ImageSource),
-    Original(tcode_protocol::OriginalTarget),
+    Original {
+        target: tcode_protocol::OriginalTarget,
+        preview: Option<ImageSource>,
+    },
 }
 
 impl From<ImageSource> for ViewerSource {
@@ -54,7 +57,38 @@ impl From<ImageSource> for ViewerSource {
 }
 impl From<tcode_protocol::OriginalTarget> for ViewerSource {
     fn from(target: tcode_protocol::OriginalTarget) -> Self {
-        Self::Original(target)
+        Self::Original {
+            target,
+            preview: None,
+        }
+    }
+}
+
+impl ViewerSource {
+    pub(crate) fn original(target: tcode_protocol::OriginalTarget, preview: ImageSource) -> Self {
+        Self::Original {
+            target,
+            preview: Some(preview),
+        }
+    }
+}
+
+// GPUI's public Image::use_render_image drops decode errors; the viewer needs them for Retry.
+struct OriginalImage;
+impl gpui::Asset for OriginalImage {
+    type Source = Arc<gpui::Image>;
+    type Output = Result<Arc<RenderImage>, SharedString>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        let renderer = cx.svg_renderer();
+        async move {
+            source
+                .to_image_data(renderer)
+                .map_err(|error| error.to_string().into())
+        }
     }
 }
 
@@ -90,9 +124,12 @@ pub(crate) fn open(
     let viewer = cx.new(|cx| {
         let mut viewer = match source.into() {
             ViewerSource::Image(source) => ImageViewer::new(source, title.into(), cx),
-            ViewerSource::Original(target) => {
-                let mut viewer =
-                    ImageViewer::new(ImageSource::Custom(Arc::new(|_, _| None)), title.into(), cx);
+            ViewerSource::Original { target, preview } => {
+                let mut viewer = ImageViewer::new(
+                    preview.unwrap_or_else(|| ImageSource::Custom(Arc::new(|_, _| None))),
+                    title.into(),
+                    cx,
+                );
                 viewer.target = Some(target);
                 viewer.start_original(cx);
                 viewer
@@ -126,7 +163,6 @@ pub(crate) fn open(
             })
             .child(viewer.clone())
     });
-    // The dialog focused its own host; the viewer's key bindings sit below it.
     focus.focus(window, cx);
 }
 
@@ -217,6 +253,8 @@ pub(crate) struct ImageViewer {
     natural: Option<Size<Pixels>>,
     failed: bool,
     target: Option<tcode_protocol::OriginalTarget>,
+    remote_progress: bool,
+    pending_original: Option<Arc<gpui::Image>>,
     original_state: Option<OriginalState>,
     transfer: Option<gpui::Task<()>>,
     host_changes: Option<gpui::Subscription>,
@@ -236,6 +274,8 @@ impl ImageViewer {
             natural: None,
             failed: false,
             target: None,
+            remote_progress: false,
+            pending_original: None,
             original_state: None,
             transfer: None,
             host_changes: None,
@@ -243,6 +283,7 @@ impl ImageViewer {
     }
 
     fn cancel_original(&mut self, cx: &mut Context<Self>) {
+        self.pending_original = None;
         if self.transfer.take().is_some()
             && matches!(self.original_state, Some(OriginalState::Loading { .. }))
         {
@@ -265,6 +306,8 @@ impl ImageViewer {
             ));
             return;
         };
+        self.remote_progress = host.is_remote();
+        let remote = self.remote_progress;
         self.original_state = Some(OriginalState::Loading {
             received: 0,
             total: None,
@@ -273,13 +316,15 @@ impl ImageViewer {
             let mut transfer = host.read_original(target);
             let result = async {
                 let total = transfer.metadata().await?.len;
-                let _ = this.update(cx, |this, cx| {
-                    this.original_state = Some(OriginalState::Loading {
-                        received: 0,
-                        total: Some(total),
+                if remote {
+                    let _ = this.update(cx, |this, cx| {
+                        this.original_state = Some(OriginalState::Loading {
+                            received: 0,
+                            total: Some(total),
+                        });
+                        cx.notify();
                     });
-                    cx.notify();
-                });
+                }
                 let mut bytes = Vec::new();
                 while let Some(block) = transfer.read().await? {
                     bytes
@@ -287,15 +332,16 @@ impl ImageViewer {
                         .map_err(tcode_client::original::error)?;
                     bytes.extend_from_slice(&block);
                     let received = transfer.received();
-                    if this
-                        .update(cx, |this, cx| {
-                            this.original_state = Some(OriginalState::Loading {
-                                received,
-                                total: Some(total),
-                            });
-                            cx.notify();
-                        })
-                        .is_err()
+                    if remote
+                        && this
+                            .update(cx, |this, cx| {
+                                this.original_state = Some(OriginalState::Loading {
+                                    received,
+                                    total: Some(total),
+                                });
+                                cx.notify();
+                            })
+                            .is_err()
                     {
                         return Err(tcode_client::original::error("viewer closed"));
                     }
@@ -304,17 +350,15 @@ impl ImageViewer {
                     .ok()
                     .and_then(|format| gpui::ImageFormat::from_mime_type(format.to_mime_type()))
                     .ok_or_else(|| tcode_client::original::error("unsupported image format"))?;
-                Ok(ImageSource::Image(Arc::new(gpui::Image::from_bytes(
-                    format, bytes,
-                ))))
+                Ok(cx
+                    .background_executor()
+                    .spawn(async move { Arc::new(gpui::Image::from_bytes(format, bytes)) })
+                    .await)
             }
             .await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(source) => {
-                        this.source = source;
-                        this.original_state = Some(OriginalState::Complete);
-                    }
+                    Ok(source) => this.pending_original = Some(source),
                     Err(error) => {
                         this.original_state = Some(OriginalState::Failed(error.message.into()))
                     }
@@ -335,10 +379,13 @@ impl ImageViewer {
         {
             return None;
         }
+        let fit = (self.frame.width / natural.width).min(self.frame.height / natural.height);
         Some(
-            (self.frame.width / natural.width)
-                .min(self.frame.height / natural.height)
-                .min(1.),
+            if matches!(self.original_state, Some(OriginalState::Loading { .. })) {
+                fit
+            } else {
+                fit.min(1.)
+            },
         )
     }
 
@@ -505,6 +552,18 @@ impl ImageViewer {
     }
 
     fn decode(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(original) = &self.pending_original
+            && let Some(decoded) = window.use_asset::<OriginalImage>(original, cx)
+        {
+            self.pending_original = None;
+            match decoded {
+                Ok(image) => {
+                    self.source = ImageSource::Render(image);
+                    self.original_state = Some(OriginalState::Complete);
+                }
+                Err(error) => self.original_state = Some(OriginalState::Failed(error)),
+            }
+        }
         let decoded = match &self.source {
             ImageSource::Resource(resource) => {
                 window.use_asset::<gpui::ImgResourceLoader>(resource, cx)
@@ -597,8 +656,10 @@ impl Render for ImageViewer {
                                 _ => crate::tr!("image_viewer.load_failed").into_owned().into(),
                             },
                         ))
-                    } else {
+                    } else if self.target.is_none() || self.remote_progress {
                         el.child(crate::widgets::Spinner::new())
+                    } else {
+                        el.child(crate::icon::Icon::default().path("icons/image.svg"))
                     }
                 })
             });
@@ -624,12 +685,16 @@ impl Render for ImageViewer {
                 this.zoom_to(zoom, this.stage.center(), true, cx);
             }))
         };
-        let show_transfer = matches!(
-            self.original_state,
-            Some(
-                OriginalState::Loading { .. } | OriginalState::Cancelled | OriginalState::Failed(_)
-            )
-        );
+        let show_transfer = (self.remote_progress
+            || !matches!(self.original_state, Some(OriginalState::Loading { .. })))
+            && matches!(
+                self.original_state,
+                Some(
+                    OriginalState::Loading { .. }
+                        | OriginalState::Cancelled
+                        | OriginalState::Failed(_)
+                )
+            );
         let transfer_controls = div()
             .absolute()
             .bottom(insets.bottom + STAGE_MARGIN)
@@ -968,16 +1033,28 @@ mod tests {
                 link: Some(link),
                 namespace: 1,
             });
+            let preview = Arc::new(RenderImage::new(vec![Frame::new(ImageBuffer::from_pixel(
+                240,
+                120,
+                Rgba([255, 0, 0, 255]),
+            ))]));
             open(
-                tcode_protocol::OriginalTarget::File {
-                    path: "/host/pending.png".into(),
-                },
+                ViewerSource::original(
+                    tcode_protocol::OriginalTarget::File {
+                        path: "/host/pending.png".into(),
+                    },
+                    ImageSource::Render(preview),
+                ),
                 "pending.png",
                 window,
                 cx,
             );
         });
         draw(cx);
+        assert!(
+            cx.debug_bounds("image-viewer-image").is_some(),
+            "the loaded preview remains visible while the original is pending"
+        );
         requests
             .try_recv()
             .expect("explicit open starts the viewer transfer");

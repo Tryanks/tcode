@@ -2,9 +2,12 @@ use image::{
     DynamicImage, GenericImageView, ImageDecoder, ImageFormat, RgbaImage, imageops::FilterType,
     metadata::Orientation,
 };
+use sha2::{Digest, Sha256};
 use std::{
     io::{self, Cursor, Read},
     path::Path,
+    sync::Mutex,
+    time::UNIX_EPOCH,
 };
 
 /// Sources past these bounds get no preview; a client opens the original only when asked to.
@@ -14,22 +17,129 @@ const JPEG_QUALITY: u8 = 80;
 
 /// A preview that fits `pixels` square, or the original when it already fits and is a still PNG
 /// or JPEG.
-pub fn read(path: &Path, pixels: u32, crop_to_square: bool) -> io::Result<Vec<u8>> {
-    let file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    if len > MAX_SOURCE_BYTES {
+pub fn read(
+    path: &Path,
+    pixels: u32,
+    crop_to_square: bool,
+    data_dir: &Path,
+) -> io::Result<Vec<u8>> {
+    let path = path.canonicalize()?;
+    let identity = std::fs::metadata(&path)?;
+    if identity.len() > MAX_SOURCE_BYTES {
         return Err(io::Error::other("Image is too large to preview"));
     }
-    let mut bytes = Vec::with_capacity(len as usize);
-    file.take(MAX_SOURCE_BYTES).read_to_end(&mut bytes)?;
-    preview(&bytes, pixels, pixels, crop_to_square)
+    let modified = identity.modified()?;
+    let mut hash = Sha256::new();
+    hash.update(b"file\0");
+    hash.update(path.as_os_str().as_encoded_bytes());
+    hash.update(identity.len().to_le_bytes());
+    let (before_epoch, timestamp) = match modified.duration_since(UNIX_EPOCH) {
+        Ok(timestamp) => (false, timestamp),
+        Err(error) => (true, error.duration()),
+    };
+    hash.update([u8::from(before_epoch)]);
+    hash.update(timestamp.as_nanos().to_le_bytes());
+    let key = cache_key(hash, pixels, pixels, crop_to_square);
+    cached(data_dir, key, || {
+        let file = std::fs::File::open(&path)?;
+        let mut bytes = Vec::with_capacity(identity.len() as usize);
+        file.take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_SOURCE_BYTES {
+            return Err(io::Error::other("Image is too large to preview"));
+        }
+        let output = preview(&bytes, pixels, pixels, crop_to_square)?;
+        let current = std::fs::metadata(&path)?;
+        if current.len() != identity.len() || current.modified()? != modified {
+            return Err(io::Error::other(
+                "Image changed while generating its preview",
+            ));
+        }
+        Ok(output)
+    })
 }
 
-pub fn read_bytes(bytes: &[u8], width: u32, height: u32) -> io::Result<Vec<u8>> {
+pub fn read_bytes(bytes: &[u8], width: u32, height: u32, data_dir: &Path) -> io::Result<Vec<u8>> {
     if bytes.len() as u64 > MAX_SOURCE_BYTES {
         return Err(io::Error::other("Image is too large to preview"));
     }
-    preview(bytes, width, height, true)
+    let mut hash = Sha256::new();
+    hash.update(b"bytes\0");
+    hash.update(bytes);
+    cached(data_dir, cache_key(hash, width, height, true), || {
+        preview(bytes, width, height, true)
+    })
+}
+
+const MAX_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_CACHE_ENTRIES: usize = 2048;
+static GENERATING: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
+static EVICTING: Mutex<()> = Mutex::new(());
+
+fn cache_key(mut hash: Sha256, width: u32, height: u32, crop: bool) -> [u8; 32] {
+    hash.update(width.to_le_bytes());
+    hash.update(height.to_le_bytes());
+    hash.update([u8::from(crop)]);
+    hash.finalize().into()
+}
+
+fn cached(
+    data_dir: &Path,
+    key: [u8; 32],
+    generate: impl FnOnce() -> io::Result<Vec<u8>>,
+) -> io::Result<Vec<u8>> {
+    // Concurrent tiles for the same source share generation without serializing every image.
+    let _generation = GENERATING[usize::from(key[0]) % GENERATING.len()]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = data_dir.join("image-previews-v1");
+    let name = key
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let path = directory.join(format!("{name}.preview"));
+    if let Ok(bytes) = std::fs::read(&path) {
+        return Ok(bytes);
+    }
+    let bytes = generate()?;
+    // A read-only or full data directory must not prevent displaying a preview.
+    let _ = (|| -> io::Result<()> {
+        let _eviction = EVICTING.lock().unwrap_or_else(|e| e.into_inner());
+        std::fs::create_dir_all(&directory)?;
+        let temporary = directory.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let written = (|| {
+            std::fs::write(&temporary, &bytes)?;
+            std::fs::rename(&temporary, &path)
+        })();
+        let _ = std::fs::remove_file(&temporary);
+        written?;
+        let mut entries = Vec::new();
+        let mut total = 0;
+        for entry in std::fs::read_dir(&directory)?.flatten() {
+            let metadata = entry.metadata()?;
+            if !metadata.is_file() {
+                continue;
+            }
+            total += metadata.len();
+            entries.push((
+                metadata.modified().unwrap_or(UNIX_EPOCH),
+                metadata.len(),
+                entry.path(),
+            ));
+        }
+        entries.sort_unstable();
+        let mut count = entries.len();
+        for (_, len, path) in entries {
+            if total <= MAX_CACHE_BYTES && count <= MAX_CACHE_ENTRIES {
+                break;
+            }
+            if std::fs::remove_file(path).is_ok() {
+                total -= len;
+                count -= 1;
+            }
+        }
+        Ok(())
+    })();
+    Ok(bytes)
 }
 
 fn preview(bytes: &[u8], target_width: u32, target_height: u32, crop: bool) -> io::Result<Vec<u8>> {
@@ -40,6 +150,7 @@ fn preview(bytes: &[u8], target_width: u32, target_height: u32, crop: bool) -> i
     }
     let reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     // Animated sources decode their first frame; the original carries the animation.
+    let jpeg = reader.format() == Some(ImageFormat::Jpeg);
     let (mut decoder, still): (Box<dyn ImageDecoder>, bool) = match reader.format() {
         Some(ImageFormat::Png) => {
             let decoder = image::codecs::png::PngDecoder::new(reader.into_inner())
@@ -71,7 +182,26 @@ fn preview(bytes: &[u8], target_width: u32, target_height: u32, crop: bool) -> i
     {
         return Ok(bytes.to_vec());
     }
-    let mut image = DynamicImage::from_decoder(decoder).map_err(io::Error::other)?;
+    let target = if matches!(
+        orientation,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    ) {
+        (target_height, target_width)
+    } else {
+        (target_width, target_height)
+    };
+    let mut image = if jpeg {
+        scaled_jpeg(bytes, (width, height), target, crop)?
+    } else {
+        None
+    }
+    .map_or_else(
+        || DynamicImage::from_decoder(decoder).map_err(io::Error::other),
+        Ok,
+    )?;
     image.apply_orientation(orientation);
     let (mut x, mut y, mut width, mut height) = (0, 0, image.width(), image.height());
     if crop {
@@ -109,6 +239,69 @@ fn preview(bytes: &[u8], target_width: u32, target_height: u32, crop: bool) -> i
             target_height,
         ))
     }
+}
+
+fn scaled_jpeg(
+    bytes: &[u8],
+    (width, height): (u32, u32),
+    (target_width, target_height): (u32, u32),
+    crop: bool,
+) -> io::Result<Option<DynamicImage>> {
+    let horizontal = f64::from(target_width) / f64::from(width);
+    let vertical = f64::from(target_height) / f64::from(height);
+    let ratio = if crop {
+        horizontal.max(vertical)
+    } else {
+        horizontal.min(vertical)
+    }
+    .min(1.);
+    let needed = (
+        (f64::from(width) * ratio).ceil() as u32,
+        (f64::from(height) * ratio).ceil() as u32,
+    );
+    let Some(factor) = [8, 4, 2]
+        .into_iter()
+        .find(|factor| width.div_ceil(*factor) >= needed.0 && height.div_ceil(*factor) >= needed.1)
+    else {
+        return Ok(None);
+    };
+    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(bytes));
+    decoder.set_max_decoding_buffer_size(MAX_DECODED_BYTES as usize);
+    decoder.read_info().map_err(io::Error::other)?;
+    let format = decoder
+        .info()
+        .ok_or_else(|| io::Error::other("Missing JPEG metadata"))?
+        .pixel_format;
+    if !matches!(
+        format,
+        jpeg_decoder::PixelFormat::L8 | jpeg_decoder::PixelFormat::RGB24
+    ) {
+        return Ok(None);
+    }
+    // scale() accepts either axis; both requests must exclude the next smaller DCT size.
+    let request = if factor == 8 {
+        (width.div_ceil(8), height.div_ceil(8))
+    } else {
+        (
+            width.div_ceil(factor * 2) + 1,
+            height.div_ceil(factor * 2) + 1,
+        )
+    };
+    let (width, height) = decoder
+        .scale(request.0 as u16, request.1 as u16)
+        .map_err(io::Error::other)?;
+    let pixels = decoder.decode().map_err(io::Error::other)?;
+    let image = match format {
+        jpeg_decoder::PixelFormat::L8 => {
+            image::GrayImage::from_raw(width.into(), height.into(), pixels)
+                .map(DynamicImage::ImageLuma8)
+        }
+        _ => image::RgbImage::from_raw(width.into(), height.into(), pixels)
+            .map(DynamicImage::ImageRgb8),
+    };
+    image
+        .map(Some)
+        .ok_or_else(|| io::Error::other("Invalid scaled JPEG dimensions"))
 }
 
 /// Scales `image` down to fit `width`×`height`, never up. A box filter first brings a large
@@ -198,9 +391,56 @@ mod tests {
     fn attachment_preview(bytes: &[u8], pixels: u32, crop_to_square: bool) -> Vec<u8> {
         let path = std::env::temp_dir().join(format!("tcode-preview-{}", uuid::Uuid::new_v4()));
         std::fs::write(&path, bytes).unwrap();
-        let preview = read(&path, pixels, crop_to_square);
+        let cache = path.with_extension("cache");
+        let preview = read(&path, pixels, crop_to_square, &cache);
         std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_dir_all(cache);
         preview.unwrap()
+    }
+
+    #[test]
+    fn unchanged_sources_reuse_previews_and_changed_sources_regenerate() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-preview-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("source.png");
+        let source = encoded(
+            image::RgbImage::from_pixel(800, 600, image::Rgb([255, 0, 0])),
+            ImageFormat::Png,
+        );
+        std::fs::write(&path, &source).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let first = read(&path, 120, false, &root).unwrap();
+        // Keeping the source identity while making decoding fail proves a cache hit skips decoding.
+        std::fs::write(&path, vec![0; source.len()]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(read(&path, 120, false, &root).unwrap(), first);
+        let changed = encoded(
+            image::RgbImage::from_pixel(800, 600, image::Rgb([0, 0, 255])),
+            ImageFormat::Png,
+        );
+        std::fs::write(&path, changed).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(modified + std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+        let next = read(&path, 120, false, &root).unwrap();
+        assert_ne!(next, first);
+        assert_eq!(
+            image::load_from_memory(&next).unwrap().dimensions(),
+            (120, 90)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Camera-resolution sources are previewed rather than handed to the client in full.

@@ -239,7 +239,10 @@ impl MarkdownState {
     /// The image the viewer opens, which reads a host file's original.
     pub(super) fn opened_image_source(&self, uri: &SharedUri) -> crate::image_viewer::ViewerSource {
         self.resolve_image(uri, |path| {
-            tcode_protocol::OriginalTarget::File { path }.into()
+            crate::image_viewer::ViewerSource::original(
+                tcode_protocol::OriginalTarget::File { path },
+                self.image_source(uri),
+            )
         })
     }
 

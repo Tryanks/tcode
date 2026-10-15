@@ -10,7 +10,11 @@ pub struct ImageRead {
 
 enum ImageReadKind {
     Complete,
-    Preview { width: u32, height: u32 },
+    Preview {
+        width: u32,
+        height: u32,
+        data_dir: std::path::PathBuf,
+    },
 }
 
 pub fn decoded_len(encoded: &str) -> io::Result<u64> {
@@ -40,14 +44,23 @@ impl ImageRead {
         })
     }
 
-    pub fn preview(encoded: &str, width: u32, height: u32) -> io::Result<Self> {
+    pub fn preview(
+        encoded: &str,
+        width: u32,
+        height: u32,
+        data_dir: &std::path::Path,
+    ) -> io::Result<Self> {
         if !(1..=1024).contains(&width) || !(1..=1024).contains(&height) {
             return Err(io::Error::other(
                 "Preview size is outside the supported range",
             ));
         }
         let mut read = Self::complete(encoded, Some(64 * 1024 * 1024))?;
-        read.kind = ImageReadKind::Preview { width, height };
+        read.kind = ImageReadKind::Preview {
+            width,
+            height,
+            data_dir: data_dir.to_owned(),
+        };
         Ok(read)
     }
 
@@ -55,9 +68,11 @@ impl ImageRead {
         let bytes = STANDARD.decode(&self.encoded).map_err(io::Error::other)?;
         let bytes = match self.kind {
             ImageReadKind::Complete => bytes,
-            ImageReadKind::Preview { width, height } => {
-                crate::image_previews::read_bytes(&bytes, width, height)?
-            }
+            ImageReadKind::Preview {
+                width,
+                height,
+                data_dir,
+            } => crate::image_previews::read_bytes(&bytes, width, height, &data_dir)?,
         };
         Ok(QueryResponse::FileBytes(bytes))
     }

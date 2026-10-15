@@ -67,6 +67,13 @@ pub(crate) fn image_tiles(
                 .enumerate()
                 .map(move |(index, (source, title, path))| {
                     let copy_items = super::activity::activity_copy_items(entry);
+                    let preview = crate::store::item_image_preview(
+                        session_id.into(),
+                        entry.id.clone(),
+                        index,
+                        120.,
+                        80.,
+                    );
                     crate::material::accessible_clickable(
                         gpui::div()
                             .w(px(120.))
@@ -96,7 +103,15 @@ pub(crate) fn image_tiles(
                         cx,
                     )
                     .on_click(move |_, window, cx| {
-                        crate::image_viewer::open(source.clone(), title.clone(), window, cx);
+                        crate::image_viewer::open(
+                            crate::image_viewer::ViewerSource::original(
+                                source.clone(),
+                                preview.clone(),
+                            ),
+                            title.clone(),
+                            window,
+                            cx,
+                        );
                     })
                     .context_menu(move |mut menu, _, _| {
                         if let Some(path) = &path {
