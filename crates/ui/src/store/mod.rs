@@ -1433,20 +1433,6 @@ impl WorkspaceStore {
                     Some(held) if continuation == Some(*from) && held.end == *from => {
                         held.extend(records, *end);
                     }
-                    // Neither a baseline nor what follows the held records:
-                    // ask for a baseline.
-                    _ if continuation.is_some() => {
-                        *held = None;
-                        self.session_replica = None;
-                        self.baseline_topics.remove(&envelope.topic);
-                        self.session_catching_up = false;
-                        let _ = self.host.subscribe(Subscription {
-                            known_index: None,
-                            topic: envelope.topic.clone(),
-                            after: None,
-                        });
-                        return;
-                    }
                     _ => *held = Some(history::HeldHistory::new(*from, *end, records)),
                 }
                 let after = *end;
@@ -7161,9 +7147,7 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn reconnect_and_mismatched_tail_preserve_exactly_one_copy_of_each_record(
-        cx: &mut TestAppContext,
-    ) {
+    fn reconnect_preserves_exactly_one_copy_of_each_record(cx: &mut TestAppContext) {
         let root = scratch_root("p4a-reconnect");
         let disk = SessionStore::open_at(root.clone()).unwrap();
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
@@ -7206,55 +7190,7 @@ pub(crate) mod tests {
         workspace.update(cx, |store, cx| {
             store.drain_host_events_for_test(cx);
             assert_eq!(held_history(store, "reconnect").records.len(), 3);
-            let topic = Topic::SessionEvents {
-                session_id: "reconnect".into(),
-            };
-            driver
-                .link
-                .subscribe(Subscription {
-                    topic: topic.clone(),
-                    after: Some(3),
-                    known_index: None,
-                })
-                .unwrap();
-            let id = driver.link.subscription_request_id(&topic).unwrap();
-            store.apply_domain_event(
-                &EventEnvelope {
-                    request_id: Some(id),
-                    topic: Topic::SessionEvents {
-                        session_id: "reconnect".into(),
-                    },
-                    event: ServerEvent::SessionSnapshot {
-                        total: 3,
-                        total_turns: 0,
-                        truncated: false,
-                        from: 2,
-                        end: 3,
-                        records: vec![SessionEventRecord {
-                            ts: Some(3),
-                            ..SessionEventRecord::from(AgentEvent::Warning {
-                                message: "three".into(),
-                            })
-                        }],
-                    },
-                },
-                cx,
-            );
-            assert!(
-                store.session_replica.is_none(),
-                "invalid tail must request a full replacement"
-            );
         });
-        driver.wait_until(
-            cx,
-            &workspace,
-            "full replacement after invalid tail",
-            |cx| {
-                workspace.read_with(cx, |store, _| {
-                    held_window(store, "reconnect").is_some_and(|held| held.records.len() == 3)
-                })
-            },
-        );
         workspace.read_with(cx, |store, _| {
             assert_eq!(
                 held_history(store, "reconnect")

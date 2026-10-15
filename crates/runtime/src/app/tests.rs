@@ -9594,6 +9594,7 @@ fn send_to_host(
 /// Run the host until it answered client message `id` and parked, and
 /// return every message it serialized since the last drain.
 fn answered(cx: &mut TestAppContext, id: u64) -> Vec<HostMessage> {
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut messages = Vec::new();
     loop {
         cx.run_until_parked();
@@ -9603,6 +9604,10 @@ fn answered(cx: &mut TestAppContext, id: u64) -> Vec<HostMessage> {
         }) {
             return messages;
         }
+        assert!(
+            Instant::now() < deadline,
+            "the host did not answer message {id} within thirty seconds"
+        );
     }
 }
 
@@ -10096,7 +10101,7 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
     let store = TestStore::new("cold-items");
     open_stored_session(&store, "items");
     let fixture = r#"{"type":"turn_started","turn_id":"one"}
-{"type":"item_started","id":"cmd","content":{"kind":"command_execution","command":"make","output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item_started","id":"c\u006dd","content":{"kind":"command_execution","command":"make","output":"","exit_code":null,"status":"in_progress"}}
 {"type":"delta","item_id":"cmd","kind":"command_output","text":"abc"}
 {"type":"delta","item_id":"cmd","kind":"command_output","text":"def"}
 {"type":"item_updated","id":"cmd","content":{"kind":"command_execution","command":"make","output":"abc","exit_code":null,"status":"in_progress"}}
@@ -10107,7 +10112,9 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
 {"type":"delta","item_id":"reused","kind":"command_output","text":"old"}
 {"type":"turn_completed","turn_id":"two","status":"completed","usage":null}
 {"type":"turn_started","turn_id":"three"}
+{"type":"turn_checkpoint","turn_id":"three","checkpoint_id":"rewound"}
 {"type":"delta","item_id":"reused","kind":"command_output","text":"new"}
+{"type":"delta","item_id":"removed","kind":"command_output","text":"gone"}
 {"type":"turn_completed","turn_id":"three","status":"completed","usage":null}
 "#;
     store
@@ -10127,6 +10134,8 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
         .unwrap();
     let whole = SessionLog::new(store.read_log("items").unwrap());
     let read = store.snapshot_log("items").unwrap();
+    assert!(read.read_item("reused").unwrap().is_none());
+    assert!(read.read_item("removed").unwrap().is_some());
     let targeted = SessionLog::new(
         read.read_item("cmd")
             .unwrap()
@@ -10151,6 +10160,33 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
         )
         .unwrap(),
         serde_json::to_value(whole.item_image("image", 0, None).unwrap().read().unwrap()).unwrap()
+    );
+    drop(read);
+    let rewind_fixture = format!(
+        "{fixture}{}\n",
+        r#"{"type":"rewind_completed","checkpoint_id":"rewound","mode":"conversation","prefill":null}"#
+    );
+    store
+        .apply(&[
+            tcode_services::store::Mutation::replace_event_log(
+                "rewound",
+                rewind_fixture.into_bytes(),
+            ),
+            tcode_services::store::Mutation::set_turn_index(
+                "rewound",
+                tcode_services::store::TurnIndex {
+                    turns: 2,
+                    starts: vec![0, 8, 11],
+                },
+            ),
+        ])
+        .unwrap();
+    let read = store.snapshot_log("rewound").unwrap();
+    assert!(read.read_item("removed").unwrap().is_none());
+    assert!(
+        SessionLog::new(store.read_log("rewound").unwrap())
+            .item_output("rewound", "removed")
+            .is_err()
     );
     drop(read);
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -10178,9 +10214,18 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
         id += 1;
         let browsing = id == 2;
         let page_before = store.next_row("long").unwrap().saturating_sub(400);
+        // Delay the full read's completion, not the bounded requests' mailbox.
+        let held_hydration = store.turn_index("long").unwrap().map(|_| {
+            let (mailbox, completions) = smol::channel::unbounded();
+            let (events, _) = smol::channel::unbounded();
+            let mut held = HostCx::new(mailbox, events);
+            state.update(cx, |state, _| {
+                state.hydrate_log("long", None, &mut held);
+            });
+            completions
+        });
         send_to_host(state, cx, id, subscribe_events("long", after));
         if browsing {
-            assert!(state.read(|state| state.log_hydrations.contains_key("long")));
             send_to_host(state, cx, id + 2000, history_page("long", page_before));
             send_to_host(state, cx, id + 3000, subscribe_events("long", Some(0)));
         }
@@ -10192,6 +10237,9 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
             let messages = cx.drain_outgoing();
             page_ready |= messages.iter().any(|message| matches!(message, HostMessage::QueryResult { id: request, .. } if *request == id + 2000));
             continuation_ready |= messages.iter().any(|message| matches!(message, HostMessage::Event(EventEnvelope { request_id: Some(request), .. }) if *request == id + 3000));
+            if browsing && (page_ready || continuation_ready) {
+                assert!(!state.read(|state| state.event_records.contains_key("long")));
+            }
             replies.extend(messages.clone());
             if let Some(window) = messages.iter().find_map(|message| match message {
                 HostMessage::Event(EventEnvelope {
@@ -10219,6 +10267,7 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
                 continuation_ready |= messages.iter().any(|message| matches!(message, HostMessage::Event(EventEnvelope { request_id: Some(request), .. }) if *request == id + 3000));
                 replies.extend(messages);
             }
+            assert!(!state.read(|state| state.event_records.contains_key("long")));
             let QueryResponse::SessionHistoryPage { end, records, .. } =
                 query_reply(&replies, id + 2000)
             else {
@@ -10244,6 +10293,16 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
                 }))
                 .unwrap()
             );
+        }
+        if let Some(completions) = held_hydration {
+            let completion = smol::block_on(smol::future::race(
+                async { completions.recv().await.expect("hydration completion") },
+                async {
+                    smol::Timer::after(Duration::from_secs(30)).await;
+                    panic!("hydration did not finish within thirty seconds")
+                },
+            ));
+            state.update(cx, |state, cx| completion(state, cx));
         }
         cx.run_until(|state| state.event_records.contains_key("long"));
         let whole = SessionLog::new(store.read_log("long").unwrap()).events_window(&Subscription {

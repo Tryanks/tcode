@@ -314,7 +314,7 @@ async fn host_loop(
         state.reap_terminal_projections();
         domain_diff.emit_changes(&mut state, &mut cx);
     }
-    // Queued completions can own pinned transactions.
+    // Reject late completions and release their captured results.
     mailbox.close();
     while let Ok(operation) = mailbox.try_recv() {
         drop(operation);

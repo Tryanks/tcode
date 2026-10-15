@@ -449,14 +449,18 @@ impl LogView<'_> {
         }
     }
 
+    fn page_start(&self, end: u64, limit: u32) -> u64 {
+        let count = (limit as u64).clamp(1, SESSION_HISTORY_RECORDS as u64);
+        self.turn_aligned_start(end.saturating_sub(count))
+    }
+
     fn history_page(
         &self,
         before: u64,
         limit: u32,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
         let end = before.min(self.end);
-        let count = (limit as u64).clamp(1, SESSION_HISTORY_RECORDS as u64);
-        let start = self.turn_aligned_start(end.saturating_sub(count));
+        let start = self.page_start(end, limit);
         let requested = self.index(start)..self.index(end);
         let empty = HostMessage::QueryResult {
             id: u64::MAX,
@@ -758,25 +762,21 @@ impl Tail {
         };
         let end = page.map_or(read.end, |(before, _)| before.min(read.end));
         let after = after.filter(|after| *after <= end);
-        let start = after.unwrap_or_else(|| {
-            let count = page.map_or(BASELINE_RECORDS, |(_, count)| {
-                (count as u64).clamp(1, SESSION_HISTORY_RECORDS as u64)
-            });
-            let position = end.saturating_sub(count);
-            index
-                .starts
-                .partition_point(|row| *row <= position)
-                .checked_sub(1)
-                .map_or(position, |last| index.starts[last])
-        });
         let mut tail = Self {
             records: Vec::new(),
             rows: Vec::new(),
-            from: start,
+            from: 0,
             end: read.end,
             covered_end: end,
             index,
         };
+        let start = after.unwrap_or_else(|| match page {
+            Some((_, count)) => tail.view().page_start(end, count),
+            None => tail
+                .view()
+                .turn_aligned_start(end.saturating_sub(BASELINE_RECORDS)),
+        });
+        tail.from = start;
         let mut bytes = 0;
         read.visit_projected_rows(
             start..end,
@@ -827,7 +827,6 @@ impl Tail {
 /// before the hydration began and none queued after. Every record accepted
 /// for the session from then on is held in `pending`, in order, and takes the
 /// rows after that end.
-///
 pub(super) struct Hydration {
     live: bool,
     pending: Vec<SessionEventRecord>,
@@ -889,7 +888,7 @@ impl AppState {
                     Ok(Ok(read)) => read,
                     Ok(Err(error)) => {
                         host_cx.enqueue(move |state, cx| {
-                            state.finish_hydration(read_id, Err(error), cx)
+                            state.finish_hydration(read_id, Err(error), false, cx)
                         });
                         return;
                     }
@@ -898,40 +897,26 @@ impl AppState {
                             state.finish_hydration(
                                 read_id,
                                 Err("the session store writer has stopped".into()),
+                                false,
                                 cx,
                             )
                         });
                         return;
                     }
                 };
-                let end = read.end;
-                let (tail, publication) = host_cx
-                    .unblock(move || {
-                        let tail = Tail::read_cut(&read, None, None).ok().flatten();
-                        (tail, read.take_publication())
-                    })
-                    .await;
-                if let Some(tail) = tail {
-                    let tail_id = read_id.clone();
-                    host_cx.enqueue(move |state, cx| state.serve_tail(&tail_id, tail, cx));
-                }
                 let full_id = read_id.clone();
-                let log = host_cx
+                let (log, indexed) = host_cx
                     .unblock(move || {
-                        store
+                        let (end, indexed) = (read.end, read.index.is_some());
+                        drop(read);
+                        let log = store
                             .read_log_until(&full_id, end)
                             .map(SessionLog::new)
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| error.to_string());
+                        (log, indexed)
                     })
                     .await;
-                host_cx.enqueue(move |state, cx| state.finish_hydration(read_id, log, cx));
-                host_cx
-                    .unblock(move || {
-                        if let Err(error) = publication.publish() {
-                            log::warn!("could not publish history previews: {error}");
-                        }
-                    })
-                    .await;
+                host_cx.enqueue(move |state, cx| state.finish_hydration(read_id, log, indexed, cx));
             });
             self.log_hydrations.insert(
                 session_id.to_string(),
@@ -954,37 +939,13 @@ impl AppState {
         hydration
     }
 
-    fn serve_tail(&mut self, session_id: &str, tail: Tail, cx: &mut HostCx) {
-        let Some(hydration) = self.log_hydrations.get_mut(session_id) else {
-            return;
-        };
-        if !hydration.pending.is_empty() {
-            hydration.live |= !hydration.replies.is_empty();
-            return;
-        }
-        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut hydration.replies)
-            .into_iter()
-            .partition(|(_, subscription)| {
-                subscription.after.is_none_or(|after| after >= tail.from)
-            });
-        hydration.replies = waiting;
-        hydration.live |= !ready.is_empty();
-        for (request_id, subscription) in ready {
-            self.reply_with(
-                tail.view().events_window(&subscription),
-                request_id,
-                &subscription,
-                cx,
-            );
-        }
-    }
-
     /// Serve everything that waited for the log, in the order of its
     /// records, and keep the log only if its session is resident.
     fn finish_hydration(
         &mut self,
         session_id: String,
         log: Result<SessionLog, String>,
+        indexed: bool,
         cx: &mut HostCx,
     ) {
         let Some(hydration) = self.log_hydrations.remove(&session_id) else {
@@ -1019,9 +980,10 @@ impl AppState {
         let topic = Topic::SessionEvents {
             session_id: session_id.clone(),
         };
+        let live = hydration.live || (indexed && !hydration.replies.is_empty());
         // Records a live log accepted are out already: a waiting subscription
         // gets a window that holds them. Otherwise they follow the windows.
-        if !hydration.live {
+        if !live {
             self.reply_from_log(&log, &hydration.replies, cx);
         }
         let timeline = hydration.timeline.filter(|_| retained);
@@ -1031,7 +993,7 @@ impl AppState {
             if fold_at == Some(index) {
                 folded = Some((log.end(), log.fold().clone()));
             }
-            if !hydration.live {
+            if !live {
                 self.emit_domain(
                     topic.clone(),
                     ServerEvent::SessionEvent(wire_record(&record).into_owned()),
@@ -1040,7 +1002,7 @@ impl AppState {
             }
             log.push(record);
         }
-        if hydration.live {
+        if live {
             self.reply_from_log(&log, &hydration.replies, cx);
         }
         for query in hydration.queries {
@@ -1348,7 +1310,7 @@ impl AppState {
                 let suffix = state
                     .log_hydrations
                     .get(&read_id)
-                    .map(|hydration| hydration.pending[accepted..].to_vec())
+                    .map(|hydration| &hydration.pending[accepted..])
                     .unwrap_or_default();
                 // V1 starts do not describe the final turn's closing state.
                 // A later mention could reuse the id in a newly opened turn.
@@ -1582,42 +1544,51 @@ mod tests {
             after: Some(0),
             known_index: None,
         };
-        let first = Tail::read_cut(&cut, subscription.after, None)
-            .unwrap()
-            .unwrap()
-            .view()
-            .events_window(&subscription);
-        assert!(matches!(
-            first,
-            ServerEvent::SessionSnapshot {
-                from: 0,
-                end: 1,
-                total: 5,
-                truncated: true,
-                ..
+        let resident = SessionLog::new(store.read_log("thread").unwrap());
+        let mut cold_records = Vec::new();
+        let mut resident_records = Vec::new();
+        for cold in [false, true] {
+            subscription.after = Some(0);
+            let collected = if cold {
+                &mut cold_records
+            } else {
+                &mut resident_records
+            };
+            loop {
+                let window = if cold {
+                    Tail::read_cut(&cut, subscription.after, None)
+                        .unwrap()
+                        .unwrap()
+                        .view()
+                        .events_window(&subscription)
+                } else {
+                    resident.events_window(&subscription)
+                };
+                let ServerEvent::SessionSnapshot {
+                    from,
+                    end,
+                    total,
+                    records,
+                    ..
+                } = window
+                else {
+                    panic!("snapshot");
+                };
+                assert_eq!(from, subscription.after.unwrap());
+                assert!(end > from && end <= total);
+                collected.extend(records);
+                if end == total {
+                    break;
+                }
+                subscription.after = Some(end);
             }
-        ));
-        subscription.after = Some(1);
-        let next = Tail::read_cut(&cut, subscription.after, None)
-            .unwrap()
-            .unwrap()
-            .view()
-            .events_window(&subscription);
-        let ServerEvent::SessionSnapshot {
-            from,
-            end,
-            total,
-            records,
-            truncated,
-            ..
-        } = next
-        else {
-            panic!("snapshot");
-        };
-        assert_eq!((from, end, total, truncated), (1, 5, 5, false));
-        assert_eq!(records.len(), 2);
-        assert!(matches!(&records[0].event, AgentEvent::Delta { text, .. } if text == "ab"));
-        assert!(matches!(&records[1].event, AgentEvent::Warning { message } if message == "last"));
+        }
+        assert_eq!(cold_records, resident_records);
+        assert_eq!(cold_records.len(), 3);
+        assert!(matches!(&cold_records[1].event, AgentEvent::Delta { text, .. } if text == "ab"));
+        assert!(
+            matches!(&cold_records[2].event, AgentEvent::Warning { message } if message == "last")
+        );
         drop(cut);
         store.close().unwrap();
         std::fs::remove_dir_all(root).unwrap();

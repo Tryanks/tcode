@@ -95,6 +95,9 @@ impl Drop for LogRead {
 
 impl LogRead {
     pub fn read_item(&self, item_id: &str) -> io::Result<Option<EventLog>> {
+        let quoted_id = serde_json::to_vec(item_id).map_err(invalid_data)?;
+        let id = memchr::memmem::Finder::new(&quoted_id);
+        let rewind = memchr::memmem::Finder::new(br#""rewind_completed""#);
         self.store.run("locate item", |db| {
             let guard = self.connection.lock().unwrap();
             let connection = guard.as_ref().ok_or_else(|| io::Error::other("event read cancelled"))?;
@@ -107,6 +110,11 @@ impl LogRead {
                 "SELECT position, line FROM events WHERE session_id=?1 AND position<?2 ORDER BY position",
                 (self.id.as_str(), self.end as i64), |row| {
                     let bytes = blob(row, 1)?;
+                    // Escaped JSON addresses can spell the same id differently.
+                    if id.find(&bytes).is_none() && rewind.find(&bytes).is_none()
+                        && memchr::memchr(b'\\', &bytes).is_none() {
+                        return Ok(());
+                    }
                     let Ok(envelope) = serde_json::from_slice::<EventAddress>(&bytes) else { return Ok(()); };
                     let address = envelope.event.as_deref().unwrap_or(&envelope);
                     let position = integer(row, 0)? as u64;
