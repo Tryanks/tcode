@@ -54,6 +54,7 @@ fn main() {
                     let connection = mux.attach_local(tcode_protocol::Principal::Full);
                     let (_, state) = async_channel::unbounded();
                     Ok(tcode_client::host::Transport {
+                        originals: None,
                         to_host: connection.to_host.into(),
                         from_host: connection.from_host,
                         state,

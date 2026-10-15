@@ -18,6 +18,7 @@ pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// A live link to a host: NDJSON lines in both directions plus connection state.
 pub struct Transport {
+    pub originals: Option<std::sync::Arc<dyn crate::original::OriginalOpener>>,
     pub to_host: crate::outgoing::Outgoing,
     pub from_host: async_channel::Receiver<String>,
     pub state: async_channel::Receiver<ConnectionState>,

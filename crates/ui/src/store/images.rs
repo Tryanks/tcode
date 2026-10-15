@@ -8,7 +8,7 @@ use tcode_protocol::{Query, QueryResponse};
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
 
-pub(super) struct HostImages {
+pub(crate) struct HostImages {
     pub link: Option<HostLink>,
     pub namespace: u64,
     /// Existing live-host UI fixtures pump on an OS thread. Keep its wakeups
@@ -20,16 +20,10 @@ impl Global for HostImages {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ImageRequest {
-    File(PathBuf),
     Preview {
         path: PathBuf,
         pixels: u32,
         crop_to_square: bool,
-    },
-    Item {
-        session_id: String,
-        item_id: String,
-        image_index: usize,
     },
     ItemPreview {
         session_id: String,
@@ -83,10 +77,6 @@ impl Asset for HostImage {
         let blocking_queries = images.blocking_queries;
         async move {
             let query = match request {
-                ImageRequest::File(path) => Query::ReadFileBytes {
-                    path,
-                    max_bytes: None,
-                },
                 ImageRequest::Preview {
                     path,
                     pixels,
@@ -95,16 +85,6 @@ impl Asset for HostImage {
                     path,
                     pixels,
                     crop_to_square,
-                },
-                ImageRequest::Item {
-                    session_id,
-                    item_id,
-                    image_index,
-                } => Query::ReadItemImage {
-                    session_id,
-                    item_id,
-                    image_index,
-                    max_bytes: None,
                 },
                 ImageRequest::ItemPreview {
                     session_id,
@@ -177,11 +157,6 @@ fn source(request: impl Fn(&gpui::Window) -> ImageRequest + 'static) -> ImageSou
     })
 }
 
-/// The original image; only an explicit open reads it, since it may be large.
-pub(crate) fn host_image(path: PathBuf) -> ImageSource {
-    source(move |_| ImageRequest::File(path.clone()))
-}
-
 /// The host's preview of `path` at `logical_pixels` square. It never falls back to the
 /// original: without a preview, the tile draws its fallback and opening it reads the original.
 pub(crate) fn image_preview(
@@ -215,14 +190,6 @@ pub(crate) fn item_image_preview(
         image_index,
         width: preview_pixels(width, window),
         height: preview_pixels(height, window),
-    })
-}
-
-pub(crate) fn item_image(session_id: String, item_id: String, image_index: usize) -> ImageSource {
-    source(move |_| ImageRequest::Item {
-        session_id: session_id.clone(),
-        item_id: item_id.clone(),
-        image_index,
     })
 }
 
@@ -872,7 +839,7 @@ mod tests {
                         "{key} must move focus into the image lightbox"
                     );
                 });
-                if key == "enter" {
+                {
                     let request = decode_client_line(
                         &requests
                             .try_recv()

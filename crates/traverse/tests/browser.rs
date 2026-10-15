@@ -1,5 +1,8 @@
 //! The browser listener over loopback: static bundle, password login and the
 //! `/ws` hello, as `crates/web` speaks them.
+#[path = "common/original.rs"]
+mod original_fixture;
+
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -527,4 +530,66 @@ fn a_bind_beyond_loopback_needs_a_password_first() {
     let server = serve(mux, lan()).unwrap();
     assert!(server.password_configured());
     server.shutdown();
+}
+
+/// Contract: password-issued bearer tokens permit exact full and single-range
+/// original reads; an invalid token cannot read the same existing file.
+#[test]
+fn authenticated_original_full_range_and_invalid_token() {
+    let dir = TestDir::new("original-http");
+    let bytes: Vec<_> = (0..160_000)
+        .map(|index| ((index * 11 + index / 19) % 251) as u8)
+        .collect();
+    let path = dir.0.join("original.png");
+    std::fs::write(&path, &bytes).unwrap();
+    let (runtime, mux, _, _) = original_fixture::recorded_host(&dir.0, &bytes);
+    let server = serve(mux.clone(), config(dir.0.clone())).unwrap();
+    setup(&server, "original-password");
+    let (status, login) = login(server.local_addr(), "original-password", "Original browser");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    let token = login["token"].as_str().unwrap();
+    let target = serde_json::to_string(&tcode_protocol::OriginalTarget::File { path }).unwrap();
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("target", &target)
+        .finish();
+    let request = |token: &str, range: Option<&str>| {
+        let mut stream = TcpStream::connect(server.local_addr()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        write!(
+            stream,
+            "GET /original?{query} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n"
+        )
+        .unwrap();
+        if let Some(range) = range {
+            write!(stream, "Range: {range}\r\n").unwrap();
+        }
+        write!(stream, "Connection: close\r\n\r\n").unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        let split = bytes
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        (
+            String::from_utf8(bytes[..split].to_vec()).unwrap(),
+            bytes[split + 4..].to_vec(),
+        )
+    };
+    let (head, body) = request(token, None);
+    assert!(head.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert_eq!(body, bytes);
+    let (head, body) = request(token, Some("bytes=65000-131999"));
+    assert!(head.starts_with("HTTP/1.1 206 Partial Content\r\n"));
+    assert!(
+        head.lines()
+            .any(|line| line == "Content-Range: bytes 65000-131999/160000")
+    );
+    assert!(head.lines().any(|line| line == "Content-Length: 67000"));
+    assert_eq!(body, bytes[65000..132000]);
+    let (head, _) = request("invalid-token", None);
+    assert!(head.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+    server.shutdown();
+    original_fixture::stop(runtime, &mux);
 }

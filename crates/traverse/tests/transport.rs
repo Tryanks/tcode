@@ -1,4 +1,7 @@
 //! Two in-process endpoints using native direct-path selection, without a relay.
+#[path = "common/original.rs"]
+mod original_fixture;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1540,4 +1543,156 @@ fn attachment_overflow_ends_the_main_stream_without_closing_the_quic_connection(
         }).await.expect("overflow and tunnel handshake complete");
     });
     host.shutdown();
+}
+
+/// Contract: a large original and a recorded image leave control responsive;
+/// cancellation releases admission even when both device slots are occupied.
+#[test]
+fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
+    use tcode_client::HostLink;
+    use tcode_protocol::{OriginalTarget, Query, QueryResponse};
+    let host_dir = TestDir::new("originals");
+    let device_dir = TestDir::new("original-device");
+    let bytes: Vec<_> = (0..20 * 1024 * 1024)
+        .map(|index| ((index * 17 + index / 257) % 251) as u8)
+        .collect();
+    let path = host_dir.0.join("original.png");
+    std::fs::write(&path, &bytes).unwrap();
+    let (runtime, mux, session_id, _) = original_fixture::recorded_host(&host_dir.0, &bytes);
+    let host = start_host(mux.clone(), &host_dir, None);
+    let device = device(&device_dir, "Original phone");
+    let paired = pair(&host.new_invitation().invite, &device).unwrap();
+    let transport = tcode_traverse::connect(&paired, &device);
+    wait_state(&transport, syncing_directly);
+    let link = HostLink::new_remote(transport.to_host, transport.from_host, transport.originals);
+    tcode_traverse::block_on(async {
+        let pump = tcode_traverse::runtime().spawn({
+            let link = link.clone();
+            async move { link.pump().await }
+        });
+        let target = OriginalTarget::File { path: path.clone() };
+        let mut file = link.read_original(target.clone());
+        assert_eq!(file.metadata().await.unwrap().len, bytes.len() as u64);
+        let mut received = file.read().await.unwrap().unwrap();
+        assert_eq!(link.query(Query::Ping).await.unwrap(), QueryResponse::Pong);
+        while let Some(block) = file.read().await.unwrap() {
+            received.extend(block);
+        }
+        assert_eq!(received, bytes);
+        drop(file);
+        let mut item = link.read_original(OriginalTarget::Item {
+            session_id,
+            item_id: "recorded-image".into(),
+            image_index: 0,
+        });
+        assert_eq!(item.metadata().await.unwrap().len, bytes.len() as u64);
+        let mut received = item.read().await.unwrap().unwrap();
+        assert_eq!(link.query(Query::Ping).await.unwrap(), QueryResponse::Pong);
+        while let Some(block) = item.read().await.unwrap() {
+            received.extend(block);
+        }
+        assert_eq!(received, bytes);
+        drop(item);
+        let mut first = link.read_original(target.clone());
+        first.read().await.unwrap().unwrap();
+        let mut second = link.read_original(target.clone());
+        second.read().await.unwrap().unwrap();
+        let mut refused = link.read_original(target.clone());
+        assert_eq!(refused.metadata().await.unwrap_err().code, "busy");
+        first.cancel();
+        assert!(first.read().await.is_err());
+        assert_eq!(link.query(Query::Ping).await.unwrap(), QueryResponse::Pong);
+        let mut replacement = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut next = link.read_original(target.clone());
+                match next.metadata().await {
+                    Ok(_) => break next,
+                    Err(error) if error.code == "busy" => tokio::task::yield_now().await,
+                    Err(error) => panic!("replacement original: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("cancelled admission must be released");
+        let mut received = Vec::new();
+        while let Some(block) = replacement.read().await.unwrap() {
+            received.extend(block);
+        }
+        assert_eq!(received, bytes);
+        drop(second);
+        link.close();
+        pump.await.unwrap();
+    });
+    host.shutdown();
+    original_fixture::stop(runtime, &mux);
+}
+
+/// Contract: revoking a project grant prevents a blocked original from completing.
+#[test]
+fn revoked_project_original_never_completes() {
+    use tcode_client::HostLink;
+    use tcode_protocol::{HostingAction, OriginalTarget, SpaceAction};
+    let host_dir = TestDir::new("original-revoke");
+    let device_dir = TestDir::new("original-member");
+    let bytes = vec![0x91; 64 * 1024 * 1024];
+    let path = host_dir.0.join("original.png");
+    std::fs::write(&path, &bytes).unwrap();
+    let (runtime, mux, _, project_id) =
+        original_fixture::recorded_host(&host_dir.0, b"recorded image");
+    let host = start_host(mux.clone(), &host_dir, None);
+    let created = host
+        .hosting(HostingAction::Spaces(SpaceAction::Create {
+            name: "Original space".into(),
+        }))
+        .unwrap();
+    let space_id = created.created_space_id.unwrap();
+    host.set_space_projects(&space_id, vec![project_id])
+        .unwrap();
+    let device = device(&device_dir, "Member phone");
+    let paired = pair(&space_invite(&host, &space_id), &device).unwrap();
+    let transport = tcode_traverse::connect(&paired, &device);
+    wait_state(&transport, syncing_directly);
+    let link = HostLink::new_remote(transport.to_host, transport.from_host, transport.originals);
+    tcode_traverse::block_on(async {
+        let pump = tcode_traverse::runtime().spawn({
+            let link = link.clone();
+            async move { link.pump().await }
+        });
+        let target = OriginalTarget::File { path };
+        let mut transfer = link.read_original(target.clone());
+        assert!(!transfer.read().await.unwrap().unwrap().is_empty());
+        host.set_space_projects(&space_id, Vec::new()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match transfer.read().await {
+                    Ok(Some(_)) => {}
+                    other => break other,
+                }
+            }
+        })
+        .await
+        .expect("grant change ends the original");
+        assert!(result.is_err(), "revoked original completed");
+        drop(transfer);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut reconnecting = false;
+            loop {
+                let state = transport.state.recv().await.unwrap();
+                if matches!(state, ConnectionState::Reconnecting { .. }) {
+                    reconnecting = true;
+                }
+                if reconnecting && matches!(state, ConnectionState::Syncing { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let mut denied = link.read_original(target);
+        assert_eq!(denied.metadata().await.unwrap_err().code, "out_of_scope");
+        link.close();
+        pump.await.unwrap();
+    });
+    host.shutdown();
+    original_fixture::stop(runtime, &mux);
 }
