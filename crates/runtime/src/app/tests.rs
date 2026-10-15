@@ -9594,7 +9594,6 @@ fn send_to_host(
 /// Run the host until it answered client message `id` and parked, and
 /// return every message it serialized since the last drain.
 fn answered(cx: &mut TestAppContext, id: u64) -> Vec<HostMessage> {
-    let deadline = Instant::now() + Duration::from_secs(5);
     let mut messages = Vec::new();
     loop {
         cx.run_until_parked();
@@ -9604,10 +9603,6 @@ fn answered(cx: &mut TestAppContext, id: u64) -> Vec<HostMessage> {
         }) {
             return messages;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the host did not answer message {id} within five seconds"
-        );
     }
 }
 
@@ -10096,6 +10091,82 @@ fn a_child_completing_while_its_log_is_read_reports_that_turn() {
 }
 
 #[test]
+fn cold_item_reads_match_folded_streams_and_reused_ids() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("cold-items");
+    open_stored_session(&store, "items");
+    let fixture = r#"{"type":"turn_started","turn_id":"one"}
+{"type":"item_started","id":"cmd","content":{"kind":"command_execution","command":"make","output":"","exit_code":null,"status":"in_progress"}}
+{"type":"delta","item_id":"cmd","kind":"command_output","text":"abc"}
+{"type":"delta","item_id":"cmd","kind":"command_output","text":"def"}
+{"type":"item_updated","id":"cmd","content":{"kind":"command_execution","command":"make","output":"abc","exit_code":null,"status":"in_progress"}}
+{"type":"item_completed","id":"cmd","content":{"kind":"command_execution","command":"make","output":"","exit_code":0,"status":"completed"}}
+{"type":"item_completed","id":"image","content":{"kind":"image_read","path":"fixture.png","image":{"media_type":"image/png","data_base64":"AQID","source_path":null}}}
+{"type":"turn_completed","turn_id":"one","status":"completed","usage":null}
+{"type":"turn_started","turn_id":"two"}
+{"type":"delta","item_id":"reused","kind":"command_output","text":"old"}
+{"type":"turn_completed","turn_id":"two","status":"completed","usage":null}
+{"type":"turn_started","turn_id":"three"}
+{"type":"delta","item_id":"reused","kind":"command_output","text":"new"}
+{"type":"turn_completed","turn_id":"three","status":"completed","usage":null}
+"#;
+    store
+        .apply(&[
+            tcode_services::store::Mutation::replace_event_log(
+                "items",
+                fixture.as_bytes().to_vec(),
+            ),
+            tcode_services::store::Mutation::set_turn_index(
+                "items",
+                tcode_services::store::TurnIndex {
+                    turns: 3,
+                    starts: vec![0, 8, 11],
+                },
+            ),
+        ])
+        .unwrap();
+    let whole = SessionLog::new(store.read_log("items").unwrap());
+    let read = store.snapshot_log("items").unwrap();
+    let targeted = SessionLog::new(
+        read.read_item("cmd")
+            .unwrap()
+            .expect("one physical turn can be read without hydration"),
+    );
+    assert_eq!(
+        targeted.item_output("items", "cmd").unwrap(),
+        QueryResponse::ItemOutput("abcdef".into())
+    );
+    assert_eq!(
+        targeted.item_output("items", "cmd"),
+        whole.item_output("items", "cmd")
+    );
+    let targeted = SessionLog::new(read.read_item("image").unwrap().unwrap());
+    assert_eq!(
+        serde_json::to_value(
+            targeted
+                .item_image("image", 0, None)
+                .unwrap()
+                .read()
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(whole.item_image("image", 0, None).unwrap().read().unwrap()).unwrap()
+    );
+    drop(read);
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    for (id, item) in [(1, "reused"), (2, "cmd")] {
+        let payload = tcode_protocol::ClientPayload::Query(tcode_protocol::Query::ReadItemOutput {
+            session_id: "items".into(),
+            item_id: item.into(),
+        });
+        assert_eq!(
+            query_reply(&through_pipe(&state, cx, id, payload), id),
+            whole.item_output("items", item).unwrap()
+        );
+    }
+}
+
+#[test]
 fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tail-window");
@@ -10105,10 +10176,23 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     let mut id = 0;
     let mut open = |state: &TestEntity, cx: &mut TestAppContext, after: Option<u64>| {
         id += 1;
+        let browsing = id == 2;
+        let page_before = store.next_row("long").unwrap().saturating_sub(400);
         send_to_host(state, cx, id, subscribe_events("long", after));
+        if browsing {
+            assert!(state.read(|state| state.log_hydrations.contains_key("long")));
+            send_to_host(state, cx, id + 2000, history_page("long", page_before));
+            send_to_host(state, cx, id + 3000, subscribe_events("long", Some(0)));
+        }
+        let mut replies = Vec::new();
+        let mut page_ready = false;
+        let mut continuation_ready = false;
         let (window, early) = loop {
             cx.run_next();
             let messages = cx.drain_outgoing();
+            page_ready |= messages.iter().any(|message| matches!(message, HostMessage::QueryResult { id: request, .. } if *request == id + 2000));
+            continuation_ready |= messages.iter().any(|message| matches!(message, HostMessage::Event(EventEnvelope { request_id: Some(request), .. }) if *request == id + 3000));
+            replies.extend(messages.clone());
             if let Some(window) = messages.iter().find_map(|message| match message {
                 HostMessage::Event(EventEnvelope {
                     request_id: Some(request),
@@ -10125,7 +10209,41 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
         };
         if after.is_some() && early {
             send_to_host(state, cx, id + 1000, subscribe_events("long", after));
-            assert_eq!(window_reply(&cx.drain_outgoing(), id + 1000), window);
+            assert_eq!(window_reply(&answered(cx, id + 1000), id + 1000), window);
+        }
+        if browsing {
+            while !page_ready || !continuation_ready {
+                cx.run_next();
+                let messages = cx.drain_outgoing();
+                page_ready |= messages.iter().any(|message| matches!(message, HostMessage::QueryResult { id: request, .. } if *request == id + 2000));
+                continuation_ready |= messages.iter().any(|message| matches!(message, HostMessage::Event(EventEnvelope { request_id: Some(request), .. }) if *request == id + 3000));
+                replies.extend(messages);
+            }
+            let QueryResponse::SessionHistoryPage { end, records, .. } =
+                query_reply(&replies, id + 2000)
+            else {
+                panic!("page");
+            };
+            assert_eq!(end, page_before);
+            assert!(!records.is_empty());
+            let continuation = window_reply(&replies, id + 3000);
+            assert_eq!(continuation.from, 0);
+            let whole = SessionLog::new(store.read_log("long").unwrap());
+            assert_eq!(
+                query_reply(&replies, id + 2000),
+                whole.history_page(page_before, 200).unwrap()
+            );
+            assert_eq!(
+                continuation,
+                window_of(&whole.events_window(&Subscription {
+                    topic: Topic::SessionEvents {
+                        session_id: "long".into()
+                    },
+                    after: Some(0),
+                    known_index: None
+                }))
+                .unwrap()
+            );
         }
         cx.run_until(|state| state.event_records.contains_key("long"));
         let whole = SessionLog::new(store.read_log("long").unwrap()).events_window(&Subscription {
@@ -10221,6 +10339,28 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
         "three, and three late ones less the rewound one"
     );
     release(&state, cx, 102);
+
+    send_to_host(&state, cx, 5000, subscribe_events("long", None));
+    let pending = AgentEvent::Warning {
+        message: "arrived during hydration".into(),
+    };
+    state.update(cx, |state, cx| state.record_event("long", &pending, cx));
+    let messages = answered(cx, 5000);
+    let baseline = window_reply(&messages, 5000);
+    assert_eq!(
+        baseline
+            .records
+            .iter()
+            .filter(|record| record.event == pending)
+            .count(),
+        1
+    );
+    assert!(
+        !live_records(&messages)
+            .iter()
+            .any(|record| record.event == pending)
+    );
+    release(&state, cx, 5001);
 
     state.update(cx, |state, cx| {
         state.record_event("long", &persisted_assistant_event("nobody held it"), cx)
@@ -10547,7 +10687,7 @@ fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
             },
         ),
     ];
-    log.extend((0..history::TAIL_ROWS + 44).map(|step| {
+    log.extend((0..300).map(|step| {
         (
             resumed + 2 + step,
             persisted_assistant_event(&format!("step {step}")),

@@ -76,6 +76,12 @@ impl ConnectionFailure {
     }
 }
 
+struct SubscriptionRequest {
+    id: u64,
+    after: Option<u64>,
+    consumed: bool,
+}
+
 struct Pending {
     sender: async_channel::Sender<HostMessage>,
     query: bool,
@@ -117,7 +123,7 @@ struct HostLinkInner {
     // must not be sent after a newer unsubscribe or cursor change.
     subscription_transition: Mutex<()>,
     subscribed_topics: Mutex<HashMap<Topic, Subscription>>,
-    subscription_requests: Mutex<HashMap<Topic, u64>>,
+    subscription_requests: Mutex<HashMap<Topic, SubscriptionRequest>>,
     connection_state: Mutex<ConnectionState>,
     connection_state_tx: async_channel::Sender<ConnectionState>,
     connection_state_rx: async_channel::Receiver<ConnectionState>,
@@ -711,11 +717,14 @@ impl HostLink {
 
     fn send_subscription(&self, subscription: Subscription) -> Result<(), ProtocolError> {
         let id = self.next_id();
-        self.inner
-            .subscription_requests
-            .lock()
-            .unwrap()
-            .insert(subscription.topic.clone(), id);
+        self.inner.subscription_requests.lock().unwrap().insert(
+            subscription.topic.clone(),
+            SubscriptionRequest {
+                id,
+                after: subscription.after,
+                consumed: false,
+            },
+        );
         if matches!(
             self.connection_state(),
             ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
@@ -740,7 +749,20 @@ impl HostLink {
             .lock()
             .unwrap()
             .get(topic)
-            .copied()
+            .filter(|request| !request.consumed)
+            .map(|request| request.id)
+    }
+
+    /// One correlated snapshot per request, including an empty continuation.
+    pub fn consume_session_snapshot(&self, envelope: &EventEnvelope) -> Option<Option<u64>> {
+        let id = envelope.request_id?;
+        let mut requests = self.inner.subscription_requests.lock().unwrap();
+        let request = requests.get_mut(&envelope.topic)?;
+        if request.id != id || request.consumed {
+            return None;
+        }
+        request.consumed = true;
+        Some(request.after)
     }
 
     pub fn unsubscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
@@ -786,11 +808,14 @@ impl HostLink {
         };
         // Supersede already queued replies without creating another wire request.
         let id = self.next_id();
-        self.inner
-            .subscription_requests
-            .lock()
-            .unwrap()
-            .insert(subscription.topic.clone(), id);
+        self.inner.subscription_requests.lock().unwrap().insert(
+            subscription.topic.clone(),
+            SubscriptionRequest {
+                id,
+                after: subscription.after,
+                consumed: false,
+            },
+        );
     }
 
     /// Remember the applied index fingerprint for recovery without sending a request.

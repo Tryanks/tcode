@@ -1405,8 +1405,17 @@ impl WorkspaceStore {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
+                let after = match envelope.request_id {
+                    Some(_) => match self.host.consume_session_snapshot(envelope) {
+                        Some(after) => after,
+                        None => return,
+                    },
+                    None => None,
+                };
+                let continuation = after.filter(|after| *after <= *total);
                 let thread = self.threads.entry(session_id.clone()).or_default();
-                let retain_timeline = records.is_empty()
+                let retain_timeline = continuation == Some(*from)
+                    && records.is_empty()
                     && thread.total_turns.is_some()
                     && *from != 0
                     && thread
@@ -1421,12 +1430,12 @@ impl WorkspaceStore {
                 let held = &mut thread.history;
                 match held {
                     // Continues the held cursor.
-                    Some(held) if *from != 0 && held.end == *from => {
+                    Some(held) if continuation == Some(*from) && held.end == *from => {
                         held.extend(records, *end);
                     }
                     // Neither a baseline nor what follows the held records:
                     // ask for a baseline.
-                    Some(_) if *from != 0 => {
+                    _ if continuation.is_some() => {
                         *held = None;
                         self.session_replica = None;
                         self.baseline_topics.remove(&envelope.topic);
@@ -3864,10 +3873,12 @@ pub(crate) mod tests {
     use tcode_core::{
         git::{GitFileEntry, GitStatus},
         project::{Project, SessionMeta},
-        session::{ReviewComment, ReviewSide},
+        session::{EntryContent, ReviewComment, ReviewSide},
         settings::{Settings, ThemeMode},
     };
-    use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
+    use tcode_protocol::{
+        Command, EventEnvelope, ServerEvent, SessionEventRecord, Subscription, Topic,
+    };
     use tcode_runtime::host::HostEvent;
     use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
     use tcode_services::store::SessionStore;
@@ -5168,6 +5179,75 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    fn rapid_thread_revisit_keeps_cached_history_when_old_replies_arrive(cx: &mut TestAppContext) {
+        for old_first in [false, true] {
+            for empty in [false, true] {
+                let (to_host, _outgoing) = async_channel::unbounded();
+                let (incoming, from_host) = async_channel::unbounded();
+                let host = tcode_client::HostLink::new(to_host, from_host);
+                let workspace = cx.new(|cx| {
+                    WorkspaceStore::new_attached(
+                        host.clone(),
+                        WorkspaceAttachment::Local,
+                        None,
+                        None,
+                        false,
+                        cx,
+                    )
+                });
+                seed_full_scope(&workspace, &incoming, Vec::new(), cx);
+                workspace.update(cx, |store, cx| {
+                    let topic = Topic::SessionEvents { session_id: "a".into() };
+                    store.select_session("a".into());
+                    let record = |text: &str| SessionEventRecord::from(AgentEvent::Delta {
+                        item_id: "answer".into(), kind: agent::DeltaKind::AssistantText, text: text.into(),
+                    });
+                    let baseline_id = host.subscription_request_id(&topic).unwrap();
+                    store.apply_domain_event(&EventEnvelope {
+                        request_id: Some(baseline_id), topic: topic.clone(),
+                        event: ServerEvent::SessionSnapshot { from: 10, end: 12, records: vec![record("cached")], total: 12, total_turns: 1, truncated: false },
+                    }, cx);
+                    host.subscribe(Subscription { topic: topic.clone(), after: Some(12), known_index: None }).unwrap();
+                    let old_id = host.subscription_request_id(&topic).unwrap();
+                    store.select_session("b".into());
+                    store.select_session("a".into());
+                    let current_id = host.subscription_request_id(&topic).unwrap();
+                    assert_ne!(old_id, current_id);
+                    let reply = |id| EventEnvelope {
+                        request_id: Some(id), topic: topic.clone(),
+                        event: ServerEvent::SessionSnapshot {
+                            from: 12, end: if empty { 12 } else { 14 },
+                            records: if empty { vec![] } else { vec![record(" continued")] },
+                            total: if empty { 12 } else { 14 }, total_turns: 1, truncated: false,
+                        },
+                    };
+                    for id in if old_first { [old_id, current_id] } else { [current_id, old_id] } {
+                        store.apply_domain_event(&reply(id), cx);
+                    }
+                    store.apply_domain_event(&reply(current_id), cx);
+                    let held = store.threads["a"].history.as_ref().unwrap();
+                    assert_eq!((held.from, held.end), (10, if empty { 12 } else { 14 }));
+                    let timeline = &store.session_replica.as_ref().unwrap().1;
+                    assert_eq!(timeline.entries.len(), 1);
+                    assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == if empty { "cached" } else { "cached continued" }));
+                    let end = if empty { 12 } else { 14 };
+                    host.subscribe(Subscription { topic: topic.clone(), after: None, known_index: None }).unwrap();
+                    let replacement_id = host.subscription_request_id(&topic).unwrap();
+                    let replacement = EventEnvelope { request_id: Some(replacement_id), topic: topic.clone(), event: ServerEvent::SessionSnapshot { from: end, end: end + 2, records: vec![record("replacement")], total: end + 2, total_turns: 1, truncated: false } };
+                    store.apply_domain_event(&replacement, cx);
+                    store.apply_domain_event(&reply(current_id), cx);
+                    store.apply_domain_event(&replacement, cx);
+                    let held = store.threads["a"].history.as_ref().unwrap();
+                    assert_eq!((held.from, held.end), (end, end + 2));
+                    let timeline = &store.session_replica.as_ref().unwrap().1;
+                    assert_eq!(timeline.entries.len(), 1);
+                    assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "replacement"));
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
     fn paged_history_keeps_event_and_turn_cursors_absolute(cx: &mut TestAppContext) {
         let (to_host, outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
@@ -5257,10 +5337,17 @@ pub(crate) mod tests {
                 session_id: "large".into(),
             };
             store.baseline_topics.remove(&topic);
+            host.subscribe(Subscription {
+                topic: topic.clone(),
+                after: Some(2000),
+                known_index: None,
+            })
+            .unwrap();
+            let reconnect_id = host.subscription_request_id(&topic).unwrap();
             let retained_entry = store.session_replica.as_ref().unwrap().1.entries[0].clone();
             store.apply_domain_event(
                 &EventEnvelope {
-                    request_id: None,
+                    request_id: Some(reconnect_id),
                     topic: topic.clone(),
                     event: ServerEvent::SessionSnapshot {
                         from: 2000,
@@ -7119,19 +7206,36 @@ pub(crate) mod tests {
         workspace.update(cx, |store, cx| {
             store.drain_host_events_for_test(cx);
             assert_eq!(held_history(store, "reconnect").records.len(), 3);
+            let topic = Topic::SessionEvents {
+                session_id: "reconnect".into(),
+            };
+            driver
+                .link
+                .subscribe(Subscription {
+                    topic: topic.clone(),
+                    after: Some(3),
+                    known_index: None,
+                })
+                .unwrap();
+            let id = driver.link.subscription_request_id(&topic).unwrap();
             store.apply_domain_event(
                 &EventEnvelope {
-                    request_id: None,
+                    request_id: Some(id),
                     topic: Topic::SessionEvents {
                         session_id: "reconnect".into(),
                     },
                     event: ServerEvent::SessionSnapshot {
-                        total: 0,
+                        total: 3,
                         total_turns: 0,
                         truncated: false,
                         from: 2,
-                        end: 2,
-                        records: vec![],
+                        end: 3,
+                        records: vec![SessionEventRecord {
+                            ts: Some(3),
+                            ..SessionEventRecord::from(AgentEvent::Warning {
+                                message: "three".into(),
+                            })
+                        }],
                     },
                 },
                 cx,

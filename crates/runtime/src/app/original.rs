@@ -66,7 +66,8 @@ impl AppState {
                             .recv()
                             .await
                             .map_err(error)?
-                            .map_err(error)?;
+                            .map_err(error)?
+                            .end;
                         let (session_id, item_id, image_index) =
                             (session_id.clone(), item_id.clone(), *image_index);
                         host.unblock(move || {
@@ -161,7 +162,7 @@ impl AppState {
                             })
                             .await
                             .map_err(|_| error("host stopped"))?;
-                        let end = snapshot.recv().await.map_err(error)?.map_err(error)?;
+                        let end = snapshot.recv().await.map_err(error)?.map_err(error)?.end;
                         host.unblock(move || {
                             let log = SessionLog::new(
                                 store.read_log_until(&session_id, end).map_err(io_error)?,
@@ -202,7 +203,7 @@ impl AppState {
         &mut self,
         id: &str,
         cx: &mut HostCx,
-    ) -> async_channel::Receiver<Result<u64, String>> {
+    ) -> async_channel::Receiver<Result<tcode_services::store::LogRead, String>> {
         let (end, snapshot) = async_channel::bounded(1);
         self.enqueue_store_write(StoreWrite::SnapshotLog { id: id.into(), end }, cx);
         snapshot

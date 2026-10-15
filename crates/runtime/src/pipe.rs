@@ -314,6 +314,11 @@ async fn host_loop(
         state.reap_terminal_projections();
         domain_diff.emit_changes(&mut state, &mut cx);
     }
+    // Queued completions can own pinned transactions.
+    mailbox.close();
+    while let Ok(operation) = mailbox.try_recv() {
+        drop(operation);
+    }
     state
 }
 
@@ -1147,23 +1152,16 @@ fn dispatch_query(
             item_id,
             cols,
         } => {
-            let Some(output) = app.stored_command_output(&session_id, &item_id) else {
-                if matches!(cx.principal, Principal::Space { .. }) {
-                    return cx.spawn_background(async {
-                        Err(ProtocolError::out_of_scope("item is outside this session"))
-                    });
-                }
-                return cx.spawn_background(async move {
-                    Err(ProtocolError {
-                        code: "unknown_stored_output".into(),
-                        message: format!("no stored command output {item_id} in {session_id}"),
-                    })
-                });
-            };
-            let task = cx.unblock(move || crate::terminal::render_stored_output(&output, cols));
-            cx.spawn_background(
-                async move { Ok(QueryResponse::TerminalFrame(Box::new(task.await))) },
-            )
+            let read = app.stored_command_output(&session_id, item_id, cx);
+            let host_cx = cx.clone();
+            cx.spawn_background(async move {
+                let output = read.await?;
+                Ok(QueryResponse::TerminalFrame(Box::new(
+                    host_cx
+                        .unblock(move || crate::terminal::render_stored_output(&output, cols))
+                        .await,
+                )))
+            })
         }
     }
 }

@@ -8,7 +8,7 @@ use tcode_protocol::{
     CommandResponse, HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES,
     SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, Subscription,
 };
-use tcode_services::store::{EventLog, TurnIndex};
+use tcode_services::store::{EventLog, LogRead, TurnIndex};
 
 /// Count serialized bytes without allocating a copy of a large record.
 struct ByteCount(usize);
@@ -367,6 +367,7 @@ struct LogView<'a> {
     /// The row each record is in, ascending.
     rows: &'a [u64],
     end: u64,
+    covered_end: u64,
     turn_starts: &'a [u64],
     turns: u64,
 }
@@ -431,7 +432,7 @@ impl LogView<'_> {
             Ok(window) => {
                 let start = self.start(window.range.start, first, from);
                 let end = if window.range.end == self.records.len() {
-                    total
+                    self.covered_end
                 } else {
                     self.rows[window.range.end]
                 };
@@ -470,7 +471,7 @@ impl LogView<'_> {
         Ok(QueryResponse::SessionHistoryPage {
             from: self.start(window.range.start, requested.start, start),
             end,
-            truncated: window.range.len() < requested.len(),
+            truncated: self.from > start || window.range.len() < requested.len(),
             records: window.records,
         })
     }
@@ -625,6 +626,7 @@ impl SessionLog {
             from: 0,
             rows: &self.rows,
             end: self.next_row,
+            covered_end: self.next_row,
             turn_starts: &self.turn_starts,
             turns: self.fold.turns.len() as u64,
         }
@@ -737,69 +739,71 @@ impl SessionLog {
 /// the turn index of the whole log so the window is the one the whole log
 /// would give.
 pub(super) struct Tail {
-    cache_rows: Vec<u64>,
     records: Vec<SessionEventRecord>,
     rows: Vec<u64>,
     from: u64,
     end: u64,
+    covered_end: u64,
     index: TurnIndex,
 }
 
-/// Rows read per step while a tail is read backwards.
-pub(super) const TAIL_ROWS: u64 = 256;
-
 impl Tail {
-    /// Read the rows before `end` backwards from it until they reach the
-    /// baseline's turn start or hold more than a window's byte budget, past
-    /// which no baseline reaches.
-    fn read(
-        store: &SessionStore,
-        session_id: &str,
-        end: u64,
-        index: TurnIndex,
-    ) -> std::io::Result<Self> {
-        let start = LogView {
-            records: &[],
-            from: 0,
-            rows: &[],
-            end,
-            turn_starts: &index.starts,
-            turns: index.turns,
-        }
-        .turn_aligned_start(end.saturating_sub(BASELINE_RECORDS));
+    fn read_cut(
+        read: &LogRead,
+        after: Option<u64>,
+        page: Option<(u64, u32)>,
+    ) -> std::io::Result<Option<Self>> {
+        let Some(index) = read.index.clone() else {
+            return Ok(None);
+        };
+        let end = page.map_or(read.end, |(before, _)| before.min(read.end));
+        let after = after.filter(|after| *after <= end);
+        let start = after.unwrap_or_else(|| {
+            let count = page.map_or(BASELINE_RECORDS, |(_, count)| {
+                (count as u64).clamp(1, SESSION_HISTORY_RECORDS as u64)
+            });
+            let position = end.saturating_sub(count);
+            index
+                .starts
+                .partition_point(|row| *row <= position)
+                .checked_sub(1)
+                .map_or(position, |last| index.starts[last])
+        });
         let mut tail = Self {
-            cache_rows: Vec::new(),
             records: Vec::new(),
             rows: Vec::new(),
             from: start,
-            end,
+            end: read.end,
+            covered_end: end,
             index,
         };
-        let (mut low, mut bytes) = (end, 0);
-        while low > start && bytes <= SESSION_WINDOW_BYTES {
-            let from = low.saturating_sub(TAIL_ROWS).max(start);
-            let cache_rows = store.visit_projected_rows_backwards(
-                session_id,
-                from..low,
-                &HISTORY_PREVIEW_VERSION,
-                HISTORY_PREVIEW_CACHE_BYTES,
-                wire_record,
-                |row, record| {
-                    bytes += wire_len(&wire_record(&record)) + 1;
-                    tail.records.push(record);
-                    tail.rows.push(row);
-                    if bytes > SESSION_WINDOW_BYTES {
+        let mut bytes = 0;
+        read.visit_projected_rows(
+            start..end,
+            after.is_none(),
+            &HISTORY_PREVIEW_VERSION,
+            HISTORY_PREVIEW_CACHE_BYTES,
+            wire_record,
+            |row, record| {
+                bytes += wire_len(&record) + 1;
+                tail.records.push(record);
+                tail.rows.push(row);
+                if bytes > SESSION_WINDOW_BYTES {
+                    if after.is_some() {
+                        tail.covered_end = row + 1;
+                    } else {
                         tail.from = row;
                     }
-                    bytes <= SESSION_WINDOW_BYTES
-                },
-            )?;
-            tail.cache_rows.extend(cache_rows);
-            low = from;
+                    return false;
+                }
+                true
+            },
+        )?;
+        if after.is_none() {
+            tail.records.reverse();
+            tail.rows.reverse();
         }
-        tail.records.reverse();
-        tail.rows.reverse();
-        Ok(tail)
+        Ok(Some(tail))
     }
 
     fn view(&self) -> LogView<'_> {
@@ -808,6 +812,7 @@ impl Tail {
             from: self.from,
             rows: &self.rows,
             end: self.end,
+            covered_end: self.covered_end,
             turn_starts: &self.index.starts,
             turns: self.index.turns,
         }
@@ -823,13 +828,7 @@ impl Tail {
 /// for the session from then on is held in `pending`, in order, and takes the
 /// rows after that end.
 ///
-/// A long log with a turn index first has its tail read, and a baseline
-/// window cut from it answers the subscriptions waiting then and made later,
-/// while nothing is pending. Once one has, the log is `live`: records it
-/// accepts go out as they arrive, and a subscription that has to wait gets a
-/// window that ends after them.
 pub(super) struct Hydration {
-    tail: Option<Tail>,
     live: bool,
     pending: Vec<SessionEventRecord>,
     /// Subscription replies; one without a request id answers no request.
@@ -842,6 +841,27 @@ pub(super) struct Hydration {
 }
 
 type LogQuery = Box<dyn FnOnce(Result<&SessionLog, &str>) + Send>;
+
+type ItemQuery<T> = Box<dyn FnOnce(&SessionLog) -> Result<T, ProtocolError> + Send>;
+
+struct LogAnswer<T> {
+    query: std::sync::Mutex<Option<ItemQuery<T>>>,
+    sender: smol::channel::Sender<Result<T, ProtocolError>>,
+}
+
+impl<T> LogAnswer<T> {
+    fn answer_log(&self, log: Result<&SessionLog, ProtocolError>) {
+        if let Some(query) = self.query.lock().unwrap().take() {
+            let _ = self.sender.try_send(log.and_then(query));
+        }
+    }
+
+    fn complete(&self, result: Result<T, ProtocolError>) {
+        if self.query.lock().unwrap().take().is_some() {
+            let _ = self.sender.try_send(result);
+        }
+    }
+}
 
 impl AppState {
     /// The session's hydration, begun unless its log is being read already.
@@ -865,8 +885,8 @@ impl AppState {
             let read_id = session_id.to_string();
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
-                let end = match taken.recv().await {
-                    Ok(Ok(end)) => end,
+                let read = match taken.recv().await {
+                    Ok(Ok(read)) => read,
                     Ok(Err(error)) => {
                         host_cx.enqueue(move |state, cx| {
                             state.finish_hydration(read_id, Err(error), cx)
@@ -884,73 +904,38 @@ impl AppState {
                         return;
                     }
                 };
-                let tail = {
-                    let store = store.clone();
-                    let read_id = read_id.clone();
-                    host_cx
-                        .unblock(move || {
-                            if end <= BASELINE_RECORDS {
-                                return None;
-                            }
-                            let index = store.turn_index(&read_id).ok().flatten()?;
-                            Tail::read(&store, &read_id, end, index)
-                                .inspect_err(|error| {
-                                    log::warn!("could not read the tail of {read_id}: {error}")
-                                })
-                                .ok()
-                        })
-                        .await
-                };
-                let mut cache_rows = Vec::new();
-                if let Some(mut tail) = tail {
-                    cache_rows = std::mem::take(&mut tail.cache_rows);
+                let end = read.end;
+                let (tail, publication) = host_cx
+                    .unblock(move || {
+                        let tail = Tail::read_cut(&read, None, None).ok().flatten();
+                        (tail, read.take_publication())
+                    })
+                    .await;
+                if let Some(tail) = tail {
                     let tail_id = read_id.clone();
                     host_cx.enqueue(move |state, cx| state.serve_tail(&tail_id, tail, cx));
                 }
-                let (log, publication) = {
-                    let read_id = read_id.clone();
-                    host_cx
-                        .unblock(move || {
-                            if cache_rows.is_empty() {
-                                return (
-                                    store
-                                        .read_log_until(&read_id, end)
-                                        .map(SessionLog::new)
-                                        .map_err(|error| error.to_string()),
-                                    None,
-                                );
-                            }
-                            match store.read_log_with_projections(
-                                &read_id,
-                                end,
-                                &cache_rows,
-                                &HISTORY_PREVIEW_VERSION,
-                                HISTORY_PREVIEW_CACHE_BYTES,
-                                wire_record,
-                            ) {
-                                Ok((log, publication)) => {
-                                    (Ok(SessionLog::new(log)), Some(publication))
-                                }
-                                Err(error) => (Err(error.to_string()), None),
-                            }
-                        })
-                        .await
-                };
+                let full_id = read_id.clone();
+                let log = host_cx
+                    .unblock(move || {
+                        store
+                            .read_log_until(&full_id, end)
+                            .map(SessionLog::new)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await;
                 host_cx.enqueue(move |state, cx| state.finish_hydration(read_id, log, cx));
-                if let Some(publication) = publication {
-                    host_cx
-                        .unblock(move || {
-                            if let Err(error) = publication.publish() {
-                                log::warn!("could not publish history previews: {error}");
-                            }
-                        })
-                        .await;
-                }
+                host_cx
+                    .unblock(move || {
+                        if let Err(error) = publication.publish() {
+                            log::warn!("could not publish history previews: {error}");
+                        }
+                    })
+                    .await;
             });
             self.log_hydrations.insert(
                 session_id.to_string(),
                 Hydration {
-                    tail: None,
                     live: false,
                     pending: Vec::new(),
                     replies: Vec::new(),
@@ -969,13 +954,12 @@ impl AppState {
         hydration
     }
 
-    /// Answer subscriptions covered by the tail,
-    /// unless a record arrived since the read began: the tail ends before it.
     fn serve_tail(&mut self, session_id: &str, tail: Tail, cx: &mut HostCx) {
         let Some(hydration) = self.log_hydrations.get_mut(session_id) else {
             return;
         };
         if !hydration.pending.is_empty() {
+            hydration.live |= !hydration.replies.is_empty();
             return;
         }
         let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut hydration.replies)
@@ -985,17 +969,13 @@ impl AppState {
             });
         hydration.replies = waiting;
         hydration.live |= !ready.is_empty();
-        let view = tail.view();
-        for (request_id, subscription) in &ready {
+        for (request_id, subscription) in ready {
             self.reply_with(
-                view.events_window(subscription),
-                *request_id,
-                subscription,
+                tail.view().events_window(&subscription),
+                request_id,
+                &subscription,
                 cx,
             );
-        }
-        if let Some(hydration) = self.log_hydrations.get_mut(session_id) {
-            hydration.tail = Some(tail);
         }
     }
 
@@ -1138,12 +1118,50 @@ impl AppState {
         }
     }
 
-    /// Answer a subscription with its snapshot and acknowledge the request.
-    /// A session's events are answered from its log: now when it is
-    /// resident, from its tail when a baseline can be and nothing arrived
-    /// since the tail was read, otherwise once the log has been read; the
-    /// acknowledgement waits with it, so the window is the request's first
-    /// reply.
+    fn read_bounded<T: Send + 'static>(
+        &mut self,
+        session_id: &str,
+        read: impl FnOnce(&LogRead) -> std::io::Result<Option<T>> + Send + 'static,
+        finish: impl FnOnce(&mut Self, &mut HostCx, Option<T>, usize) + Send + 'static,
+        cx: &mut HostCx,
+    ) {
+        let accepted = self.hydrate_log(session_id, None, cx).pending.len();
+        let (snapshot, taken) = smol::channel::bounded(1);
+        self.enqueue_store_write(
+            StoreWrite::SnapshotLog {
+                id: session_id.to_owned(),
+                end: snapshot,
+            },
+            cx,
+        );
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let (result, publication) = host_cx
+                .unblock(move || {
+                    let read_cut = taken.recv_blocking().ok().and_then(Result::ok)?;
+                    let result = read(&read_cut)
+                        .inspect_err(|error| log::warn!("bounded history read: {error}"))
+                        .ok()
+                        .flatten();
+                    Some((result, read_cut.take_publication()))
+                })
+                .await
+                .map_or((None, None), |(result, publication)| {
+                    (result, Some(publication))
+                });
+            host_cx.enqueue(move |state, cx| finish(state, cx, result, accepted));
+            if let Some(publication) = publication {
+                host_cx
+                    .unblock(move || {
+                        if let Err(error) = publication.publish() {
+                            log::warn!("could not publish history previews: {error}");
+                        }
+                    })
+                    .await;
+            }
+        });
+    }
+
     pub(crate) fn reply_to_subscription(
         &mut self,
         request_id: Option<u64>,
@@ -1161,22 +1179,48 @@ impl AppState {
                 return;
             }
             let session_id = session_id.clone();
-            let hydration = self.hydrate_log(&session_id, None, cx);
-            let window = hydration
-                .tail
-                .as_ref()
-                .filter(|tail| {
-                    hydration.pending.is_empty()
-                        && subscription.after.is_none_or(|after| after >= tail.from)
-                })
-                .map(|tail| tail.view().events_window(&subscription));
-            match window {
-                Some(window) => {
-                    hydration.live = true;
-                    self.reply_with(window, request_id, &subscription, cx);
-                }
-                None => hydration.replies.push((request_id, subscription)),
-            }
+            let after = subscription.after;
+            self.hydrate_log(&session_id, None, cx)
+                .replies
+                .push((request_id, subscription.clone()));
+            let read_id = session_id.clone();
+            self.read_bounded(
+                &read_id,
+                move |read| Tail::read_cut(read, after, None),
+                move |state, cx, tail, _| {
+                    let Some(hydration) = state.log_hydrations.get_mut(&session_id) else {
+                        return;
+                    };
+                    if !hydration
+                        .replies
+                        .iter()
+                        .any(|reply| reply.0 == request_id && reply.1 == subscription)
+                    {
+                        return;
+                    }
+                    if let Some(tail) = tail {
+                        if !hydration.pending.is_empty() {
+                            hydration.live = true;
+                            return;
+                        }
+                        if let Some(position) = hydration
+                            .replies
+                            .iter()
+                            .position(|reply| reply.0 == request_id && reply.1 == subscription)
+                        {
+                            hydration.replies.remove(position);
+                            hydration.live = true;
+                            state.reply_with(
+                                tail.view().events_window(&subscription),
+                                request_id,
+                                &subscription,
+                                cx,
+                            );
+                        }
+                    }
+                },
+                cx,
+            );
             return;
         }
         if let Some(mut snapshot) = self.subscription_snapshot(&subscription, &cx.principal) {
@@ -1215,39 +1259,43 @@ impl AppState {
         }
     }
 
-    /// Answer a query from the session's log: now when it is resident,
-    /// otherwise once it has been read.
     fn query_session_log<T: Send + 'static>(
         &mut self,
         session_id: &str,
-        query: impl FnOnce(&SessionLog) -> Result<T, tcode_protocol::ProtocolError> + Send + 'static,
+        query: impl FnOnce(&SessionLog) -> Result<T, ProtocolError> + Send + 'static,
         cx: &mut HostCx,
-    ) -> HostTask<Result<T, tcode_protocol::ProtocolError>> {
+    ) -> (
+        std::sync::Arc<LogAnswer<T>>,
+        HostTask<Result<T, ProtocolError>>,
+    ) {
+        let (sender, answered) = smol::channel::bounded(1);
+        let answer = std::sync::Arc::new(LogAnswer {
+            query: std::sync::Mutex::new(Some(Box::new(query))),
+            sender,
+        });
         if let Some(log) = self.event_records.get(session_id) {
-            let result = query(log);
-            return cx.spawn_background(async move { result });
-        }
-        let (answer, answered) = smol::channel::bounded(1);
-        let read_id = session_id.to_string();
-        self.hydrate_log(session_id, None, cx)
-            .queries
-            .push(Box::new(move |log| {
-                let _ = answer.try_send(match log {
-                    Ok(log) => query(log),
-                    Err(error) => Err(tcode_protocol::ProtocolError {
+            answer.answer_log(Ok(log));
+        } else {
+            let pending = answer.clone();
+            let read_id = session_id.to_owned();
+            self.hydrate_log(session_id, None, cx)
+                .queries
+                .push(Box::new(move |log| {
+                    pending.answer_log(log.map_err(|error| ProtocolError {
                         code: "history_unavailable".into(),
                         message: format!("could not read the history of {read_id}: {error}"),
-                    }),
-                });
-            }));
-        cx.spawn_background(async move {
+                    }));
+                }));
+        }
+        let task = cx.spawn_background(async move {
             answered.recv().await.unwrap_or_else(|_| {
-                Err(tcode_protocol::ProtocolError {
+                Err(ProtocolError {
                     code: "host_stopped".into(),
-                    message: "the host stopped before the session's log was read".into(),
+                    message: "host stopped during history read".into(),
                 })
             })
-        })
+        });
+        (answer, task)
     }
 
     pub(crate) fn session_history_page(
@@ -1257,7 +1305,66 @@ impl AppState {
         limit: u32,
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
-        self.query_session_log(session_id, move |log| log.history_page(before, limit), cx)
+        let resident = self.event_records.contains_key(session_id);
+        let (answer, task) =
+            self.query_session_log(session_id, move |log| log.history_page(before, limit), cx);
+        if resident {
+            return task;
+        }
+        self.read_bounded(
+            session_id,
+            move |read| Tail::read_cut(read, None, Some((before, limit))),
+            move |_, _, tail, _| {
+                if let Some(tail) = tail.filter(|tail| before <= tail.end) {
+                    answer.complete(tail.view().history_page(before, limit));
+                }
+            },
+            cx,
+        );
+        task
+    }
+
+    fn query_item<T: Send + 'static>(
+        &mut self,
+        session_id: &str,
+        item_id: String,
+        query: impl FnOnce(&SessionLog) -> Result<T, ProtocolError> + Send + 'static,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<T, ProtocolError>> {
+        let resident = self.event_records.contains_key(session_id);
+        let (answer, task) = self.query_session_log(session_id, query, cx);
+        if resident {
+            return task;
+        }
+        let read_id = session_id.to_owned();
+        let addressed_id = item_id.clone();
+        self.read_bounded(
+            session_id,
+            move |read| read.read_item(&item_id).map(|log| log.map(SessionLog::new)),
+            move |state, _, log, accepted| {
+                if accepted > 0 {
+                    return;
+                }
+                let suffix = state
+                    .log_hydrations
+                    .get(&read_id)
+                    .map(|hydration| hydration.pending[accepted..].to_vec())
+                    .unwrap_or_default();
+                // V1 starts do not describe the final turn's closing state.
+                // A later mention could reuse the id in a newly opened turn.
+                if suffix.iter().any(|record| {
+                    record.item_id() == Some(addressed_id.as_str())
+                        || matches!(record.event, AgentEvent::RewindCompleted { .. })
+                }) {
+                    return;
+                }
+                if let Some(log) = log {
+                    answer.answer_log(Ok(&log));
+                }
+            },
+            cx,
+        );
+        task
     }
 
     pub(crate) fn item_image(
@@ -1268,8 +1375,9 @@ impl AppState {
         max_bytes: Option<u64>,
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, ProtocolError>> {
-        let read = self.query_session_log(
+        let read = self.query_item(
             session_id,
+            item_id.clone(),
             move |log| log.item_image(&item_id, image_index, max_bytes),
             cx,
         );
@@ -1285,8 +1393,9 @@ impl AppState {
         height: u32,
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, ProtocolError>> {
-        let read = self.query_session_log(
+        let read = self.query_item(
             session_id,
+            item_id.clone(),
             move |log| {
                 let image = log.image_attachment(&item_id, image_index)?;
                 tcode_services::image_bytes::ImageRead::preview(&image.data_base64, width, height)
@@ -1305,8 +1414,9 @@ impl AppState {
     ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
         let read_id = session_id.to_string();
         let scoped = matches!(cx.principal, tcode_protocol::Principal::Space { .. });
-        self.query_session_log(
+        self.query_item(
             session_id,
+            item_id.clone(),
             move |log| {
                 log.item_output(&read_id, &item_id).map_err(|error| {
                     if scoped && error.code == "unknown_item_output" {
@@ -1315,6 +1425,44 @@ impl AppState {
                         error
                     }
                 })
+            },
+            cx,
+        )
+    }
+
+    pub(crate) fn stored_command_output(
+        &mut self,
+        session_id: &str,
+        item_id: String,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<String, ProtocolError>> {
+        let scoped = matches!(cx.principal, tcode_protocol::Principal::Space { .. });
+        let read_id = session_id.to_owned();
+        self.query_item(
+            session_id,
+            item_id.clone(),
+            move |log| {
+                log.fold
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.id == item_id)
+                    .and_then(|entry| match &entry.content {
+                        EntryContent::Item(ItemContent::CommandExecution { output, .. }) => {
+                            Some(output.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        if scoped {
+                            ProtocolError::out_of_scope("item is outside this session")
+                        } else {
+                            ProtocolError {
+                                code: "unknown_stored_output".into(),
+                                message: format!("no stored command output {item_id} in {read_id}"),
+                            }
+                        }
+                    })
             },
             cx,
         )
@@ -1402,6 +1550,78 @@ fn decode_image_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_continuation_covers_only_the_rows_it_read() {
+        let root = std::env::temp_dir().join(format!("cold-cursor-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let oversized = serde_json::to_string(&AgentEvent::Warning {
+            message: "x".repeat(SESSION_WINDOW_BYTES + 1),
+        })
+        .unwrap();
+        let fixture = format!(
+            "{oversized}\n\n{{\"type\":\"delta\",\"item_id\":\"answer\",\"kind\":\"assistant_text\",\"text\":\"a\"}}\n{{\"type\":\"delta\",\"item_id\":\"answer\",\"kind\":\"assistant_text\",\"text\":\"b\"}}\n{{\"type\":\"warning\",\"message\":\"last\"}}\n"
+        );
+        store
+            .apply(&[
+                tcode_services::store::Mutation::replace_event_log("thread", fixture.into_bytes()),
+                tcode_services::store::Mutation::set_turn_index(
+                    "thread",
+                    TurnIndex {
+                        turns: 1,
+                        starts: vec![2],
+                    },
+                ),
+            ])
+            .unwrap();
+        let cut = store.snapshot_log("thread").unwrap();
+        let mut subscription = Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "thread".into(),
+            },
+            after: Some(0),
+            known_index: None,
+        };
+        let first = Tail::read_cut(&cut, subscription.after, None)
+            .unwrap()
+            .unwrap()
+            .view()
+            .events_window(&subscription);
+        assert!(matches!(
+            first,
+            ServerEvent::SessionSnapshot {
+                from: 0,
+                end: 1,
+                total: 5,
+                truncated: true,
+                ..
+            }
+        ));
+        subscription.after = Some(1);
+        let next = Tail::read_cut(&cut, subscription.after, None)
+            .unwrap()
+            .unwrap()
+            .view()
+            .events_window(&subscription);
+        let ServerEvent::SessionSnapshot {
+            from,
+            end,
+            total,
+            records,
+            truncated,
+            ..
+        } = next
+        else {
+            panic!("snapshot");
+        };
+        assert_eq!((from, end, total, truncated), (1, 5, 5, false));
+        assert_eq!(records.len(), 2);
+        assert!(matches!(&records[0].event, AgentEvent::Delta { text, .. } if text == "ab"));
+        assert!(matches!(&records[1].event, AgentEvent::Warning { message } if message == "last"));
+        drop(cut);
+        store.close().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn history_preview_policy_golden() {

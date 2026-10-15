@@ -70,12 +70,11 @@ pub(super) enum StoreWrite {
         id: String,
         completion: smol::channel::Sender<Result<(DiffPass, Duration), String>>,
     },
-    /// Answered with the row the session's next append takes, once every
-    /// write queued before it has committed: the rows before it are the log
-    /// as those writes left it.
+    /// Pin the committed end and turn index after all earlier queued writes
+    /// have been attempted. A failed write does not prevent a read.
     SnapshotLog {
         id: String,
-        end: smol::channel::Sender<Result<u64, String>>,
+        end: smol::channel::Sender<Result<tcode_services::store::LogRead, String>>,
     },
     /// Answered once every write queued before it has committed, or with the
     /// first store failure since the writer started: a write that failed is
@@ -450,7 +449,11 @@ impl StoreWriter {
                 failure
             }
             StoreWrite::SnapshotLog { id, end } => {
-                let _ = end.try_send(self.store.next_row(&id).map_err(|error| error.to_string()));
+                let _ = end.try_send(
+                    self.store
+                        .snapshot_log(&id)
+                        .map_err(|error| error.to_string()),
+                );
                 None
             }
             StoreWrite::Flush(completion) => {
