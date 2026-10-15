@@ -4,7 +4,7 @@ use std::{
     slice,
     sync::atomic::{AtomicU64, Ordering},
 };
-use tcode_client::speech::{SpeechEvent, SpeechRecognizer, SpeechSession};
+use tcode_client::speech::{SpeechError, SpeechEvent, SpeechRecognizer, SpeechSession};
 
 pub(crate) struct IosRecognizer;
 struct Session(u64);
@@ -20,8 +20,6 @@ unsafe extern "C" {
     fn tcode_ios_host_speech_stop(id: u64, finish: u8);
 }
 
-// gpui-component 0.7.1's SystemRecognizer has no iOS backend. ClientHost supplies
-// Apple's capture/recognition lifecycle to the shared SpeechRecognizer adapter.
 impl SpeechRecognizer for IosRecognizer {
     fn is_available(&self, locale: &str) -> bool {
         // SAFETY: Swift copies the locale synchronously on the UIKit main thread.
@@ -32,7 +30,7 @@ impl SpeechRecognizer for IosRecognizer {
         &self,
         locale: &str,
         events: async_channel::Sender<SpeechEvent>,
-    ) -> Result<Box<dyn SpeechSession>, String> {
+    ) -> Result<Box<dyn SpeechSession>, SpeechError> {
         let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         EVENTS.with(|sessions| sessions.borrow_mut().insert(id, events));
         // SAFETY: Swift copies the locale and retains the session until stop.
@@ -74,7 +72,7 @@ pub extern "C" fn tcode_ios_speech_event(id: u64, kind: u32, bytes: *const u8, l
         3 => SpeechEvent::Finished,
         5 => SpeechEvent::PermissionDenied,
         6 => SpeechEvent::Unsupported,
-        _ => SpeechEvent::Error(text),
+        _ => SpeechEvent::Error(text.into()),
     };
     EVENTS.with(|sessions| {
         let mut sessions = sessions.borrow_mut();
