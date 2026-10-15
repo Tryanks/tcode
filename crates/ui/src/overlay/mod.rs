@@ -348,6 +348,223 @@ mod tests {
         });
     }
 
+    struct ProjectDialogHost {
+        store: Entity<crate::store::WorkspaceStore>,
+        link: tcode_client::HostLink,
+        incoming: async_channel::Sender<String>,
+        outgoing: async_channel::Receiver<String>,
+    }
+
+    impl ProjectDialogHost {
+        fn new(cx: &mut TestAppContext) -> Self {
+            cx.update(crate::theme::init);
+            let (to_host, outgoing) = async_channel::unbounded();
+            let (incoming, from_host) = async_channel::unbounded();
+            let link = tcode_client::HostLink::new(to_host, from_host);
+            let store = cx.new(|cx| {
+                crate::store::WorkspaceStore::new_attached(
+                    link.clone(),
+                    crate::store::WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    false,
+                    cx,
+                )
+            });
+            crate::store::tests::seed_full_scope(&store, &incoming, vec![], cx);
+            Self {
+                store,
+                link,
+                incoming,
+                outgoing,
+            }
+        }
+
+        fn send(&self, message: tcode_protocol::HostMessage, cx: &mut TestAppContext) {
+            use std::future::Future as _;
+            self.incoming
+                .try_send(tcode_protocol::encode_line(&message).unwrap())
+                .unwrap();
+            let mut pump = std::pin::pin!(self.link.pump());
+            let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(pump.as_mut().poll(&mut task).is_pending());
+            self.store
+                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
+        }
+
+        fn index(&self, cx: &mut TestAppContext) {
+            self.send(
+                tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
+                    request_id: None,
+                    topic: tcode_protocol::Topic::Index,
+                    event: tcode_protocol::ServerEvent::IndexSnapshot(
+                        tcode_protocol::IndexSnapshot {
+                            summary: Default::default(),
+                            sessions: vec![],
+                            projects: vec![tcode_core::project::Project {
+                                id: "project".into(),
+                                name: "Project".into(),
+                                root: "/host/project".into(),
+                                quick_chat: false,
+                                icon_path: None,
+                                permission_defaults: Default::default(),
+                                created_at: 0,
+                            }],
+                        },
+                    ),
+                }),
+                cx,
+            );
+        }
+
+        fn commands(&self) -> Vec<(u64, tcode_protocol::Command)> {
+            std::iter::from_fn(|| self.outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    let message = tcode_protocol::decode_client_line(&line).unwrap();
+                    match message.payload {
+                        tcode_protocol::ClientPayload::Command(command) => {
+                            Some((message.id, command))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        }
+    }
+
+    fn project_dialog_enter(cx: &mut TestAppContext, kind: &str, invalid: bool) {
+        use tcode_protocol::{Command, CommandResponse, HostMessage};
+        let host = ProjectDialogHost::new(cx);
+        if kind == "change" {
+            host.index(cx);
+        }
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        cx.update(|window, cx| {
+            if kind == "change" {
+                crate::change_project_root_dialog::open(
+                    host.store.clone(),
+                    "project".into(),
+                    window,
+                    cx,
+                );
+            } else {
+                crate::add_project_dialog::open(host.store.clone(), window, cx);
+            }
+        });
+        draw(cx);
+        // Tab follows the rendered form's focus order, starting at the modal.
+        cx.simulate_keystrokes("tab");
+        if kind == "import" {
+            cx.simulate_keystrokes("tab tab");
+        }
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        });
+        cx.simulate_input(if invalid {
+            "   "
+        } else if kind == "create" {
+            "New project"
+        } else {
+            "/host/destination"
+        });
+        host.commands();
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        assert_eq!(
+            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            1,
+            "Enter must leave the dialog open until the action succeeds"
+        );
+        let commands = host.commands();
+        if invalid {
+            assert!(
+                commands.is_empty(),
+                "an empty path must not send a command: {commands:?}"
+            );
+            return;
+        }
+        let expected = match kind {
+            "import" => Command::CreateProject {
+                root: "/host/destination".into(),
+            },
+            "create" => Command::CreateNewProject {
+                name: "New project".into(),
+            },
+            "change" => Command::SetProjectRoot {
+                project_id: "project".into(),
+                root: "/host/destination".into(),
+                move_files: false,
+            },
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            commands.len(),
+            1,
+            "Enter must send the primary action: {commands:?}"
+        );
+        assert_eq!(commands[0].1, expected);
+        if kind == "change" {
+            cx.simulate_keystrokes("enter");
+            assert!(
+                host.commands().is_empty(),
+                "a busy action must not be sent twice"
+            );
+        }
+        host.send(
+            HostMessage::Ack {
+                id: commands[0].0,
+                result: Ok(if kind == "change" {
+                    CommandResponse::Unit
+                } else {
+                    CommandResponse::ProjectId(Some("project".into()))
+                }),
+            },
+            cx,
+        );
+        if kind == "create" {
+            assert_eq!(
+                overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+                1,
+                "creation waits until the project appears in the host index"
+            );
+            host.index(cx);
+        }
+        draw(cx);
+        assert_eq!(
+            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            0,
+            "a successful action closes the dialog"
+        );
+    }
+
+    #[gpui::test]
+    fn import_project_input_enter_runs_action(cx: &mut TestAppContext) {
+        project_dialog_enter(cx, "import", false);
+    }
+
+    #[gpui::test]
+    fn create_project_input_enter_runs_action(cx: &mut TestAppContext) {
+        project_dialog_enter(cx, "create", false);
+    }
+
+    #[gpui::test]
+    fn change_project_path_input_enter_runs_action(cx: &mut TestAppContext) {
+        project_dialog_enter(cx, "change", false);
+    }
+
+    #[gpui::test]
+    fn invalid_project_path_enter_keeps_dialog_open(cx: &mut TestAppContext) {
+        for kind in ["import", "change"] {
+            project_dialog_enter(cx, kind, true);
+        }
+    }
+
     #[gpui::test]
     fn compact_toast_obeys_seam_replaces_and_wide_keeps_card(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);

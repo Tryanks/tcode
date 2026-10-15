@@ -52,6 +52,7 @@ pub(super) fn open(
     let footer = dialog.clone();
     window.open_dialog(cx, move |builder, window, cx| {
         let dialog_content = content.clone();
+        let confirm = content.clone();
         builder
             .w(px(560.))
             .rounded(crate::material::radius_overlay(cx))
@@ -68,6 +69,11 @@ pub(super) fn open(
             )
             .content(move |content_el, _, _| content_el.child(dialog_content.clone()))
             .footer(render_footer(&footer, window, cx))
+            .on_ok(move |_, window, cx| {
+                confirm.update(cx, |dialog, cx| dialog.submit(window, cx));
+                // The host result owns dismissal, including validation failures.
+                false
+            })
     });
 }
 
