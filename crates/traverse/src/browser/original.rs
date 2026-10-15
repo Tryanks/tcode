@@ -47,9 +47,12 @@ pub(super) async fn serve<S: AsyncWrite + Unpin>(
     };
     let transfer = tokio::time::timeout(
         IDLE,
-        shared
-            .mux
-            .open_original(format!("browser:{device}"), Principal::Full, target),
+        shared.mux.open_original(
+            format!("browser:{device}"),
+            Principal::Full,
+            target,
+            shared.policy,
+        ),
     )
     .await;
     let transfer = match transfer {

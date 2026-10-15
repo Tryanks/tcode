@@ -7567,9 +7567,12 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         host.update_state_for_test(move |state, _| state.set_provider_launcher_for_test(launcher)),
     )
     .unwrap();
-    let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let mux = tcode_traverse::HostMux::new(host.attachments.clone(), host.from_host.clone());
     let connect = || {
-        let connection = mux.attach(tcode_protocol::Principal::Full);
+        let connection = mux.attach(
+            tcode_protocol::Principal::Full,
+            tcode_client::attachment::AttachmentPolicy::network(),
+        );
         let link = HostLink::new(connection.to_host, connection.from_host);
         smol::spawn({
             let link = link.clone();
@@ -8682,6 +8685,7 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
                     tcode_protocol::Query::ArchivedSessions,
                 ),
             },
+            tcode_client::attachment::AttachmentPolicy::LOCAL,
         )
     });
     cx.run_until_parked();
@@ -9831,10 +9835,13 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
     }
     let persisted = root.read_events("cold").unwrap();
     let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
-    let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let mux = tcode_traverse::HostMux::new(host.attachments.clone(), host.from_host.clone());
     let clients: Vec<HostLink> = (0..2)
         .map(|_| {
-            let connection = mux.attach(tcode_protocol::Principal::Full);
+            let connection = mux.attach(
+                tcode_protocol::Principal::Full,
+                tcode_client::attachment::AttachmentPolicy::network(),
+            );
             let link = HostLink::new(connection.to_host, connection.from_host);
             smol::spawn({
                 let link = link.clone();

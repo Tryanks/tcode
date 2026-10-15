@@ -21,9 +21,36 @@ struct Queue {
 
 #[derive(Clone)]
 pub struct Outgoing {
-    sender: Sender<String>,
+    sender: Destination,
     queue: Option<Arc<Mutex<Queue>>>,
     wake: Option<Sender<Wake>>,
+}
+
+#[derive(Clone)]
+enum Destination {
+    Serialized(Sender<String>),
+    Attached(crate::attachment::AttachmentSender),
+}
+
+impl Destination {
+    fn try_send(&self, line: String) -> Result<(), async_channel::TrySendError<String>> {
+        match self {
+            Self::Serialized(sender) => sender.try_send(line),
+            Self::Attached(sender) => sender.try_send(line),
+        }
+    }
+    fn close(&self) -> bool {
+        match self {
+            Self::Serialized(sender) => sender.close(),
+            Self::Attached(sender) => sender.close(),
+        }
+    }
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Serialized(sender) => sender.is_closed(),
+            Self::Attached(sender) => sender.is_closed(),
+        }
+    }
 }
 
 pub struct OutgoingReceiver {
@@ -38,7 +65,7 @@ pub fn channel() -> (Outgoing, OutgoingReceiver) {
     let queue = Arc::new(Mutex::new(Queue::default()));
     (
         Outgoing {
-            sender,
+            sender: Destination::Serialized(sender),
             queue: Some(queue.clone()),
             wake: Some(wake_tx),
         },
@@ -53,7 +80,17 @@ pub fn channel() -> (Outgoing, OutgoingReceiver) {
 impl From<Sender<String>> for Outgoing {
     fn from(sender: Sender<String>) -> Self {
         Self {
-            sender,
+            sender: Destination::Serialized(sender),
+            queue: None,
+            wake: None,
+        }
+    }
+}
+
+impl From<crate::attachment::AttachmentSender> for Outgoing {
+    fn from(sender: crate::attachment::AttachmentSender) -> Self {
+        Self {
+            sender: Destination::Attached(sender),
             queue: None,
             wake: None,
         }
