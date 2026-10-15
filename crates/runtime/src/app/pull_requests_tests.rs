@@ -408,6 +408,15 @@ fn a_synced_terminal_pull_request_settles_only_its_thread_once_its_stack_allows(
     };
     let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
+    acked(
+        &state,
+        &mut cx,
+        1,
+        Command::PatchSettings {
+            patch: tcode_protocol::SettingsPatch::AutoSettleOnMerge(true),
+        },
+    )
+    .unwrap();
     state.update(&mut cx, |state, _| {
         state.pull_requests = PullRequestRuntime::new(api);
         for meta in [linked("merged", 1, false), linked("stacked", 3, false)] {
@@ -736,6 +745,15 @@ fn discovery_shows_the_branch_pull_request_without_linking_it_and_its_merge_sett
     let worked_at = now_millis() - 3_600_000;
     let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
+    acked(
+        &state,
+        &mut cx,
+        1,
+        Command::PatchSettings {
+            patch: tcode_protocol::SettingsPatch::AutoSettleOnMerge(true),
+        },
+    )
+    .unwrap();
     state.update(&mut cx, |state, _| {
         state.pull_requests = PullRequestRuntime::new(api);
         let mut meta = linked_meta("active", false);
