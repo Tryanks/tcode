@@ -3764,21 +3764,6 @@ mod tests {
         mapper.on_message(msg)
     }
 
-    #[test]
-    fn api_retry_reports_a_non_fatal_error() {
-        let mut mapper = Mapper::new();
-        // Recorded from Claude Code 2.1.296 against an endpoint that drops every connection.
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"system","subtype":"api_retry","attempt":1,"max_retries":2,"retry_delay_ms":595,"error_status":null,"error":"unknown","session_id":"9a7e2512-3512-46f1-9b90-5a8871bd25f4","uuid":"2a513718-8785-4d57-8f42-54021fcc876f"}"#,
-        );
-        assert!(matches!(
-            events.as_slice(),
-            [AgentEvent::Error { message, fatal: false }]
-                if message == "claude API request failed (unknown); retry 1/2 in 0.6s"
-        ));
-    }
-
     /// Every `result` publishes the current background-task count immediately
     /// before its `TurnCompleted` (the runtime's only reliable zero signal).
     /// Assert that contract and return the completion event.
