@@ -1,2 +1,5 @@
 target/
 .git/
+tmp/
+.env
+projects/

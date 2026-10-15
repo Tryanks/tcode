@@ -85,16 +85,32 @@ impl SettingsStore {
         let Ok(bytes) = fs::read(&self.path) else {
             return Settings::default();
         };
-        match serde_json::from_slice::<Settings>(&bytes) {
-            Ok(mut settings) => {
-                settings.migrate_legacy();
-                settings
-            }
+        match Self::decode(&bytes) {
+            Ok(settings) => settings,
             Err(err) => {
                 log::warn!("failed to parse settings.json: {err}");
                 Settings::default()
             }
         }
+    }
+
+    /// A read before an automatic update must not replace unreadable settings with defaults.
+    pub fn try_load(&self) -> std::io::Result<Settings> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Settings::default());
+            }
+            Err(error) => return Err(error),
+        };
+        Self::decode(&bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+
+    fn decode(bytes: &[u8]) -> serde_json::Result<Settings> {
+        let mut settings: Settings = serde_json::from_slice(bytes)?;
+        settings.migrate_legacy();
+        Ok(settings)
     }
 
     /// A file of the host's own beside settings.json.
@@ -356,6 +372,20 @@ fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_settings_updates_reject_corrupt_input() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-settings-corrupt-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let store = SettingsStore::new(root.clone());
+        fs::write(&store.path, r#"{"providers":{"codex":{"enabled":"yes"}}}"#).unwrap();
+        assert_eq!(
+            store.try_load().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn loads_legacy_file_and_migrates_binary_paths() {
