@@ -203,28 +203,36 @@ impl SessionStore {
                             return Ok(None);
                         };
                         let end = log_end(db, connection, id)?;
+                        let revision = super::turn_index::revision(db, connection, id)?;
                         let activity = match read(db, connection, id, parent)? {
                             Some(activity) => activity,
                             None => fold(db, connection, id, parent)?,
                         };
-                        Ok(Some((parent, end, activity)))
+                        let index = super::turn_index::candidate(db, connection, id)?;
+                        Ok(Some((parent, end, revision, activity, index)))
                     })();
                     db.execute(connection, "ROLLBACK", ())?;
                     result
                 })?;
-                let Some((parent, end, activity)) = candidate else {
+                let Some((parent, end, revision, activity, index)) = candidate else {
                     continue;
                 };
                 let published = db.write(|db, connection| {
                     if session_parent(db, connection, id)? != Some(parent) {
                         return Ok(None);
                     }
-                    super::turn_index::backfill(db, connection, id)?;
+                    if log_end(db, connection, id)? != end
+                        || super::turn_index::revision(db, connection, id)? != revision
+                    {
+                        return Ok(None);
+                    }
+                    if let Some(index) = index
+                        && super::turn_index::read(db, connection, id)?.is_none()
+                    {
+                        super::turn_index::save(db, connection, id, &index)?;
+                    }
                     if let Some(current) = read(db, connection, id, parent)? {
                         return Ok(Some(current));
-                    }
-                    if log_end(db, connection, id)? != end {
-                        return Ok(None);
                     }
                     save(db, connection, id, parent, &activity)?;
                     Ok(Some(activity))

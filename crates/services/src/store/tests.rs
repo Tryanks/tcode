@@ -1245,6 +1245,7 @@ fn superseded_snapshots_lose_their_diffs_in_place_once() {
     store.close().unwrap();
     store = dir.store();
     assert!(store.threads_without_diff_pass().unwrap().is_empty());
+    store.backfill_thread_activity(&["codex".into()]).unwrap();
     let snapshot = parse_stored_line(
         std::str::from_utf8(
             SNAPSHOT_LOG
@@ -1358,8 +1359,10 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
         }
     }
     let expected = TurnIndex {
-        turns: 3,
-        starts: vec![2, 8, 15, 21, 26, 29, 31, 37],
+        turns: 2,
+        starts: vec![
+            2, 8, 15, 21, 26, 29, 31, 37, 42, 45, 48, 51, 54, 57, 61, 66, 71,
+        ],
     };
     assert_eq!(store.turn_index("thread").unwrap(), Some(expected.clone()));
     store
@@ -1368,6 +1371,11 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
             Mutation::clone_events("thread", "fork"),
         ])
         .unwrap();
+    assert!(store.turn_index("import").unwrap().is_none());
+    let mut imported = SessionMeta::new(ProviderKind::Codex, dir.path().to_owned(), None);
+    imported.id = "import".into();
+    store.upsert_meta(&imported).unwrap();
+    store.backfill_thread_activity(&["import".into()]).unwrap();
     for id in ["import", "fork"] {
         assert_eq!(store.turn_index(id).unwrap(), Some(expected.clone()));
     }
@@ -1376,7 +1384,7 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
             db.write(|db, connection| {
                 db.execute(
                     connection,
-                    "UPDATE turn_index_v2 SET fold_version = 1 WHERE session_id = 'thread'",
+                    "UPDATE turn_index SET fold_version = 0 WHERE session_id = 'thread'",
                     (),
                 )?;
                 Ok(())

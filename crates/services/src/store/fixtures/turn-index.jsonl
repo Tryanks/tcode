@@ -38,3 +38,35 @@
 {"type":"item_completed","id":"reused","content":{"kind":"user_message","text":"retry after rejection"}}
 {"type":"turn_started","turn_id":"retry"}
 {"type":"turn_completed","turn_id":"retry","status":"completed","usage":null}
+{"type":"turn_checkpoint","turn_id":"snapshot","checkpoint_id":"clear-all"}
+{"type":"rewind_completed","checkpoint_id":"clear-all","mode":"conversation","prefill":null}
+{"type":"provider_relay","from_provider":"codex","from_model":null,"to_provider":"claude_code","to_model":null}
+{"type":"turn_checkpoint","turn_id":"relay","checkpoint_id":"clear-relay"}
+{"type":"rewind_completed","checkpoint_id":"clear-relay","mode":"conversation","prefill":null}
+{"type":"served_model","model":"model-a","reason":null}
+{"type":"turn_checkpoint","turn_id":"model","checkpoint_id":"clear-model"}
+{"type":"rewind_completed","checkpoint_id":"clear-model","mode":"conversation","prefill":null}
+{"type":"error","message":"failed","fatal":false}
+{"type":"turn_checkpoint","turn_id":"error","checkpoint_id":"clear-error"}
+{"type":"rewind_completed","checkpoint_id":"clear-error","mode":"conversation","prefill":null}
+{"type":"provider_start_failed","error":"cannot start"}
+{"type":"turn_checkpoint","turn_id":"start-error","checkpoint_id":"clear-start"}
+{"type":"rewind_completed","checkpoint_id":"clear-start","mode":"conversation","prefill":null}
+{"type":"session_closed","reason":"provider exited"}
+{"type":"turn_checkpoint","turn_id":"closed","checkpoint_id":"clear-closed"}
+{"type":"rewind_completed","checkpoint_id":"clear-closed","mode":"conversation","prefill":null}
+{"type":"delta","item_id":"stream","kind":"assistant_text","text":"created by delta"}
+{"type":"item_completed","id":"stream","content":{"kind":"assistant_message","text":"final"}}
+{"type":"turn_checkpoint","turn_id":"delta","checkpoint_id":"clear-delta"}
+{"type":"rewind_completed","checkpoint_id":"clear-delta","mode":"conversation","prefill":null}
+{"type":"proposed_plan_delta","item_id":"plan","text":"draft"}
+{"type":"proposed_plan","item_id":"plan","markdown":"final plan"}
+{"type":"turn_started","turn_id":"plan-turn"}
+{"type":"turn_completed","turn_id":"plan-turn","status":"completed","usage":null}
+{"type":"steer_requested","request_id":"relocated","text":"between turns","attachments":[]}
+{"type":"turn_started","turn_id":"running"}
+{"type":"steer_accepted","request_id":"relocated"}
+{"type":"turn_checkpoint","turn_id":"running","checkpoint_id":"drop-relocated"}
+{"type":"turn_completed","turn_id":"running","status":"completed","usage":null}
+{"type":"rewind_completed","checkpoint_id":"drop-relocated","mode":"conversation","prefill":null}
+{"type":"item_completed","id":"relocated","content":{"kind":"user_message","text":"send again after rewind"}}

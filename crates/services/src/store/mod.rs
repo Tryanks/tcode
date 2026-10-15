@@ -255,6 +255,7 @@ enum Op {
         session_id: String,
         line: Vec<u8>,
         projection: Option<(String, Vec<u8>)>,
+        record: Box<StoredEvent>,
     },
     ReplaceEventLog {
         session_id: String,
@@ -263,10 +264,6 @@ enum Op {
     CloneEvents {
         src: String,
         dst: String,
-    },
-    SetTurnIndex {
-        session_id: String,
-        index: TurnIndex,
     },
     UpsertMeta(Box<SessionMeta>),
     UpsertProject(Box<Project>),
@@ -300,6 +297,13 @@ impl Mutation {
             session_id: session_id.to_owned(),
             line,
             projection,
+            record: Box::new(StoredEvent {
+                ts: Some(ts),
+                event: event.clone(),
+                author: author.cloned(),
+                origin,
+                elided: None,
+            }),
         }))
     }
 
@@ -317,15 +321,6 @@ impl Mutation {
         Self(Op::CloneEvents {
             src: src.to_owned(),
             dst: dst.to_owned(),
-        })
-    }
-
-    /// Record the turns of the fold of the session's whole log, as of this
-    /// change.
-    pub fn set_turn_index(session_id: &str, index: TurnIndex) -> Self {
-        Self(Op::SetTurnIndex {
-            session_id: session_id.to_owned(),
-            index,
         })
     }
 
@@ -375,8 +370,7 @@ impl Mutation {
             }
             Op::CloneEvents { dst, .. } => Some(dst),
             Op::RemoveSession(id) => Some(id),
-            Op::SetTurnIndex { .. }
-            | Op::UpsertMeta(_)
+            Op::UpsertMeta(_)
             | Op::UpsertProject(_)
             | Op::RemoveProject(_)
             | Op::KeepWorktree(_) => None,
@@ -698,9 +692,15 @@ impl SessionStore {
         let icons = self.run("write", |db| {
             db.write(|db, connection| {
                 let mut icons = Vec::new();
+                let mut indices = turn_index::Batch::new();
                 for mutation in mutations {
-                    apply_op(db, connection, &mutation.0, &mut icons)?;
+                    if !matches!(mutation.0, Op::AppendEvent { .. }) {
+                        turn_index::flush(db, connection, &indices)?;
+                        indices.clear();
+                    }
+                    apply_op(db, connection, &mutation.0, &mut icons, &mut indices)?;
                 }
+                turn_index::flush(db, connection, &indices)?;
                 Ok(icons)
             })
         })?;
@@ -1288,12 +1288,14 @@ fn apply_op(
     connection: &turso::Connection,
     op: &Op,
     icons: &mut Vec<Option<PathBuf>>,
+    indices: &mut turn_index::Batch,
 ) -> io::Result<()> {
     match op {
         Op::AppendEvent {
             session_id,
             line,
             projection,
+            record,
         } => {
             let mut last = None;
             db.query(
@@ -1333,14 +1335,10 @@ fn apply_op(
                 }
             };
             insert_segments(db, connection, session_id, next, [line])?;
-            let record = decode_row(line)
-                .map_err(invalid_data)?
-                .ok_or_else(|| invalid_data("an appended event is blank"))?
-                .stored;
             if tcode_core::settlement::ThreadActivity::moves_clock(&record.event) {
-                activity::append(db, connection, session_id, &record)?;
+                activity::append(db, connection, session_id, record)?;
             }
-            turn_index::append(db, connection, session_id, next as u64, &record)?;
+            turn_index::append(db, connection, indices, session_id, next as u64, record)?;
             if let Some((version, body)) = projection
                 && let Err(error) = db.execute(
                     connection,
@@ -1352,6 +1350,7 @@ fn apply_op(
             }
         }
         Op::ReplaceEventLog { session_id, bytes } => {
+            turn_index::replace_revision(db, connection, session_id)?;
             db.execute(
                 connection,
                 "DELETE FROM events WHERE session_id = ?1",
@@ -1360,9 +1359,10 @@ fn apply_op(
             insert_segments(db, connection, session_id, 0, segments(bytes))?;
             activity::recompute(db, connection, session_id)?;
             superseded::forget_pass(db, connection, session_id)?;
-            turn_index::rebuild(db, connection, session_id)?;
+            turn_index::forget(db, connection, session_id)?;
         }
         Op::CloneEvents { src, dst } => {
+            turn_index::replace_revision(db, connection, dst)?;
             db.execute(
                 connection,
                 "DELETE FROM events WHERE session_id = ?1",
@@ -1376,10 +1376,7 @@ fn apply_op(
             )?;
             activity::recompute(db, connection, dst)?;
             superseded::forget_pass(db, connection, dst)?;
-            turn_index::rebuild(db, connection, dst)?;
-        }
-        Op::SetTurnIndex { session_id, index } => {
-            turn_index::set(db, connection, session_id, index)?
+            turn_index::copy(db, connection, src, dst)?;
         }
         Op::UpsertMeta(meta) => {
             let mut previous_parent = None;
@@ -1419,6 +1416,7 @@ fn apply_op(
             )?;
         }
         Op::RemoveSession(id) => {
+            turn_index::replace_revision(db, connection, id)?;
             activity::remove(db, connection, id)?;
             db.execute(
                 connection,

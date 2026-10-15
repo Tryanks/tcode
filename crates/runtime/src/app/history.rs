@@ -571,13 +571,6 @@ impl SessionLog {
         self.next_row
     }
 
-    pub(super) fn turn_index(&self) -> TurnIndex {
-        TurnIndex {
-            turns: self.fold.turns.len() as u64,
-            starts: self.turn_starts.clone(),
-        }
-    }
-
     fn view(&self) -> LogView<'_> {
         LogView {
             records: &self.records,
@@ -961,15 +954,6 @@ impl AppState {
         }
         for query in hydration.queries {
             query(Ok(&log));
-        }
-        if !indexed {
-            self.enqueue_store_write(
-                StoreWrite::SetTurnIndex {
-                    id: session_id.clone(),
-                    index: log.turn_index(),
-                },
-                cx,
-            );
         }
         if !retained {
             return;
@@ -1462,6 +1446,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn append_index_matches_the_full_session_log_fixture() {
+        let root =
+            std::env::temp_dir().join(format!("turn-boundary-fixture-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        for (row, line) in include_str!("../../../services/src/store/fixtures/turn-index.jsonl")
+            .lines()
+            .enumerate()
+        {
+            let event = serde_json::from_str::<AgentEvent>(line).unwrap();
+            store.append_event("fixture", row as u64, &event).unwrap();
+        }
+        let log = SessionLog::new(store.read_log("fixture").unwrap());
+        assert_eq!(
+            store.turn_index("fixture").unwrap(),
+            Some(TurnIndex {
+                turns: log.fold.turns.len() as u64,
+                starts: log.turn_starts,
+            })
+        );
+        store.close().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cold_continuation_covers_only_the_rows_it_read() {
         let root = std::env::temp_dir().join(format!("cold-cursor-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
@@ -1478,6 +1486,10 @@ mod tests {
                 fixture.into_bytes(),
             )])
             .unwrap();
+        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        meta.id = "thread".into();
+        store.upsert_meta(&meta).unwrap();
+        store.backfill_thread_activity(&["thread".into()]).unwrap();
         let cut = store.snapshot_log("thread").unwrap();
         let mut subscription = Subscription {
             topic: Topic::SessionEvents {

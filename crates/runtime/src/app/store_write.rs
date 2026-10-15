@@ -1,5 +1,5 @@
 use super::*;
-use tcode_services::store::{DiffPass, Mutation, TurnIndex};
+use tcode_services::store::{DiffPass, Mutation};
 
 /// A drain of the queue is committed in transactions of at most this many
 /// writes and about this many bytes; streamed deltas then share a commit
@@ -16,11 +16,6 @@ pub(super) enum StoreWrite {
         author: Option<Author>,
         origin: Option<MessageOrigin>,
         event: Box<AgentEvent>,
-    },
-    /// The full-fold result used to seed an index during migration.
-    SetTurnIndex {
-        id: String,
-        index: TurnIndex,
     },
     UpsertMeta {
         meta: Box<SessionMeta>,
@@ -132,9 +127,6 @@ impl StoreWrite {
                     Err(error) => return Some(Err(error.to_string())),
                 }
             }
-            StoreWrite::SetTurnIndex { id, index } => {
-                vec![Mutation::set_turn_index(id, index.clone())]
-            }
             StoreWrite::UpsertMeta { meta, .. } => vec![Mutation::upsert_meta((**meta).clone())],
             StoreWrite::UpsertProject(project) => vec![Mutation::upsert_project(project.clone())],
             StoreWrite::RemoveSessions {
@@ -160,9 +152,7 @@ impl StoreWrite {
 
     fn member(self) -> Member {
         let (failure, completion): (fn(String) -> RuntimeError, _) = match self {
-            StoreWrite::AppendEvent { .. } | StoreWrite::SetTurnIndex { .. } => {
-                (|error| RuntimeError::PersistEvent { error }, None)
-            }
+            StoreWrite::AppendEvent { .. } => (|error| RuntimeError::PersistEvent { error }, None),
             StoreWrite::UpsertMeta { initial: true, .. } => {
                 (|error| RuntimeError::PersistSession { error }, None)
             }
@@ -450,7 +440,6 @@ impl StoreWriter {
                 None
             }
             StoreWrite::AppendEvent { .. }
-            | StoreWrite::SetTurnIndex { .. }
             | StoreWrite::UpsertMeta { .. }
             | StoreWrite::UpsertProject(_)
             | StoreWrite::RemoveSessions { .. }

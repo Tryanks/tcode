@@ -5841,6 +5841,7 @@ fn idle_histories_evict_oldest_by_bytes_and_bypass_oversized_logs() {
             request,
         );
         assert!(!window.records.is_empty());
+        cx.run_until(|state| state.event_records.contains_key(id));
         through_pipe(&state, cx, request + 1, unsubscribe_events(id));
         if index >= 2 {
             state.read(|state| {
@@ -8991,6 +8992,8 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
         open_stored_session(&store, "thread");
         let mut conversation = store.read_events("thread").unwrap();
         let state = cx.new_entity(TestClientState::new((*store).clone()));
+        state.update(cx, |state, cx| state.start_activity(cx));
+        cx.run_until(|state| state.store.turn_index("thread").unwrap().is_some());
         window_reply(
             &through_pipe(&state, cx, 1, subscribe_events("thread", None)),
             1,
@@ -9074,6 +9077,19 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
 /// appends did, an open one included, through the store writer.
 #[test]
 fn the_startup_pass_drops_superseded_diffs_of_every_stored_thread() {
+    struct CleanupLog(std::sync::Mutex<Vec<String>>);
+    impl log::Log for CleanupLog {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            self.0.lock().unwrap().push(record.args().to_string());
+        }
+        fn flush(&self) {}
+    }
+    static LOG: CleanupLog = CleanupLog(std::sync::Mutex::new(Vec::new()));
+    log::set_logger(&LOG).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("diff-pass");
     let log = format!(
@@ -9111,6 +9127,19 @@ fn the_startup_pass_drops_superseded_diffs_of_every_stored_thread() {
             "{id}"
         );
     }
+    drop(state);
+    LOG.0.lock().unwrap().clear();
+    let cx = &mut TestAppContext::default();
+    let restarted = cx.new_entity(TestClientState::new((*store).clone()));
+    restarted.update(cx, |state, cx| state.start_diff_pass(cx));
+    cx.run_until(|_| {
+        LOG.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line == "superseded diff cleanup complete: no work")
+    });
+    restarted.read(|state| assert!(state.diff_pass.is_none()));
 }
 
 /// A thread opens with about half a megabyte of history however long its
@@ -10062,6 +10091,7 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
             fixture.as_bytes().to_vec(),
         )])
         .unwrap();
+    store.backfill_thread_activity(&["items".into()]).unwrap();
     let whole = SessionLog::new(store.read_log("items").unwrap());
     let read = store.snapshot_log("items").unwrap();
     assert!(read.read_item("reused").unwrap().is_none());
@@ -10102,6 +10132,8 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
             rewind_fixture.into_bytes(),
         )])
         .unwrap();
+    open_stored_session(&store, "rewound");
+    store.backfill_thread_activity(&["rewound".into()]).unwrap();
     let read = store.snapshot_log("rewound").unwrap();
     assert!(read.read_item("removed").unwrap().is_none());
     assert!(
@@ -10124,17 +10156,44 @@ fn cold_item_reads_match_folded_streams_and_reused_ids() {
 }
 
 #[test]
-fn append_index_matches_the_full_session_log_fixture() {
-    let store = TestStore::new("turn-boundary-fixture");
-    for (row, line) in include_str!("../../../services/src/store/fixtures/turn-index.jsonl")
-        .lines()
-        .enumerate()
-    {
-        let event = serde_json::from_str::<AgentEvent>(line).unwrap();
-        store.append_event("fixture", row as u64, &event).unwrap();
-    }
-    let log = SessionLog::new(store.read_log("fixture").unwrap());
-    assert_eq!(store.turn_index("fixture").unwrap(), Some(log.turn_index()));
+fn an_unindexed_cold_thread_opens_through_hydration() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("unindexed-history");
+    open_stored_session(&store, "legacy");
+    store
+        .apply(&[tcode_services::store::Mutation::replace_event_log(
+            "legacy",
+            include_bytes!("../../../services/src/store/fixtures/turn-index.jsonl").to_vec(),
+        )])
+        .unwrap();
+    assert!(store.turn_index("legacy").unwrap().is_none());
+    let whole = SessionLog::new(store.read_log("legacy").unwrap());
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let window = window_reply(
+        &through_pipe(&state, cx, 1, subscribe_events("legacy", None)),
+        1,
+    );
+    assert_eq!(
+        window,
+        window_of(&whole.events_window(&Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "legacy".into()
+            },
+            after: None,
+            known_index: None,
+        }))
+        .unwrap()
+    );
+    state.read(|state| {
+        assert!(state.event_records.contains_key("legacy"));
+        assert!(!state.log_hydrations.contains_key("legacy"));
+    });
+    let page = query_reply(
+        &through_pipe(&state, cx, 2, history_page("legacy", window.end)),
+        2,
+    );
+    assert_eq!(page, whole.history_page(window.end, 200).unwrap());
+    assert!(store.turn_index("legacy").unwrap().is_none());
 }
 
 #[test]
