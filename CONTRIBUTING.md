@@ -124,7 +124,7 @@ cd tcode
 cargo run
 ```
 
-If `mbx` is installed, run cargo through it (`mbx cargo ...`) so compiled work
+If `mbx` is installed, run cargo through it (`mbx build`, `mbx nextest run`, ...) so compiled work
 is shared across worktrees; the [`mbx` skill](.agents/skills/mbx/SKILL.md)
 has the detection and sandbox details.
 

@@ -19,11 +19,11 @@ explicit form below still works.
 
 ## Use
 
-- Prefix every cargo command: `mbx cargo build --release -p tcode --locked`,
-  `mbx cargo nextest run --workspace --locked`, `mbx cargo clippy ...`,
-  `mbx cargo run ...`. The arguments are unchanged.
+- Replace the word `cargo` with `mbx`: `mbx build --release -p tcode --locked`,
+  `mbx nextest run --workspace --locked`, `mbx clippy ...`, `mbx run ...`.
+  The subcommand and arguments are unchanged; `mbx cargo ...` is rejected.
 - When `mbx` is not on PATH inside a sandbox, call the binary mise installed:
-  `$(mise where mr-boxington)/.mise-bins/mbx cargo <args>` (on this machine
+  `$(mise where mr-boxington)/.mise-bins/mbx <cargo-subcommand> <args>` (on this machine
   `~/.local/share/mise/installs/mr-boxington/latest/.mise-bins/mbx`).
 - A worktree whose `target/` is a symlink into `~/Library/Caches/mbx/targets`
   is managed. A plain `target/` directory was built by raw cargo: run
