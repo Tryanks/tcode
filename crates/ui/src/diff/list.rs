@@ -1,13 +1,13 @@
 //! Tcode review slots and file navigation around Kit's virtualized Diff.
 use super::model::PreparedFile;
 use crate::{
-    material,
     icon::{Icon, IconName},
+    material,
     sizing::Sizable as _,
     theme::ActiveTheme as _,
     widgets::{
         button::{Button, ButtonVariants as _},
-        menu::{ContextMenuExt as _, PopupMenu},
+        menu::{DropdownMenu as _, PopupMenu},
     },
 };
 use agent::FileChangeKind;
@@ -30,7 +30,6 @@ use tcode_core::session::ReviewSide;
 #[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_diff, no_json)]
 pub(crate) enum DiffSelectionMenu {
-    CopyLines,
     AddComment,
 }
 
@@ -61,6 +60,7 @@ pub(crate) struct DiffList {
     pub state: Entity<DiffState>,
     dirty: Cell<bool>,
     visible_file: Rc<Cell<Option<usize>>>,
+    source_anchor: Rc<RefCell<Option<DiffLinePosition>>>,
     subscription: RefCell<Option<Subscription>>,
 }
 impl DiffList {
@@ -73,55 +73,60 @@ impl DiffList {
             selection: None,
             dirty: Cell::new(false),
             visible_file: Rc::new(Cell::new(None)),
+            source_anchor: Rc::new(RefCell::new(None)),
             subscription: RefCell::new(None),
         }
     }
     pub fn layout(&self, index: usize) -> FileLayout {
         self.layouts.get(index).copied().unwrap_or_default()
     }
-    pub fn relayout(&self) {
+    pub fn relayout(&mut self) {
+        let range = self.selection.as_ref().map(|selection| {
+            DiffLineRange::new(
+                selection.file.clone(),
+                if selection.side == ReviewSide::Old {
+                    DiffSide::Original
+                } else {
+                    DiffSide::Modified
+                },
+                selection.line_start as usize,
+                selection.line_end as usize,
+            )
+        });
+        self.select(range.as_ref());
         self.dirty.set(true);
     }
     pub fn set_layouts(&mut self, layouts: Vec<FileLayout>) {
         self.layouts = layouts;
     }
     pub fn scroll_to_file(&self, file: usize, cx: &mut App) {
-        if let Some(file) = self.files.get(file) {
+        if let Some(document) = self.files.get(file) {
+            self.visible_file.set(Some(file));
+            self.source_anchor.borrow_mut().take();
             self.state
-                .update(cx, |state, cx| state.scroll_to_file(&file.path, cx));
+                .update(cx, |state, cx| state.scroll_to_file(&document.path, cx));
         }
     }
     pub fn top_file(&self, _split: bool) -> Option<usize> {
         self.visible_file.get()
     }
-    pub fn selected_lines(&self) -> String {
-        let Some(selection) = &self.selection else {
-            return String::new();
-        };
-        self.files
-            .iter()
-            .find(|file| file.path == selection.file)
-            .map(|file| {
-                file.all_rows
-                    .iter()
-                    .skip(selection.row_start.min(selection.row_end))
-                    .take(selection.row_start.abs_diff(selection.row_end) + 1)
-                    .map(|row| row.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default()
+    pub fn clear_selection(&mut self, cx: &mut App) {
+        self.selection = None;
+        self.state
+            .update(cx, |state, cx| state.set_selected_lines(None, cx));
     }
     fn select(&mut self, range: Option<&DiffLineRange>) {
         self.selection = range.and_then(|range| {
             // Host review anchors address one side of one file.
             if range.side() != range.end_side() { return None; }
             let file = self.files.iter().find(|file| file.path == range.path().as_str())?;
+            if file.parse_error { return None; }
             let side = if range.side() == DiffSide::Original { ReviewSide::Old } else { ReviewSide::New };
             let index = |line: usize| file.all_rows.iter().position(|row| match side { ReviewSide::Old => row.old, ReviewSide::New => row.new } == Some(line as u32));
             let start = index(range.start())?;
             let end = index(range.end())?;
-            Some(LineSelection { file: file.path.clone(), row_start: start, row_end: end, line_start: range.start() as u32, line_end: range.end() as u32, side, start_index: start, end_index: end })
+            let (start, end) = (start.min(end), start.max(end));
+            Some(LineSelection { file: file.path.clone(), row_start: start, row_end: end, line_start: range.start().min(range.end()) as u32, line_end: range.start().max(range.end()) as u32, side, start_index: start, end_index: end })
         });
     }
 }
@@ -135,22 +140,12 @@ pub(crate) trait DiffListHost: Sized + 'static {
     fn diff_list(&self) -> Option<&DiffList>;
     fn diff_list_mut(&mut self) -> Option<&mut DiffList>;
     fn load_context(&mut self, _file: usize, _cx: &mut Context<Self>) {}
+    fn has_more_files(&self, _cx: &App) -> bool {
+        false
+    }
     fn file_menu(&self, file: usize, cx: &App) -> FileMenu;
     fn gap_state(&self, _file: usize, _expandable: bool) -> GapState {
         GapState::Fixed(None)
-    }
-    fn header_title(&self, file: usize, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .min_w_0()
-            .truncate()
-            .child(
-                self.diff_list()
-                    .and_then(|list| list.files.get(file))
-                    .map(|file| file.path.clone())
-                    .unwrap_or_default(),
-            )
-            .text_color(cx.theme().foreground)
-            .into_any_element()
     }
     fn header_note(&self, _file: usize, _cx: &mut Context<Self>) -> Option<AnyElement> {
         None
@@ -172,7 +167,7 @@ pub(crate) trait DiffListHost: Sized + 'static {
         Vec::new()
     }
     fn placeholder(&self, _file: usize, cx: &mut Context<Self>) -> AnyElement {
-        render_notice(crate::tr!("diff.no_text").into_owned(), cx)
+        render_notice(crate::tr!("diff.no_text").into_owned(), cx).into_any_element()
     }
     fn review_comment_menu(&self, _cx: &App) -> Option<(bool, SharedString)> {
         None
@@ -198,7 +193,26 @@ pub(crate) fn render_list<H: DiffListHost>(
             .map(|file| file.path.clone());
         state.update(cx, |state, cx| {
             state.set_files(list.files.iter().map(|file| file.document.clone()), cx);
-            if let Some(path) = top {
+            state.set_selected_lines(
+                list.selection.as_ref().map(|selection| {
+                    DiffLineRange::new(
+                        selection.file.clone(),
+                        if selection.side == ReviewSide::Old {
+                            DiffSide::Original
+                        } else {
+                            DiffSide::Modified
+                        },
+                        selection.line_start as usize,
+                        selection.line_end as usize,
+                    )
+                }),
+                cx,
+            );
+            // Kit 0.7.3 has no viewport/append API. Restore the reader's last
+            // observed source line when rebuilding after a host page arrives.
+            if let Some(anchor) = list.source_anchor.borrow().clone() {
+                state.scroll_to_line(anchor, cx);
+            } else if let Some(path) = top {
                 state.scroll_to_file(&path, cx);
             }
         });
@@ -213,7 +227,13 @@ pub(crate) fn render_list<H: DiffListHost>(
             cx,
         );
         for (index, file) in list.files.iter().enumerate() {
-            state.set_file_collapsed(&file.path, list.layout(index) == FileLayout::Header, cx);
+            // Kit has no notice slot. Keep host-only binary/oversized details
+            // in the file annotation, suppressing its empty-document notice.
+            if file.all_rows.is_empty() && !file.full_source && !file.parse_error {
+                state.set_file_collapsed(&file.path, true, cx);
+            } else if let Some(layout) = list.layouts.get(index) {
+                state.set_file_collapsed(&file.path, *layout == FileLayout::Header, cx);
+            }
         }
     });
     if list.subscription.borrow().is_none() {
@@ -252,10 +272,10 @@ pub(crate) fn render_list<H: DiffListHost>(
     positions.dedup();
     let mut annotations = positions
         .into_iter()
-        .enumerate()
-        .map(|(index, (path, side, line))| {
+        .map(|(path, side, line)| {
+            let id = SharedString::from(format!("tcode-review:{side:?}:{line}:{path}"));
             DiffAnnotation::line(
-                ("tcode-review", index),
+                id,
                 DiffLinePosition::new(
                     path,
                     if side == ReviewSide::Old {
@@ -269,51 +289,96 @@ pub(crate) fn render_list<H: DiffListHost>(
         })
         .collect::<Vec<_>>();
     for (index, file) in list.files.iter().enumerate() {
-        if list.layout(index) == FileLayout::Placeholder || file.all_rows.is_empty() {
+        if list.layout(index) == FileLayout::Placeholder
+            || file.all_rows.is_empty()
+            || file.parse_error
+        {
             annotations.push(DiffAnnotation::file(
                 ("tcode-file-notice", index),
                 file.path.clone(),
             ));
         }
     }
+    // A page-end annotation also notices a scrollbar jump past the last
+    // virtualized header, so host pagination cannot stall on a long file.
+    if host.has_more_files(cx)
+        && let Some((index, file)) = list.files.iter().enumerate().next_back()
+    {
+        let position = file
+            .all_rows
+            .iter()
+            .rev()
+            .find(|row| row.kind != super::parse::RowKind::Context)
+            .and_then(|row| {
+                row.new
+                    .map(|line| (DiffSide::Modified, line))
+                    .or_else(|| row.old.map(|line| (DiffSide::Original, line)))
+            });
+        let id = ("tcode-file-tail", index);
+        annotations.push(if let Some((side, line)) = position {
+            DiffAnnotation::line(
+                id,
+                DiffLinePosition::new(file.path.clone(), side, line as usize),
+            )
+        } else {
+            DiffAnnotation::file(id, file.path.clone())
+        });
+    }
     let entity = cx.entity();
     let headers = Rc::new(RefCell::new(Vec::new()));
     let top = list.visible_file.clone();
-    let header_entity = entity.clone();
     let header_paths = paths.clone();
     let header_geometry = headers.clone();
     let annotation_entity = entity.clone();
     let annotation_paths = paths.clone();
+    let annotation_geometry = headers.clone();
+    let source_anchor = list.source_anchor.clone();
     let diff = Diff::new(&state)
         .soft_wrap(wrap)
-        .render_header(move |file, _, cx| {
+        .on_line_hover({
+            let top = top.clone();
+            let source_anchor = list.source_anchor.clone();
+            let paths = paths.clone();
+            let entity = entity.clone();
+            move |position, _, cx| {
+                if let Some(position) = position {
+                    *source_anchor.borrow_mut() = Some(position.clone());
+                }
+                if let Some(index) = position.and_then(|position| {
+                    paths
+                        .iter()
+                        .position(|path| path == position.path().as_str())
+                }) && top.replace(Some(index)) != Some(index)
+                {
+                    cx.notify(entity.entity_id());
+                }
+            }
+        })
+        .render_header_prefix(move |file, _, _| {
             let index = header_paths
                 .iter()
                 .position(|path| path == file.path().as_str())
                 .unwrap_or_default();
             let headers = header_geometry.clone();
-            header_entity.update(cx, |host, cx| {
-                let menu = host.file_menu(index, cx);
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .relative()
-                    .child(host.header_title(index, cx))
-                    .children(host.header_note(index, cx))
-                    .child(
-                        canvas(
-                            move |bounds, _, _| {
-                                headers.borrow_mut().push((index, bounds.origin.y));
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                    .context_menu(move |menu_state, window, cx| menu(menu_state, window, cx))
-                    .into_any_element()
-            })
+            canvas(
+                move |bounds, _, _| headers.borrow_mut().push((index, bounds.origin.y)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        })
+        .render_header_title_suffix({
+            let entity = entity.clone();
+            let paths = paths.clone();
+            move |file, _, cx| {
+                let index = paths
+                    .iter()
+                    .position(|path| path == file.path().as_str())
+                    .unwrap_or_default();
+                entity.update(cx, |host, cx| {
+                    h_flex().children(host.header_note(index, cx))
+                })
+            }
         })
         .render_header_suffix({
             let entity = entity.clone();
@@ -324,7 +389,18 @@ pub(crate) fn render_list<H: DiffListHost>(
                     .position(|path| path == file.path().as_str())
                     .unwrap_or_default();
                 entity.update(cx, |host, cx| {
-                    let mut suffix = h_flex().gap_2().children(host.header_trailing(index, cx));
+                    let menu = host.file_menu(index, cx);
+                    let mut suffix = h_flex()
+                        .gap_2()
+                        .children(host.header_trailing(index, cx))
+                        .child(
+                            Button::new(("diff-file-menu", index))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Ellipsis)
+                                .aria_label(crate::tr!("diff.file_actions"))
+                                .dropdown_menu(move |popup, window, cx| menu(popup, window, cx)),
+                        );
                     if let Some(file) = host.diff_list().and_then(|list| list.files.get(index))
                         && !file.full_source
                     {
@@ -358,7 +434,33 @@ pub(crate) fn render_list<H: DiffListHost>(
                 .iter()
                 .position(|path| path == annotation.path().as_str())
                 .unwrap_or_default();
+            if annotation.id() == &("tcode-file-tail", index).into() {
+                let geometry = annotation_geometry.clone();
+                return div()
+                    .relative()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(crate::tr!("pull_requests.files.loading_more").into_owned())
+                    .child(
+                        canvas(
+                            move |bounds, _, _| {
+                                geometry.borrow_mut().push((index, bounds.origin.y))
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .into_any_element();
+            }
             annotation_entity.update(cx, |host, cx| {
+                if host
+                    .diff_list()
+                    .and_then(|list| list.files.get(index))
+                    .is_some_and(|file| file.parse_error)
+                {
+                    return render_notice(crate::tr!("diff.invalid_patch").into_owned(), cx)
+                        .into_any_element();
+                }
                 if let Some(position) = annotation.position() {
                     let (old, new) = if position.side() == DiffSide::Original {
                         (Some(position.line() as u32), None)
@@ -373,17 +475,27 @@ pub(crate) fn render_list<H: DiffListHost>(
                 }
             })
         });
-    let diff = diff.when(host.review_comment_menu(cx).is_some_and(|(enabled, _)| enabled), |diff| {
-        let entity = entity.clone();
-        diff.on_add_annotation(move |range, window, cx| {
-            entity.update(cx, |host, _| {
-                if let Some(list) = host.diff_list_mut() { list.select(Some(range)); }
-            });
-            window.dispatch_action(Box::new(DiffSelectionMenu::AddComment), cx);
-        })
-    });
-    // Diff has no public viewport query. Header slots supply file visibility
-    // for host paging and the sidebar without owning the list's geometry.
+    let diff = diff.when(
+        host.review_comment_menu(cx)
+            .is_some_and(|(enabled, _)| enabled),
+        |diff| {
+            let entity = entity.clone();
+            diff.on_add_annotation(move |range, window, cx| {
+                let selected = entity.update(cx, |host, _| {
+                    let Some(list) = host.diff_list_mut() else {
+                        return false;
+                    };
+                    list.select(Some(range));
+                    list.selection.is_some()
+                });
+                if selected {
+                    window.dispatch_action(Box::new(DiffSelectionMenu::AddComment), cx);
+                }
+            })
+        },
+    );
+    // Diff has no public viewport query. Slots supply file visibility for
+    // host paging and the sidebar without owning the list's geometry.
     div()
         .id(id)
         .debug_selector(move || id.into())
@@ -406,6 +518,13 @@ pub(crate) fn render_list<H: DiffListHost>(
                     if let Some(index) = closest
                         && top.replace(Some(index)) != Some(index)
                     {
+                        if source_anchor
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|anchor| paths[index] != anchor.path().as_str())
+                        {
+                            source_anchor.borrow_mut().take();
+                        }
                         cx.notify(entity.entity_id());
                     }
                 },

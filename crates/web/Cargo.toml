@@ -12,7 +12,7 @@ default = []
 debug-exports = []
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-gpui = { package = "gpui-kit", version = "0.7.3", features = ["gpui-fast"], default-features = false }
+gpui = { package = "gpui-fast", version = "0.1.7", default-features = false }
 # The browser constructs its own platform (gpui::Application::with_platform)
 # rather than enabling the web backend's multithreaded default.
 gpui_web = { package = "gpui-fast-web", version = "0.1.7", default-features = false }

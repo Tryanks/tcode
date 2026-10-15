@@ -770,7 +770,7 @@ impl PullRequestView {
             Ok(()) => {
                 self.close_editor(&Slot::Line, cx);
                 if let Some(list) = self.diff_list_mut_for_review() {
-                    list.selection = None;
+                    list.clear_selection(cx);
                 }
             }
             Err(error) => {

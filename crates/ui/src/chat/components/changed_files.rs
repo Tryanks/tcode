@@ -385,6 +385,7 @@ impl InlineDiffCache {
         if !current {
             let file = crate::diff::model::prepare_file(
                 &crate::diff::model::FileDiffInput {
+                    previous_path: None,
                     kind: row.kind,
                     old_text: None,
                     new_text: None,

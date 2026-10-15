@@ -7,7 +7,7 @@ publish = false
 description = "iOS platform backend for gpui-fast (Metal via gpui_wgpu)"
 
 [dependencies]
-gpui = { package = "gpui-kit", version = "0.7.3", features = ["gpui-fast"], default-features = false }
+gpui = { package = "gpui-fast", version = "0.1.7", default-features = false }
 gpui_wgpu = { package = "gpui-fast-wgpu", version = "0.1.7" }
 anyhow = "1"
 log = "0.4"
@@ -17,7 +17,7 @@ raw-window-handle = "0.6"
 smallvec = "1"
 
 [dev-dependencies]
-gpui = { package = "gpui-kit", version = "0.7.3", features = ["gpui-fast", "test-support"], default-features = false }
+gpui = { package = "gpui-fast", version = "0.1.7", features = ["test-support"], default-features = false }
 gpui-base = { version = "0.7.3", features = ["gpui-fast"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]

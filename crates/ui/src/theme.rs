@@ -312,7 +312,20 @@ pub fn init(cx: &mut App) {
 pub fn init_with_json(theme_json: &str, cx: &mut App) {
     gpui_component::init(cx);
     let kit: gpui_component::ThemeSet = serde_json::from_str(theme_json).expect("valid Kit theme");
-    for config in kit.themes {
+    for mut config in kit.themes {
+        // Tcode supplies UI tokens; Kit supplies the syntax palette for each mode.
+        let mode = config.mode;
+        config.highlight.get_or_insert_with(|| {
+            if mode.is_dark() {
+                gpui_component::highlighter::HighlightTheme::default_dark()
+                    .style
+                    .clone()
+            } else {
+                gpui_component::highlighter::HighlightTheme::default_light()
+                    .style
+                    .clone()
+            }
+        });
         let config = std::rc::Rc::new(config);
         let theme = gpui_component::Theme::global_mut(cx);
         if config.mode.is_dark() {

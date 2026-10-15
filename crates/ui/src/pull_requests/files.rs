@@ -115,10 +115,10 @@ impl PullRequestView {
             .unwrap_or_default()
             .iter()
             .map(|file| {
-                if !matches!(file.patch, PullRequestPatch::Hunks(_)) {
-                    FileLayout::Placeholder
-                } else if self.collapsed(&file.path) {
+                if self.collapsed(&file.path) {
                     FileLayout::Header
+                } else if !matches!(file.patch, PullRequestPatch::Hunks(_)) {
+                    FileLayout::Placeholder
                 } else {
                     FileLayout::Rows
                 }
@@ -430,22 +430,11 @@ impl PullRequestView {
 
     pub(super) fn on_selection_menu(
         &mut self,
-        action: &DiffSelectionMenu,
+        _: &DiffSelectionMenu,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if *action == DiffSelectionMenu::AddComment {
-            self.start_line_comment(window, cx);
-            return;
-        }
-        let text = self
-            .page()
-            .and_then(|page| page.files_view.list.as_ref())
-            .map(DiffList::selected_lines)
-            .unwrap_or_default();
-        if !text.is_empty() {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-        }
+        self.start_line_comment(window, cx);
     }
 
     fn scroll_to(&mut self, file: usize, cx: &mut Context<Self>) {
@@ -1216,40 +1205,49 @@ impl PullRequestView {
             .into_owned();
             div().mx_2().mb_1().child(render_notice(text, cx))
         });
-        let footer = files
-            .next_cursor
-            .as_ref()
-            .filter(|_| page.files_view.page_loading || page.files_view.page_error.is_some())
-            .map(|_| {
-                let failed = page.files_view.page_error.is_some();
-                h_flex()
-                    .flex_none()
-                    .h(px(40.))
-                    .px_3()
-                    .gap_2()
-                    .items_center()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .when(!failed, |row| {
-                        row.child(crate::widgets::spinner::Spinner::new().small())
-                            .child(crate::tr!("pull_requests.files.loading_more"))
-                    })
-                    .when(failed, |row| {
-                        row.child(crate::tr!("pull_requests.files.rest_failed"))
-                            .child(
-                                Button::new("pr-files-rest-retry")
-                                    .outline()
-                                    .xsmall()
-                                    .label(crate::tr!("pull_requests.detail.retry"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(page) = this.page_mut() {
-                                            page.files_view.page_error = None;
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                    })
-            });
+        let footer = files.next_cursor.as_ref().map(|next| {
+            let next = next.clone();
+            let loading = page.files_view.page_loading;
+            let failed = page.files_view.page_error.is_some();
+            h_flex()
+                .flex_none()
+                .h(px(40.))
+                .px_3()
+                .gap_2()
+                .items_center()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .when(loading, |row| {
+                    row.child(crate::widgets::spinner::Spinner::new().small())
+                        .child(crate::tr!("pull_requests.files.loading_more"))
+                })
+                .when(!loading && !failed, |row| {
+                    row.child(
+                        Button::new("pr-files-load-more")
+                            .outline()
+                            .xsmall()
+                            .label(crate::tr!("pull_requests.files.load_more"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.read_next_page(next.clone(), cx)
+                            })),
+                    )
+                })
+                .when(failed, |row| {
+                    row.child(crate::tr!("pull_requests.files.rest_failed"))
+                        .child(
+                            Button::new("pr-files-rest-retry")
+                                .outline()
+                                .xsmall()
+                                .label(crate::tr!("pull_requests.detail.retry"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(page) = this.page_mut() {
+                                        page.files_view.page_error = None;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                })
+        });
         let body = if page.files_view.list.is_some() {
             render_list(self, "pr-files-body", split, wrap, cx)
         } else {
@@ -1352,6 +1350,12 @@ impl PullRequestView {
 }
 
 impl DiffListHost for PullRequestView {
+    fn has_more_files(&self, _cx: &App) -> bool {
+        self.page()
+            .and_then(|page| page.files.data.as_ref())
+            .is_some_and(|files| files.next_cursor.is_some())
+    }
+
     fn diff_list(&self) -> Option<&DiffList> {
         self.page()?.files_view.list.as_ref()
     }
@@ -1400,43 +1404,17 @@ impl DiffListHost for PullRequestView {
         }
     }
 
-    fn header_title(&self, file: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(entry) = self.files_of().and_then(|files| files.get(file)) else {
-            return div().into_any_element();
-        };
-        h_flex()
-            .min_w_0()
-            .gap_1()
-            .text_size(px(13.))
-            .line_height(px(18.))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .children(entry.previous_path.as_ref().map(|previous| {
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("{previous} →"))
-            }))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(cx.theme().foreground)
-                    .child(entry.path.clone()),
-            )
-            .into_any_element()
-    }
-
     fn header_note(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let path = &self.files_of()?.get(file)?.path;
-        (self.viewed_state(path) == Viewed::Changed).then(|| {
-            div()
-                .text_size(px(11.))
-                .line_height(px(18.))
-                .text_color(cx.theme().warning)
-                .child(crate::tr!("pull_requests.files.changed_since_viewed"))
-                .into_any_element()
-        })
+        let entry = self.files_of()?.get(file)?;
+        let unavailable = !matches!(entry.patch, PullRequestPatch::Hunks(_));
+        let changed = self.viewed_state(&entry.path) == Viewed::Changed;
+        (unavailable || changed).then(|| h_flex().gap_2().text_size(px(11.)).line_height(px(18.))
+            .when(unavailable, |row| row
+                .children(entry.previous_path.as_ref().map(|path| div().text_color(cx.theme().muted_foreground).child(format!("← {path}"))))
+                .child(div().text_color(cx.theme().success).child(format!("+{}", entry.additions)))
+                .child(div().text_color(cx.theme().danger).child(format!("−{}", entry.deletions))))
+            .when(changed, |row| row.child(div().text_color(cx.theme().warning).child(crate::tr!("pull_requests.files.changed_since_viewed"))))
+            .into_any_element())
     }
 
     fn header_trailing(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1549,7 +1527,8 @@ fn render(
     };
     prepare_file(
         &FileDiffInput {
-                kind: file.kind,
+            previous_path: file.previous_path.as_deref(),
+            kind: file.kind,
             old_text: text.map(|(old, _)| old.as_str()),
             new_text: text.map(|(_, new)| new.as_str()),
             patch,

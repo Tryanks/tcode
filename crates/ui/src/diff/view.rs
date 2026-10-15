@@ -95,6 +95,7 @@ fn render_file(
 
     prepare_file(
         &FileDiffInput {
+            previous_path: None,
             kind: change.kind,
             old_text,
             new_text,
@@ -402,8 +403,7 @@ impl DiffPanel {
         .detach();
     }
 
-    /// Rebuild the rendered-file cache when its key (session / turn / theme)
-    /// changed. Returns whether there is anything to show.
+    /// Prepare the selected host revision. Returns whether there is anything to show.
     fn ensure_cache(&mut self, cx: &mut Context<Self>) -> bool {
         let pending_focus = self.workspace_store.read(cx).pending_diff_focus();
         if let Some(request) = pending_focus {
@@ -724,7 +724,7 @@ impl DiffPanel {
 
     fn on_selection_menu(
         &mut self,
-        action: &DiffSelectionMenu,
+        _: &DiffSelectionMenu,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -734,15 +734,7 @@ impl DiffPanel {
         if list.selection.is_none() {
             return;
         }
-        match action {
-            DiffSelectionMenu::CopyLines => {
-                let text = list.selected_lines();
-                if !text.is_empty() {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                }
-            }
-            DiffSelectionMenu::AddComment => self.start_comment(window, cx),
-        }
+        self.start_comment(window, cx);
     }
 
     fn start_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1194,7 +1186,7 @@ impl DiffPanel {
             store.add_review_comment(comment);
         });
         if let Some(cache) = self.cache.as_mut() {
-            cache.list.selection = None;
+            cache.list.clear_selection(cx);
         }
         self.comment_input = None;
         cx.notify();
@@ -1637,27 +1629,141 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn fallback_previews_are_bounded_and_oversized_files_keep_the_stored_patch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use tcode_protocol::{
+            ClientPayload, HostMessage, ProtocolError, Query, QueryResponse, decode_client_line,
+            encode_line,
+        };
+        cx.update(crate::theme::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let panel = cx.new(|cx| DiffPanel::new(store, window_state, cx));
+        panel.update(cx, |panel, cx| {
+            panel.request_rendered_files(
+                RenderKey {
+                    session: "thread".into(),
+                    scope: DiffScope::WorkingTree,
+                    revision: 1,
+                    ignore_ws: false,
+                },
+                (0..9)
+                    .map(|index| FileChange {
+                        path: format!("file-{index}.rs"),
+                        kind: FileChangeKind::Modify,
+                        diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
+                    })
+                    .collect(),
+                Vec::new(),
+                PathBuf::from("/workspace"),
+                cx,
+            )
+        });
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            cx.run_until_parked();
+            if panel.read_with(cx, |panel, _| panel.cache.is_some()) {
+                break;
+            }
+            let reads = std::iter::from_fn(|| requests.try_recv().ok())
+                .filter_map(|line| {
+                    let request = decode_client_line(&line).unwrap();
+                    match request.payload {
+                        ClientPayload::Query(Query::ReadFilePreview { path }) => {
+                            Some((request.id, path))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                !reads.is_empty(),
+                "loading waits for outstanding host previews"
+            );
+            assert!(
+                reads.len() <= 4,
+                "a weak remote link has at most four previews in flight"
+            );
+            for (id, path) in reads {
+                assert!(seen.insert(path.clone()), "each fallback file is read once");
+                let result = if path.ends_with("file-5.rs") {
+                    Err(ProtocolError {
+                        code: "file_too_large".into(),
+                        message: "preview exceeds the host limit".into(),
+                    })
+                } else {
+                    Ok(QueryResponse::FileBytes(b"new\n".to_vec()))
+                };
+                incoming
+                    .try_send(encode_line(&HostMessage::QueryResult { id, result }).unwrap())
+                    .unwrap();
+            }
+        }
+        assert_eq!(seen.len(), 9);
+        panel.read_with(cx, |panel, _| {
+            let files = &panel.cache.as_ref().unwrap().list.files;
+            let oversized = &files[5];
+            assert_eq!(
+                (
+                    oversized.document.additions(),
+                    oversized.document.deletions()
+                ),
+                (1, 1)
+            );
+            assert!(
+                !oversized.full_source,
+                "an oversized preview never invents unseen context"
+            );
+        });
+    }
+
     #[test]
     fn out_of_workspace_turn_change_renders_from_stored_diff_without_file_text() {
-        let path = "/tmp/tcode-outside-workspace.rs";
-        let change = FileChange {
-            path: path.into(),
-            kind: FileChangeKind::Modify,
-            diff: Some("@@ -1 +1 @@\n-fn old_value() {}\n+fn new_value() {}\n".into()),
-        };
-        let file = render_file(
-            &change,
-            None,
-            None,
-            RenderFileContext {
-                cwd: Path::new("/workspace/repository"),
-                options: DiffOptions { ignore_ws: false },
-            },
-        );
-
-        assert_eq!(file.path, path);
-        assert_eq!(file.document.additions(), 1);
-        assert_eq!(file.document.deletions(), 1);
-        assert_eq!(file.all_rows.len(), 2);
+        for patch in [
+            "@@ -1 +1 @@\n-old @@ value\n+new @@ value\n",
+            "-old @@ value\n+new @@ value\n",
+            " context\n-old @@ value\n+new @@ value\n",
+        ] {
+            let path = "/tmp/tcode-outside-@@-workspace.rs";
+            let change = FileChange {
+                path: path.into(),
+                kind: FileChangeKind::Modify,
+                diff: Some(patch.into()),
+            };
+            let file = render_file(
+                &change,
+                None,
+                None,
+                RenderFileContext {
+                    cwd: Path::new("/workspace/repository"),
+                    options: DiffOptions { ignore_ws: false },
+                },
+            );
+            assert_eq!(file.path, path);
+            assert_eq!(file.document.path().as_str(), path);
+            assert!(!file.parse_error, "{patch}");
+            assert_eq!(file.document.additions(), 1);
+            assert_eq!(file.document.deletions(), 1);
+        }
     }
 }

@@ -42,7 +42,7 @@ pub(crate) fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
 }
 
 pub fn parse_unified_diff(diff: &str) -> ParsedDiff {
-    if diff.lines().any(|l| l.starts_with("@@")) {
+    if diff.lines().any(|line| parse_hunk_header(line).is_some()) {
         parse_standard(diff)
     } else {
         parse_bare(diff)
@@ -144,6 +144,9 @@ fn parse_bare(diff: &str) -> ParsedDiff {
     let mut old_cursor = 1u32;
     let mut new_cursor = 1u32;
     for line in diff.lines() {
+        if line == r"\ No newline at end of file" {
+            continue;
+        }
         let mut chars = line.chars();
         match chars.next() {
             Some('+') => {

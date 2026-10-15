@@ -6610,9 +6610,22 @@ mod tests {
         assert!(cx.debug_bounds("diff-close").is_some());
         as_mobile(cx);
         resize(cx, 393.);
-        shell.update(cx, |shell, cx| shell.open_panels(cx));
-        cx.executor().advance_clock(Duration::from_millis(250));
+        shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+        draw(cx);
+        cx.update(|window, cx| window.dispatch_action(Box::new(crate::chat::OpenFileDiff {
+            turn: 0,
+            path: "/tmp/tcode-compact-panel/a/deeply/nested/module/tree/with/an/absurdly/long/file_name.rs".into(),
+        }), cx));
         draw_until(&shell, cx, &host, "diff-body", None);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).destination(),
+                Destination::Panel
+            );
+        });
+        assert!(
+            store_of(&shell, cx).read_with(cx, |store, _| store.pending_diff_focus().is_none())
+        );
 
         assert!(
             cx.debug_bounds("right-panel-tabs").is_none(),

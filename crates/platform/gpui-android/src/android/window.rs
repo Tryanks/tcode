@@ -968,6 +968,10 @@ impl PlatformWindow for AndroidWindow {
         self.0.callbacks.borrow_mut().resize = Some(callback);
     }
 
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {
+        // This host exposes one fixed display; geometry changes use on_resize.
+    }
+
     fn on_moved(&self, callback: Box<dyn FnMut()>) {
         self.0.callbacks.borrow_mut().moved = Some(callback);
     }

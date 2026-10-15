@@ -650,6 +650,10 @@ impl PlatformWindow for IosWindow {
         *self.resize_callback.borrow_mut() = Some(callback);
     }
 
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {
+        // This host exposes one fixed display; geometry changes use on_resize.
+    }
+
     fn on_moved(&self, callback: Box<dyn FnMut()>) {
         *self.moved_callback.borrow_mut() = Some(callback);
     }

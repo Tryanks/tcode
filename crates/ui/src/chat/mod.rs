@@ -4748,6 +4748,27 @@ mod tests {
             view.read_with(cx, |chat, _| chat.list_state.max_offset_for_scrollbar().y) > px(0.)
         );
         let diff_bounds = cx.debug_bounds("file-edit-diff").expect("inline diff");
+        let visible_lines = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                gpui_base::test_support::snapshots(window)
+                    .into_iter()
+                    .filter(|snapshot| {
+                        snapshot.visible() && snapshot.bounds().intersects(&diff_bounds)
+                    })
+                    .filter_map(|snapshot| {
+                        snapshot
+                            .label()
+                            .filter(|label| label.contains("line") || label.contains("行"))
+                            .map(str::to_owned)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let first_lines = visible_lines(cx);
+        assert!(
+            !first_lines.is_empty(),
+            "the inline diff exposes source line controls"
+        );
         let wheel = |delta, cx: &mut VisualTestContext| {
             for (touch_phase, delta) in [
                 (TouchPhase::Started, point(px(0.), px(0.))),
@@ -4764,6 +4785,11 @@ mod tests {
             draw(cx);
         };
         wheel(point(px(0.), px(-2_000.)), cx);
+        assert_ne!(
+            visible_lines(cx),
+            first_lines,
+            "the wheel moves the diff's source lines"
+        );
         wheel(point(px(-200.), px(0.)), cx);
         assert_eq!(timeline_top(cx), before);
 

@@ -19,9 +19,11 @@ pub struct PreparedFile {
     pub document: DiffFile,
     pub all_rows: Vec<ReviewLine>,
     pub full_source: bool,
+    pub parse_error: bool,
 }
 
 pub struct FileDiffInput<'a> {
+    pub previous_path: Option<&'a str>,
     pub kind: FileChangeKind,
     pub old_text: Option<&'a str>,
     pub new_text: Option<&'a str>,
@@ -39,59 +41,102 @@ pub fn prepare_file(input: &FileDiffInput<'_>, path: String) -> PreparedFile {
     let full_source = old.is_some() && new.is_some();
     let body = match (old, new) {
         (Some(old), Some(new)) => full_patch(old, new, input.ignore_whitespace),
-        _ => input
-            .patch
-            .map(|patch| {
-                if let Some(start) = patch.find("@@") {
-                    patch[start..].to_string()
-                } else {
-                    let parsed = parse_unified_diff(patch);
-                    let old = parsed.removed;
-                    let new = parsed.added;
-                    format!(
-                        "@@ -{},{} +{},{} @@\n{}",
-                        u32::from(old > 0),
-                        old,
-                        u32::from(new > 0),
-                        new,
-                        patch
-                    )
-                }
-            })
-            .unwrap_or_default(),
+        _ => input.patch.map(patch_body).unwrap_or_default(),
     };
     let original = if input.kind == FileChangeKind::Create {
         "/dev/null".to_owned()
     } else {
-        serde_json::to_string(&format!("a/{path}")).unwrap()
+        quote_path(&format!("a/{}", input.previous_path.unwrap_or(&path)))
     };
     let modified = if input.kind == FileChangeKind::Delete {
         "/dev/null".to_owned()
     } else {
-        serde_json::to_string(&format!("b/{path}")).unwrap()
+        quote_path(&format!("b/{path}"))
     };
     let patch = format!("--- {original}\n+++ {modified}\n{body}");
-    let document = DiffFile::parse(&patch)
-        .ok()
-        .and_then(|files| files.into_iter().next())
-        .unwrap_or_else(|| DiffFile::unchanged(path.clone(), ""));
-    let all_rows = parse_unified_diff(&body)
-        .hunks
-        .into_iter()
-        .flat_map(|hunk| hunk.rows)
-        .map(|row| ReviewLine {
-            kind: row.kind,
-            old: row.old_line,
-            new: row.new_line,
-            text: row.text,
-        })
-        .collect();
+    let (document, parse_error) = if input.patch.is_none() && !full_source {
+        (DiffFile::unchanged(path.clone(), ""), false)
+    } else {
+        match DiffFile::parse(&patch) {
+            Ok(files) => (
+                files
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| DiffFile::unchanged(path.clone(), "")),
+                false,
+            ),
+            Err(error) => {
+                log::warn!("Cannot parse diff for {path}: {error}");
+                (
+                    DiffFile::unchanged(path.clone(), input.patch.unwrap_or(&body)),
+                    true,
+                )
+            }
+        }
+    };
+    let all_rows = if parse_error {
+        Vec::new()
+    } else {
+        parse_unified_diff(&body)
+            .hunks
+            .into_iter()
+            .flat_map(|hunk| hunk.rows)
+            .map(|row| ReviewLine {
+                kind: row.kind,
+                old: row.old_line,
+                new: row.new_line,
+                text: row.text,
+            })
+            .collect()
+    };
     PreparedFile {
         path,
         document,
         all_rows,
         full_source,
+        parse_error,
     }
+}
+
+fn patch_body(patch: &str) -> String {
+    let mut offset = 0;
+    for line in patch.split_inclusive('\n') {
+        if parse_hunk_header(line).is_some() {
+            return patch[offset..].to_string();
+        }
+        offset += line.len();
+    }
+    let parsed = parse_unified_diff(patch);
+    let rows = parsed.hunks.iter().flat_map(|hunk| &hunk.rows);
+    let (mut old, mut new) = (0, 0);
+    for row in rows {
+        old += usize::from(row.old_line.is_some());
+        new += usize::from(row.new_line.is_some());
+    }
+    format!(
+        "@@ -{},{} +{},{} @@\n{}",
+        usize::from(old > 0),
+        old,
+        usize::from(new > 0),
+        new,
+        patch
+    )
+}
+
+fn quote_path(path: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in path.chars() {
+        match character {
+            '\\' | '"' => {
+                quoted.push('\\');
+                quoted.push(character);
+            }
+            '\0'..='\x1f' | '\x7f' => quoted.push_str(&format!("\\{:03o}", character as u32)),
+            _ => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn full_patch(old: &str, new: &str, ignore_whitespace: bool) -> String {
@@ -131,7 +176,7 @@ fn full_patch(old: &str, new: &str, ignore_whitespace: bool) -> String {
 }
 
 pub fn reconstruct_from_text(new_text: String, patch: &str) -> Option<(String, String)> {
-    let old_text = if patch.lines().any(|line| line.starts_with("@@")) {
+    let old_text = if patch.lines().any(|line| parse_hunk_header(line).is_some()) {
         reconstruct_unified(&new_text, patch)?
     } else {
         reconstruct_bare(&new_text, patch)?

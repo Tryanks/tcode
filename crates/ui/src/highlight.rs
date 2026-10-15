@@ -3,7 +3,6 @@ use std::{
     collections::HashSet,
     ops::Range,
     panic::{self, AssertUnwindSafe},
-    path::Path,
     sync::{Arc, LazyLock, Mutex, PoisonError},
 };
 
@@ -200,25 +199,6 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| {
     syntect::dumps::from_uncompressed_data(include_bytes!("../assets/syntaxes.bin"))
         .expect("failed to load syntect syntax set from crates/ui/assets/syntaxes.bin")
 });
-
-/// Return the syntax name associated with `path`, or `"text"` when its
-/// extension is unknown.
-pub(crate) fn language_name_for_path(path: &str) -> &'static str {
-    let syntax = SYNTAX_SET
-        .find_syntax_for_file(Path::new(path))
-        .ok()
-        .flatten();
-
-    match syntax.map(|syntax| syntax.name.as_str()) {
-        Some("Rust") => "rust",
-        Some("Python") => "python",
-        Some("TypeScript") => "typescript",
-        Some("Plain Text") | None => "text",
-        // Syntax names are owned by the process-wide syntax set, so this
-        // reference has the same lifetime as the static set.
-        Some(name) => name,
-    }
-}
 
 /// Resolve a Markdown fence token, language name, or file extension.
 pub(crate) fn syntax_for_name_or_extension(name: &str) -> Option<&'static SyntaxReference> {
@@ -527,21 +507,6 @@ fn highlight_from(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn detects_language_from_path() {
-        assert_eq!(language_name_for_path("x.rs"), "rust");
-        assert_eq!(language_name_for_path("x.py"), "python");
-        assert_eq!(language_name_for_path("x.ts"), "typescript");
-        assert_eq!(language_name_for_path("x.tsx"), "TypeScriptReact");
-        assert_eq!(language_name_for_path("x.toml"), "TOML");
-        assert_eq!(language_name_for_path("x.kt"), "Kotlin");
-        assert_eq!(language_name_for_path("x.swift"), "Swift");
-        assert_eq!(language_name_for_path("x.ex"), "Elixir");
-        assert_eq!(language_name_for_path("x.zig"), "Zig");
-        assert_eq!(language_name_for_path("noext"), "text");
-        assert!(SYNTAX_SET.find_syntax_by_name("Plain Text").is_some());
-    }
 
     /// Mirror of syntect's private `substitute_backrefs_in_regex` with the
     /// placeholder substituter its YAML loader validates patterns with; kept

@@ -220,7 +220,7 @@ fn exit_with_startup_failure(error: std::io::Error) -> ! {
 
     eprintln!("tcode: {error}");
     let detail = error.to_string();
-    gpui_platform::application().run(move |cx| {
+    gpui_kit::application().run(move |cx| {
         // gpui ends a quit with status 0; this observer is the last code that
         // runs before it.
         cx.on_app_quit(|_| async { std::process::exit(1) }).detach();
@@ -562,7 +562,7 @@ fn main() {
     // leaves the window without a local host, and says why there.
     let started = start_local_host();
 
-    gpui_platform::application()
+    gpui_kit::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
