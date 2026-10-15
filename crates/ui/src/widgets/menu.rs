@@ -432,7 +432,7 @@ fn menu_popover<T>(
     cx: &mut App,
 ) -> impl IntoElement
 where
-    T: IntoElement + 'static,
+    T: gpui::StatefulInteractiveElement + IntoElement + 'static,
 {
     let menu_state =
         window.use_keyed_state((id.clone(), "menu-state"), cx, |_, _| MenuState::default());
@@ -448,7 +448,15 @@ where
                 }
             }
         })
-        .trigger_with(move |_, _, _| trigger.into_any_element())
+        .trigger_with(move |_, toggle, _, _| {
+            trigger
+                .when_some(toggle, |trigger, toggle| {
+                    trigger.on_a11y_action(gpui::accesskit::Action::Click, move |_, window, cx| {
+                        toggle(window, cx);
+                    })
+                })
+                .into_any_element()
+        })
         .content(move |popover, window, cx| {
             if let Some(menu) = menu_state.read(cx).menu.clone() {
                 return menu;
@@ -668,7 +676,9 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
     }
 }
 
-pub trait DropdownMenu: InteractiveElement + gpui_base::Selectable + IntoElement + 'static {
+pub trait DropdownMenu:
+    gpui::StatefulInteractiveElement + gpui_base::Selectable + IntoElement + 'static
+{
     fn dropdown_menu(
         mut self,
         builder: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
@@ -685,22 +695,27 @@ pub trait DropdownMenu: InteractiveElement + gpui_base::Selectable + IntoElement
         }
     }
 }
-impl<T: InteractiveElement + gpui_base::Selectable + IntoElement + 'static> DropdownMenu for T {}
+impl<T: gpui::StatefulInteractiveElement + gpui_base::Selectable + IntoElement + 'static>
+    DropdownMenu for T
+{
+}
 
 #[derive(IntoElement)]
-pub struct DropdownMenuPopover<T: IntoElement + 'static> {
+pub struct DropdownMenuPopover<T: gpui::StatefulInteractiveElement + IntoElement + 'static> {
     id: ElementId,
     trigger: T,
     builder: MenuBuilder,
     touch: bool,
 }
-impl<T: IntoElement + 'static> DropdownMenuPopover<T> {
+impl<T: gpui::StatefulInteractiveElement + IntoElement + 'static> DropdownMenuPopover<T> {
     pub fn touch(mut self, touch: bool) -> Self {
         self.touch = touch;
         self
     }
 }
-impl<T: IntoElement + 'static> RenderOnce for DropdownMenuPopover<T> {
+impl<T: gpui::StatefulInteractiveElement + IntoElement + 'static> RenderOnce
+    for DropdownMenuPopover<T>
+{
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         menu_popover(
             self.id,
@@ -762,6 +777,98 @@ mod tests {
         let menu = right_click(cx, point(px(380.), px(50.)));
         assert!(menu.right() <= px(393. - 8.), "{menu:?}");
         assert_eq!(menu.top(), px(50.));
+    }
+
+    type Press = Rc<std::cell::RefCell<Option<Box<dyn FnMut(&mut Window, &mut App)>>>>;
+
+    // Capture the registered action at the trigger boundary because GPUI's
+    // TestWindow does not implement the platform accessibility adapter.
+    #[derive(IntoElement)]
+    struct AccessibleTrigger {
+        button: gpui::Stateful<gpui::Div>,
+        press: Press,
+        node: Rc<std::cell::RefCell<Option<gpui::accesskit::Node>>>,
+    }
+    impl InteractiveElement for AccessibleTrigger {
+        fn interactivity(&mut self) -> &mut gpui::Interactivity {
+            self.button.interactivity()
+        }
+    }
+    impl gpui::StatefulInteractiveElement for AccessibleTrigger {
+        fn on_a11y_action(
+            mut self,
+            action: gpui::accesskit::Action,
+            mut listener: impl FnMut(Option<&gpui::accesskit::ActionData>, &mut Window, &mut App)
+            + 'static,
+        ) -> Self {
+            assert_eq!(action, gpui::accesskit::Action::Click);
+            *self.press.borrow_mut() = Some(Box::new(move |window, cx| listener(None, window, cx)));
+            let press = self.press.clone();
+            self.button = self.button.on_a11y_action(action, move |_, window, cx| {
+                press.borrow_mut().as_mut().unwrap()(window, cx);
+            });
+            self
+        }
+    }
+    impl gpui_base::Selectable for AccessibleTrigger {
+        fn selected(mut self, selected: bool) -> Self {
+            self.button = self.button.aria_selected(selected);
+            self
+        }
+        fn is_selected(&self) -> bool {
+            false
+        }
+    }
+    impl RenderOnce for AccessibleTrigger {
+        fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+            use gpui::Element as _;
+            let mut node = gpui::accesskit::Node::new(self.button.a11y_role().unwrap());
+            self.button.write_a11y_info(&mut node);
+            *self.node.borrow_mut() = Some(node);
+            self.button
+        }
+    }
+    struct AccessibleDropdown(Press, Rc<std::cell::RefCell<Option<gpui::accesskit::Node>>>);
+    impl Render for AccessibleDropdown {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            AccessibleTrigger {
+                button: div()
+                    .id("actions")
+                    .role(gpui::Role::Button)
+                    .aria_label("Actions for #716")
+                    .child("Actions"),
+                press: self.0.clone(),
+                node: self.1.clone(),
+            }
+            .dropdown_menu(|menu, _, _| menu.menu("Choose", Box::new(Cancel)))
+        }
+    }
+
+    #[gpui::test]
+    fn named_desktop_dropdown_press_opens_menu(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let press = Press::default();
+        let node = Rc::new(std::cell::RefCell::new(None));
+        let (_, cx) = cx.add_window_view({
+            let press = press.clone();
+            let node = node.clone();
+            move |_, _| AccessibleDropdown(press, node)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        {
+            let node = node.borrow();
+            let trigger = node.as_ref().expect("named dropdown trigger");
+            assert_eq!(trigger.label(), Some("Actions for #716"));
+            assert_eq!(trigger.role(), gpui::accesskit::Role::Button);
+            assert!(trigger.supports_action(gpui::accesskit::Action::Click));
+        }
+        assert!(cx.debug_bounds("tcode-popup-menu").is_none());
+        cx.update(|window, cx| {
+            press.borrow_mut().as_mut().expect("press action")(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("tcode-popup-menu").is_some());
     }
 
     /// A phone row's "more" button: a dropdown opened by touch.
