@@ -967,7 +967,6 @@ mod tests {
             cx.set_global(crate::store::images::HostImages {
                 link: Some(link),
                 namespace: 1,
-                blocking_queries: false,
             });
             open(
                 tcode_protocol::OriginalTarget::File {

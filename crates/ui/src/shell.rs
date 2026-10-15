@@ -4604,11 +4604,8 @@ mod tests {
         use tcode_services::store::SessionStore;
 
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-new-thread-{}-{project_count}-{compact}-{}",
-            std::process::id(),
-            tcode_services::store::now_millis()
-        ));
+        let root =
+            crate::store::tests::scratch_root(&format!("new-thread-{project_count}-{compact}"));
         let disk = SessionStore::open_at(root.clone()).unwrap();
         let projects: Vec<_> = (0..project_count)
             .map(|index| Project {
@@ -5491,10 +5488,7 @@ mod tests {
     fn model_picker_focuses_its_search_only_off_phone(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-model-picker-focus-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("model-picker-focus");
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         let project = tcode_core::project::Project::from_root(root.join("project"));
         let mut meta = tcode_core::project::SessionMeta::new(
@@ -5580,10 +5574,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let root = std::env::temp_dir().join(format!(
-            "tcode-thread-shortcuts-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("thread-shortcuts");
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         let project = tcode_core::project::Project::from_root(root.join("project"));
         let sessions: Vec<_> = [("third", 10), ("first", 30), ("second", 20)]

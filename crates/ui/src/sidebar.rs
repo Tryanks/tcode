@@ -4788,10 +4788,7 @@ mod tests {
     #[gpui::test]
     fn canceling_inline_rename_discards_the_unsaved_title(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-sidebar-rename-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("sidebar-rename-test");
         let session_store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
@@ -4862,10 +4859,7 @@ mod tests {
     #[gpui::test]
     fn thread_rows_carry_the_provider_mark_until_the_setting_is_off(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-provider-mark-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("provider-mark");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
@@ -5008,10 +5002,7 @@ mod tests {
     fn compact_menu_dismissal_preserves_selection_and_clears_row_surface(cx: &mut TestAppContext) {
         use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase};
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-menu-selection-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("menu-selection");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
@@ -5129,10 +5120,7 @@ mod tests {
         quick_chat: bool,
     ) -> bool {
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-sidebar-{projects}-project-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root(&format!("sidebar-{projects}-project"));
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
@@ -5313,11 +5301,7 @@ mod tests {
     fn thread_list_scrollbar_drags_without_selecting_a_thread(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-sidebar-scrollbar-{}-{}",
-            std::process::id(),
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("sidebar-scrollbar");
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
@@ -5836,6 +5820,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "remote-hosting")]
     #[gpui::test]
     fn the_share_item_toggles_the_project_in_a_space_on_this_machine(cx: &mut TestAppContext) {
         use gpui::BorrowAppContext as _;
@@ -5843,10 +5828,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-sidebar-share-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("sidebar-share");
         let host = spawn_host(
             SessionStore::open_at(root.join("store")).unwrap(),
             HostServices::default(),
