@@ -881,19 +881,51 @@ mod tests {
         );
         cx.simulate_click(gpui::point(px(40.), px(14.)), gpui::Modifiers::default());
         cx.run_until_parked();
-        let request = decode_client_line(
-            &requests
-                .try_recv()
-                .expect("clicking the image badge must read its host image"),
-        )
-        .unwrap();
-        assert_eq!(
-            request.payload,
-            ClientPayload::Query(Query::ReadFileBytes {
-                path: cwd.join("preview.png"),
-                max_bytes: None
-            })
-        );
+        let mut preview_requested = false;
+        loop {
+            let request = decode_client_line(
+                &requests
+                    .try_recv()
+                    .expect("opening the badge reads the original"),
+            )
+            .unwrap();
+            if let ClientPayload::Query(Query::ReadImagePreview {
+                path,
+                pixels,
+                crop_to_square,
+            }) = request.payload
+            {
+                assert!(
+                    !preview_requested,
+                    "the lightbox requests its fallback preview once"
+                );
+                preview_requested = true;
+                assert_eq!(path, cwd.join("preview.png"));
+                assert_eq!(pixels, MAX_PREVIEW_PIXELS);
+                assert!(!crop_to_square);
+                replies
+                    .send_blocking(
+                        encode_line(&HostMessage::QueryResult {
+                            id: request.id,
+                            result: Ok(QueryResponse::FileBytes(
+                                include_bytes!("../../../../assets/icons/app/tcode.png").to_vec(),
+                            )),
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+                cx.run_until_parked();
+                continue;
+            }
+            assert_eq!(
+                request.payload,
+                ClientPayload::Query(Query::ReadFileBytes {
+                    path: cwd.join("preview.png"),
+                    max_bytes: None
+                })
+            );
+            break;
+        }
         assert!(
             cx.opened_url().is_none(),
             "host image badges must open in the app"

@@ -774,6 +774,8 @@ mod tests {
                 }),
                 cx,
             );
+        });
+        cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
     }

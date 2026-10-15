@@ -11,6 +11,11 @@ impl PlatformDisplay for IosDisplay {
         DisplayId::new(1)
     }
 
+    fn refresh_interval(&self) -> Option<std::time::Duration> {
+        // The host bridge does not report the display's refresh rate.
+        None
+    }
+
     fn uuid(&self) -> anyhow::Result<Uuid> {
         Ok(Uuid::new_v5(
             &Uuid::NAMESPACE_OID,

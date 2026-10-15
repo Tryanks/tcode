@@ -16,11 +16,14 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(crate::shell::undo_thread_action);
     cx.bind_keys([
         KeyBinding::new("secondary-z", crate::sidebar::ThreadUndo, None),
+        KeyBinding::new("secondary-c", gpui_base::input::Copy, Some("TcodeDiff")),
+        #[cfg(target_os = "ios")]
+        KeyBinding::new("cmd-c", gpui_base::input::Copy, Some("TcodeDiff")),
         // GPUI gives later bindings precedence, including a global binding over
         // the editor's earlier contextual one. Keep the editor's native action.
         KeyBinding::new("secondary-z", gpui_base::input::Undo, Some("Input")),
     ]);
-    // gpui-base 0.7.1 gates Apple's editor bindings to macOS. iOS hardware
+    // gpui-base 0.7.3 gates Apple's editor bindings to macOS. iOS hardware
     // keyboards use Command too, while GPUI's secondary modifier is Control.
     #[cfg(target_os = "ios")]
     cx.bind_keys([

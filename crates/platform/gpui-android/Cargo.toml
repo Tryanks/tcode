@@ -7,8 +7,8 @@ publish = false
 description = "Android platform backend for gpui-fast (Vulkan via gpui_wgpu)"
 
 [dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false }
-gpui_wgpu = { git = "https://github.com/longbridge/gpui-fast" }
+gpui = { package = "gpui-fast", version = "0.1.7", default-features = false }
+gpui_wgpu = { package = "gpui-fast-wgpu", version = "0.1.7" }
 anyhow = "1"
 log = "0.4"
 parking_lot = "0.12"

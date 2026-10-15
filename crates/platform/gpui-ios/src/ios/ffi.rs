@@ -384,6 +384,7 @@ pub extern "C" fn gpui_ios_attach_view(
         log::error!("failed to replace the GPUI iOS Metal surface: {error:#}");
         return 0;
     }
+    super::with_platform(super::IosPlatform::notify_displays_changed);
     1
 }
 
@@ -440,6 +441,7 @@ pub extern "C" fn gpui_ios_resize(width: f32, height: f32, scale: f32) {
         host.metrics.scale = scale.max(1.0);
     });
     with_window(|window| window.resize_from_host(width, height, scale));
+    super::with_platform(super::IosPlatform::notify_displays_changed);
 }
 
 #[unsafe(no_mangle)]
@@ -450,6 +452,7 @@ pub extern "C" fn gpui_ios_scale_factor_changed(scale: f32) {
         host.metrics
     });
     with_window(|window| window.resize_from_host(metrics.width, metrics.height, metrics.scale));
+    super::with_platform(super::IosPlatform::notify_displays_changed);
 }
 
 #[unsafe(no_mangle)]

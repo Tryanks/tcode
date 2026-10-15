@@ -34,7 +34,7 @@ use super::list::{
 use super::model::{
     DiffColors, ExpandDir, FileDiffInput, RenderedFile, build_file, reconstruct_from_text,
 };
-use super::parse::RowKind;
+use super::parse::{RowKind, is_binary_patch};
 use crate::agents_panel::{Agents, AgentsPanel};
 use crate::plan_panel::PlanPanel;
 use crate::store::WorkspaceStore;
@@ -132,6 +132,7 @@ struct DiffCache {
     ignore_ws: bool,
     show_invisibles: bool,
     list: DiffList,
+    fallback_texts: HashMap<String, Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,11 +370,23 @@ impl DiffPanel {
         if self.render_loading_key.as_ref() == Some(&key) {
             return;
         }
-        self.cache = None;
+        let reusable = self
+            .cache
+            .take()
+            .filter(|cache| {
+                cache.session == key.session
+                    && cache.scope == key.scope
+                    && cache.revision == key.revision
+            })
+            .map(|cache| cache.fallback_texts)
+            .unwrap_or_default();
         self.render_loading_key = Some(key.clone());
         let workspace_store = self.workspace_store.clone();
         cx.spawn(async move |this, cx| {
-            let mut fallback_texts = vec![None; changes.len()];
+            let mut fallback_texts = changes
+                .iter()
+                .map(|change| reusable.get(&change.path).cloned().flatten())
+                .collect::<Vec<_>>();
             for first in (0..changes.len()).step_by(4) {
                 if !this
                     .update(cx, |panel, _cx| {
@@ -389,7 +402,8 @@ impl DiffPanel {
                     .skip(first)
                     .take(4)
                     .filter_map(|(index, change)| {
-                        if change.diff.is_none()
+                        if change.diff.as_deref().is_none_or(is_binary_patch)
+                            || reusable.contains_key(&change.path)
                             || texts.get(index).is_some_and(|text| text.new.is_some())
                         {
                             return None;
@@ -419,6 +433,11 @@ impl DiffPanel {
             {
                 return;
             }
+            let sources = changes
+                .iter()
+                .zip(&fallback_texts)
+                .map(|(change, text)| (change.path.clone(), text.clone()))
+                .collect();
             let files = cx
                 .background_executor()
                 .spawn(async move {
@@ -454,7 +473,8 @@ impl DiffPanel {
                         dark: key.dark,
                         ignore_ws: key.ignore_ws,
                         show_invisibles: key.show_invisibles,
-                        list: DiffList::new(files, Vec::new()),
+                        list: DiffList::new(files, Vec::new(), cx),
+                        fallback_texts: sources,
                     });
                     panel.render_loading_key = None;
                     panel.apply_pending_file_focus(&key.session, key.scope, cx);
@@ -862,11 +882,9 @@ impl DiffPanel {
             DiffViewOption::Whitespace => {
                 self.ignore_ws = !self.ignore_ws;
                 self.git_preview = None;
-                self.cache = None;
             }
             DiffViewOption::Invisibles => {
                 self.show_invisibles = !self.show_invisibles;
-                self.cache = None;
             }
         }
         cx.notify();
@@ -1225,7 +1243,7 @@ impl DiffPanel {
             .iter()
             .enumerate()
             .filter(|(index, _)| *index >= start && *index <= end)
-            .map(|(_, row)| (row.kind, row.old, row.new, &row.text))
+            .map(|(_, row)| (row.kind, row.old, row.new, row.source(selection.side)))
             .collect::<Vec<_>>();
         let old_start = selected.iter().find_map(|(_, old, _, _)| *old).unwrap_or(0);
         let new_start = selected.iter().find_map(|(_, _, new, _)| *new).unwrap_or(0);
@@ -1295,7 +1313,7 @@ impl DiffPanel {
         cx.notify();
     }
 
-    fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_body(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(cache) = self.cache.as_ref() else {
             if self.loading_key.is_some() || self.render_loading_key.is_some() {
                 return self.render_status(crate::tr!("diff.loading").into_owned(), cx);
@@ -1307,7 +1325,7 @@ impl DiffPanel {
         } else {
             let split = self.workspace_store.read(cx).diff_split();
             let wrap = self.workspace_store.read(cx).diff_word_wrap();
-            render_list(self, "diff-body", split, wrap, cx)
+            render_list(self, "diff-body", split, wrap, window, cx)
         };
         // A compact page holds its content clear of the window edges; the code
         // itself still scrolls sideways *inside* that inset rather than running
@@ -1647,7 +1665,7 @@ impl Render for DiffPanel {
             // AppShell mounts Preview separately; this container handles Diff/Plan.
             RightTab::Diff | RightTab::Preview => root
                 .child(self.render_toolbar(cx))
-                .child(self.render_body(cx)),
+                .child(self.render_body(window, cx)),
             RightTab::PullRequests => {
                 root.child(div().flex_1().min_h_0().child(self.pull_requests.clone()))
             }
@@ -1704,12 +1722,18 @@ mod tests {
                         kind: FileChangeKind::Modify,
                         diff: None,
                     },
+                    FileChange {
+                        path: "/workspace/binary.dat".into(),
+                        kind: FileChangeKind::Modify,
+                        diff: Some("diff --git a/binary.dat b/binary.dat\nindex abc..def 100644\nBinary files a/binary.dat and b/binary.dat differ\n".into()),
+                    },
                 ],
                 vec![
                     GitFileText {
                         old: None,
                         new: Some("fn added() {}\n".into()),
                     },
+                    GitFileText::default(),
                     GitFileText::default(),
                 ],
                 PathBuf::from("/workspace"),
@@ -1742,8 +1766,166 @@ mod tests {
                 .cache
                 .as_ref()
                 .expect("files render without host file replies");
-            assert_eq!(cache.list.files.len(), 2);
+            assert_eq!(cache.list.files.len(), 3);
+            assert_eq!(
+                cache.list.files[2].notice,
+                Some(super::super::model::FileNotice::Binary)
+            );
+            assert!(cache.list.files[2].all_rows.is_empty());
             assert_eq!(cache.list.files[0].added, 1);
+        });
+    }
+
+    #[gpui::test]
+    fn fallback_previews_are_bounded_and_oversized_files_keep_the_stored_patch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use tcode_protocol::{
+            ClientPayload, HostMessage, ProtocolError, Query, QueryResponse, decode_client_line,
+            encode_line,
+        };
+        cx.update(crate::theme::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let panel = cx.new(|cx| DiffPanel::new(store, window_state, cx));
+        panel.update(cx, |panel, cx| {
+            panel.request_rendered_files(
+                RenderKey {
+                    session: "thread".into(),
+                    scope: DiffScope::WorkingTree,
+                    revision: 1,
+                    dark: true,
+                    ignore_ws: false,
+                    show_invisibles: false,
+                },
+                (0..9)
+                    .map(|index| FileChange {
+                        path: format!("file-{index}.rs"),
+                        kind: FileChangeKind::Modify,
+                        diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
+                    })
+                    .collect(),
+                Vec::new(),
+                PathBuf::from("/workspace"),
+                RenderAppearance {
+                    theme: HighlightTheme::default_dark(),
+                    colors: DiffColors {
+                        added_word_bg: gpui::green(),
+                        removed_word_bg: gpui::red(),
+                    },
+                    whitespace_style: HighlightStyle::default(),
+                },
+                cx,
+            )
+        });
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            cx.run_until_parked();
+            if panel.read_with(cx, |panel, _| panel.cache.is_some()) {
+                break;
+            }
+            let reads = std::iter::from_fn(|| requests.try_recv().ok())
+                .filter_map(|line| {
+                    let request = decode_client_line(&line).unwrap();
+                    match request.payload {
+                        ClientPayload::Query(Query::ReadFilePreview { path }) => {
+                            Some((request.id, path))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                !reads.is_empty(),
+                "loading waits for outstanding host previews"
+            );
+            assert!(
+                reads.len() <= 4,
+                "a weak remote link has at most four previews in flight"
+            );
+            for (id, path) in reads {
+                assert!(seen.insert(path.clone()), "each fallback file is read once");
+                let result = if path.ends_with("file-5.rs") {
+                    Err(ProtocolError {
+                        code: "file_too_large".into(),
+                        message: "preview exceeds the host limit".into(),
+                    })
+                } else {
+                    Ok(QueryResponse::FileBytes(b"new\n".to_vec()))
+                };
+                incoming
+                    .try_send(encode_line(&HostMessage::QueryResult { id, result }).unwrap())
+                    .unwrap();
+            }
+        }
+        assert_eq!(seen.len(), 9);
+        panel.update(cx, |panel, cx| {
+            panel.request_rendered_files(
+                RenderKey {
+                    session: "thread".into(),
+                    scope: DiffScope::WorkingTree,
+                    revision: 1,
+                    dark: false,
+                    ignore_ws: false,
+                    show_invisibles: true,
+                },
+                (0..9)
+                    .map(|index| FileChange {
+                        path: format!("file-{index}.rs"),
+                        kind: FileChangeKind::Modify,
+                        diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
+                    })
+                    .collect(),
+                Vec::new(),
+                PathBuf::from("/workspace"),
+                RenderAppearance {
+                    theme: HighlightTheme::default_light(),
+                    colors: DiffColors {
+                        added_word_bg: gpui::green(),
+                        removed_word_bg: gpui::red(),
+                    },
+                    whitespace_style: HighlightStyle::default(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        while let Ok(line) = requests.try_recv() {
+            assert!(
+                !matches!(
+                    decode_client_line(&line).unwrap().payload,
+                    ClientPayload::Query(Query::ReadFilePreview { .. })
+                ),
+                "appearance changes reuse the host source, including a rejected oversized preview"
+            );
+        }
+
+        panel.read_with(cx, |panel, _| {
+            let files = &panel.cache.as_ref().unwrap().list.files;
+            let oversized = &files[5];
+            assert_eq!((oversized.added, oversized.removed), (1, 1));
+            assert!(
+                !oversized.expandable,
+                "an oversized preview never invents unseen context"
+            );
         });
     }
 
@@ -1781,7 +1963,27 @@ mod tests {
         assert_eq!(file.removed, 1);
         assert_eq!(file.all_rows.len(), 2);
         let items = build_list_items_with(std::slice::from_ref(&file), &[]);
-        assert_eq!(items.unified.len(), 3, "header plus two visible rows");
-        assert_eq!(items.split.len(), 2, "header plus one paired row");
+        for rows in [&items.unified, &items.split] {
+            let content = rows
+                .iter()
+                .filter_map(|row| match row {
+                    super::super::rows::DisplayRow::Code { left, right, .. } => Some((
+                        left.map(|ix| file.all_rows[ix].source_text.as_str()),
+                        right.map(|ix| file.all_rows[ix].source_text.as_str()),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                content
+                    .iter()
+                    .any(|(old, _)| *old == Some("fn old_value() {}"))
+            );
+            assert!(
+                content
+                    .iter()
+                    .any(|(_, new)| *new == Some("fn new_value() {}"))
+            );
+        }
     }
 }

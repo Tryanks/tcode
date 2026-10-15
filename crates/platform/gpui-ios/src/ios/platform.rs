@@ -33,6 +33,7 @@ struct IosPlatformState {
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     on_quit: Option<Box<dyn FnMut() -> bool>>,
     on_reopen: Option<Box<dyn FnMut()>>,
+    on_displays_changed: Option<Box<dyn FnMut()>>,
     on_system_sleep: Option<Box<dyn FnMut()>>,
     on_system_wake: Option<Box<dyn FnMut()>>,
     on_lifecycle: Option<Box<dyn FnMut(AppLifecyclePhase)>>,
@@ -64,6 +65,16 @@ impl IosPlatform {
         }
         if self.state.borrow().on_lifecycle.is_none() {
             self.state.borrow_mut().on_lifecycle = callback;
+        }
+    }
+
+    pub(crate) fn notify_displays_changed(&self) {
+        let mut callback = self.state.borrow_mut().on_displays_changed.take();
+        if let Some(callback) = callback.as_mut() {
+            callback();
+        }
+        if self.state.borrow().on_displays_changed.is_none() {
+            self.state.borrow_mut().on_displays_changed = callback;
         }
     }
 
@@ -153,6 +164,10 @@ impl Platform for IosPlatform {
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
         vec![Rc::new(IosDisplay)]
+    }
+
+    fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
+        self.state.borrow_mut().on_displays_changed = Some(callback);
     }
 
     fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {

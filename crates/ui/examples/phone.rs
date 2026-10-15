@@ -8,6 +8,7 @@
 //!
 //! ```sh
 //! cargo run -p tcode-ui --example phone            # 393×852
+//! cargo run -p tcode-ui --example phone -- --wide   # 768×852
 //! cargo run -p tcode-ui --example phone -- --android  # 412×915
 //! TCODE_DATA_DIR=$(mktemp -d) cargo run -p tcode-ui --example phone -- --local
 //! ```
@@ -23,12 +24,15 @@ type LocalTransport = Rc<dyn Fn(&mut gpui::App) -> Result<tcode_client::host::Tr
 
 fn main() {
     let local = std::env::args().any(|arg| arg == "--local");
+    let wide = std::env::args().any(|arg| arg == "--wide");
     let android = std::env::args().any(|arg| arg == "--android");
     gpui_platform::application()
         .with_assets(tcode_ui::assets::Assets)
         .run(move |cx| {
             tcode_ui::force_mobile_layout(cx);
-            let dimensions = if android {
+            let dimensions = if wide {
+                size(px(768.), px(852.))
+            } else if android {
                 size(px(412.), px(915.))
             } else {
                 size(px(393.), px(852.))

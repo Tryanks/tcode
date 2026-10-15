@@ -15,6 +15,7 @@ pub struct DiffRow {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hunk {
+    pub header: String,
     pub gap_before: u32,
     pub rows: Vec<DiffRow>,
 }
@@ -41,9 +42,17 @@ pub(crate) fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
     Some((old_start?, new_start?))
 }
 
+pub(crate) fn is_binary_patch(patch: &str) -> bool {
+    patch
+        .lines()
+        .any(|line| line.starts_with("Binary files ") || line == "GIT binary patch")
+}
+
 pub fn parse_unified_diff(diff: &str) -> ParsedDiff {
-    if diff.lines().any(|l| l.starts_with("@@")) {
+    if diff.lines().any(|line| parse_hunk_header(line).is_some()) {
         parse_standard(diff)
+    } else if diff.lines().any(|line| line.starts_with("diff --git ")) {
+        ParsedDiff::default()
     } else {
         parse_bare(diff)
     }
@@ -67,6 +76,7 @@ fn parse_standard(diff: &str) -> ParsedDiff {
             old_cursor = old_start;
             new_cursor = new_start;
             cur = Some(Hunk {
+                header: line.to_string(),
                 gap_before: gap,
                 rows: Vec::new(),
             });
@@ -144,6 +154,9 @@ fn parse_bare(diff: &str) -> ParsedDiff {
     let mut old_cursor = 1u32;
     let mut new_cursor = 1u32;
     for line in diff.lines() {
+        if line == r"\ No newline at end of file" {
+            continue;
+        }
         let mut chars = line.chars();
         match chars.next() {
             Some('+') => {
@@ -180,6 +193,7 @@ fn parse_bare(diff: &str) -> ParsedDiff {
     }
     if !rows.is_empty() {
         out.hunks.push(Hunk {
+            header: String::new(),
             gap_before: 0,
             rows,
         });

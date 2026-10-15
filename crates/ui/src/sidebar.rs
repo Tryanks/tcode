@@ -2365,34 +2365,36 @@ impl SessionsSidebar {
         row_height: f32,
         right_padding: f32,
         cx: &App,
-    ) -> Option<gpui::Div> {
-        let color: gpui::Hsla = gpui::rgb(self.store.read(cx).provider_color(meta)?).into();
+    ) -> gpui::Div {
+        // gpui-fast 0.1.8 can retain a reparented child without measuring it.
+        // Keep this slot present when the optional mark is hidden (#68 upstream).
+        let Some(color) = self.store.read(cx).provider_color(meta) else {
+            return div().absolute();
+        };
+        let color: gpui::Hsla = gpui::rgb(color).into();
         let glyph = match meta.provider {
-            // ACP agents share the box glyph the composer rail and ACP panel use.
             agent::ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
             kind => crate::provider_card::provider_glyph(kind),
         };
         let size = px(row_height - PROVIDER_MARK_INSET);
         let id = meta.id.clone();
-        Some(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right(px(right_padding))
-                .flex()
-                .items_center()
-                .child(
-                    div()
-                        .size(size)
-                        .debug_selector(move || format!("sidebar-provider-mark-{id}"))
-                        .child(
-                            glyph
-                                .size(size)
-                                .text_color(color.opacity(PROVIDER_MARK_ALPHA)),
-                        ),
-                ),
-        )
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right(px(right_padding))
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .size(size)
+                    .debug_selector(move || format!("sidebar-provider-mark-{id}"))
+                    .child(
+                        glyph
+                            .size(size)
+                            .text_color(color.opacity(PROVIDER_MARK_ALPHA)),
+                    ),
+            )
     }
 
     fn thread_clickable_row(
@@ -2822,15 +2824,13 @@ impl SessionsSidebar {
             // Indent threads beneath their project header's icon and chevron.
             .pl(px(30.))
             // First child so the row's content paints over the mark.
-            .when_some(
-                self.provider_mark(
-                    meta,
-                    crate::material::selectable_row_height(false),
-                    THREAD_ROW_PADDING_X,
-                    cx,
-                ),
-                |row, mark| row.relative().child(mark),
-            )
+            .relative()
+            .child(self.provider_mark(
+                meta,
+                crate::material::selectable_row_height(false),
+                THREAD_ROW_PADDING_X,
+                cx,
+            ))
             .when_some(
                 Self::thread_status_badge(&state, working, &self.store, cx),
                 |row, badge| row.child(badge),
@@ -3001,10 +3001,8 @@ impl SessionsSidebar {
             .justify_center()
             .gap(px(2.))
             // First child so the row's content paints over the mark.
-            .when_some(
-                self.provider_mark(meta, FLAT_ROW_INNER_HEIGHT, THREAD_ROW_PADDING_X, cx),
-                |row, mark| row.relative().child(mark),
-            );
+            .relative()
+            .child(self.provider_mark(meta, FLAT_ROW_INNER_HEIGHT, THREAD_ROW_PADDING_X, cx));
 
         let row = {
             let title_or_input = self.thread_title_or_input(meta, &state, true, cx);
@@ -3921,7 +3919,8 @@ impl SessionsSidebar {
                 move || format!("compact-row-{id}")
             })
             // First child so the row's content paints over the mark.
-            .when_some(mark, |row, mark| row.relative().child(mark))
+            .relative()
+            .child(mark)
             .when(
                 self.store.read(cx).roster_session_id().as_deref() == Some(session_id.as_str()),
                 |row| row.bg(cx.theme().list_active).aria_selected(true),
@@ -6689,8 +6688,22 @@ mod tests {
                     sidebar.flat_list_state.clone()
                 }
             });
+            let target = if compact {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar
+                        .compact_model(cx)
+                        .rows
+                        .iter()
+                        .position(
+                            |row| matches!(row, CompactListRow::Thread(row) if row.meta.id == id),
+                        )
+                        .expect("target thread")
+                })
+            } else {
+                28
+            };
             list.scroll_to(gpui::ListOffset {
-                item_ix: 28,
+                item_ix: target,
                 offset_in_item: px(0.),
             });
             sidebar.update(cx, |_, cx| cx.notify());

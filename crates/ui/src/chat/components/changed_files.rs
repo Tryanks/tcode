@@ -415,11 +415,6 @@ impl InlineDiffCache {
         self.diffs.clear();
     }
 
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.diffs.len()
-    }
-
     /// Call once per frame, before the rows render.
     pub(crate) fn sweep(&mut self) {
         self.diffs

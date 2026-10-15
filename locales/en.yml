@@ -1003,6 +1003,9 @@ approval:
   pending: "PENDING APPROVAL"
   cancel_turn: "Cancel turn"
 diff:
+  binary: "Binary file. Its contents aren't shown."
+  empty_file: "Empty file."
+  no_text: "File contents are not available."
   title: "Diff"
   panel_tabs: "Right panel tabs"
   scope_menu: "Diff scope"
