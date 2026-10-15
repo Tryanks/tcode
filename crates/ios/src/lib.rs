@@ -7,6 +7,9 @@
 mod host;
 
 #[cfg(target_os = "ios")]
+mod speech;
+
+#[cfg(target_os = "ios")]
 mod entry;
 
 #[cfg(target_os = "ios")]

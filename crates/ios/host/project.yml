@@ -44,6 +44,8 @@ targets:
           - "-framework"
           - AVFoundation
           - "-framework"
+          - Speech
+          - "-framework"
           - QuartzCore
           - "-framework"
           - Metal

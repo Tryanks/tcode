@@ -43,7 +43,7 @@ native-preview = [
     "dep:windows-core",
     "dep:tempfile",
 ]
-# System dictation in the desktop composer.
+# System dictation in the composer, including ClientHost recognizers.
 voice = ["dep:gpui-component"]
 # macOS TCC permission status, grant and relaunch for a *local* attachment.
 local-permissions = ["dep:computer-use-mcp"]

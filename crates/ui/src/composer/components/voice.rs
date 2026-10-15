@@ -2,9 +2,9 @@
 
 use super::super::*;
 use gpui::SharedString;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use gpui_component::speech::SystemRecognizer;
 use gpui_component::speech::{SpeechEvent, SpeechState, SpeechStatus};
+
+mod client;
 
 pub(in super::super) struct Voice {
     state: Entity<SpeechState>,
@@ -27,11 +27,7 @@ fn speech_locale() -> &'static str {
 }
 
 fn speech_state(cx: &mut Context<SpeechState>) -> SpeechState {
-    let state = SpeechState::new(cx);
-    // On Windows the system recognizer uses Microsoft's online speech service.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let state = state.recognizer(SystemRecognizer::new().locale(speech_locale()));
-    state
+    client::configure(SpeechState::new(cx), speech_locale(), cx)
 }
 
 impl Voice {
@@ -70,9 +66,7 @@ impl Composer {
             self.voice.state.update(cx, |state, cx| {
                 // Preserve session ids so a previous sink cannot address a new session.
                 let previous = std::mem::replace(state, SpeechState::new(cx));
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
-                let previous = previous.recognizer(SystemRecognizer::new().locale(locale));
-                *state = previous;
+                *state = client::configure(previous, locale, cx);
             });
             self.voice.locale = locale;
         }

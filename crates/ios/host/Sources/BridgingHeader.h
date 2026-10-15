@@ -16,6 +16,8 @@ typedef struct GpuiIosTouch {
 } GpuiIosTouch;
 
 void tcode_ios_start(void);
+void tcode_ios_speech_event(uint64_t id, uint32_t kind, const uint8_t *bytes, size_t length);
+void tcode_ios_speech_availability_changed(void);
 void tcode_ios_network_changed(void);
 uint8_t tcode_ios_can_swipe_back(void);
 void tcode_ios_swipe_back(void);
@@ -59,12 +61,18 @@ void gpui_ios_lifecycle_background(void);
 void gpui_ios_lifecycle_foreground(void);
 void gpui_ios_memory_warning(void);
 
-void gpui_ios_insert_text(const uint8_t *bytes, size_t length);
-void gpui_ios_set_marked_text(const uint8_t *bytes, size_t length,
-                              size_t selection_start,
-                              size_t selection_length);
+typedef struct TextRange { size_t location; size_t length; } TextRange;
+typedef struct TextRect { double x; double y; double width; double height; } TextRect;
+TextRange gpui_ios_text_range(uint32_t kind);
+size_t gpui_ios_read_text(TextRange range, uint8_t *bytes, size_t capacity);
+void gpui_ios_replace_text(TextRange range, const uint8_t *bytes, size_t length,
+                           uint8_t marked, TextRange selection);
+void gpui_ios_select_text(TextRange range);
+void gpui_ios_unmark_text(void);
+TextRect gpui_ios_text_rect(TextRange range);
+size_t gpui_ios_character_at_point(double x, double y);
 void gpui_ios_delete_backward(void);
-void gpui_ios_key_event(const uint8_t *key_bytes, size_t key_length,
+uint8_t gpui_ios_key_event(const uint8_t *key_bytes, size_t key_length,
                         const uint8_t *character_bytes,
                         size_t character_length, uint32_t modifier_bits,
                         uint8_t down, uint8_t repeat);

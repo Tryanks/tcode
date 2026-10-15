@@ -4,6 +4,7 @@
 //! to the attached `UIView` and consumes value-type snapshots from callbacks.
 
 use super::IosWindow;
+use crate::text_input::{self, NOT_FOUND, TextRange};
 use anyhow::{Result, anyhow};
 use gpui::{
     AppLifecyclePhase, Autocapitalize, Edges, Modifiers, PlatformInput, TextInputAction,
@@ -99,6 +100,7 @@ unsafe extern "C" {
     fn gpui_ios_host_first_frame_rendered();
     fn gpui_ios_host_show_keyboard();
     fn gpui_ios_host_hide_keyboard();
+    fn gpui_ios_host_text_input_changed();
     fn gpui_ios_host_configure_text_input(
         autocorrect: u8,
         autocapitalize: u32,
@@ -197,6 +199,11 @@ pub(crate) fn host_show_keyboard() {
 pub(crate) fn host_hide_keyboard() {
     // SAFETY: UIKit work is performed by Swift on this same main-thread call.
     unsafe { gpui_ios_host_hide_keyboard() }
+}
+
+pub(crate) fn host_text_input_changed() {
+    // SAFETY: Swift schedules notification outside the current GPUI update.
+    unsafe { gpui_ios_host_text_input_changed() }
 }
 
 pub(crate) fn host_configure_text_input(configuration: &TextInputConfiguration) {
@@ -498,24 +505,132 @@ pub extern "C" fn gpui_ios_memory_warning() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_ios_insert_text(bytes: *const u8, length: usize) {
+pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
+    let mut result = None;
+    with_window(|window| {
+        if !window.text_input_active() {
+            return;
+        }
+        result = window
+            .with_input_handler(|handler| match kind {
+                0 => handler
+                    .selected_text_range(true)
+                    .map(|selection| selection.range),
+                1 => handler.marked_text_range(),
+                _ => text_input::text_length(handler).map(|length| 0..length),
+            })
+            .flatten();
+    });
+    result.into()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_read_text(range: TextRange, bytes: *mut u8, capacity: usize) -> usize {
+    let Some(range) = range.range() else {
+        return NOT_FOUND;
+    };
+    let mut text = None;
+    with_window(|window| {
+        text = window
+            .with_input_handler(|handler| text_input::read_text(handler, range))
+            .flatten();
+    });
+    let Some(text) = text else {
+        return NOT_FOUND;
+    };
+    if !bytes.is_null() && capacity >= text.len() {
+        // SAFETY: Swift supplies a writable buffer of `capacity` bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), bytes, text.len());
+        }
+    }
+    text.len()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_replace_text(
+    range: TextRange,
+    bytes: *const u8,
+    length: usize,
+    marked: u8,
+    selection: TextRange,
+) {
     if let Some(text) = utf8(bytes, length) {
-        with_window(|window| window.insert_text(&text));
+        with_window(|window| {
+            let replace = |handler: &mut gpui::PlatformInputHandler| {
+                if marked != 0 {
+                    handler.replace_and_mark_text_in_range(range.range(), &text, selection.range());
+                } else {
+                    handler.replace_text_in_range(range.range(), &text);
+                }
+            };
+            if marked != 0 {
+                window.with_input_handler(replace);
+            } else {
+                window.with_stored_input_handler(replace);
+            }
+        });
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_ios_set_marked_text(
-    bytes: *const u8,
-    length: usize,
-    selection_start: usize,
-    selection_length: usize,
-) {
-    if let Some(text) = utf8(bytes, length) {
+pub extern "C" fn gpui_ios_select_text(range: TextRange) {
+    let Some(range) = range.range() else {
+        return;
+    };
+    with_window(|window| {
+        window.with_input_handler(|handler| text_input::select_text(handler, range));
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_unmark_text() {
+    with_window(|window| {
+        window.with_stored_input_handler(text_input::commit_marked_text);
+    });
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct TextRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_text_rect(range: TextRange) -> TextRect {
+    let mut rect = TextRect::default();
+    if let Some(range) = range.range() {
         with_window(|window| {
-            window.set_marked_text(&text, selection_start, selection_length);
+            if let Some(bounds) = window
+                .with_input_handler(|handler| handler.bounds_for_range(range))
+                .flatten()
+            {
+                rect = TextRect {
+                    x: f32::from(bounds.origin.x) as f64,
+                    y: f32::from(bounds.origin.y) as f64,
+                    width: f32::from(bounds.size.width) as f64,
+                    height: f32::from(bounds.size.height) as f64,
+                };
+            }
         });
     }
+    rect
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_character_at_point(x: f64, y: f64) -> usize {
+    let mut index = None;
+    with_window(|window| {
+        index = window
+            .with_input_handler(|handler| {
+                handler.character_index_for_point(point(px(x as f32), px(y as f32)))
+            })
+            .flatten();
+    });
+    index.unwrap_or(NOT_FOUND)
 }
 
 #[unsafe(no_mangle)]
@@ -532,15 +647,16 @@ pub extern "C" fn gpui_ios_key_event(
     modifier_bits: u32,
     down: u8,
     repeat: u8,
-) {
+) -> u8 {
     let Some(key) = utf8(key_bytes, key_length) else {
-        return;
+        return 0;
     };
     let character = (character_length > 0)
         .then(|| utf8(character_bytes, character_length))
         .flatten();
+    let mut handled = false;
     with_window(|window| {
-        window.key_event(
+        handled = window.key_event(
             key,
             character,
             modifiers(modifier_bits),
@@ -548,6 +664,7 @@ pub extern "C" fn gpui_ios_key_event(
             repeat != 0,
         );
     });
+    u8::from(handled)
 }
 
 #[unsafe(no_mangle)]

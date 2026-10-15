@@ -35,6 +35,10 @@
     <string>直接连接同一网络中已配对的 Tcode 执行端。</string>
     <key>NSCameraUsageDescription</key>
     <string>Scan a QR code to pair with a Tcode host.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Dictate text into your Tcode draft.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Transcribe speech into your Tcode draft without sending a message.</string>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

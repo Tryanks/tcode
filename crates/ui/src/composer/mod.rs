@@ -414,6 +414,9 @@ impl Composer {
         }
         #[cfg(feature = "voice")]
         self.abort_dictation(cx);
+        self.input.update(cx, |input, cx| {
+            crate::widgets::input::commit_marked_text(input, window, cx);
+        });
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         if let Some(outgoing) = self.input_destination.take() {
             self.input_cache.insert(outgoing, self.input.clone());
@@ -1565,6 +1568,14 @@ mod replica_tests {
             );
             cx.update(|window, cx| composer.update(cx, |composer, cx| composer.focus(window, cx)));
             cx.simulate_input("Other destination draft");
+            let outgoing = composer.read_with(cx, |composer, _| composer.input.clone());
+            cx.update(|window, cx| {
+                outgoing.update(cx, |input, cx| {
+                    use gpui::EntityInputHandler as _;
+                    input.replace_and_mark_text_in_range(None, "，你好", None, window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
             if is_draft {
                 restored_status.session_id = "reopened-project-draft".into();
             }
@@ -1583,6 +1594,11 @@ mod replica_tests {
             cx.update(|window, cx| {
                 window.draw(cx).clear(cx);
                 composer.update(cx, |composer, cx| composer.focus(window, cx));
+                outgoing.update(cx, |input, cx| {
+                    use gpui::EntityInputHandler as _;
+                    assert_eq!(input.marked_text_range(window, cx), None);
+                    assert_eq!(input.value(), "Other destination draft，你好");
+                });
             });
             assert_eq!(
                 composer.read_with(cx, |composer, cx| composer.draft(cx)),
@@ -1597,9 +1613,10 @@ mod replica_tests {
                 composer.read_with(cx, |composer, cx| composer.draft(cx)),
                 ""
             );
-            for (destination, expected) in
-                [(status, "Other destination draft"), (restored_status, "")]
-            {
+            for (destination, expected) in [
+                (status, "Other destination draft，你好"),
+                (restored_status, ""),
+            ] {
                 store.update(cx, |store, _| {
                     store.select_session(destination.session_id.clone())
                 });

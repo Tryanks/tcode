@@ -8,6 +8,7 @@ pub use original::OriginalTransfer;
 pub mod outgoing;
 pub mod pairing;
 pub mod recovery;
+pub mod speech;
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;

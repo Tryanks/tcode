@@ -23,6 +23,7 @@ type MulticastLock = dyn Fn(bool) + Send + Sync;
 /// Native clients share hosts.json, mobile.json, device.json, pairing, and
 /// transport policy.
 pub struct NativeClientHost {
+    speech: Option<std::rc::Rc<dyn tcode_client::speech::SpeechRecognizer>>,
     data_dir: PathBuf,
     default_device_name: String,
     platform: Option<String>,
@@ -39,6 +40,7 @@ impl NativeClientHost {
     /// bootstraps replace it with [`NativeClientHost::with_platform`].
     pub fn new(data_dir: PathBuf, device_name: impl Into<String>) -> Self {
         Self {
+            speech: None,
             data_dir,
             default_device_name: device_name.into(),
             platform: default_device_platform(),
@@ -105,6 +107,14 @@ impl NativeClientHost {
         self
     }
 
+    pub fn with_speech_recognizer(
+        mut self,
+        recognizer: impl tcode_client::speech::SpeechRecognizer + 'static,
+    ) -> Self {
+        self.speech = Some(std::rc::Rc::new(recognizer));
+        self
+    }
+
     /// The platform's own media picker; see [`ClientHost::pick_images`].
     pub fn with_image_picker(
         mut self,
@@ -163,6 +173,10 @@ impl NativeClientHost {
 }
 
 impl ClientHost for NativeClientHost {
+    fn speech_recognizer(&self) -> Option<std::rc::Rc<dyn tcode_client::speech::SpeechRecognizer>> {
+        self.speech.clone()
+    }
+
     fn device_name(&self) -> String {
         self.load_preferences()
             .device_name

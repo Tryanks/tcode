@@ -44,12 +44,13 @@ public func gpuiHostScheduleFrame() {
 
 @_cdecl("gpui_ios_host_show_keyboard")
 public func gpuiHostShowKeyboard() {
-    GPUIHostBridge.view?.showKeyboard()
+    // Becoming first responder queries UITextInput; GPUI may still be drawing.
+    DispatchQueue.main.async { GPUIHostBridge.view?.showKeyboard() }
 }
 
 @_cdecl("gpui_ios_host_hide_keyboard")
 public func gpuiHostHideKeyboard() {
-    GPUIHostBridge.view?.hideKeyboard()
+    DispatchQueue.main.async { GPUIHostBridge.view?.hideKeyboard() }
 }
 
 @_cdecl("gpui_ios_host_configure_text_input")
@@ -59,12 +60,14 @@ public func gpuiHostConfigureTextInput(
     _ suggestions: UInt8,
     _ inputAction: UInt32
 ) {
-    GPUIHostBridge.view?.configureTextInput(
-        autocorrect: autocorrect != 0,
-        autocapitalize: autocapitalize,
-        suggestions: suggestions != 0,
-        inputAction: inputAction
-    )
+    DispatchQueue.main.async {
+        GPUIHostBridge.view?.configureTextInput(
+            autocorrect: autocorrect != 0,
+            autocapitalize: autocapitalize,
+            suggestions: suggestions != 0,
+            inputAction: inputAction
+        )
+    }
 }
 
 @_cdecl("gpui_ios_host_open_url")

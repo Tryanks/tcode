@@ -6,6 +6,8 @@
 
 use std::rc::Rc;
 
+pub mod text_input;
+
 #[cfg(target_os = "ios")]
 mod ios;
 

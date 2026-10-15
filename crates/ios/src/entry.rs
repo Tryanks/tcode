@@ -12,6 +12,14 @@ thread_local! {
     static APPLICATION: OnceCell<ApplicationHandle> = const { OnceCell::new() };
 }
 
+pub(crate) fn refresh_windows() {
+    APPLICATION.with(|slot| {
+        if let Some(app) = slot.get() {
+            app.to_async().update(|cx| cx.refresh_windows());
+        }
+    });
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn tcode_ios_start() {
     APPLICATION.with(|slot| {

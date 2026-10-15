@@ -92,6 +92,7 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
         .expect("iOS gives every app container a home directory")
         .join("tcode");
     let host = NativeClientHost::new(data_dir, device_name)
+        .with_speech_recognizer(crate::speech::IosRecognizer)
         .with_platform(platform)
         .with_system_browser(system_browser())
         .with_qr_scanner(|| -> HostFuture<'static, Result<String, String>> {
