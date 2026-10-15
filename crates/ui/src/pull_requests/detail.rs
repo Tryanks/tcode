@@ -1033,13 +1033,25 @@ impl PullRequestView {
                 .is_none_or(|s| s.state == PullRequestState::Open)
         {
             has_chip = true;
+            let paused = self
+                .store
+                .read(cx)
+                .thread_meta(&session)
+                .is_some_and(|meta| meta.pull_request_watches_paused);
             chips = chips.child(
                 div()
                     .id("pr-detail-watch")
                     .child(Icon::new(IconName::Eye).size(px(14.)).text_color(muted))
-                    .tooltip(|window, cx| {
-                        Tooltip::new(crate::tr!("pull_requests.watching_tooltip").into_owned())
-                            .build(window, cx)
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(
+                            crate::tr!(if paused {
+                                "pull_requests.watching_paused_tooltip"
+                            } else {
+                                "pull_requests.watching_tooltip"
+                            })
+                            .into_owned(),
+                        )
+                        .build(window, cx)
                     }),
             );
         }
