@@ -323,12 +323,13 @@ fn an_invitation_that_finds_no_path_pairs_at_a_typed_address() {
     let typed = std::net::Ipv4Addr::LOCALHOST.into();
     let paired = tcode_traverse::pair_blocking(&link, Some(typed), &phone).unwrap();
     assert_eq!(paired.name, "Test Host");
+    let worked = std::net::SocketAddr::new(typed, link.port).to_string();
+    assert!(paired.addrs.contains(&worked), "{:?}", paired.addrs);
+    assert_eq!(paired.addrs.first(), Some(&worked));
     assert!(host.invitation().is_none(), "the invitation is used");
 
     tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&paired)).unwrap();
     drop(phone);
-    // Multipath may leave the typed socket for another interface. A fresh
-    // endpoint must reconnect from the saved record, not its pairing path cache.
     let phone = DeviceIdentity::load_or_create(&dir.0).unwrap();
     phone.set_lan_options(tcode_traverse::lan::LanOptions {
         browse: tcode_traverse::lan::Browse::Off,

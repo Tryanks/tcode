@@ -508,7 +508,15 @@ pub async fn pair(
     if result.is_err() && !sources.is_empty() {
         client.lookups.reconcile().await;
     }
-    result
+    result.map(|mut host| {
+        // iroh's current paths can omit the typed address after switching paths.
+        for addr in typed {
+            host.addrs.retain(|known| *known != addr);
+            host.addrs.insert(0, addr);
+        }
+        host.addrs.truncate(MAX_ADDRS);
+        host
+    })
 }
 
 async fn pair_exchange(
