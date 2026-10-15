@@ -69,8 +69,7 @@ pub extern "C" fn tcode_ios_start() {
     });
 }
 
-/// Whether UIKit's left-edge pan may begin: only where it pops a page, so an
-/// edge contact elsewhere stays an ordinary touch.
+/// Whether the window has a sheet or page that can answer an edge gesture.
 #[unsafe(no_mangle)]
 pub extern "C" fn tcode_ios_can_swipe_back() -> u8 {
     APPLICATION.with(|slot| {
@@ -80,14 +79,19 @@ pub extern "C" fn tcode_ios_can_swipe_back() -> u8 {
     })
 }
 
-/// UIKit's left-edge pan ended past its commit point.
+/// Continuous UIKit edge-pan samples; the shared UI owns progress and commit.
 #[unsafe(no_mangle)]
-pub extern "C" fn tcode_ios_swipe_back() {
+pub extern "C" fn tcode_ios_edge_back(phase: u8, travel: f32, velocity: f32) {
+    let phase = match phase {
+        0 => gpui::TouchPhase::Started,
+        1 => gpui::TouchPhase::Moved,
+        2 => gpui::TouchPhase::Ended,
+        _ => gpui::TouchPhase::Cancelled,
+    };
     APPLICATION.with(|slot| {
         if let Some(app) = slot.get() {
-            app.to_async().update(|cx| {
-                tcode_ui::handle_back(cx);
-            });
+            app.to_async()
+                .update(|cx| tcode_ui::update_edge_back(phase, travel, velocity, cx));
         }
     });
 }

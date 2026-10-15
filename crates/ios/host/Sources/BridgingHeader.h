@@ -20,7 +20,7 @@ void tcode_ios_speech_event(uint64_t id, uint32_t kind, const uint8_t *bytes, si
 void tcode_ios_speech_availability_changed(void);
 void tcode_ios_network_changed(void);
 uint8_t tcode_ios_can_swipe_back(void);
-void tcode_ios_swipe_back(void);
+void tcode_ios_edge_back(uint8_t phase, float travel, float velocity);
 void tcode_ios_browse_found(uint64_t request, const uint8_t *id_bytes,
                             size_t id_length, const uint8_t *address_bytes,
                             size_t address_length);
