@@ -4813,7 +4813,11 @@ mod tests {
             .debug_bounds("file-edit-diff")
             .expect("updated inline diff");
         cx.simulate_click(bounds.center(), Modifiers::default());
-        cx.simulate_keystrokes("cmd-a cmd-c");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a cmd-c"
+        } else {
+            "ctrl-a ctrl-c"
+        });
         assert!(cx.update(|_, cx| {
             cx.read_from_clipboard()
                 .unwrap()
