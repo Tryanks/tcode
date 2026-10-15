@@ -357,12 +357,16 @@ final class GPUIHostView: UIView {
     }
 
     @objc private func backSwipeChanged(_ recognizer: UIScreenEdgePanGestureRecognizer) {
-        guard recognizer.state == .ended else { return }
-        let travel = recognizer.translation(in: self).x
-        let velocity = recognizer.velocity(in: self).x
-        if travel >= bounds.width / 3 || (travel >= 32 && velocity >= 600) {
-            tcode_ios_swipe_back()
+        let phase: UInt8
+        switch recognizer.state {
+        case .began: phase = 0
+        case .changed: phase = 1
+        case .ended: phase = 2
+        case .cancelled, .failed: phase = 3
+        default: return
         }
+        tcode_ios_edge_back(phase, Float(recognizer.translation(in: self).x),
+                            Float(recognizer.velocity(in: self).x))
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {

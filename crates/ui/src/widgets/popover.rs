@@ -227,17 +227,35 @@ impl Popover {
         let dismissal = crate::overlay::OutsideDismissal::new(self.id.clone(), window, cx);
         let closable = self.overlay_closable;
         let open = state.read(cx).is_open();
-        // Keep the sheet mounted through its fade-out before dismissal.
+        let parent = window.current_view();
+        let close = state.clone();
+        let binding = crate::overlay::bind_sheet(
+            self.id.clone(),
+            state.read(cx).focus_handle(cx),
+            open,
+            move |window, cx| {
+                close.update(cx, |state, cx| state.dismiss(window, cx));
+                cx.notify(parent);
+            },
+            window,
+            cx,
+        );
+        let drag = binding.read(cx);
+        let sheet_height = drag.height;
+        let drag_progress = crate::edge_back::settle(
+            (self.id.clone(), "edge-offset"),
+            drag.progress,
+            drag.dragging,
+            window,
+            cx,
+        );
         let presence = gpui_base::motion::Presence::new(
             gpui::SharedString::from(format!("{:?}-sheet", self.id)),
             open,
         )
-        .transition(gpui_base::motion::Transition::new(
-            std::time::Duration::from_millis(180),
-        ))
+        .transition(gpui_base::motion::Transition::new(crate::edge_back::SETTLE))
         .sample(window, cx);
         let progress = presence.progress;
-        let parent = window.current_view();
         let toggle: SheetToggle = Rc::new({
             let state = state.clone();
             move |window, cx| {
@@ -277,8 +295,6 @@ impl Popover {
                 .role(Role::Group)
                 .aria_label(self.sheet_title.clone().unwrap_or_default())
                 .occlude()
-                // Offset animation would move the hit targets, so fade with the
-                // backdrop while keeping the sheet in its final position.
                 .opacity(progress)
                 .w(viewport.width)
                 .max_w(viewport.width)
@@ -359,14 +375,31 @@ impl Popover {
                                 .absolute()
                                 .inset_0()
                                 .occlude()
-                                .bg(crate::material::scrim(progress, cx)),
+                                .bg(crate::material::scrim(progress * (1. - drag_progress), cx)),
                         )
                         .surface(
                             div()
                                 .absolute()
                                 .left_0()
-                                .bottom(insets.bottom)
+                                .bottom(
+                                    insets.bottom
+                                        - crate::edge_back::BackProgress::offset(
+                                            if open {
+                                                drag_progress
+                                            } else {
+                                                drag_progress.max(1. - progress)
+                                            },
+                                            sheet_height,
+                                        ),
+                                )
                                 .w(viewport.width)
+                                .on_children_prepainted(move |bounds, _, cx| {
+                                    if let Some(bounds) = bounds.first() {
+                                        binding.update(cx, |binding, _| {
+                                            binding.height = bounds.size.height
+                                        });
+                                    }
+                                })
                                 .child(surface),
                         ),
                 )

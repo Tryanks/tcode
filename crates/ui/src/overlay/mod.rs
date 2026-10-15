@@ -79,6 +79,7 @@ impl OutsideDismissal {
 /// leaves behind.
 pub(crate) struct Overlays {
     dialogs: Vec<ActiveDialog>,
+    sheets: Vec<gpui::WeakEntity<SheetBack>>,
     notifications: Entity<NotificationList>,
     touch_selection: Entity<WindowTouchSelectionOverlay>,
 }
@@ -92,6 +93,7 @@ impl Overlays {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             dialogs: Vec::new(),
+            sheets: Vec::new(),
             notifications: cx.new(|cx| NotificationList::new(window, cx)),
             touch_selection: cx.new(|cx| WindowTouchSelectionOverlay::new(window, cx)),
         }
@@ -314,6 +316,85 @@ impl OverlayExt for Window {
                 .update(cx, |list, cx| list.clear(window, cx));
         });
     }
+}
+
+type SheetClose = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// A sheet's binding to the window's edge-back gesture, scoped by its base focus trap.
+pub(crate) struct SheetBack {
+    pub focus: gpui::FocusHandle,
+    pub open: bool,
+    pub dragging: bool,
+    pub progress: f32,
+    pub height: gpui::Pixels,
+    pub close: SheetClose,
+    pub parent: gpui::EntityId,
+}
+
+pub(crate) fn bind_sheet(
+    id: ElementId,
+    focus: gpui::FocusHandle,
+    open: bool,
+    close: impl Fn(&mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<SheetBack> {
+    let parent = window.current_view();
+    let state = window.use_keyed_state((id, "edge-back"), cx, |_, _| SheetBack {
+        focus: focus.clone(),
+        open,
+        dragging: false,
+        progress: 0.,
+        height: gpui::px(0.),
+        close: Rc::new(|_, _| {}),
+        parent,
+    });
+    state.update(cx, |state, _| {
+        state.focus = focus;
+        if open && !state.open {
+            state.progress = 0.;
+            state.dragging = false;
+        }
+        state.open = open;
+        state.close = Rc::new(close);
+        state.parent = parent;
+    });
+    if let Some(overlays) = window
+        .root::<gpui_base::Root>()
+        .flatten()
+        .and_then(|root| root.read(cx).plugin::<Overlays>())
+    {
+        overlays.update(cx, |overlays, _| {
+            overlays.sheets.retain(|sheet| sheet.upgrade().is_some());
+            if !overlays
+                .sheets
+                .iter()
+                .any(|sheet| sheet.entity_id() == state.entity_id())
+            {
+                overlays.sheets.push(state.downgrade());
+            }
+        });
+    }
+    state
+}
+
+pub(crate) fn active_sheet(window: &Window, cx: &App) -> Option<Entity<SheetBack>> {
+    let trap = gpui_base::active_focus_trap(window, cx)?;
+    let overlays = window
+        .root::<gpui_base::Root>()
+        .flatten()?
+        .read(cx)
+        .plugin::<Overlays>()?;
+    overlays
+        .read(cx)
+        .sheets
+        .iter()
+        .rev()
+        .filter_map(|sheet| sheet.upgrade())
+        .find(|sheet| {
+            let sheet = sheet.read(cx);
+            sheet.open && sheet.focus == trap
+        })
 }
 
 #[cfg(test)]

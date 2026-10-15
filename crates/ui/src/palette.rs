@@ -741,13 +741,20 @@ impl CommandPalette {
 
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = self.window_state.read(cx).compact;
+        let open = self.window_state.read(cx).palette_open;
+        let presence = gpui_base::motion::Presence::new("palette-presence", open)
+            .transition(gpui_base::motion::Transition::new(crate::edge_back::SETTLE))
+            .sample(window, cx);
+        if !open && (!compact || !presence.should_render() || presence.progress == 0.) {
+            return div().into_any_element();
+        }
         let results = self.results(cx);
         let total = results.items.len();
         if total > 0 && self.selected >= total {
             self.selected = total - 1;
         }
         let muted = cx.theme().muted_foreground;
-        let compact = self.window_state.read(cx).compact;
         let viewport = window.viewport_size();
         let insets = crate::window_seam::content_insets(window);
         let available =
@@ -861,6 +868,56 @@ impl Render for CommandPalette {
                 cx.stop_propagation();
             });
         let palette = cx.entity();
+        if compact {
+            let close = palette.clone();
+            let binding = crate::overlay::bind_sheet(
+                "command-palette".into(),
+                self.focus_handle.clone(),
+                open,
+                move |_, cx| close.update(cx, |palette, cx| palette.close(cx)),
+                window,
+                cx,
+            );
+            let drag = binding.read(cx);
+            let progress = crate::edge_back::settle(
+                "palette-edge-offset",
+                drag.progress,
+                drag.dragging,
+                window,
+                cx,
+            );
+            let progress = if open {
+                progress
+            } else {
+                progress.max(1. - presence.progress)
+            };
+            return gpui_base::Sheet::new(cx)
+                .focus_handle(self.focus_handle.clone())
+                .request_close(move |_, cx| {
+                    dismissal.dismissed();
+                    palette.update(cx, |palette, cx| palette.close(cx));
+                })
+                .overlay(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(crate::material::scrim(1. - progress, cx)),
+                )
+                .surface(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .bottom(
+                            insets.bottom
+                                - crate::edge_back::BackProgress::offset(
+                                    progress,
+                                    px(440.).min(available),
+                                ),
+                        )
+                        .child(card),
+                )
+                .into_any_element();
+        }
         gpui_base::Dialog::new(cx)
             // gpui-base's backdrop parent dismisses but does not block; the scrim stops wheels without occluding it.
             .backdrop(
@@ -883,6 +940,7 @@ impl Render for CommandPalette {
             .when(!compact, |host| {
                 host.justify_start().pt(insets.top + px(96.))
             })
+            .into_any_element()
     }
 }
 
@@ -1267,6 +1325,7 @@ mod tests {
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("thread-0".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        window_state.update(cx, |state, cx| state.open_palette(cx));
         let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {
             palette: cx.new(|cx| CommandPalette::new(store.clone(), window_state, window, cx)),
         });
