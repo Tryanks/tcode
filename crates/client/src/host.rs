@@ -146,6 +146,10 @@ pub struct PickedImage {
 
 /// Persistence, pairing, transport, and platform facilities for a tcode client.
 pub trait ClientHost: 'static {
+    fn speech_recognizer(&self) -> Option<std::rc::Rc<dyn crate::speech::SpeechRecognizer>> {
+        None
+    }
+
     /// Name this device presents to hosts while pairing and connecting.
     fn device_name(&self) -> String;
 

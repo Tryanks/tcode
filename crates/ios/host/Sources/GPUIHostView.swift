@@ -1,30 +1,6 @@
 import QuartzCore
 import UIKit
 
-private final class GPUIKeyboardProxy: UITextView {
-    weak var keyEventTarget: GPUIHostView?
-
-    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        keyEventTarget?.sendPresses(presses, down: true, repeatKey: false)
-        super.pressesBegan(presses, with: event)
-    }
-
-    override func pressesChanged(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        keyEventTarget?.sendPresses(presses, down: true, repeatKey: true)
-        super.pressesChanged(presses, with: event)
-    }
-
-    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        keyEventTarget?.sendPresses(presses, down: false, repeatKey: false)
-        super.pressesEnded(presses, with: event)
-    }
-
-    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        keyEventTarget?.sendPresses(presses, down: false, repeatKey: false)
-        super.pressesCancelled(presses, with: event)
-    }
-}
-
 final class GPUIHostViewController: UIViewController {
     private var started = false
     private var displayLink: CADisplayLink?
@@ -128,16 +104,12 @@ final class GPUIHostViewController: UIViewController {
     }
 }
 
-final class GPUIHostView: UIView, UITextViewDelegate {
+final class GPUIHostView: UIView {
     private var attached = false
     private var nextTouchIdentifier: UInt64 = 1
     private var touchIdentifiers: [ObjectIdentifier: UInt64] = [:]
-    private var resettingKeyboardProxy = false
-    private var hasForwardedMarkedText = false
     private var keyboardFrameInScreen: CGRect?
-    private let keyboardProxy = GPUIKeyboardProxy(
-        frame: CGRect(x: -2, y: -2, width: 1, height: 1)
-    )
+    let keyboardProxy = GPUITextInput(frame: .zero)
     // Once it recognizes, UIKit cancels the edge touch in this view, so GPUI
     // sees no pan to fling and no tap; an edge contact that never moves fails
     // it and reaches GPUI unchanged.
@@ -170,12 +142,9 @@ final class GPUIHostView: UIView, UITextViewDelegate {
         metalLayer.contentsScale = contentScaleFactor
         metalLayer.presentsWithTransaction = false
 
-        keyboardProxy.delegate = self
         keyboardProxy.keyEventTarget = self
         keyboardProxy.backgroundColor = .clear
-        keyboardProxy.textColor = .clear
         keyboardProxy.tintColor = .clear
-        keyboardProxy.alpha = 0.01
         keyboardProxy.isAccessibilityElement = false
         keyboardProxy.autocorrectionType = .no
         keyboardProxy.autocapitalizationType = .none
@@ -249,7 +218,7 @@ final class GPUIHostView: UIView, UITextViewDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        keyboardProxy.frame = CGRect(x: -2, y: -2, width: 1, height: 1)
+        keyboardProxy.frame = bounds
         metalLayer.contentsScale = contentScaleFactor
         metalLayer.drawableSize = CGSize(
             width: bounds.width * contentScaleFactor,
@@ -348,67 +317,6 @@ final class GPUIHostView: UIView, UITextViewDelegate {
         }
     }
 
-    func textViewDidChange(_ textView: UITextView) {
-        guard !resettingKeyboardProxy else { return }
-
-        if let markedRange = textView.markedTextRange,
-           let markedText = textView.text(in: markedRange)
-        {
-            hasForwardedMarkedText = true
-            var selectionStart = markedText.utf16.count
-            var selectionLength = 0
-            if let selected = textView.selectedTextRange {
-                selectionStart = max(
-                    0,
-                    textView.offset(from: markedRange.start, to: selected.start)
-                )
-                selectionLength = max(
-                    0,
-                    textView.offset(from: selected.start, to: selected.end)
-                )
-            }
-            withUTF8(markedText) { bytes, length in
-                gpui_ios_set_marked_text(
-                    bytes,
-                    length,
-                    selectionStart,
-                    selectionLength
-                )
-            }
-            return
-        }
-
-        let committed = textView.text ?? ""
-        if !committed.isEmpty || hasForwardedMarkedText {
-            // Cancelling composition must replace the marked range with empty
-            // text; unmarking alone preserves the preedit as committed text.
-            withUTF8(committed) { bytes, length in
-                gpui_ios_insert_text(bytes, length)
-            }
-        }
-        hasForwardedMarkedText = false
-        resettingKeyboardProxy = true
-        textView.text = ""
-        resettingKeyboardProxy = false
-    }
-
-    func textView(
-        _ textView: UITextView,
-        shouldChangeTextIn range: NSRange,
-        replacementText text: String
-    ) -> Bool {
-        if text == "\n" {
-            sendKey(name: "enter", character: "\n", modifiers: 0, down: true, repeatKey: false)
-            sendKey(name: "enter", character: "\n", modifiers: 0, down: false, repeatKey: false)
-            return false
-        }
-        if text.isEmpty, textView.markedTextRange == nil, textView.text.isEmpty {
-            gpui_ios_delete_backward()
-            return false
-        }
-        return true
-    }
-
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gestureRecognizer === backSwipe else {
             return super.gestureRecognizerShouldBegin(gestureRecognizer)
@@ -502,36 +410,37 @@ final class GPUIHostView: UIView, UITextViewDelegate {
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         super.pressesBegan(presses, with: event)
-        sendPresses(presses, down: true, repeatKey: false)
+        if !keyboardProxy.isFirstResponder { sendPresses(presses, down: true, repeatKey: false) }
     }
 
     override func pressesChanged(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         super.pressesChanged(presses, with: event)
-        sendPresses(presses, down: true, repeatKey: true)
+        if !keyboardProxy.isFirstResponder { sendPresses(presses, down: true, repeatKey: true) }
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         super.pressesEnded(presses, with: event)
-        sendPresses(presses, down: false, repeatKey: false)
+        if !keyboardProxy.isFirstResponder { sendPresses(presses, down: false, repeatKey: false) }
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         super.pressesCancelled(presses, with: event)
-        sendPresses(presses, down: false, repeatKey: false)
+        if !keyboardProxy.isFirstResponder { sendPresses(presses, down: false, repeatKey: false) }
     }
 
-    fileprivate func sendPresses(_ presses: Set<UIPress>, down: Bool, repeatKey: Bool) {
-        for press in presses {
-            guard let key = press.key else { continue }
+    @discardableResult
+    func sendPresses(_ presses: Set<UIPress>, down: Bool, repeatKey: Bool) -> Set<UIPress> {
+        Set(presses.filter { press in
+            guard let key = press.key else { return true }
             let name = gpuiKeyName(for: key)
-            sendKey(
+            return !sendKey(
                 name: name,
                 character: gpuiCharacter(for: key, name: name),
                 modifiers: modifierBits(key.modifierFlags),
                 down: down,
                 repeatKey: repeatKey
             )
-        }
+        })
     }
 }
 
@@ -568,16 +477,18 @@ private func modifierBits(_ flags: UIKeyModifierFlags) -> UInt32 {
     return bits
 }
 
-private func sendKey(
+@discardableResult
+func sendKey(
     name: String,
     character: String,
     modifiers: UInt32,
     down: Bool,
     repeatKey: Bool
-) {
+) -> Bool {
+    var handled = false
     withUTF8(name) { keyBytes, keyLength in
         withUTF8(character) { characterBytes, characterLength in
-            gpui_ios_key_event(
+            handled = gpui_ios_key_event(
                 keyBytes,
                 keyLength,
                 characterBytes,
@@ -585,7 +496,8 @@ private func sendKey(
                 modifiers,
                 down ? 1 : 0,
                 repeatKey ? 1 : 0
-            )
+            ) != 0
         }
     }
+    return handled
 }

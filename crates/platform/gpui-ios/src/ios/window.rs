@@ -69,6 +69,8 @@ pub(crate) struct IosWindow {
     dispatching_input: Cell<bool>,
     pending_input: RefCell<VecDeque<PlatformInput>>,
     requesting_frame: Cell<bool>,
+    using_input_handler: Cell<bool>,
+    text_input_active: Cell<bool>,
 }
 
 impl std::fmt::Debug for IosWindow {
@@ -192,6 +194,8 @@ impl IosWindow {
             dispatching_input: Cell::new(false),
             pending_input: RefCell::new(VecDeque::new()),
             requesting_frame: Cell::new(false),
+            using_input_handler: Cell::new(false),
+            text_input_active: Cell::new(false),
         })
     }
 
@@ -424,22 +428,25 @@ impl IosWindow {
         self.request_frame(true);
     }
 
-    pub(crate) fn insert_text(&self, text: &str) {
-        if let Some(handler) = self.input_handler.borrow_mut().as_mut() {
-            handler.replace_text_in_range(None, text);
+    pub(crate) fn with_input_handler<R>(
+        &self,
+        f: impl FnOnce(&mut PlatformInputHandler) -> R,
+    ) -> Option<R> {
+        if !self.text_input_active.get() || self.using_input_handler.replace(true) {
+            return None;
         }
-        self.request_frame(true);
+        // Handler calls update GPUI and may re-enter the platform during layout.
+        let mut handler = self.input_handler.borrow_mut().take();
+        let result = handler.as_mut().map(f);
+        if self.input_handler.borrow().is_none() {
+            *self.input_handler.borrow_mut() = handler;
+        }
+        self.using_input_handler.set(false);
+        result
     }
 
-    pub(crate) fn set_marked_text(&self, text: &str, start: usize, length: usize) {
-        if let Some(handler) = self.input_handler.borrow_mut().as_mut() {
-            handler.replace_and_mark_text_in_range(
-                None,
-                text,
-                Some(start..start.saturating_add(length)),
-            );
-        }
-        self.request_frame(true);
+    pub(crate) fn text_input_active(&self) -> bool {
+        self.text_input_active.get()
     }
 
     pub(crate) fn delete_backward(&self) {
@@ -464,7 +471,7 @@ impl IosWindow {
         modifiers: Modifiers,
         down: bool,
         repeat: bool,
-    ) {
+    ) -> bool {
         self.modifiers.set(modifiers);
         let keystroke = Keystroke {
             modifiers,
@@ -483,8 +490,9 @@ impl IosWindow {
         } else {
             PlatformInput::KeyUp(KeyUpEvent { keystroke })
         };
-        self.dispatch_input(input);
+        let result = self.dispatch_input(input);
         self.request_frame(true);
+        !result.propagate || result.default_prevented
     }
 }
 
@@ -567,6 +575,11 @@ impl PlatformWindow for IosWindow {
 
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
         *self.input_handler.borrow_mut() = Some(input_handler);
+        // GPUI emits only focus state changes. Reinstalling the focused handler
+        // after rendering also exposes programmatic edits and caret moves.
+        if self.text_input_active.get() {
+            super::ffi::host_text_input_changed();
+        }
     }
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
@@ -712,9 +725,19 @@ impl PlatformWindow for IosWindow {
 
     fn text_input_state_changed(&self, change: TextInputStateChange) {
         match change {
-            TextInputStateChange::FocusGained => super::ffi::host_show_keyboard(),
-            TextInputStateChange::FocusLost => super::ffi::host_hide_keyboard(),
-            TextInputStateChange::SelectionChanged | TextInputStateChange::ContentChanged => {}
+            TextInputStateChange::FocusGained => {
+                self.text_input_active.set(true);
+                super::ffi::host_show_keyboard();
+                super::ffi::host_text_input_changed();
+            }
+            TextInputStateChange::FocusLost => {
+                self.text_input_active.set(false);
+                super::ffi::host_hide_keyboard();
+                super::ffi::host_text_input_changed();
+            }
+            TextInputStateChange::SelectionChanged | TextInputStateChange::ContentChanged => {
+                super::ffi::host_text_input_changed();
+            }
         }
     }
 }
