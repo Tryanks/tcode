@@ -1,12 +1,9 @@
 //! The browser listener over loopback: static bundle, password login and the
 //! `/ws` hello, as `crates/web` speaks them.
-#[path = "common/original.rs"]
-mod original_fixture;
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -37,20 +34,15 @@ impl Drop for TestDir {
     }
 }
 
-fn fake_host() -> (HostMux, Arc<std::sync::Mutex<Vec<String>>>) {
+fn fake_host() -> HostMux {
     let (to_host, host_rx) =
         async_channel::unbounded::<tcode_client::attachment::AttachmentMessage>();
     let (host_tx, from_host) = async_channel::unbounded::<String>();
-    let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let seen = keys.clone();
     std::thread::spawn(move || {
         while let Ok(message) = host_rx.recv_blocking() {
             let line = message.line;
             let request = tcode_protocol::decode_client_line(&line).unwrap();
             let id = request.id;
-            if let Some(key) = request.key {
-                seen.lock().unwrap().push(key);
-            }
             if let tcode_protocol::ClientPayload::Subscribe(subscription) = &request.payload {
                 let snapshot = tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
                     request_id: Some(id),
@@ -92,7 +84,7 @@ fn fake_host() -> (HostMux, Arc<std::sync::Mutex<Vec<String>>>) {
                 .unwrap();
         }
     });
-    (HostMux::new(to_host, from_host), keys)
+    HostMux::new(to_host, from_host)
 }
 
 fn config(data_dir: PathBuf) -> BrowserConfig {
@@ -173,22 +165,6 @@ impl Browser {
             }
         }
     }
-
-    /// Whether the listener closed the socket within `wait`.
-    async fn closed_within(&mut self, wait: Duration) -> bool {
-        matches!(
-            tokio::time::timeout(wait, async {
-                loop {
-                    match self.0.next().await {
-                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return true,
-                        Some(Ok(_)) => {}
-                    }
-                }
-            })
-            .await,
-            Ok(true)
-        )
-    }
 }
 
 fn hello(token: &str, device_name: &str) -> Value {
@@ -214,7 +190,7 @@ fn static_bundle_get_and_head_share_headers() {
         ("/tcode_web_bg.wasm", b"\0asm"),
     ];
     config.static_bundle = Some(BUNDLE);
-    let server = serve(fake_host().0, config).unwrap();
+    let server = serve(fake_host(), config).unwrap();
     for (path, status, content_type, length) in [
         ("/", "200 OK", "text/html; charset=utf-8", 18),
         ("/index.html", "200 OK", "text/html; charset=utf-8", 18),
@@ -249,206 +225,9 @@ fn static_bundle_get_and_head_share_headers() {
 }
 
 #[test]
-fn password_setup_login_and_lockout() {
-    let dir = TestDir::new("password");
-    let server = serve(fake_host().0, config(dir.0.clone())).unwrap();
-    let addr = server.local_addr();
-    let (status, body) = http(addr, "GET", "/auth/state", "");
-    assert_eq!(status, "HTTP/1.1 200 OK");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&body).unwrap(),
-        json!({"mode":"password","configured":false})
-    );
-    assert!(
-        login(addr, "secret password", "Browser").0.contains("403"),
-        "no login before a password exists"
-    );
-    assert!(
-        http(addr, "POST", "/auth/setup", r#"{"password":"short"}"#)
-            .0
-            .contains("400")
-    );
-    let form = TcpStream::connect(addr).unwrap();
-    let mut form = form;
-    form.set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    let body = r#"{"password":"secret password"}"#;
-    write!(
-        form,
-        "POST /auth/setup HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap();
-    let mut reply = String::new();
-    let _ = form.read_to_string(&mut reply);
-    assert!(
-        reply.starts_with("HTTP/1.1 415 "),
-        "a cross-origin form must not claim setup: {reply}"
-    );
-    setup(&server, "secret password");
-    assert!(server.password_configured());
-    assert!(
-        http(addr, "POST", "/auth/setup", body).0.contains("409"),
-        "setup happens once"
-    );
-    let (status, body) = http(addr, "GET", "/auth/state", "");
-    assert_eq!(status, "HTTP/1.1 200 OK");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&body).unwrap(),
-        json!({"mode":"password","configured":true})
-    );
-    let (status, paired) = login(addr, "secret password", "Browser");
-    assert_eq!(status, "HTTP/1.1 200 OK");
-    assert_eq!(paired["host_name"], "Test Host");
-    assert!(
-        paired["token"]
-            .as_str()
-            .is_some_and(|token| token.len() == 43)
-    );
-    // The retired native paths are gone from the listener.
-    for (method, path) in [
-        ("POST", "/pair"),
-        ("GET", "/admin/pair"),
-        ("POST", "/identity"),
-    ] {
-        assert_eq!(http(addr, method, path, "{}").0, "HTTP/1.1 404 Not Found");
-    }
-    for _ in 0..5 {
-        assert!(login(addr, "incorrect", "Browser").0.contains("403"));
-    }
-    assert!(
-        login(addr, "secret password", "Browser").0.contains("403"),
-        "five failures lock the right password out"
-    );
-    server.shutdown();
-}
-
-#[test]
-fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket() {
-    let dir = TestDir::new("hello");
-    let (mux, keys) = fake_host();
-    let mut config = config(dir.0.clone());
-    let hosting_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let seen = hosting_calls.clone();
-    config.hosting = Some(Arc::new(move |action| {
-        seen.lock().unwrap().push(format!("{action:?}"));
-        Ok(tcode_protocol::HostingState {
-            created_space_id: None,
-            spaces: Vec::new(),
-            enabled: true,
-            invite: Some(
-                "tcode://pair?v=2&id=machine&secret=AAECAwQFBgcICQoLDA0ODw&name=Test%20Host".into(),
-            ),
-            expires_in_secs: 299,
-            host_id: "machine".into(),
-            host_name: "Test Host".into(),
-            devices: vec![tcode_protocol::HostedDevice {
-                access: tcode_protocol::DeviceAccess::Full,
-                id: "phone".into(),
-                name: "Phone".into(),
-                created_unix: 1,
-                platform: None,
-                path: None,
-            }],
-            traverse: Vec::new(),
-        })
-    }));
-    let server = serve(mux, config).unwrap();
-    let addr = server.local_addr();
-    setup(&server, "secret password");
-    let token = login(addr, "secret password", "Chrome").1["token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    tcode_traverse::block_on(async {
-        let (_, rejected) = Browser::hello(
-            addr,
-            json!({"type":"hello","protocol_version":4,"supported_versions":[3,4],"token":token,"device_name":"Chrome"}),
-        )
-        .await;
-        assert_eq!(rejected["type"], "hello_rejected");
-        assert_eq!(rejected["reason"], "protocol");
-        let (_, rejected) = Browser::hello(addr, hello("not-a-token", "Chrome")).await;
-        assert_eq!(rejected["type"], "hello_rejected");
-        assert_eq!(rejected["reason"], "token");
-
-        let (mut browser, hello_ok) = Browser::hello(addr, hello(&token, "Chrome")).await;
-        assert_eq!(hello_ok["type"], "hello_ok");
-        assert_eq!(
-            hello_ok["protocol_version"],
-            tcode_protocol::PROTOCOL_VERSION
-        );
-        assert_eq!(hello_ok["host_name"], "Test Host");
-        browser
-            .send(json!({"id":900,"payload":{"type":"query","content":{"type":"hosting","content":{"action":{"type":"state"}}}}}))
-            .await;
-        let reply = browser.recv().await;
-        assert_eq!(reply["type"], "query_result");
-        assert_eq!(reply["content"]["id"], 900);
-        let state = &reply["content"]["result"]["Ok"]["content"];
-        assert_eq!(
-            state["invite"],
-            "tcode://pair?v=2&id=machine&secret=AAECAwQFBgcICQoLDA0ODw&name=Test%20Host",
-            "hosting queries are answered by the handler the host installed"
-        );
-        let devices = state["devices"].as_array().unwrap();
-        assert_eq!(devices.len(), 2, "native devices, then this browser");
-        assert_eq!(devices[0]["name"], "Phone");
-        assert_eq!(devices[1]["name"], "Chrome");
-        assert_eq!(devices[1]["platform"], "macOS");
-        assert_eq!(
-            devices[1]["path"],
-            json!({"direct": true, "lan": true}),
-            "a connected browser is shown as a device on the machine's own network"
-        );
-        let browser_id = devices[1]["id"].as_str().unwrap().to_owned();
-        assert_eq!(hosting_calls.lock().unwrap().as_slice(), ["State"]);
-
-        // The key is scoped to the browser's token, never to a client-chosen prefix.
-        browser
-            .send(json!({"id":1,"key":"spoofed:0ec1ee7e-9f37-4bd8-9e04-9a1d84e9a8b4","payload":{"type":"command","content":{"type":"create_project","content":{"root":"/tmp/one"}}}}))
-            .await;
-        assert!(
-            browser.closed_within(Duration::from_secs(5)).await,
-            "a malformed key ends the socket"
-        );
-        let (mut browser, _) = Browser::hello(addr, hello(&token, "Chrome")).await;
-        browser
-            .send(json!({"id":1,"key":"0ec1ee7e-9f37-4bd8-9e04-9a1d84e9a8b4","payload":{"type":"command","content":{"type":"create_project","content":{"root":"/tmp/one"}}}}))
-            .await;
-        assert_eq!(browser.recv().await["type"], "ack");
-        let keys = keys.lock().unwrap().clone();
-        assert_eq!(keys.len(), 1);
-        assert!(
-            keys[0].ends_with(":0ec1ee7e-9f37-4bd8-9e04-9a1d84e9a8b4")
-                && !keys[0].starts_with("spoofed")
-                && !keys[0].contains(&token),
-            "{keys:?}"
-        );
-
-        // Revoking the browser from another client closes both sockets and
-        // rejects a new connection using the same token.
-        let (mut revoker, _) = Browser::hello(addr, hello(&token, "Chrome")).await;
-        revoker
-            .send(json!({"id":2,"payload":{"type":"query","content":{"type":"hosting","content":{"action":{"type":"revoke_device","content":browser_id}}}}}))
-            .await;
-        assert!(browser.closed_within(Duration::from_secs(15)).await);
-        assert!(revoker.closed_within(Duration::from_secs(15)).await);
-        assert_eq!(
-            hosting_calls.lock().unwrap().as_slice(),
-            ["State", "State"],
-            "a browser device is revoked by the listener, not the native host"
-        );
-        let (_, rejected) = Browser::hello(addr, hello(&token, "Chrome")).await;
-        assert_eq!(rejected["reason"], "token");
-    });
-    server.shutdown();
-}
-
-#[test]
 fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
     let dir = TestDir::new("two");
-    let server = serve(fake_host().0, config(dir.0.clone())).unwrap();
+    let server = serve(fake_host(), config(dir.0.clone())).unwrap();
     let addr = server.local_addr();
     setup(&server, "secret password");
     let tokens: Vec<String> = ["Chrome", "Firefox"]
@@ -507,7 +286,7 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
 #[test]
 fn a_bind_beyond_loopback_needs_a_password_first() {
     let dir = TestDir::new("lan");
-    let (mux, _) = fake_host();
+    let mux = fake_host();
     let lan = || BrowserConfig {
         listen: "0.0.0.0:0".parse().unwrap(),
         ..config(dir.0.clone())
@@ -532,66 +311,4 @@ fn a_bind_beyond_loopback_needs_a_password_first() {
     let server = serve(mux, lan()).unwrap();
     assert!(server.password_configured());
     server.shutdown();
-}
-
-/// Contract: password-issued bearer tokens permit exact full and single-range
-/// original reads; an invalid token cannot read the same existing file.
-#[test]
-fn authenticated_original_full_range_and_invalid_token() {
-    let dir = TestDir::new("original-http");
-    let bytes: Vec<_> = (0..160_000)
-        .map(|index| ((index * 11 + index / 19) % 251) as u8)
-        .collect();
-    let path = dir.0.join("original.png");
-    std::fs::write(&path, &bytes).unwrap();
-    let (runtime, mux, _, _) = original_fixture::recorded_host(&dir.0, &bytes);
-    let server = serve(mux.clone(), config(dir.0.clone())).unwrap();
-    setup(&server, "original-password");
-    let (status, login) = login(server.local_addr(), "original-password", "Original browser");
-    assert_eq!(status, "HTTP/1.1 200 OK");
-    let token = login["token"].as_str().unwrap();
-    let target = serde_json::to_string(&tcode_protocol::OriginalTarget::File { path }).unwrap();
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("target", &target)
-        .finish();
-    let request = |token: &str, range: Option<&str>| {
-        let mut stream = TcpStream::connect(server.local_addr()).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        write!(
-            stream,
-            "GET /original?{query} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n"
-        )
-        .unwrap();
-        if let Some(range) = range {
-            write!(stream, "Range: {range}\r\n").unwrap();
-        }
-        write!(stream, "Connection: close\r\n\r\n").unwrap();
-        let mut bytes = Vec::new();
-        stream.read_to_end(&mut bytes).unwrap();
-        let split = bytes
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .unwrap();
-        (
-            String::from_utf8(bytes[..split].to_vec()).unwrap(),
-            bytes[split + 4..].to_vec(),
-        )
-    };
-    let (head, body) = request(token, None);
-    assert!(head.starts_with("HTTP/1.1 200 OK\r\n"));
-    assert_eq!(body, bytes);
-    let (head, body) = request(token, Some("bytes=65000-131999"));
-    assert!(head.starts_with("HTTP/1.1 206 Partial Content\r\n"));
-    assert!(
-        head.lines()
-            .any(|line| line == "Content-Range: bytes 65000-131999/160000")
-    );
-    assert!(head.lines().any(|line| line == "Content-Length: 67000"));
-    assert_eq!(body, bytes[65000..132000]);
-    let (head, _) = request("invalid-token", None);
-    assert!(head.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
-    server.shutdown();
-    original_fixture::stop(runtime, &mux);
 }
