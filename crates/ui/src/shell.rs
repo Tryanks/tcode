@@ -4322,7 +4322,7 @@ mod tests {
             "drafxt"
         );
         driver.shutdown(cx, &store, &host);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
