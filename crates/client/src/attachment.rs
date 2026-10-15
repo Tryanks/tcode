@@ -97,6 +97,7 @@ impl AttachmentSender {
             })
     }
 
+    #[cfg(not(target_family = "wasm"))]
     pub fn send_blocking(&self, line: String) -> Result<(), async_channel::SendError<String>> {
         self.sender
             .send_blocking(AttachmentMessage {
