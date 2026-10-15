@@ -4200,6 +4200,132 @@ mod tests {
     }
 
     #[gpui::test]
+    fn background_provider_notices_preserve_composer_editing(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = crate::store::tests::scratch_root("background-notification-focus");
+        let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+        for id in ["thread-a", "thread-b"] {
+            let mut meta = tcode_core::project::SessionMeta::new(
+                agent::ProviderKind::Codex,
+                root.clone(),
+                None,
+            );
+            meta.id = id.into();
+            disk.upsert_meta(&meta).unwrap();
+        }
+        let host =
+            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
+                .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let (shell, _transport, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 393.);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| {
+            *store = WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            );
+            store.select_session("thread-a".into());
+        });
+        driver.wait_until(cx, &store, "selected conversation", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+            })
+        });
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_thread(window, cx)));
+        draw(cx);
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+        });
+        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        let card = cx.debug_bounds("composer-card").unwrap();
+        cx.simulate_click(card.center(), gpui::Modifiers::default());
+        cx.simulate_keystrokes("draft");
+        cx.simulate_keystrokes("left");
+        draw(cx);
+        cx.update(|window, _| assert!(focus.is_focused(window)));
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "draft"
+        );
+
+        for event in [
+            agent::AgentEvent::TurnRetry {
+                retry: Some(agent::TurnRetry {
+                    turn_id: "background-turn".into(),
+                    retry_at: Some(u64::MAX),
+                }),
+            },
+            agent::AgentEvent::Warning {
+                message: "Background status changed".into(),
+            },
+            agent::AgentEvent::Error {
+                message: "Reconnecting…".into(),
+                fatal: false,
+            },
+        ] {
+            driver
+                .await_with_events(
+                    cx,
+                    &store,
+                    host.update_state_for_test(move |state, cx| {
+                        state.provider_event_for_test("thread-b", event, cx);
+                    }),
+                )
+                .unwrap();
+            driver.step(cx, &store);
+            draw(cx);
+            cx.update(|window, _| {
+                assert!(
+                    focus.is_focused(window),
+                    "background provider event stole composer focus"
+                );
+            });
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                "draft"
+            );
+        }
+        for width in [1024., 393.] {
+            resize(cx, width);
+            cx.update(|window, _| {
+                assert!(focus.is_focused(window), "rotation keeps editing focus")
+            });
+        }
+        let toast = cx
+            .debug_bounds("compact-toast")
+            .expect("the notice remains visible");
+        cx.simulate_click(toast.center(), gpui::Modifiers::default());
+        draw(cx);
+        cx.update(|window, _| {
+            assert!(
+                !focus.is_focused(window),
+                "tapping the error opens its details"
+            )
+        });
+        cx.update(|window, cx| window.close_dialog(cx));
+        draw(cx);
+        cx.update(|window, _| {
+            assert!(
+                focus.is_focused(window),
+                "closing details returns to editing"
+            )
+        });
+        cx.simulate_keystrokes("x");
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "drafxt"
+        );
+        driver.shutdown(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
     fn keyboard_cover_changes_keep_editor_focus_until_explicit_dismissal(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
