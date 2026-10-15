@@ -24,7 +24,30 @@ use tcode_protocol::{IconImageEntry, QueryResponse};
 const TILE_WIDTH: f32 = 96.;
 const TILE_GAP: f32 = 8.;
 
-pub(crate) fn artwork(project: &Project, size: f32) -> impl IntoElement + use<> {
+pub(crate) fn label(project: &Project) -> String {
+    if project.quick_chat {
+        crate::tr!("sidebar.quick_chat").into_owned()
+    } else {
+        project.name.clone()
+    }
+}
+
+pub(crate) fn group_label(project: &Project) -> String {
+    if project.quick_chat {
+        crate::tr!("sidebar.quick_chats").into_owned()
+    } else {
+        project.name.clone()
+    }
+}
+
+pub(crate) fn artwork(project: &Project, size: f32) -> AnyElement {
+    if project.quick_chat {
+        return Icon::empty()
+            .path("icons/message-square.svg")
+            .size(px(size))
+            .flex_none()
+            .into_any_element();
+    }
     img(images::project_icon(project, size))
         .size(px(size))
         .flex_none()
@@ -33,6 +56,7 @@ pub(crate) fn artwork(project: &Project, size: f32) -> impl IntoElement + use<> 
                 .size(px(size))
                 .into_any_element()
         })
+        .into_any_element()
 }
 
 pub(crate) fn open(

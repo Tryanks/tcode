@@ -1672,6 +1672,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             root: PathBuf::from(format!("/{id}")),
+            quick_chat: false,
             icon_path: None,
             permission_defaults: Default::default(),
             created_at: 0,
