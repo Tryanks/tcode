@@ -1,3 +1,4 @@
+use gpui::PlatformInputHandler;
 use std::ops::Range;
 
 pub const NOT_FOUND: usize = isize::MAX as usize;
@@ -38,7 +39,7 @@ impl From<Option<Range<usize>>> for TextRange {
     }
 }
 
-/// Reject offsets inside a surrogate pair rather than replacing a different character.
+/// Read a UTF-16 range without rounding offsets inside surrogate pairs.
 pub fn utf16_slice(text: &str, range: Range<usize>) -> Option<&str> {
     fn byte_offset(text: &str, target: usize) -> Option<usize> {
         let mut offset = 0;
@@ -53,9 +54,173 @@ pub fn utf16_slice(text: &str, range: Range<usize>) -> Option<&str> {
     text.get(byte_offset(text, range.start)?..byte_offset(text, range.end)?)
 }
 
+pub fn text_length(handler: &mut PlatformInputHandler) -> Option<usize> {
+    handler.text_length_utf16().or_else(|| {
+        // gpui-base 0.7.1 has no length query and clamps oversized reads to the document.
+        handler
+            .text_for_range(0..usize::MAX / 2, &mut None)
+            .map(|text| text.encode_utf16().count())
+    })
+}
+
+pub fn read_text(handler: &mut PlatformInputHandler, range: Range<usize>) -> Option<String> {
+    let mut adjusted = None;
+    let text = handler.text_for_range(range.clone(), &mut adjusted)?;
+    let adjusted = adjusted.unwrap_or(range.clone());
+    let start = range.start.checked_sub(adjusted.start)?;
+    let end = range.end.checked_sub(adjusted.start)?;
+    utf16_slice(&text, start..end).map(str::to_owned)
+}
+
+pub fn select_text(handler: &mut PlatformInputHandler, range: Range<usize>) {
+    handler.set_selected_text_range(range.clone());
+    if handler
+        .selected_text_range(true)
+        .is_some_and(|selection| selection.range == range)
+    {
+        return;
+    }
+    // gpui-base 0.7.1 inherits the no-op selection setter. Its composition API
+    // sets selection; identical replacement text records no undo edit.
+    let marked = handler.marked_text_range();
+    let context = marked
+        .clone()
+        .filter(|marked| marked.start <= range.start && range.end <= marked.end)
+        .unwrap_or(range.clone());
+    if let Some(text) = read_text(handler, context.clone()) {
+        handler.replace_and_mark_text_in_range(
+            Some(context.clone()),
+            &text,
+            Some(range.start - context.start..range.end - context.start),
+        );
+        if marked.is_none() {
+            handler.unmark_text();
+        }
+    }
+}
+
+pub fn commit_marked_text(handler: &mut PlatformInputHandler) {
+    // gpui-base 0.7.1 leaves the mark/undo transaction open on blur, and
+    // unmark_text emits no Change. Replacing the preedit commits and emits it.
+    if let Some(marked) = handler.marked_text_range()
+        && let Some(text) = read_text(handler, marked.clone())
+    {
+        let selection = handler.selected_text_range(true);
+        handler.replace_text_in_range(Some(marked), &text);
+        if let Some(selection) = selection {
+            select_text(handler, selection.range);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{ElementInputHandler, Entity, TestAppContext, VisualTestContext};
+    use gpui_base::input::{InputEvent, TextareaState};
+    use std::{cell::Cell, rc::Rc};
+
+    fn textarea(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TextareaState>,
+        &mut VisualTestContext,
+        PlatformInputHandler,
+    ) {
+        cx.update(gpui_base::init);
+        let (input, cx) = cx.add_window_view(TextareaState::new);
+        let handler = cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+            window.draw(cx).clear(cx);
+            PlatformInputHandler::new(
+                window.to_async(cx),
+                Box::new(ElementInputHandler::new(Default::default(), input.clone())),
+            )
+        });
+        (input, cx, handler)
+    }
+
+    #[gpui::test]
+    fn native_selection_preserves_the_draft_and_undo(cx: &mut TestAppContext) {
+        let (input, cx, mut handler) = textarea(cx);
+        cx.simulate_input("前😀e\u{301}后");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(text_length(&mut handler), Some(6));
+        assert_eq!(read_text(&mut handler, 1..3).as_deref(), Some("😀"));
+        assert_eq!(read_text(&mut handler, 1..2), None);
+        select_text(&mut handler, 1..3);
+        assert_eq!(handler.selected_text_range(true).unwrap().range, 1..3);
+        assert_eq!(handler.marked_text_range(), None);
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value()),
+            "前😀e\u{301}后"
+        );
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        });
+        assert_eq!(input.read_with(cx, |input, _| input.value()), "");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-shift-z"
+        } else {
+            "ctrl-y"
+        });
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value()),
+            "前😀e\u{301}后"
+        );
+    }
+
+    #[gpui::test]
+    fn committing_preedit_notifies_and_survives_blur(cx: &mut TestAppContext) {
+        let (input, cx, mut handler) = textarea(cx);
+        let changes = Rc::new(Cell::new(0));
+        let observed = changes.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&input, move |_, event, _| {
+                if matches!(event, InputEvent::Change) {
+                    observed.set(observed.get() + 1);
+                }
+            })
+        });
+        handler.replace_and_mark_text_in_range(None, "你好", Some(0..0));
+        commit_marked_text(&mut handler);
+        assert_eq!(handler.marked_text_range(), None);
+        assert_eq!(handler.selected_text_range(true).unwrap().range, 0..0);
+        assert_eq!(
+            changes.get(),
+            1,
+            "committing must publish the draft to subscribers"
+        );
+        select_text(&mut handler, 2..2);
+        handler.replace_and_mark_text_in_range(None, "世界", Some(2..2));
+        cx.update(|window, cx| {
+            window.blur(cx);
+            window.draw(cx).clear(cx);
+        });
+        commit_marked_text(&mut handler);
+        assert_eq!(handler.marked_text_range(), None);
+        assert_eq!(changes.get(), 2);
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_input("!");
+        assert_eq!(input.read_with(cx, |input, _| input.value()), "你好世界!");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        });
+        assert_eq!(input.read_with(cx, |input, _| input.value()), "你好世界");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        });
+        assert_eq!(input.read_with(cx, |input, _| input.value()), "你好");
+    }
 
     #[test]
     fn keyboard_ranges_preserve_cjk_emoji_and_combining_text() {
@@ -69,7 +234,7 @@ mod tests {
         ] {
             assert_eq!(utf16_slice(text, range), Some(expected));
         }
-        for range in [1..2, 2..3, 0..7, 5..3] {
+        for range in [1..2, 2..3, 0..7, Range { start: 5, end: 3 }] {
             assert_eq!(utf16_slice(text, range), None);
         }
     }

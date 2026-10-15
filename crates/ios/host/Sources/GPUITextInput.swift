@@ -30,8 +30,8 @@ final class GPUITextInput: UIView, UITextInput {
     var enablesReturnKeyAutomatically = false
     var isSecureTextEntry = false
     private var editing = false
-    private var synchronizing = false
     private var servingOldSnapshot = false
+    private var synchronizationPending = false
     private var snapshot: Snapshot?
 
     private struct Snapshot: Equatable {
@@ -47,6 +47,11 @@ final class GPUITextInput: UIView, UITextInput {
 
     override var canBecomeFirstResponder: Bool { true }
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool { false }
+
+    override func resignFirstResponder() -> Bool {
+        unmarkText()
+        return super.resignFirstResponder()
+    }
 
     private func nativeRange(_ kind: UInt32) -> NSRange {
         let value = gpui_ios_text_range(kind)
@@ -70,12 +75,24 @@ final class GPUITextInput: UIView, UITextInput {
         return String(bytes: bytes.prefix(written), encoding: .utf8)
     }
 
-    func synchronize() {
-        guard !editing, !synchronizing else { return }
-        synchronizing = true
-        defer { synchronizing = false }
+    private func liveSnapshot() -> Snapshot {
         let document = nativeRange(2)
-        let current = Snapshot(text: read(document) ?? "", selection: nativeRange(0), marked: nativeRange(1))
+        return Snapshot(text: read(document) ?? "", selection: nativeRange(0), marked: nativeRange(1))
+    }
+
+    func scheduleSynchronization() {
+        guard isFirstResponder, !synchronizationPending else { return }
+        synchronizationPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.synchronizationPending = false
+            if self.isFirstResponder { self.synchronize() }
+        }
+    }
+
+    func synchronize() {
+        guard !editing, !servingOldSnapshot else { return }
+        let current = liveSnapshot()
         guard snapshot != current else { return }
         let textChanged = snapshot.map { !$0.text.utf16.elementsEqual(current.text.utf16) } ?? true
             || snapshot?.marked != current.marked
@@ -91,10 +108,13 @@ final class GPUITextInput: UIView, UITextInput {
     }
 
     private func edit(_ body: () -> Void) {
-        guard !editing, !synchronizing else { return }
+        guard !editing, !servingOldSnapshot else { return }
+        // Report any GPUI edits before adopting the result of this UIKit edit.
+        // did-change callbacks may edit once the new snapshot is being served.
+        synchronize()
         editing = true
         body()
-        snapshot = Snapshot(text: read(nativeRange(2)) ?? "", selection: nativeRange(0), marked: nativeRange(1))
+        snapshot = liveSnapshot()
         editing = false
         gpui_ios_request_frame()
     }
@@ -263,5 +283,5 @@ final class GPUITextInput: UIView, UITextInput {
 
 @_cdecl("gpui_ios_host_text_input_changed")
 public func gpuiHostTextInputChanged() {
-    DispatchQueue.main.async { GPUIHostBridge.view?.keyboardProxy.synchronize() }
+    GPUIHostBridge.view?.keyboardProxy.scheduleSynchronization()
 }

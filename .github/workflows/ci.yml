@@ -98,6 +98,10 @@ jobs:
         if: runner.os != 'Linux'
         run: cargo nextest run --workspace --locked
 
+      - name: Test iOS text input on the host
+        if: runner.os == 'macOS'
+        run: cargo test -p gpui-ios --lib --locked
+
       - name: Run tests under Xvfb
         if: runner.os == 'Linux'
         run: xvfb-run -a cargo nextest run --workspace --locked

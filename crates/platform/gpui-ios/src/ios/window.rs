@@ -432,7 +432,18 @@ impl IosWindow {
         &self,
         f: impl FnOnce(&mut PlatformInputHandler) -> R,
     ) -> Option<R> {
-        if !self.text_input_active.get() || self.using_input_handler.replace(true) {
+        if !self.text_input_active.get() {
+            return None;
+        }
+        self.with_stored_input_handler(f)
+    }
+
+    pub(crate) fn with_stored_input_handler<R>(
+        &self,
+        f: impl FnOnce(&mut PlatformInputHandler) -> R,
+    ) -> Option<R> {
+        // UIKit may commit after GPUI deactivates text input.
+        if self.using_input_handler.replace(true) {
             return None;
         }
         // Handler calls update GPUI and may re-enter the platform during layout.

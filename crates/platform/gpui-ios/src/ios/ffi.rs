@@ -4,7 +4,7 @@
 //! to the attached `UIView` and consumes value-type snapshots from callbacks.
 
 use super::IosWindow;
-use crate::text_input::{NOT_FOUND, TextRange, utf16_slice};
+use crate::text_input::{self, NOT_FOUND, TextRange};
 use anyhow::{Result, anyhow};
 use gpui::{
     AppLifecyclePhase, Autocapitalize, Edges, Modifiers, PlatformInput, TextInputAction,
@@ -517,15 +517,7 @@ pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
                     .selected_text_range(true)
                     .map(|selection| selection.range),
                 1 => handler.marked_text_range(),
-                _ => handler
-                    .text_length_utf16()
-                    .or_else(|| {
-                        // gpui-base 0.7.1 does not implement text_length_utf16.
-                        handler
-                            .text_for_range(0..usize::MAX / 2, &mut None)
-                            .map(|text| text.encode_utf16().count())
-                    })
-                    .map(|length| 0..length),
+                _ => text_input::text_length(handler).map(|length| 0..length),
             })
             .flatten();
     });
@@ -540,14 +532,7 @@ pub extern "C" fn gpui_ios_read_text(range: TextRange, bytes: *mut u8, capacity:
     let mut text = None;
     with_window(|window| {
         text = window
-            .with_input_handler(|handler| {
-                let mut adjusted = None;
-                let text = handler.text_for_range(range.clone(), &mut adjusted)?;
-                let adjusted = adjusted.unwrap_or(range.clone());
-                let start = range.start.checked_sub(adjusted.start)?;
-                let end = range.end.checked_sub(adjusted.start)?;
-                utf16_slice(&text, start..end).map(str::to_owned)
-            })
+            .with_input_handler(|handler| text_input::read_text(handler, range))
             .flatten();
     });
     let Some(text) = text else {
@@ -572,13 +557,18 @@ pub extern "C" fn gpui_ios_replace_text(
 ) {
     if let Some(text) = utf8(bytes, length) {
         with_window(|window| {
-            window.with_input_handler(|handler| {
+            let replace = |handler: &mut gpui::PlatformInputHandler| {
                 if marked != 0 {
                     handler.replace_and_mark_text_in_range(range.range(), &text, selection.range());
                 } else {
                     handler.replace_text_in_range(range.range(), &text);
                 }
-            });
+            };
+            if marked != 0 {
+                window.with_input_handler(replace);
+            } else {
+                window.with_stored_input_handler(replace);
+            }
         });
     }
 }
@@ -589,39 +579,14 @@ pub extern "C" fn gpui_ios_select_text(range: TextRange) {
         return;
     };
     with_window(|window| {
-        window.with_input_handler(|handler| {
-            handler.set_selected_text_range(range.clone());
-            if handler
-                .selected_text_range(true)
-                .is_some_and(|selection| selection.range == range)
-            {
-                return;
-            }
-            // gpui-base 0.7.1 inherits the no-op selection setter. Its composition
-            // API can set selection without losing the surrounding draft.
-            let marked = handler.marked_text_range();
-            let context = marked
-                .clone()
-                .filter(|marked| marked.start <= range.start && range.end <= marked.end)
-                .unwrap_or(range.clone());
-            if let Some(text) = handler.text_for_range(context.clone(), &mut None) {
-                handler.replace_and_mark_text_in_range(
-                    Some(context.clone()),
-                    &text,
-                    Some(range.start - context.start..range.end - context.start),
-                );
-                if marked.is_none() {
-                    handler.unmark_text();
-                }
-            }
-        });
+        window.with_input_handler(|handler| text_input::select_text(handler, range));
     });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_unmark_text() {
     with_window(|window| {
-        window.with_input_handler(|handler| handler.unmark_text());
+        window.with_stored_input_handler(text_input::commit_marked_text);
     });
 }
 

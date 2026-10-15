@@ -31,6 +31,23 @@ enum InputMenu {
 
 pub use gpui_base::input::{Copy, InputEvent, InputState, Paste, SelectAll, TextareaState};
 
+pub(crate) fn commit_marked_text<M: gpui_base::input::InputModeKind>(
+    state: &mut gpui_base::input::InputBaseState<M>,
+    window: &mut Window,
+    cx: &mut gpui::Context<gpui_base::input::InputBaseState<M>>,
+) {
+    use gpui::EntityInputHandler as _;
+    // gpui-base 0.7.1 leaves the mark and undo transaction open on blur;
+    // its unmark_text also omits Change, so commit through replacement.
+    if let Some(marked) = state.marked_text_range(window, cx)
+        && let Some(text) = state.text_for_range(marked.clone(), &mut None, window, cx)
+    {
+        let selection = state.selected_range();
+        state.replace_text_in_range(Some(marked), &text, window, cx);
+        state.set_selected_range(selection, cx);
+    }
+}
+
 #[derive(Clone)]
 enum State {
     Input(Entity<InputState>),
@@ -228,6 +245,15 @@ impl RenderOnce for Input {
                 }
             });
         }
+        let focused = dispatch_state!(&self.state, |base| base
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window))
+            && !self.disabled;
+        if !focused {
+            dispatch_state!(&self.state, |base| base
+                .update(cx, |state, cx| commit_marked_text(state, window, cx)));
+        }
         let theme = cx.theme().clone();
         dispatch_state!(&self.state, |base| base.update(cx, |state, cx| {
             state.set_editor_style(gpui_base::input::InputEditorStyle {
@@ -253,11 +279,6 @@ impl RenderOnce for Input {
             state.set_disabled(self.disabled, cx);
             state.set_text_align(self.style.text.text_align.unwrap_or(TextAlign::Left), cx);
         }));
-        let focused = dispatch_state!(&self.state, |base| base
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window))
-            && !self.disabled;
         let placeholder = dispatch_state!(&self.state, |base| base
             .read(cx)
             .presentation()
@@ -507,5 +528,76 @@ impl RenderOnce for NumberInput {
                     .justify_center()
                     .child(crate::icon::Icon::new(crate::icon::IconName::ChevronDown).size_3())
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext as _, Context, EntityInputHandler as _, Render, TestAppContext};
+    use std::{cell::Cell, rc::Rc};
+
+    struct Field(Entity<TextareaState>, bool);
+    impl Render for Field {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Textarea::new(&self.0).disabled(self.1)
+        }
+    }
+
+    #[gpui::test]
+    fn blur_or_disable_commits_preedit_before_the_native_handler_is_removed(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        for disable in [false, true] {
+            let (field, cx) = cx.add_window_view(|window, cx| {
+                Field(cx.new(|cx| TextareaState::new(window, cx)), false)
+            });
+            let input = field.read_with(cx, |field, _| field.0.clone());
+            let committed = Rc::new(Cell::new(false));
+            let observed = committed.clone();
+            let _subscription = cx.update(|_, cx| {
+                cx.subscribe(&input, move |_, event, _| {
+                    if matches!(event, InputEvent::Change) {
+                        observed.set(true);
+                    }
+                })
+            });
+            cx.update(|window, cx| {
+                input.update(cx, |state, cx| {
+                    state.focus(window, cx);
+                    state.replace_and_mark_text_in_range(None, "你好", Some(0..0), window, cx);
+                });
+                window.draw(cx).clear(cx);
+                if disable {
+                    field.update(cx, |field, cx| {
+                        field.1 = true;
+                        cx.notify();
+                    });
+                } else {
+                    window.blur(cx);
+                }
+                window.draw(cx).clear(cx);
+            });
+            assert!(
+                committed.get(),
+                "leaving the editable field must publish the completed draft (disable={disable})"
+            );
+            cx.update(|window, cx| {
+                field.update(cx, |field, cx| {
+                    field.1 = false;
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+                input.update(cx, |state, cx| {
+                    assert_eq!(state.marked_text_range(window, cx), None);
+                    assert_eq!(state.selected_range(), 0..0);
+                    state.focus(window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            cx.simulate_input("!");
+            assert_eq!(input.read_with(cx, |state, _| state.value()), "!你好");
+        }
     }
 }

@@ -12,8 +12,25 @@ private enum Dictation {
     static var sessions: [UInt64: NativeDictation] = [:]
     static var availability: [String: Bool] = [:]
     static var cleanup: Task<Void, Never>?
+    static var permissionsAllowed: Bool?
+    static let permissionObserver = NotificationCenter.default.addObserver(
+        forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+    ) { _ in
+        MainActor.assumeIsolated {
+            refreshPermissions()
+            tcode_ios_speech_availability_changed()
+        }
+    }
+
+    static func refreshPermissions() {
+        let speech = SFSpeechRecognizer.authorizationStatus()
+        permissionsAllowed = speech != .denied && speech != .restricted
+            && AVAudioApplication.shared.recordPermission != .denied
+    }
 
     static func available(_ language: String) -> Bool {
+        _ = permissionObserver
+        if permissionsAllowed == nil { refreshPermissions() }
         if availability[language] == nil {
             availability[language] = false
             Task {
@@ -24,10 +41,7 @@ private enum Dictation {
                 tcode_ios_speech_availability_changed()
             }
         }
-        return availability[language] == true
-            && SFSpeechRecognizer.authorizationStatus() != .denied
-            && SFSpeechRecognizer.authorizationStatus() != .restricted
-            && AVAudioApplication.shared.recordPermission != .denied
+        return availability[language] == true && permissionsAllowed == true
     }
 }
 
@@ -85,7 +99,7 @@ private final class NativeDictation {
                              AVAudioSession.interruptionNotification,
                              AVAudioSession.mediaServicesWereResetNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: notification, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.complete(error: CocoaError(.userCancelled)) }
+                MainActor.assumeIsolated { self?.complete() }
             })
         }
         let pendingCleanup = Dictation.cleanup
@@ -96,9 +110,13 @@ private final class NativeDictation {
                 let speech = await withCheckedContinuation { continuation in
                     SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
                 }
+                Dictation.refreshPermissions()
+                tcode_ios_speech_availability_changed()
                 try Task.checkCancellation()
                 guard speech == .authorized else { throw DictationFailure.permissionDenied }
                 let microphone = await AVAudioApplication.requestRecordPermission()
+                Dictation.refreshPermissions()
+                tcode_ios_speech_availability_changed()
                 try Task.checkCancellation()
                 guard microphone else { throw DictationFailure.permissionDenied }
                 guard let locale = await DictationTranscriber.supportedLocale(equivalentTo: Locale(identifier: language)) else {
@@ -173,6 +191,8 @@ private final class NativeDictation {
         }
     }
 
+    func preempt() { complete() }
+
     private func stopCapture() {
         if let engine {
             engine.stop()
@@ -243,7 +263,7 @@ public func tcodeSpeechAvailable(_ bytes: UnsafePointer<UInt8>?, _ length: Int) 
 public func tcodeSpeechStart(_ id: UInt64, _ bytes: UnsafePointer<UInt8>?, _ length: Int) {
     MainActor.assumeIsolated {
         // Only one session may own AVAudioSession's microphone at a time.
-        for session in Array(Dictation.sessions.values) { session.stop(finish: false) }
+        for session in Array(Dictation.sessions.values) { session.preempt() }
         let session = NativeDictation(id: id, language: speechLanguage(bytes, length))
         Dictation.sessions[id] = session
         session.start()

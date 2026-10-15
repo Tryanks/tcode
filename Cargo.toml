@@ -19,10 +19,10 @@ members = [
     "crates/ui",
     "crates/app",
     "crates/ios",
+    "crates/platform/gpui-ios",
     "crates/android",
 ]
 exclude = [
-    "crates/platform/gpui-ios",
     "crates/platform/gpui-android",
 ]
 resolver = "3"
