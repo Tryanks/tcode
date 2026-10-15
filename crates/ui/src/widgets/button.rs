@@ -222,6 +222,23 @@ impl InteractiveElement for Button {
     }
 }
 
+impl StatefulInteractiveElement for Button {
+    fn on_a11y_action(
+        mut self,
+        action: gpui::accesskit::Action,
+        listener: impl FnMut(Option<&gpui::accesskit::ActionData>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        if action == gpui::accesskit::Action::Click {
+            let listener = std::cell::RefCell::new(listener);
+            return self.press_action(Rc::new(move |window, cx| {
+                listener.borrow_mut()(None, window, cx);
+            }));
+        }
+        self.base = self.base.on_a11y_action(action, listener);
+        self
+    }
+}
+
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();

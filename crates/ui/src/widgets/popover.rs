@@ -30,7 +30,6 @@ pub struct Popover {
     on_open_change: Option<super::ToggleHandler>,
 }
 
-/// Builds the trigger; a sheet hands it the toggle it opens with.
 type TriggerBuilder = Box<dyn FnOnce(bool, Option<SheetToggle>, &Window, &App) -> AnyElement>;
 pub(crate) type SheetToggle = Rc<dyn Fn(&mut Window, &mut App)>;
 type ContentBuilder =
@@ -108,11 +107,9 @@ impl Popover {
     }
     pub(crate) fn trigger_with(
         mut self,
-        trigger: impl FnOnce(bool, &Window, &App) -> AnyElement + 'static,
+        trigger: impl FnOnce(bool, Option<SheetToggle>, &Window, &App) -> AnyElement + 'static,
     ) -> Self {
-        self.trigger = Some(Box::new(move |open, _, window, cx| {
-            trigger(open, window, cx)
-        }));
+        self.trigger = Some(Box::new(trigger));
         self
     }
     pub fn content<F, E>(mut self, builder: F) -> Self
@@ -155,6 +152,9 @@ impl RenderOnce for Popover {
         let content = self.content;
         let children = self.children;
         let style = self.style;
+        let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| {
+            PopoverState::new(self.default_open, cx)
+        });
         gpui_base::Popover::new(self.id)
             .anchor(self.anchor)
             .mouse_button(self.mouse_button)
@@ -164,8 +164,15 @@ impl RenderOnce for Popover {
             .when_some(self.tracked_focus, |base, focus| base.track_focus(&focus))
             .when_some(self.trigger, |base, trigger| {
                 base.trigger_with(move |open, window, cx| {
+                    let parent = window.current_view();
+                    // gpui-base 0.7.1 Popover::trigger installs no activation callback
+                    // on the trigger element. Remove this once gpui-base installs it.
+                    let toggle: SheetToggle = Rc::new(move |window, cx| {
+                        state.update(cx, |state, cx| state.toggle_open(window, cx));
+                        cx.notify(parent);
+                    });
                     div()
-                        .child(trigger(open, None, window, cx))
+                        .child(trigger(open, Some(toggle), window, cx))
                         .child(release.release_listener())
                         .into_any_element()
                 })
@@ -198,6 +205,9 @@ impl RenderOnce for Popover {
                     .children(children)
                     .refine_style(&style)
             })
+            // Keep the base in this render scope so the activation callback
+            // and gpui-base resolve the same keyed PopoverState.
+            .render(window, cx)
             .into_any_element()
     }
 }

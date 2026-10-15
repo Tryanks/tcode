@@ -2498,7 +2498,7 @@ impl ChatView {
                                 let _ = shown.update(cx, |panel, cx| panel.set_shown(open, cx));
                             });
                         })
-                        .trigger_with(move |_, _, _| pill.into_any_element())
+                        .trigger_with(move |_, _, _, _| pill.into_any_element())
                         .content(move |_, window, cx| {
                             let sheet = cx.entity().downgrade();
                             panel.update(cx, |panel, _| panel.in_sheet(sheet));

@@ -767,7 +767,7 @@ impl PullRequestView {
                     }
                 }
             })
-            .trigger_with(move |_, _, _| chip.into_any_element());
+            .trigger_with(move |_, _, _, _| chip.into_any_element());
         let popover = if compact {
             popover.bottom_sheet(crate::tr!("pull_requests.reactions.add").into_owned())
         } else {
