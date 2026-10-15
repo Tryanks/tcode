@@ -169,7 +169,7 @@ impl Notification {
         self.action = Some(Rc::new(builder));
         self
     }
-    pub(super) fn requires_dialog(&self) -> bool {
+    fn is_error(&self) -> bool {
         matches!(self.type_, Some(NotificationType::Error))
     }
 
@@ -239,6 +239,7 @@ impl Render for Notification {
             let action = self
                 .action
                 .clone()
+                .filter(|_| !self.is_error())
                 .map(|build| build(self, window, cx).ghost());
             let icon = self.icon.clone().or_else(|| {
                 self.type_.and_then(|kind| {
@@ -261,7 +262,16 @@ impl Render for Notification {
                 .bg(cx.theme().popover)
                 .shadow_lg()
                 .text_color(cx.theme().foreground)
-                .on_click(cx.listener(|this, _, window, cx| this.dismiss(window, cx)))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.dismiss(window, cx);
+                    if this.is_error() {
+                        let note = cx.entity();
+                        // The dialog reads this entity after its click update completes.
+                        window.defer(cx, move |window, cx| {
+                            super::open_notification_dialog(note, window, cx);
+                        });
+                    }
+                }))
                 .children(icon)
                 .child(
                     div()
@@ -386,7 +396,7 @@ impl NotificationList {
 
     pub fn push(&mut self, note: Notification, window: &mut Window, cx: &mut Context<Self>) {
         let compact = crate::window_seam::window_is_compact(window, cx);
-        self.sync_layout(compact, window, cx);
+        self.sync_layout(compact, cx);
         let timeout = if compact {
             // Replacement is immediate: discarded messages never reappear later.
             self.manager = ToastManager::new(ToastMotion {
@@ -421,36 +431,16 @@ impl NotificationList {
         cx.notify();
     }
 
-    fn sync_layout(&mut self, compact: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_layout(&mut self, compact: bool, cx: &mut Context<Self>) {
         if self.compact == compact {
             return;
         }
         self.compact = compact;
-        if compact {
-            let errors = self
-                .manager
-                .iter()
-                .filter(|(_, note, status)| {
-                    *status != ToastTransitionStatus::Ending && note.read(cx).requires_dialog()
-                })
-                .map(|(_, note, _)| note.clone())
-                .collect::<Vec<_>>();
-            if !errors.is_empty() {
-                cx.defer_in(window, move |_, window, cx| {
-                    for note in errors {
-                        super::open_notification_dialog(note, window, cx);
-                    }
-                });
-            }
-        }
         let latest = self
             .manager
             .iter()
             .rev()
-            .find(|(_, note, status)| {
-                *status != ToastTransitionStatus::Ending
-                    && (!compact || !note.read(cx).requires_dialog())
-            })
+            .find(|(_, _, status)| *status != ToastTransitionStatus::Ending)
             .map(|(id, note, _)| (id.clone(), note.clone()));
         self.manager = ToastManager::new(if compact {
             ToastMotion {
@@ -572,7 +562,7 @@ impl NotificationList {
 impl Render for NotificationList {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
-        self.sync_layout(compact, window, cx);
+        self.sync_layout(compact, cx);
         if compact {
             return div()
                 .max_w_full()

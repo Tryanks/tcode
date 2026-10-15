@@ -273,11 +273,6 @@ impl OverlayExt for Window {
 
     fn push_notification(&mut self, note: impl Into<Notification>, cx: &mut App) {
         let note = note.into();
-        if crate::window_seam::window_is_compact(self, cx) && note.requires_dialog() {
-            let note = cx.new(|_| note);
-            open_notification_dialog(note, self, cx);
-            return;
-        }
         Overlays::update(self, cx, |host, window, cx| {
             host.notifications
                 .update(cx, |list, cx| list.push(note, window, cx));
@@ -615,10 +610,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_timeout_and_error_recovery(cx: &mut TestAppContext) {
+    fn compact_notification_timeouts(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
-        let (root, cx) = cx.add_window_view(|window, cx| {
+        let (_root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| Body);
             gpui_base::Root::new(body, window, cx)
         });
@@ -651,26 +646,5 @@ mod tests {
             .advance_clock(std::time::Duration::from_secs(2));
         draw(cx);
         assert!(cx.debug_bounds("compact-toast").is_none());
-        cx.update(|window, cx| {
-            window.push_notification(Notification::error("Repair required").autohide(false), cx)
-        });
-        draw(cx);
-        overlays(&root, cx).read_with(cx, |root, cx| {
-            assert_eq!(root.dialogs.len(), 1);
-            root.notifications.read(cx).assert_messages(cx, &[]);
-        });
-        cx.update(|window, cx| window.close_dialog(cx));
-        cx.simulate_resize(size(px(1200.), px(800.)));
-        cx.update(|window, cx| {
-            window.push_notification(Notification::error("Wide recovery").autohide(false), cx)
-        });
-        draw(cx);
-        assert!(cx.debug_bounds("wide-toast").is_some());
-        cx.simulate_resize(size(px(393.), px(852.)));
-        draw(cx);
-        overlays(&root, cx).read_with(cx, |root, cx| {
-            assert_eq!(root.dialogs.len(), 1);
-            root.notifications.read(cx).assert_messages(cx, &[]);
-        });
     }
 }
