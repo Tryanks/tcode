@@ -125,7 +125,7 @@ impl Attachment {
                 .and_then(|client| client.outbox_storage("local")),
         };
         let link = if matches!(target, AttachmentTarget::Local) {
-            HostLink::new(transport.to_host, transport.from_host)
+            HostLink::new_local(transport.to_host, transport.from_host, transport.originals)
         } else {
             HostLink::new_remote(transport.to_host, transport.from_host, transport.originals)
         };

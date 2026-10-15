@@ -1035,19 +1035,7 @@ fn dispatch_query(
             path,
             pixels,
             crop_to_square,
-        } => {
-            let task = cx.unblock(move || {
-                tcode_services::image_previews::read(&path, pixels, crop_to_square)
-            });
-            cx.spawn_background(async move {
-                task.await
-                    .map(QueryResponse::FileBytes)
-                    .map_err(|error| ProtocolError {
-                        code: "preview_unavailable".into(),
-                        message: error.to_string(),
-                    })
-            })
-        }
+        } => app.image_preview(path, pixels, crop_to_square, cx),
         Query::ReadProjectIcon { project_id, pixels } => {
             let project = app.projects.iter().find(|p| p.id == project_id).cloned();
             let task = cx.unblock(move || {

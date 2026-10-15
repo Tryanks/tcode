@@ -55,6 +55,56 @@ impl Drop for OriginalSource {
     }
 }
 
+/// An in-process original uses the host's bounded binary ingress instead of a JSON reply.
+pub struct BackendOriginal {
+    pub backend: Arc<dyn OriginalBackend>,
+    pub principal: Principal,
+}
+
+impl OriginalOpener for BackendOriginal {
+    fn open(&self, target: OriginalTarget) -> OriginalFuture<'static, OpenedOriginal> {
+        let source = self.backend.open(self.principal.clone(), target);
+        Box::pin(async move {
+            let source = source.await?;
+            Ok(OpenedOriginal {
+                metadata: source.metadata.clone(),
+                reader: Box::new(BackendReader {
+                    remaining: source.metadata.len,
+                    source,
+                }),
+            })
+        })
+    }
+}
+
+struct BackendReader {
+    source: OriginalSource,
+    remaining: u64,
+}
+
+impl OriginalReader for BackendReader {
+    fn read(&mut self) -> OriginalFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async move {
+            let block = self.source.blocks.recv().await.map_err(error)??;
+            if block.is_empty() {
+                return if self.remaining == 0 {
+                    Ok(None)
+                } else {
+                    Err(error("original ended short"))
+                };
+            }
+            self.remaining = self
+                .remaining
+                .checked_sub(block.len() as u64)
+                .ok_or_else(|| error("original exceeded its length"))?;
+            Ok(Some(block))
+        })
+    }
+    fn cancel(&mut self) {
+        self.source.blocks.close();
+    }
+}
+
 /// An explicit read, opened only when metadata or bytes are requested.
 pub struct OriginalTransfer {
     opener: Arc<dyn OriginalOpener>,

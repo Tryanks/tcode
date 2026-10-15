@@ -1932,7 +1932,10 @@ impl ChatView {
                     .unwrap_or_else(|| "image".to_string());
                 Box::new(cx.listener(move |_, _, window, cx| {
                     crate::image_viewer::open(
-                        tcode_protocol::OriginalTarget::File { path: path.clone() },
+                        crate::image_viewer::ViewerSource::original(
+                            tcode_protocol::OriginalTarget::File { path: path.clone() },
+                            crate::store::image_preview(path.clone(), 120., true),
+                        ),
                         title.clone(),
                         window,
                         cx,
