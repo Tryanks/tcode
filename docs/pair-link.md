@@ -53,7 +53,8 @@ Everything the link does not carry is learned elsewhere:
 - The machine's addresses: on the LAN, the DNS-SD browse (`_tcode._udp`)
   that runs for every first contact; elsewhere, the relay and hole
   punching through it. After pairing, the device remembers the addresses a
-  connection actually used, and pkarr keeps the relay current.
+  connection actually used, with any typed address kept first in the saved
+  list. Pkarr keeps the relay current.
 
 ## How the device uses the link
 
