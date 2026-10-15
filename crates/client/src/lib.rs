@@ -793,6 +793,14 @@ impl HostLink {
             .insert(subscription.topic.clone(), id);
     }
 
+    /// Remember the applied index fingerprint for recovery without sending a request.
+    pub fn remember_known_index(&self, topic: &Topic, fingerprint: Option<String>) {
+        let _transition = self.inner.subscription_transition.lock().unwrap();
+        if let Some(subscription) = self.inner.subscribed_topics.lock().unwrap().get_mut(topic) {
+            subscription.known_index = fingerprint;
+        }
+    }
+
     fn advance_after(&self, topic: &Topic, after: u64) -> Option<Subscription> {
         let mut topics = self.inner.subscribed_topics.lock().unwrap();
         let subscription = topics.get_mut(topic)?;
