@@ -6196,18 +6196,28 @@ pub(crate) mod tests {
         driver.link.set_connection_state(reconnecting.clone());
         driver.link.set_connection_state(syncing.clone());
         let events = driver.link.events();
-        let mut next = std::pin::pin!(events.recv());
+        let mut deferred_events = Vec::new();
         let scope = smol::block_on(smol::future::race(
-            std::future::poll_fn(|task_cx| {
-                let _ = driver.pump.as_mut().poll(task_cx);
-                next.as_mut().poll(task_cx)
-            }),
+            async {
+                loop {
+                    let mut next = std::pin::pin!(events.recv());
+                    let event = std::future::poll_fn(|task_cx| {
+                        let _ = driver.pump.as_mut().poll(task_cx);
+                        next.as_mut().poll(task_cx)
+                    })
+                    .await
+                    .unwrap();
+                    if matches!(event.event, ServerEvent::ScopeSnapshot(_)) {
+                        break event;
+                    }
+                    deferred_events.push(event);
+                }
+            },
             async {
                 smol::Timer::after(std::time::Duration::from_secs(5)).await;
                 panic!("recovery Scope was not delivered");
             },
-        ))
-        .unwrap();
+        ));
         assert!(matches!(scope.event, ServerEvent::ScopeSnapshot(_)));
         workspace.update(cx, |store, cx| {
             store.apply_domain_event(&scope, cx);
@@ -6222,6 +6232,9 @@ pub(crate) mod tests {
                 "other current baselines are still pending"
             );
             assert!(!store.chat_loading(), "cached thread remains visible");
+            for event in deferred_events {
+                store.apply_domain_event(&event, cx);
+            }
         });
         driver.wait_until(
             cx,
