@@ -293,10 +293,9 @@ pub struct AppShell {
 
 struct BackSwipe {
     origin: gpui::Point<Pixels>,
-    travel: Pixels,
+    progress: crate::edge_back::BackProgress,
+    sheet: Option<Entity<crate::overlay::SheetBack>>,
     last_moved_at: Instant,
-    velocity: f32,
-    width: Pixels,
     finished: bool,
 }
 
@@ -317,7 +316,7 @@ const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
 /// Compact push/pop duration.
-const NAV_TRANSITION: Duration = Duration::from_millis(200);
+const NAV_TRANSITION: Duration = crate::edge_back::SETTLE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarHoverTransition {
@@ -979,6 +978,13 @@ impl AppShell {
             && let Some(swipe) = &mut self.back_swipe
         {
             swipe.finished = true;
+            if let Some(sheet) = &swipe.sheet {
+                sheet.update(cx, |sheet, cx| {
+                    sheet.dragging = false;
+                    sheet.progress = 0.;
+                    App::notify(cx, sheet.parent);
+                });
+            }
         }
         let common = self
             .mounted
@@ -1222,17 +1228,46 @@ pub fn handle_back(cx: &mut App) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether a platform edge swipe in the window would pop a compact page. An
-/// overlay keeps the edge: its own dismissal answers Back first.
-pub fn can_swipe_back(cx: &App) -> bool {
-    let Some((_, shell)) = current_window_shell(cx) else {
+/// Whether the top sheet or a compact page can answer the native edge gesture.
+pub fn can_swipe_back(cx: &mut App) -> bool {
+    let Some((window, shell)) = current_window_shell(cx) else {
         return false;
     };
-    let shell = shell.read(cx);
-    shell.compact(cx)
-        && !shell.window_state.read(cx).palette_open
-        && !gpui_base::GlobalState::is_in_deferred_context(cx)
-        && shell.nav.read(cx).depth() > 1
+    window
+        .update(cx, |_, window, cx| {
+            crate::overlay::active_sheet(window, cx).is_some() || {
+                let shell = shell.read(cx);
+                shell.compact(cx)
+                    && !shell.window_state.read(cx).palette_open
+                    && !gpui_base::GlobalState::is_in_deferred_context(cx)
+                    && shell.nav.read(cx).depth() > 1
+            }
+        })
+        .unwrap_or(false)
+}
+
+/// UIKit supplies continuous translation and velocity; thresholds stay in Rust.
+pub fn update_edge_back(phase: TouchPhase, travel: f32, velocity: f32, cx: &mut App) {
+    let Some((window, shell)) = current_window_shell(cx) else {
+        return;
+    };
+    let _ = window.update(cx, |_, window, cx| {
+        shell.update(cx, |shell, cx| {
+            if phase == TouchPhase::Started {
+                shell.begin_edge_back(
+                    gpui::point(px(0.), px(0.)),
+                    window.viewport_size().width,
+                    window,
+                    cx,
+                );
+            }
+            if let Some(swipe) = &mut shell.back_swipe {
+                swipe.progress.travel = px(travel);
+                swipe.progress.velocity = velocity;
+            }
+            shell.move_edge_back(phase, window, cx);
+        });
+    });
 }
 
 /// The per-thread notification slot for its pull request watch.
@@ -2220,10 +2255,61 @@ impl AppShell {
         cx.notify();
     }
 
-    // gpui-base 0.7.1 has no edge gesture or interactive pop API: NavPage progress
-    // is read-only and driven by Presence's clock. Remove this wrapper when
-    // NavStack supports touch-back; until then release commits its animated pop.
-    // iOS takes the edge with UIKit's own recognizer instead (`can_swipe_back`).
+    fn begin_edge_back(
+        &mut self,
+        origin: gpui::Point<Pixels>,
+        width: Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sheet = crate::overlay::active_sheet(window, cx);
+        self.back_swipe = Some(BackSwipe {
+            origin,
+            progress: crate::edge_back::BackProgress {
+                width,
+                ..Default::default()
+            },
+            sheet,
+            last_moved_at: cx.background_executor().now(),
+            finished: false,
+        });
+    }
+
+    fn move_edge_back(&mut self, phase: TouchPhase, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(swipe) = &mut self.back_swipe else {
+            return;
+        };
+        if swipe.finished {
+            return;
+        }
+        let ended = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled);
+        let commit = phase == TouchPhase::Ended && swipe.progress.commits();
+        let progress = swipe.progress.progress();
+        if let Some(sheet) = &swipe.sheet {
+            let close = sheet.update(cx, |sheet, cx| {
+                sheet.dragging = !ended;
+                sheet.progress = if ended {
+                    if commit { 1. } else { 0. }
+                } else {
+                    progress
+                };
+                App::notify(cx, sheet.parent);
+                sheet.close.clone()
+            });
+            if commit {
+                close(window, cx);
+            }
+        } else if commit {
+            self.back(window, cx);
+        }
+        if ended && let Some(swipe) = &mut self.back_swipe {
+            swipe.finished = true;
+        }
+        cx.notify();
+    }
+
+    // gpui-base has no edge recognizer; observe GPUI's original pan contact so
+    // ordinary taps still reach the Back control. UIKit supplies this on iOS.
     fn swipe_back_stack(
         &self,
         stack: impl IntoElement,
@@ -2247,26 +2333,28 @@ impl AppShell {
                             let Some(shell) = shell.upgrade() else { return };
                             shell.update(cx, |shell, cx| {
                                 if delta.y != px(0.) {
-                                    shell.back_swipe = None;
+                                    shell.move_edge_back(TouchPhase::Cancelled, window, cx);
                                     return;
                                 }
                                 if event.touch_phase == TouchPhase::Started {
                                     shell.back_swipe = None;
-                                    if !hitbox.should_handle_scroll(window)
-                                        || shell.nav.read(cx).depth() <= 1
+                                    if (crate::overlay::active_sheet(window, cx).is_none()
+                                        && (!hitbox.should_handle_scroll(window)
+                                            || gpui_base::GlobalState::is_in_deferred_context(cx)
+                                            || shell.window_state.read(cx).palette_open
+                                            || !shell.compact(cx)
+                                            || shell.nav.read(cx).depth() <= 1))
                                         || !bounds.contains(&event.position)
                                         || event.position.x - bounds.left() > px(20.)
                                     {
                                         return;
                                     }
-                                    shell.back_swipe = Some(BackSwipe {
-                                        origin: event.position,
-                                        travel: px(0.),
-                                        last_moved_at: cx.background_executor().now(),
-                                        velocity: 0.,
-                                        width: bounds.size.width,
-                                        finished: false,
-                                    });
+                                    shell.begin_edge_back(
+                                        event.position,
+                                        bounds.size.width,
+                                        window,
+                                        cx,
+                                    );
                                 }
                                 let Some(swipe) = shell.back_swipe.as_mut() else {
                                     return;
@@ -2279,28 +2367,35 @@ impl AppShell {
                                     return;
                                 }
                                 let now = cx.background_executor().now();
-                                swipe.travel += delta.x;
+                                swipe.progress.travel += delta.x;
                                 if event.touch_phase == TouchPhase::Moved && delta.x != px(0.) {
                                     let elapsed =
                                         now.duration_since(swipe.last_moved_at).as_secs_f32();
-                                    swipe.velocity = f32::from(delta.x) / elapsed.max(0.001);
+                                    swipe.progress.velocity =
+                                        f32::from(delta.x) / elapsed.max(0.001);
                                     swipe.last_moved_at = now;
                                 }
+                                if !matches!(
+                                    event.touch_phase,
+                                    TouchPhase::Ended | TouchPhase::Cancelled
+                                ) {
+                                    shell.move_edge_back(event.touch_phase, window, cx);
+                                }
+                                let Some(swipe) = shell.back_swipe.as_mut() else {
+                                    return;
+                                };
                                 if matches!(
                                     event.touch_phase,
                                     TouchPhase::Ended | TouchPhase::Cancelled
                                 ) {
-                                    swipe.finished = true;
-                                    let fast = swipe.travel >= px(32.)
-                                        && swipe.velocity >= 600.
-                                        && now.duration_since(swipe.last_moved_at)
-                                            <= Duration::from_millis(100);
-                                    let commit = swipe.travel >= swipe.width / 3. || fast;
+                                    if now.duration_since(swipe.last_moved_at)
+                                        > Duration::from_millis(100)
+                                    {
+                                        swipe.progress.velocity = 0.;
+                                    }
                                     let origin = swipe.origin;
+                                    shell.move_edge_back(event.touch_phase, window, cx);
                                     if event.touch_phase == TouchPhase::Ended {
-                                        if commit {
-                                            shell.back(window, cx);
-                                        }
                                         // GPUI flings every released pan, this one too, and
                                         // spends the next touch, a tap included, on catching
                                         // that invisible fling. A touch that starts and
@@ -2338,7 +2433,6 @@ impl AppShell {
             self.sync_nav(NavMotion::Immediate, cx);
         }
         let width = window.viewport_size().width;
-        let palette_open = self.window_state.read(cx).palette_open;
         // 200ms lateral push/pop. GPUI has no paint transform, so each page is
         // offset by its own insets; setting `left` and `right` in opposite
         // directions slides it without resizing it.
@@ -2388,14 +2482,8 @@ impl AppShell {
             .on_action(cx.listener(Self::on_thread_undo))
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
+            .child(stack)
             .map(|el| {
-                if cfg!(target_os = "ios") {
-                    el.child(stack)
-                } else {
-                    el.child(self.swipe_back_stack(stack, cx))
-                }
-            })
-            .when(palette_open, |el| {
                 el.children(
                     self.attachment
                         .as_ref()
@@ -3073,6 +3161,11 @@ impl Render for AppShell {
             self.render_compact(window, cx)
         } else {
             self.render_wide(window, cx)
+        };
+        let body = if crate::window_seam::is_mobile(cx) && !cfg!(target_os = "ios") {
+            self.swipe_back_stack(body, cx).into_any_element()
+        } else {
+            body
         };
         let dismissal = self
             .attachment
@@ -5276,28 +5369,70 @@ mod tests {
     }
 
     #[gpui::test]
-    fn platform_edge_swipe_pops_only_an_uncovered_compact_page(cx: &mut TestAppContext) {
+    fn edge_swipe_dismisses_sheet_before_navigating_underneath(cx: &mut TestAppContext) {
+        use gpui::TouchPhase::{Ended, Moved, Started};
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
         cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
-        let can_swipe = |cx: &mut VisualTestContext| cx.update(|_, cx| can_swipe_back(cx));
         cx.update(|window, cx| shell.update(cx, |shell, cx| while shell.back(window, cx) {}));
         draw(cx);
-        assert!(!can_swipe(cx));
+        assert!(!cx.cx.update(can_swipe_back));
         shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
         draw(cx);
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
-        assert!(can_swipe(cx));
         let state = shell.read_with(cx, |shell, _| shell.window_state());
-        state.update(cx, |state, cx| state.open_palette(cx));
-        draw(cx);
-        assert!(!can_swipe(cx));
-        state.update(cx, |state, cx| state.close_palette(cx));
-        draw(cx);
-        assert!(can_swipe(cx));
+        let history = state.read_with(cx, |state, _| state.history().to_vec());
+        for (id, end_x, elapsed, closes) in [
+            (1, 70., 400, false),
+            (2, 180., 400, true),
+            (3, 70., 40, true),
+        ] {
+            state.update(cx, |state, cx| state.open_palette(cx));
+            draw(cx);
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
+            assert!(cx.cx.update(can_swipe_back));
+            let resting = cx.debug_bounds("palette-card").unwrap();
+            touch_drag(
+                cx,
+                id,
+                &[
+                    (Started, 10., 600., 0),
+                    (Moved, (10. + end_x) / 2., 600., elapsed / 2),
+                    (Moved, end_x, 600., elapsed / 2),
+                ],
+            );
+            let dragged = cx.debug_bounds("palette-card").unwrap();
+            assert!(
+                dragged.top() > resting.top(),
+                "sheet follows the edge gesture vertically"
+            );
+            touch_drag(cx, id, &[(Ended, end_x, 600., 10)]);
+            draw(cx);
+            cx.executor().advance_clock(Duration::from_millis(500));
+            draw(cx);
+            assert_eq!(
+                state.read_with(cx, |state, _| state.palette_open),
+                !closes,
+                "gesture {id}"
+            );
+            assert_eq!(
+                state.read_with(cx, |state, _| state.history().to_vec()),
+                history
+            );
+            if !closes {
+                assert_eq!(cx.debug_bounds("palette-card").unwrap(), resting);
+                state.update(cx, |state, cx| state.close_palette(cx));
+                draw(cx);
+                cx.executor().advance_clock(Duration::from_millis(250));
+                draw(cx);
+            } else {
+                assert!(cx.debug_bounds("palette-card").is_none());
+            }
+        }
         let depth = shell.read_with(cx, |shell, cx| shell.nav.read(cx).depth());
         assert!(cx.cx.update(handle_back));
         draw(cx);
