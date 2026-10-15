@@ -405,7 +405,12 @@ impl LocalKernel {
         // receiver simply ends the forwarder on its first poll.
         let (_, state) = async_channel::unbounded();
         Transport {
-            originals: None,
+            originals: Some(std::sync::Arc::new(
+                tcode_client::original::BackendOriginal {
+                    backend: std::sync::Arc::new(self.host.clone()),
+                    principal: tcode_protocol::Principal::Full,
+                },
+            )),
             to_host: connection.to_host.into(),
             from_host: connection.from_host,
             state,
