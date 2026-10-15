@@ -1562,8 +1562,9 @@ impl WorkspaceStore {
             _ => {}
         }
         self.load_pending_chat_history(cx);
-        // Every index mutation re-decides the destination in one place.
         if envelope.topic == index_topic {
+            self.host
+                .remember_known_index(&index_topic, self.cached_index_fingerprint());
             self.reconcile_destination(cx);
             self.removed_session = None;
             // A thread kept on screen (its failed send still offers Retry)
@@ -4261,6 +4262,26 @@ pub(crate) mod tests {
                 })
             });
         host.barrier(cx, &workspace);
+        let requests = host.requests.lock().unwrap();
+        let new_space = requests
+            .iter()
+            .find_map(|request| match &request.payload {
+                tcode_protocol::ClientPayload::Subscribe(subscription)
+                    if subscription.topic
+                        == (Topic::SpaceIndex {
+                            space_id: "space-two".into(),
+                        }) =>
+                {
+                    Some(subscription)
+                }
+                _ => None,
+            })
+            .expect("new space index subscription");
+        assert_eq!(
+            new_space.known_index, None,
+            "a new space needs its own baseline"
+        );
+        drop(requests);
         workspace.read_with(cx, |store, _| {
             assert!(store.enabled_profiles().is_empty());
             assert_eq!(
@@ -6147,7 +6168,7 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn reconnect_retains_replicas_until_all_selected_thread_baselines_arrive(
+    fn reconnect_replays_current_index_fingerprint_and_retains_replicas_until_baselines_arrive(
         cx: &mut TestAppContext,
     ) {
         use tcode_client::ConnectionState;
@@ -6156,12 +6177,48 @@ pub(crate) mod tests {
         disk.upsert_project(&project_at("p", &root)).unwrap();
         disk.upsert_meta(&thread(&root, "one", "p", None)).unwrap();
         let host = test_host(disk);
-        let mut driver = LocalHostDriver::new(&host);
+        let (to_host, requests) = async_channel::unbounded::<String>();
+        let replayed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = replayed.clone();
+        let host_sender = host.to_host.clone();
+        let forwarder = std::thread::spawn(move || {
+            while let Ok(line) = requests.recv_blocking() {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(tcode_protocol::decode_client_line(&line).unwrap());
+                if host_sender.send_blocking(line).is_err() {
+                    break;
+                }
+            }
+            host_sender.close();
+        });
+        let link = tcode_client::HostLink::new(to_host, host.from_host.clone());
+        let mut driver = LocalHostDriver::from_link(link);
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, _| store.select_session("one".into()));
         driver.wait_until(cx, &workspace, "selected thread baseline", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
+        let link = driver.link.clone();
+        driver
+            .await_with_events(
+                cx,
+                &workspace,
+                link.command(Command::RenameSession {
+                    session_id: "one".into(),
+                    title: "Updated live".into(),
+                }),
+            )
+            .unwrap();
+        driver.wait_until(cx, &workspace, "live index upsert", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.index_replica.0[0].title == "Updated live"
+            })
+        });
+        let fingerprint =
+            workspace.read_with(cx, |store, _| store.cached_index_fingerprint().unwrap());
+        replayed.lock().unwrap().clear();
         workspace.update(cx, |store, cx| {
             let state = ConnectionState::Reconnecting {
                 attempt: 2,
@@ -6188,6 +6245,20 @@ pub(crate) mod tests {
         driver.wait_until(cx, &workspace, "correlated reconnect baselines", |cx| {
             workspace.read_with(cx, |store, _| store.connection_state().is_connected())
         });
+        let subscriptions = replayed.lock().unwrap();
+        let replay = subscriptions
+            .iter()
+            .find_map(|request| match &request.payload {
+                tcode_protocol::ClientPayload::Subscribe(subscription)
+                    if subscription.topic == Topic::Index =>
+                {
+                    Some(subscription)
+                }
+                _ => None,
+            })
+            .expect("replayed index subscription");
+        assert_eq!(replay.known_index.as_ref(), Some(&fingerprint));
+        drop(subscriptions);
         let reconnecting = ConnectionState::Reconnecting {
             attempt: 3,
             reason: None,
@@ -6199,7 +6270,12 @@ pub(crate) mod tests {
         let mut deferred_events = Vec::new();
         let scope = smol::block_on(smol::future::race(
             async {
+                let mut scope = None;
+                let mut unchanged = false;
                 loop {
+                    if unchanged && let Some(scope) = scope.take() {
+                        break scope;
+                    }
                     let mut next = std::pin::pin!(events.recv());
                     let event = std::future::poll_fn(|task_cx| {
                         let _ = driver.pump.as_mut().poll(task_cx);
@@ -6208,14 +6284,23 @@ pub(crate) mod tests {
                     .await
                     .unwrap();
                     if matches!(event.event, ServerEvent::ScopeSnapshot(_)) {
-                        break event;
+                        scope = Some(event);
+                    } else {
+                        if let ServerEvent::IndexUnchanged {
+                            fingerprint: received,
+                            ..
+                        } = &event.event
+                        {
+                            assert_eq!(received, &fingerprint);
+                            unchanged = true;
+                        }
+                        deferred_events.push(event);
                     }
-                    deferred_events.push(event);
                 }
             },
             async {
                 smol::Timer::after(std::time::Duration::from_secs(5)).await;
-                panic!("recovery Scope was not delivered");
+                panic!("recovery Scope and IndexUnchanged were not delivered");
             },
         ));
         assert!(matches!(scope.event, ServerEvent::ScopeSnapshot(_)));
@@ -6242,7 +6327,16 @@ pub(crate) mod tests {
             "baselines after delayed state notifications",
             |cx| workspace.read_with(cx, |store, _| store.connection_state().is_connected()),
         );
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(
+                store.cached_index_fingerprint().as_ref(),
+                Some(&fingerprint)
+            );
+            assert_eq!(store.index_replica.0[0].title, "Updated live");
+        });
         driver.shutdown(cx, &workspace, &host);
+        driver.link.close();
+        forwarder.join().unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
