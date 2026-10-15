@@ -407,6 +407,8 @@ impl AppState {
         } else {
             brief
         };
+        self.thread_activity
+            .insert(meta.id.clone(), Default::default());
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
                 meta: Box::new(meta.clone()),

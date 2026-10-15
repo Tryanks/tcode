@@ -728,6 +728,7 @@ impl AppState {
             let _ = active.take_queued(id);
         }
         self.reschedule_scheduled_wake(cx);
+        self.evaluate_thread_settlement(target_id, cx);
     }
 
     pub fn retry_turn(
