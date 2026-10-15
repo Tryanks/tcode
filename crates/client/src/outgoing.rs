@@ -3,7 +3,7 @@
 use crate::recovery::Wake;
 use async_channel::{Receiver, Sender};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     sync::{Arc, Mutex},
 };
 
@@ -14,7 +14,7 @@ pub const MAX_BYTES: usize = tcode_protocol::MAX_LINE_BYTES;
 #[derive(Default)]
 struct Queue {
     lines: VecDeque<String>,
-    subscriptions: BTreeMap<String, String>,
+    subscriptions: VecDeque<(String, String)>,
     count: usize,
     bytes: usize,
 }
@@ -107,7 +107,10 @@ impl Outgoing {
         }
         let mut queue = queue.lock().unwrap();
         if let Some(key) = subscription_key(&line) {
-            queue.subscriptions.insert(key, line);
+            // Recovery queues Scope before the other baselines. Coalescing must
+            // keep the latest requests in admission order, even under backpressure.
+            queue.subscriptions.retain(|(topic, _)| topic != &key);
+            queue.subscriptions.push_back((key, line));
         } else {
             if queue.count >= MAX_LINES || line.len() > MAX_BYTES.saturating_sub(queue.bytes) {
                 log::error!("outgoing queue full; rejecting new non-subscription line");
@@ -153,7 +156,7 @@ impl OutgoingReceiver {
         loop {
             {
                 let mut queue = self.queue.lock().unwrap();
-                if let Some((_, line)) = queue.subscriptions.pop_first() {
+                if let Some((_, line)) = queue.subscriptions.pop_front() {
                     return Ok(line);
                 }
                 if let Some(line) = queue.lines.pop_front() {
