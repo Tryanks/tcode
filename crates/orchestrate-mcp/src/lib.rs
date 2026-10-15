@@ -4,7 +4,7 @@ use std::time::Duration;
 
 mod tools;
 
-pub use tools::{INSTRUCTIONS, REPORT_INSTRUCTIONS};
+pub use tools::{INSTRUCTIONS, REPORT_INSTRUCTIONS, tool_descriptions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadPurpose {
@@ -54,6 +54,9 @@ pub enum OrchestrateOp {
         parent_id: String,
         thread_id: String,
     },
+    SettleAll {
+        parent_id: String,
+    },
     Approve {
         parent_id: String,
         thread_id: String,
@@ -62,7 +65,10 @@ pub enum OrchestrateOp {
         cancel: bool,
     },
     /// A child thread pushing its final RESULT text up to the orchestrator.
-    ReportResult { child_id: String, text: String },
+    ReportResult {
+        child_id: String,
+        text: String,
+    },
 }
 
 #[derive(Debug)]

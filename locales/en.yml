@@ -2275,6 +2275,7 @@ agents:
   archived: "Archived"
   open: "Open agent"
   stop: "Stop agent"
+  settle_all: "Settle all finished"
   settle: "Settle agent"
   cancel: "Cancel agent"
   cancel_title: "Cancel this agent?"

@@ -1223,7 +1223,9 @@ fn the_agent_tools_are_disclosed_before_the_first_turn() {
     let host = crate::pipe::spawn_host((*store).clone(), services).unwrap();
     for (provider, disclosed) in [(ProviderKind::ClaudeCode, true), (ProviderKind::Pi, false)] {
         let tools = smol::block_on(host.update_state_for_test(move |state, _| {
-            let meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
+            let mut meta =
+                SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
+            meta.orchestrate_enabled = true;
             let id = meta.id.clone();
             state.sessions.push(meta.clone());
             state
@@ -1241,6 +1243,13 @@ fn the_agent_tools_are_disclosed_before_the_first_turn() {
             disclosed,
             "{provider:?}: shown exactly when its provider would receive the tools"
         );
+        if let Some(tools) = tools {
+            let description = orchestrate_mcp::tool_descriptions()
+                .into_iter()
+                .find(|(name, _)| name == "settle_all")
+                .unwrap();
+            assert!(tools.tools.contains(&description));
+        }
     }
     host.shutdown_blocking().unwrap();
 }

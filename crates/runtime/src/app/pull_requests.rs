@@ -238,8 +238,8 @@ impl AppState {
             .map(|existing| existing.instructions.clone())
             .unwrap_or_else(|| pull_request::linking_instructions(&self.pull_request_hosts()))
     }
-    /// The pull request tools offered to the thread's provider, and every text Tcode gives its
-    /// model outside the conversation, as delivered.
+    /// Pull request and orchestration tools, and every text Tcode gives the model
+    /// outside the conversation, as delivered.
     pub(super) fn injected_pull_request_tools(
         &self,
         session: &ActiveSession,
@@ -301,8 +301,12 @@ impl AppState {
                     text: text.to_owned(),
                 }),
         );
+        let mut tools = pull_request_mcp::tool_descriptions(&self.pull_request_tool_hosts(id));
+        if session.meta.orchestrate_enabled {
+            tools.extend(orchestrate_mcp::tool_descriptions());
+        }
         Some(tcode_protocol::InjectedPullRequestTools {
-            tools: pull_request_mcp::tool_descriptions(&self.pull_request_tool_hosts(id)),
+            tools,
             attached,
             instructions,
         })
