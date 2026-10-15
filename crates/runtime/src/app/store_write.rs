@@ -70,10 +70,14 @@ pub(super) enum StoreWrite {
         id: String,
         completion: smol::channel::Sender<Result<(DiffPass, Duration), String>>,
     },
-    /// Answered with the row the session's next append takes, once every
-    /// write queued before it has committed: the rows before it are the log
-    /// as those writes left it.
+    /// Pin the committed end and turn index after all earlier queued writes
+    /// have been attempted. A failed write does not prevent a read.
     SnapshotLog {
+        id: String,
+        end: smol::channel::Sender<Result<tcode_services::store::LogRead, String>>,
+    },
+    /// The committed end after all earlier queued writes have been attempted.
+    LogEnd {
         id: String,
         end: smol::channel::Sender<Result<u64, String>>,
     },
@@ -210,9 +214,9 @@ impl StoreWrite {
                 |error| RuntimeError::PersistEvent { error },
                 Some(completion),
             ),
-            StoreWrite::DropSupersededDiffs { .. } | StoreWrite::SnapshotLog { .. } => {
-                (|error| RuntimeError::PersistEvent { error }, None)
-            }
+            StoreWrite::DropSupersededDiffs { .. }
+            | StoreWrite::SnapshotLog { .. }
+            | StoreWrite::LogEnd { .. } => (|error| RuntimeError::PersistEvent { error }, None),
             StoreWrite::SaveCommands { .. }
             | StoreWrite::InvalidateCommands(_)
             | StoreWrite::WriteTerminalUi(_)
@@ -236,6 +240,10 @@ impl StoreWrite {
                 return None;
             }
             StoreWrite::SnapshotLog { end, .. } => {
+                let _ = end.try_send(Err(reason.to_owned()));
+                return None;
+            }
+            StoreWrite::LogEnd { end, .. } => {
                 let _ = end.try_send(Err(reason.to_owned()));
                 return None;
             }
@@ -450,6 +458,14 @@ impl StoreWriter {
                 failure
             }
             StoreWrite::SnapshotLog { id, end } => {
+                let _ = end.try_send(
+                    self.store
+                        .snapshot_log(&id)
+                        .map_err(|error| error.to_string()),
+                );
+                None
+            }
+            StoreWrite::LogEnd { id, end } => {
                 let _ = end.try_send(self.store.next_row(&id).map_err(|error| error.to_string()));
                 None
             }

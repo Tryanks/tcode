@@ -10990,6 +10990,7 @@ dependencies = [
  "image",
  "imara-diff",
  "log",
+ "memchr",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -166,6 +166,117 @@ fn assert_fixture_migrated(store: &SessionStore, root: &Path) {
 }
 
 #[test]
+fn pinned_history_cuts_survive_mutation_and_close_releases_readers() {
+    use std::borrow::Cow;
+    let dir = DataDir::new();
+    let store = dir.store();
+    let old = AgentEvent::Warning {
+        message: "old".repeat(1000),
+    };
+    store
+        .apply(&[
+            Mutation::append_event("thread", 1, &old).unwrap(),
+            Mutation::set_turn_index(
+                "thread",
+                TurnIndex {
+                    turns: 0,
+                    starts: vec![],
+                },
+            ),
+        ])
+        .unwrap();
+    let cut = store.snapshot_log("thread").unwrap();
+    store
+        .append_event(
+            "thread",
+            2,
+            &AgentEvent::Warning {
+                message: "appended".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(cut.end, 1);
+    assert_eq!(
+        cut.index,
+        Some(TurnIndex {
+            turns: 0,
+            starts: vec![]
+        })
+    );
+    let mut seen = Vec::new();
+    cut.visit_projected_rows(
+        0..u64::MAX,
+        false,
+        "fixture-preview",
+        128,
+        |record| {
+            Cow::Owned(StoredEvent {
+                event: AgentEvent::Warning {
+                    message: "old-preview".into(),
+                },
+                ..record.clone()
+            })
+        },
+        |row, record| {
+            seen.push((row, record.event));
+            true
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        seen,
+        [(
+            0,
+            AgentEvent::Warning {
+                message: "old-preview".into()
+            }
+        )]
+    );
+    let publication = cut.take_publication();
+    store
+        .apply(&[Mutation::replace_event_log(
+            "thread",
+            b"{\"type\":\"warning\",\"message\":\"replacement\"}\n".to_vec(),
+        )])
+        .unwrap();
+    publication.publish().unwrap();
+    let current = store.snapshot_log("thread").unwrap();
+    let mut seen = Vec::new();
+    current
+        .visit_projected_rows(
+            0..current.end,
+            false,
+            "fixture-preview",
+            128,
+            |record| Cow::Borrowed(record),
+            |_, record| {
+                seen.push(record.event);
+                true
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        seen,
+        [AgentEvent::Warning {
+            message: "replacement".into()
+        }]
+    );
+    store.close().unwrap();
+    assert!(
+        current
+            .visit_projected_rows(
+                0..current.end,
+                false,
+                "fixture-preview",
+                128,
+                |record| Cow::Borrowed(record),
+                |_, _| true
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn first_start_migrates_the_json_index_and_every_log_byte_for_byte() {
     let dir = DataDir::new();
     write_legacy_fixture(dir.path());

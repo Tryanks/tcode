@@ -22,6 +22,7 @@
 
 mod activity;
 mod db;
+mod log_read;
 mod migrate;
 mod projection;
 mod relocate;
@@ -30,6 +31,7 @@ mod superseded;
 mod tests;
 mod turn_index;
 
+pub use log_read::LogRead;
 pub use migrate::{Migration, MigrationPhase, MigrationProgress};
 pub use projection::ProjectionPublication;
 pub use superseded::DiffPass;
@@ -288,7 +290,7 @@ impl Mutation {
     }
 
     /// `project` returns a derived body using the same policy/version as
-    /// `visit_projected_rows_backwards`; it never replaces the canonical event.
+    /// [`LogRead::visit_projected_rows`]; it never replaces the canonical event.
     pub fn append_authored_event(
         session_id: &str,
         ts: u64,
@@ -610,7 +612,10 @@ impl SessionStore {
                         .wait(state)
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                 }
-                State::Open(live) => *state = State::Closing(live),
+                State::Open(live) => {
+                    live.db.cancel_reads();
+                    *state = State::Closing(live);
+                }
                 State::Closing(live) if live.in_flight > 0 => {
                     *state = State::Closing(live);
                     state = self
@@ -621,6 +626,7 @@ impl SessionStore {
                 }
                 State::Closing(live) => {
                     let Live { db, ownership, .. } = live;
+                    db.close_readers();
                     let result = match Arc::try_unwrap(db) {
                         Ok(db) => catch_unwind(AssertUnwindSafe(|| db.checkpoint()))
                             .unwrap_or_else(|panic| {
