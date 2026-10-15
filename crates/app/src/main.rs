@@ -192,7 +192,6 @@ fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
     let mut host_services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
-        drop_superseded_diffs: true,
         ..HostServices::default()
     };
     if let Err(error) = host_services.start_mcp_servers(true) {

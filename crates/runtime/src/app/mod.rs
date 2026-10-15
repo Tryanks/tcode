@@ -250,7 +250,7 @@ mod events;
 mod git;
 mod history;
 mod original;
-use history::{Hydration, Joined, SessionLog};
+use history::{Hydration, SessionLog};
 mod lifecycle;
 mod options;
 mod orchestrate;
@@ -541,13 +541,17 @@ impl AppState {
             store.root().display()
         );
         let thread_activity = store.load_thread_activity()?;
+        let missing_turn_indices: HashSet<_> =
+            store.threads_without_turn_index()?.into_iter().collect();
         let activity_pending: VecDeque<_> = sessions
             .iter()
-            .filter(|meta| !thread_activity.contains_key(&meta.id))
+            .filter(|meta| {
+                !thread_activity.contains_key(&meta.id) || missing_turn_indices.contains(&meta.id)
+            })
             .map(|meta| meta.id.clone())
             .collect();
         log::info!(
-            "thread activity: {} rows loaded, {} to backfill",
+            "thread activity: {} rows loaded, {} threads to backfill activity or turn index",
             thread_activity.len(),
             activity_pending.len()
         );

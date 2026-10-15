@@ -19,6 +19,78 @@ mod superseded;
 
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
+/// Bump when the persisted turn-boundary policy changes.
+pub const TURN_INDEX_FOLD_VERSION: u32 = 2;
+
+pub fn provider_turn_index<'a>(
+    turn_id: &str,
+    mut turns: impl Iterator<Item = Option<&'a str>>,
+    current: Option<usize>,
+) -> Option<usize> {
+    turns.position(|id| id == Some(turn_id)).or(current)
+}
+
+/// `current_open` is absent when there is no current turn. `known_item`
+/// includes entries in completed turns: an update never opens a new exchange.
+pub fn record_opens_turn(
+    event: &AgentEvent,
+    current_open: Option<bool>,
+    known_item: bool,
+    compacting: bool,
+) -> bool {
+    match event {
+        AgentEvent::TurnStarted { .. } | AgentEvent::ProviderRelay { .. } => {
+            current_open != Some(true)
+        }
+        AgentEvent::ItemStarted(item)
+        | AgentEvent::ItemUpdated(item)
+        | AgentEvent::ItemCompleted(item) => {
+            item.parent_item_id.is_none()
+                && !known_item
+                && if matches!(item.content, ItemContent::UserMessage { .. }) {
+                    current_open != Some(true)
+                } else {
+                    current_open.is_none()
+                }
+        }
+        AgentEvent::SteerRequested { .. } => !known_item && current_open.is_none(),
+        AgentEvent::ServedModel { .. }
+        | AgentEvent::TurnChangesUpdated { .. }
+        | AgentEvent::TurnCheckpoint { .. }
+        | AgentEvent::ProviderStartFailed { .. }
+        | AgentEvent::Error { .. }
+        | AgentEvent::SessionClosed { reason: Some(_) }
+        | AgentEvent::Delta { .. }
+        | AgentEvent::ProposedPlanDelta { .. }
+        | AgentEvent::ProposedPlan { .. }
+        | AgentEvent::ContextWindowChanged { .. } => current_open.is_none(),
+        AgentEvent::ContextCompacted(compaction) => {
+            !(compaction.in_progress && compacting) && current_open.is_none()
+        }
+        _ => false,
+    }
+}
+
+pub fn synthetic_entry_id(
+    prefix: &str,
+    ts: Option<u64>,
+    next: &mut u64,
+    mut exists: impl FnMut(&str) -> bool,
+) -> String {
+    let Some(ts) = ts else {
+        *next += 1;
+        return format!("{prefix}-{next}");
+    };
+    let base = format!("{prefix}-{ts}");
+    let mut id = base.clone();
+    let mut duplicate = 1;
+    while exists(&id) {
+        id = format!("{base}-{duplicate}");
+        duplicate += 1;
+    }
+    id
+}
+
 /// Claude Code's own prompt for resuming work after a usage-window reset.
 pub const RESUME_PROMPT: &str = "Continue from where you left off.";
 
@@ -657,6 +729,25 @@ impl Timeline {
         if self.turn_is_open() && !matches!(event, AgentEvent::TurnCompleted { .. }) {
             self.tool_clock.observe(ts);
         }
+        let item_id = match event {
+            AgentEvent::ItemStarted(item)
+            | AgentEvent::ItemUpdated(item)
+            | AgentEvent::ItemCompleted(item)
+                if matches!(item.content, ItemContent::UserMessage { .. }) =>
+            {
+                Some(item.id.as_str())
+            }
+            _ => None,
+        };
+        if record_opens_turn(
+            event,
+            self.current_turn.map(|_| self.turn_is_open()),
+            item_id.is_some_and(|id| self.entries.iter().any(|entry| entry.id == id)),
+            self.usage
+                .is_some_and(|usage| usage.freshness == agent::ContextFreshness::Compacting),
+        ) {
+            self.push_turn(ts);
+        }
         match event {
             AgentEvent::TurnRetry { retry } => {
                 self.turn_retry = retry.clone();
@@ -667,7 +758,7 @@ impl Timeline {
                 to_provider,
                 to_model,
             } => {
-                let turn = self.begin_user_turn(ts);
+                let turn = self.begin_user_turn();
                 let id = self.synthetic_id("relay", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
@@ -694,7 +785,7 @@ impl Timeline {
                 self.last_served_model = self.model.clone();
             }
             AgentEvent::ServedModel { model, reason } => {
-                let turn = self.ensure_turn(ts);
+                let turn = self.ensure_turn();
                 self.turns[turn].served_model = Some(model.clone());
                 // A `[1m]` launch id and the bare id the API reports back
                 // name the same model, so that pair draws no divider.
@@ -726,12 +817,7 @@ impl Timeline {
                 {
                     usage.freshness = agent::ContextFreshness::LastKnown;
                 }
-                // Reuse the open turn (typically opened by the user message);
-                // otherwise begin a fresh one.
-                let turn = match self.current_turn {
-                    Some(t) if self.turn_is_open() => t,
-                    _ => self.push_turn(ts),
-                };
+                let turn = self.ensure_turn();
                 // TurnStarted is the authoritative turn start; prefer it over
                 // the opening user message's time when known. It is also the
                 // only start the timing breakdown will measure from.
@@ -756,7 +842,7 @@ impl Timeline {
             } => {
                 let turn = self
                     .provider_turn(turn_id)
-                    .unwrap_or_else(|| self.push_turn(ts));
+                    .expect("the turn-opening policy supplied a turn");
                 if !turn_id.is_empty() {
                     self.turns[turn].provider_turn_id = Some(turn_id.clone());
                 }
@@ -771,7 +857,7 @@ impl Timeline {
             } => {
                 let turn = self
                     .provider_turn(turn_id)
-                    .unwrap_or_else(|| self.push_turn(ts));
+                    .expect("the turn-opening policy supplied a turn");
                 self.turns[turn].provider_turn_id = Some(turn_id.clone());
                 self.turns[turn].provider_checkpoint_id = Some(checkpoint_id.clone());
             }
@@ -914,7 +1000,7 @@ impl Timeline {
             // replays stored records, which would log every old warning again.
             AgentEvent::Warning { .. } | AgentEvent::PlanResolved { .. } => {}
             AgentEvent::ProviderStartFailed { error } => {
-                let turn = self.ensure_turn(ts);
+                let turn = self.ensure_turn();
                 let id = self.synthetic_id("error", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
@@ -926,7 +1012,7 @@ impl Timeline {
                 }));
             }
             AgentEvent::Error { message, .. } => {
-                let turn = self.ensure_turn(ts);
+                let turn = self.ensure_turn();
                 let id = self.synthetic_id("error", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
@@ -968,7 +1054,7 @@ impl Timeline {
                 // cause survives past the one-shot toast — a reopened session
                 // must still show why the work stopped.
                 if let Some(reason) = reason {
-                    let turn = self.ensure_turn(ts);
+                    let turn = self.ensure_turn();
                     let id = self.synthetic_id("error", ts);
                     self.entries.push(Arc::new(TimelineEntry {
                         id,
@@ -1025,7 +1111,7 @@ impl Timeline {
                     usage.cached_input_tokens = None;
                     usage.output_tokens = None;
                 }
-                let turn = self.ensure_turn(ts);
+                let turn = self.ensure_turn();
                 let id = self.synthetic_id("compacted", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
@@ -1035,7 +1121,7 @@ impl Timeline {
                 }));
             }
             AgentEvent::ContextWindowChanged { window } => {
-                let turn = self.ensure_turn(ts);
+                let turn = self.ensure_turn();
                 let id = self.synthetic_id("context-window", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
@@ -1052,10 +1138,13 @@ impl Timeline {
     /// The turn a provider-addressed record lands on: the first turn carrying
     /// `turn_id`, else the current one. `None` means the record opens a turn.
     fn provider_turn(&self, turn_id: &str) -> Option<usize> {
-        self.turns
-            .iter()
-            .position(|turn| turn.provider_turn_id.as_deref() == Some(turn_id))
-            .or(self.current_turn)
+        provider_turn_index(
+            turn_id,
+            self.turns
+                .iter()
+                .map(|turn| turn.provider_turn_id.as_deref()),
+            self.current_turn,
+        )
     }
 
     /// Whether the current turn is still accumulating. A turn is finished once
@@ -1133,27 +1222,14 @@ impl Timeline {
             .retain(|item_id| self.entries.iter().any(|entry| entry.id == *item_id));
     }
 
-    /// The current open turn, creating one if none exists.
-    fn ensure_turn(&mut self, ts: Option<u64>) -> usize {
-        match self.current_turn {
-            Some(turn) => turn,
-            None => self.push_turn(ts),
-        }
+    fn ensure_turn(&self) -> usize {
+        self.current_turn
+            .expect("the turn-opening policy supplied a turn")
     }
 
-    /// Turn a user message belongs to: a fresh turn when the previous one has
-    /// already completed (a new exchange), otherwise the current open turn.
-    fn begin_user_turn(&mut self, ts: Option<u64>) -> usize {
+    fn begin_user_turn(&mut self) -> usize {
         self.turn_retry = None;
-        let need_new = match self.current_turn {
-            None => true,
-            Some(turn) => self.turns[turn].end_ts.is_some() || self.turns[turn].status.is_some(),
-        };
-        if need_new {
-            self.push_turn(ts)
-        } else {
-            self.current_turn.unwrap()
-        }
+        self.ensure_turn()
     }
 
     /// Ids for entries that have no provider item. The UI pages history in
@@ -1161,18 +1237,9 @@ impl Timeline {
     /// a timestamped record names itself, and only untimestamped legacy logs
     /// fall back to the fold-relative counter.
     fn synthetic_id(&mut self, prefix: &str, ts: Option<u64>) -> String {
-        let Some(ts) = ts else {
-            self.next_synthetic_id += 1;
-            return format!("{prefix}-{}", self.next_synthetic_id);
-        };
-        let base = format!("{prefix}-{ts}");
-        let mut id = base.clone();
-        let mut duplicate = 1;
-        while self.entries.iter().any(|entry| entry.id == id) {
-            id = format!("{base}-{duplicate}");
-            duplicate += 1;
-        }
-        id
+        synthetic_entry_id(prefix, ts, &mut self.next_synthetic_id, |id| {
+            self.entries.iter().any(|entry| entry.id == id)
+        })
     }
 
     fn refresh_partial_turn_changes(&mut self, turn: usize) {
@@ -1226,7 +1293,7 @@ impl Timeline {
                 incoming,
                 EntryContent::Item(ItemContent::UserMessage { .. })
             ) {
-                let turn = self.begin_user_turn(ts);
+                let turn = self.begin_user_turn();
                 if self.entries.iter().any(|entry| {
                     entry.turn == turn
                         && matches!(
@@ -1254,7 +1321,7 @@ impl Timeline {
                 }
                 turn
             } else {
-                self.ensure_turn(ts)
+                self.ensure_turn()
             };
             self.entries.push(Arc::new(TimelineEntry {
                 id: item.id.clone(),
@@ -1275,7 +1342,7 @@ impl Timeline {
         if self.entries.iter().any(|entry| entry.id == request_id) {
             return;
         }
-        let turn = self.ensure_turn(ts);
+        let turn = self.ensure_turn();
         self.entries.push(Arc::new(TimelineEntry {
             id: request_id.to_owned(),
             content: EntryContent::Steer {
@@ -1382,7 +1449,7 @@ impl Timeline {
                 status: ItemStatus::InProgress,
             }),
         };
-        let turn = self.ensure_turn(ts);
+        let turn = self.ensure_turn();
         self.entries.push(Arc::new(TimelineEntry {
             id: item_id.to_string(),
             content,

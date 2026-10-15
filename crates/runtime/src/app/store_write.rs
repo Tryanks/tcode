@@ -9,17 +9,15 @@ const MAX_BATCH_BYTES: usize = 4 << 20;
 
 pub(super) enum StoreWrite {
     /// One appended record, committed together with what it changes in the
-    /// session's other rows: the diffs of the snapshot it supersedes and the
-    /// turn index, or, when no fold tells, forgetting both.
+    /// session's turn boundaries and the diffs of the snapshot it supersedes.
     AppendEvent {
         id: String,
         ts: u64,
         author: Option<Author>,
         origin: Option<MessageOrigin>,
         event: Box<AgentEvent>,
-        joined: Joined,
     },
-    /// The turn index of a log the host just read and folded whole.
+    /// The full-fold result used to seed an index during migration.
     SetTurnIndex {
         id: String,
         index: TurnIndex,
@@ -121,9 +119,8 @@ impl StoreWrite {
                 author,
                 origin,
                 event,
-                joined,
             } => {
-                let mut mutations = match Mutation::append_authored_event(
+                match Mutation::append_authored_event(
                     id,
                     *ts,
                     event,
@@ -133,31 +130,7 @@ impl StoreWrite {
                 ) {
                     Ok(mutation) => vec![mutation],
                     Err(error) => return Some(Err(error.to_string())),
-                };
-                match joined {
-                    Joined::Folded {
-                        superseded,
-                        turn_index,
-                    } => {
-                        if let Some(superseded) = superseded {
-                            mutations.push(Mutation::drop_turn_diffs(
-                                id,
-                                superseded.position,
-                                &superseded.turn_id,
-                            ));
-                        }
-                        if let Some(index) = turn_index {
-                            mutations.push(Mutation::set_turn_index(id, index.clone()));
-                        }
-                    }
-                    Joined::Unfolded => {
-                        mutations.push(Mutation::forget_turn_index(id));
-                        if matches!(**event, AgentEvent::TurnChangesUpdated { .. }) {
-                            mutations.push(Mutation::forget_diff_pass(id));
-                        }
-                    }
                 }
-                mutations
             }
             StoreWrite::SetTurnIndex { id, index } => {
                 vec![Mutation::set_turn_index(id, index.clone())]

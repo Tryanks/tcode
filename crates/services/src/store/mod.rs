@@ -11,7 +11,7 @@
 //!     ([`tcode_core::session::TurnSnapshots`]).
 //!   * `diff_pass` names the threads whose superseded snapshots
 //!     [`SessionStore::drop_superseded_diffs`] has dealt with.
-//!   * `turn_index` holds a thread's [`TurnIndex`], while the host knows it.
+//!   * `turn_index_v2` holds append-maintained turn boundaries.
 //!   * `kept_worktrees` holds the path of every worktree whose thread was
 //!     deleted with the worktree kept.
 //!
@@ -255,7 +255,6 @@ enum Op {
         session_id: String,
         line: Vec<u8>,
         projection: Option<(String, Vec<u8>)>,
-        activity_record: Option<Box<StoredEvent>>,
     },
     ReplaceEventLog {
         session_id: String,
@@ -265,17 +264,10 @@ enum Op {
         src: String,
         dst: String,
     },
-    DropTurnDiffs {
-        session_id: String,
-        position: u64,
-        turn_id: String,
-    },
-    ForgetDiffPass(String),
     SetTurnIndex {
         session_id: String,
         index: TurnIndex,
     },
-    ForgetTurnIndex(String),
     UpsertMeta(Box<SessionMeta>),
     UpsertProject(Box<Project>),
     RemoveSession(String),
@@ -308,17 +300,6 @@ impl Mutation {
             session_id: session_id.to_owned(),
             line,
             projection,
-            activity_record: tcode_core::settlement::ThreadActivity::moves_clock(event).then(
-                || {
-                    Box::new(StoredEvent {
-                        ts: Some(ts),
-                        event: event.clone(),
-                        origin,
-                        author: author.cloned(),
-                        elided: None,
-                    })
-                },
-            ),
         }))
     }
 
@@ -339,24 +320,6 @@ impl Mutation {
         })
     }
 
-    /// Drop the diffs of the turn-changes snapshot of `turn_id` stored at
-    /// `position` of the session's log, which a later snapshot supersedes. A
-    /// row that holds anything else is left as it is.
-    pub fn drop_turn_diffs(session_id: &str, position: u64, turn_id: &str) -> Self {
-        Self(Op::DropTurnDiffs {
-            session_id: session_id.to_owned(),
-            position,
-            turn_id: turn_id.to_owned(),
-        })
-    }
-
-    /// Have the next [`SessionStore::drop_superseded_diffs`] pass cover the
-    /// session again: an append superseded a snapshot whose row could not be
-    /// named.
-    pub fn forget_diff_pass(session_id: &str) -> Self {
-        Self(Op::ForgetDiffPass(session_id.to_owned()))
-    }
-
     /// Record the turns of the fold of the session's whole log, as of this
     /// change.
     pub fn set_turn_index(session_id: &str, index: TurnIndex) -> Self {
@@ -364,12 +327,6 @@ impl Mutation {
             session_id: session_id.to_owned(),
             index,
         })
-    }
-
-    /// Forget the session's turn index: this change may alter its turns
-    /// without anyone having folded it.
-    pub fn forget_turn_index(session_id: &str) -> Self {
-        Self(Op::ForgetTurnIndex(session_id.to_owned()))
     }
 
     /// Insert or replace a meta (by id).
@@ -413,14 +370,12 @@ impl Mutation {
     /// The session whose event log this change rewrites, if any.
     fn event_log(&self) -> Option<&str> {
         match &self.0 {
-            Op::AppendEvent { session_id, .. }
-            | Op::ReplaceEventLog { session_id, .. }
-            | Op::DropTurnDiffs { session_id, .. } => Some(session_id),
+            Op::AppendEvent { session_id, .. } | Op::ReplaceEventLog { session_id, .. } => {
+                Some(session_id)
+            }
             Op::CloneEvents { dst, .. } => Some(dst),
             Op::RemoveSession(id) => Some(id),
-            Op::ForgetDiffPass(_)
-            | Op::SetTurnIndex { .. }
-            | Op::ForgetTurnIndex(_)
+            Op::SetTurnIndex { .. }
             | Op::UpsertMeta(_)
             | Op::UpsertProject(_)
             | Op::RemoveProject(_)
@@ -1189,7 +1144,7 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
     db.write(|db, connection| {
         db.execute(connection, KEPT_WORKTREES, ())?;
         db.execute(connection, superseded::DIFF_PASS_TABLE, ())?;
-        db.execute(connection, turn_index::TURN_INDEX_TABLE, ())?;
+        turn_index::create_tables(db, connection)?;
         activity::create_table(db, connection)?;
         projection::create_cache(db, connection)
     })?;
@@ -1339,7 +1294,6 @@ fn apply_op(
             session_id,
             line,
             projection,
-            activity_record,
         } => {
             let mut last = None;
             db.query(
@@ -1379,7 +1333,14 @@ fn apply_op(
                 }
             };
             insert_segments(db, connection, session_id, next, [line])?;
-            activity::append(db, connection, session_id, activity_record.as_deref())?;
+            let record = decode_row(line)
+                .map_err(invalid_data)?
+                .ok_or_else(|| invalid_data("an appended event is blank"))?
+                .stored;
+            if tcode_core::settlement::ThreadActivity::moves_clock(&record.event) {
+                activity::append(db, connection, session_id, &record)?;
+            }
+            turn_index::append(db, connection, session_id, next as u64, &record)?;
             if let Some((version, body)) = projection
                 && let Err(error) = db.execute(
                     connection,
@@ -1399,7 +1360,7 @@ fn apply_op(
             insert_segments(db, connection, session_id, 0, segments(bytes))?;
             activity::recompute(db, connection, session_id)?;
             superseded::forget_pass(db, connection, session_id)?;
-            turn_index::forget(db, connection, session_id)?;
+            turn_index::rebuild(db, connection, session_id)?;
         }
         Op::CloneEvents { src, dst } => {
             db.execute(
@@ -1415,18 +1376,11 @@ fn apply_op(
             )?;
             activity::recompute(db, connection, dst)?;
             superseded::forget_pass(db, connection, dst)?;
-            turn_index::forget(db, connection, dst)?;
+            turn_index::rebuild(db, connection, dst)?;
         }
-        Op::DropTurnDiffs {
-            session_id,
-            position,
-            turn_id,
-        } => superseded::drop_row_diffs(db, connection, session_id, *position, turn_id)?,
-        Op::ForgetDiffPass(session_id) => superseded::forget_pass(db, connection, session_id)?,
         Op::SetTurnIndex { session_id, index } => {
             turn_index::set(db, connection, session_id, index)?
         }
-        Op::ForgetTurnIndex(session_id) => turn_index::forget(db, connection, session_id)?,
         Op::UpsertMeta(meta) => {
             let mut previous_parent = None;
             db.query(
@@ -1445,6 +1399,7 @@ fn apply_op(
                  ON CONFLICT (id) DO UPDATE SET body = excluded.body",
                 (meta.id.as_str(), body),
             )?;
+            superseded::mark_empty(db, connection, &meta.id)?;
             if previous_parent != Some(meta.parent_session_id.is_some()) {
                 activity::recompute(db, connection, &meta.id)?;
             }

@@ -130,11 +130,8 @@ pub(super) fn append(
     db: &Db,
     connection: &Connection,
     id: &str,
-    record: Option<&StoredEvent>,
+    record: &StoredEvent,
 ) -> io::Result<()> {
-    let Some(record) = record else {
-        return Ok(());
-    };
     let mut stored = None;
     db.query(
         connection,
@@ -222,6 +219,7 @@ impl SessionStore {
                     if session_parent(db, connection, id)? != Some(parent) {
                         return Ok(None);
                     }
+                    super::turn_index::backfill(db, connection, id)?;
                     if let Some(current) = read(db, connection, id, parent)? {
                         return Ok(Some(current));
                     }

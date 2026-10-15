@@ -1,0 +1,40 @@
+{"type":"token_usage","freshness":"compacting"}
+{"type":"context_compacted","in_progress":true}
+{"type":"item_completed","id":"u1","content":{"kind":"user_message","text":"first"}}
+{"type":"turn_started","turn_id":"one"}
+{"type":"steer_requested","request_id":"s1","text":"adjust","attachments":[]}
+{"type":"turn_checkpoint","turn_id":"one","checkpoint_id":"c1"}
+{"type":"turn_completed","turn_id":"one","status":"interrupted","usage":null}
+{"type":"item_updated","id":"u1","content":{"kind":"user_message","text":"first revised"}}
+{"type":"item_completed","id":"u2","content":{"kind":"user_message","text":"second"}}
+{"type":"turn_started","turn_id":"two"}
+{"type":"turn_checkpoint","turn_id":"two","checkpoint_id":"c2"}
+{"type":"turn_completed","turn_id":"two","status":"completed","usage":null}
+{"type":"rewind_completed","checkpoint_id":"c2","mode":"conversation","prefill":null}
+{"type":"steer_requested","request_id":"late","text":"late steer","attachments":[]}
+{"type":"turn_completed","turn_id":"one","status":"completed","usage":null}
+{"type":"item_completed","id":"u3","content":{"kind":"user_message","text":"third"}}
+{"type":"turn_started","turn_id":"three"}
+{"type":"turn_changes_updated","turn_id":"","changes":[],"completeness":"exact"}
+{"type":"turn_checkpoint","turn_id":"three","checkpoint_id":"c3"}
+{"type":"turn_completed","turn_id":"three","status":"failed","usage":null}
+{"type":"rewind_completed","checkpoint_id":"c1","mode":"conversation","prefill":null}
+{"type":"steer_requested","request_id":"standalone","text":"open a turn","attachments":[]}
+{"type":"steer_rejected","request_id":"standalone"}
+{"type":"turn_checkpoint","turn_id":"steer","checkpoint_id":"cs"}
+{"type":"turn_completed","turn_id":"steer","status":"interrupted","usage":null}
+{"type":"rewind_completed","checkpoint_id":"cs","mode":"conversation","prefill":null}
+{"type":"turn_checkpoint","turn_id":"checkpoint","checkpoint_id":"orphan"}
+{"type":"turn_completed","turn_id":"checkpoint","status":"interrupted","usage":null}
+{"type":"rewind_completed","checkpoint_id":"orphan","mode":"conversation","prefill":null}
+{"type":"turn_changes_updated","turn_id":"snapshot","changes":[],"completeness":"exact"}
+{"type":"turn_completed","turn_id":"snapshot","status":"interrupted","usage":null}
+{"type":"turn_started","turn_id":"last"}
+{"type":"item_completed","id":"nested","parent_item_id":"tool","content":{"kind":"user_message","text":"nested"}}
+{"type":"turn_completed","turn_id":"last","status":"failed","usage":null}
+{"type":"steer_requested","request_id":"reused","text":"pending","attachments":[]}
+{"type":"item_completed","id":"reused","content":{"kind":"user_message","text":"provider snapshot"}}
+{"type":"steer_rejected","request_id":"reused"}
+{"type":"item_completed","id":"reused","content":{"kind":"user_message","text":"retry after rejection"}}
+{"type":"turn_started","turn_id":"retry"}
+{"type":"turn_completed","turn_id":"retry","status":"completed","usage":null}
