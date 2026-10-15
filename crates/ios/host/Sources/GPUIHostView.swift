@@ -138,6 +138,17 @@ final class GPUIHostView: UIView, UITextViewDelegate {
     private let keyboardProxy = GPUIKeyboardProxy(
         frame: CGRect(x: -2, y: -2, width: 1, height: 1)
     )
+    // Once it recognizes, UIKit cancels the edge touch in this view, so GPUI
+    // sees no pan to fling and no tap; an edge contact that never moves fails
+    // it and reaches GPUI unchanged.
+    private lazy var backSwipe: UIScreenEdgePanGestureRecognizer = {
+        let recognizer = UIScreenEdgePanGestureRecognizer(
+            target: self,
+            action: #selector(backSwipeChanged(_:))
+        )
+        recognizer.edges = .left
+        return recognizer
+    }()
 
     override class var layerClass: AnyClass {
         CAMetalLayer.self
@@ -173,6 +184,7 @@ final class GPUIHostView: UIView, UITextViewDelegate {
         keyboardProxy.smartQuotesType = .no
         keyboardProxy.smartInsertDeleteType = .no
         addSubview(keyboardProxy)
+        addGestureRecognizer(backSwipe)
 
         NotificationCenter.default.addObserver(
             self,
@@ -395,6 +407,22 @@ final class GPUIHostView: UIView, UITextViewDelegate {
             return false
         }
         return true
+    }
+
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === backSwipe else {
+            return super.gestureRecognizerShouldBegin(gestureRecognizer)
+        }
+        return tcode_ios_can_swipe_back() != 0
+    }
+
+    @objc private func backSwipeChanged(_ recognizer: UIScreenEdgePanGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        let travel = recognizer.translation(in: self).x
+        let velocity = recognizer.velocity(in: self).x
+        if travel >= bounds.width / 3 || (travel >= 32 && velocity >= 600) {
+            tcode_ios_swipe_back()
+        }
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
