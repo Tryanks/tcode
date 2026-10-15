@@ -120,13 +120,7 @@ impl AppState {
                 if changed {
                     state.evaluate_all_settlement(cx);
                 }
-                if failed {
-                    let host_cx = cx.clone();
-                    HostCx::spawn_detached(cx, async move {
-                        smol::Timer::after(Duration::from_secs(1)).await;
-                        host_cx.enqueue(|state, cx| state.load_next_activity_batch(cx));
-                    });
-                } else {
+                if !failed {
                     state.load_next_activity_batch(cx);
                 }
             });
