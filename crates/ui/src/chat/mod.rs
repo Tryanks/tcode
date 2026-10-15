@@ -5391,8 +5391,8 @@ mod tests {
                     }),
                     cx,
                 );
-                let _ = window.draw(cx);
             });
+            draw(cx);
         };
 
         // The finger moves down: earlier content comes into view and following

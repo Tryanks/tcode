@@ -504,6 +504,22 @@ fn highlight_from(
     (runs, checkpoint)
 }
 
+pub(crate) fn sub_runs(
+    all: &[(Range<usize>, HighlightStyle)],
+    start: usize,
+    end: usize,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    all.iter()
+        .filter(|(range, _)| range.start < end && range.end > start)
+        .map(|(range, style)| {
+            (
+                range.start.max(start) - start..range.end.min(end) - start,
+                *style,
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,20 +636,4 @@ mod tests {
             );
         }
     }
-}
-
-pub(crate) fn sub_runs(
-    all: &[(Range<usize>, HighlightStyle)],
-    start: usize,
-    end: usize,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    all.iter()
-        .filter(|(range, _)| range.start < end && range.end > start)
-        .map(|(range, style)| {
-            (
-                range.start.max(start) - start..range.end.min(end) - start,
-                *style,
-            )
-        })
-        .collect()
 }

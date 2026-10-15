@@ -6470,8 +6470,8 @@ mod tests {
                     session_id: session.into(),
                 },
                 ServerEvent::SessionSnapshot {
-                    total: 0,
-                    total_turns: 0,
+                    total: 2 + extra.len() as u64,
+                    total_turns: 1,
                     truncated: false,
                     from: 0,
                     end: 2 + extra.len() as u64,
@@ -6601,21 +6601,74 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        {
+            let (shell, host, cx) = mount(cx);
+            seed_wide_diff(&shell, &host, cx);
+            resize(cx, 1024.);
+            store_of(&shell, cx).update(cx, |store, cx| store.toggle_diff_panel(cx));
+            draw_until(&shell, cx, &host, "diff-body", None);
+            assert!(cx.debug_bounds("right-panel-tabs").is_some());
+            assert!(cx.debug_bounds("diff-close").is_some());
+        }
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, cx) = mount(cx);
-        seed_wide_diff(&shell, &host, cx);
-        resize(cx, 1024.);
-        store_of(&shell, cx).update(cx, |store, cx| store.toggle_diff_panel(cx));
-        draw_until(&shell, cx, &host, "diff-body", None);
-        assert!(cx.debug_bounds("right-panel-tabs").is_some());
-        assert!(cx.debug_bounds("diff-close").is_some());
-        as_mobile(cx);
+        for (topic, event) in [
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: Vec::new(),
+                    projects: Vec::new(),
+                }),
+            ),
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        seed_wide_diff_with(
+            &shell,
+            &host,
+            cx,
+            vec![
+                agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: "answer".into(),
+                    parent_item_id: None,
+                    content: agent::ItemContent::AssistantMessage {
+                        text: "Updated the file.".into(),
+                    },
+                }),
+                agent::AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                },
+            ],
+        );
         resize(cx, 393.);
         shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
         draw(cx);
-        cx.update(|window, cx| window.dispatch_action(Box::new(crate::chat::OpenFileDiff {
+        assert!(!store_of(&shell, cx).read_with(cx, |store, _| store.chat_loading()));
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+        });
+        cx.update(|window, cx| composer.read(cx).input_focus_handle(cx).focus(window, cx));
+        draw(cx);
+        cx.dispatch_action(crate::chat::OpenFileDiff {
             turn: 0,
             path: "/tmp/tcode-compact-panel/a/deeply/nested/module/tree/with/an/absurdly/long/file_name.rs".into(),
-        }), cx));
+        });
         draw_until(&shell, cx, &host, "diff-body", None);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(

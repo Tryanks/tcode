@@ -1408,13 +1408,37 @@ impl DiffListHost for PullRequestView {
         let entry = self.files_of()?.get(file)?;
         let unavailable = !matches!(entry.patch, PullRequestPatch::Hunks(_));
         let changed = self.viewed_state(&entry.path) == Viewed::Changed;
-        (unavailable || changed).then(|| h_flex().gap_2().text_size(px(11.)).line_height(px(18.))
-            .when(unavailable, |row| row
-                .children(entry.previous_path.as_ref().map(|path| div().text_color(cx.theme().muted_foreground).child(format!("← {path}"))))
-                .child(div().text_color(cx.theme().success).child(format!("+{}", entry.additions)))
-                .child(div().text_color(cx.theme().danger).child(format!("−{}", entry.deletions))))
-            .when(changed, |row| row.child(div().text_color(cx.theme().warning).child(crate::tr!("pull_requests.files.changed_since_viewed"))))
-            .into_any_element())
+        (unavailable || changed).then(|| {
+            h_flex()
+                .gap_2()
+                .text_size(px(11.))
+                .line_height(px(18.))
+                .when(unavailable, |row| {
+                    row.children(entry.previous_path.as_ref().map(|path| {
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("← {path}"))
+                    }))
+                    .child(
+                        div()
+                            .text_color(cx.theme().success)
+                            .child(format!("+{}", entry.additions)),
+                    )
+                    .child(
+                        div()
+                            .text_color(cx.theme().danger)
+                            .child(format!("−{}", entry.deletions)),
+                    )
+                })
+                .when(changed, |row| {
+                    row.child(
+                        div()
+                            .text_color(cx.theme().warning)
+                            .child(crate::tr!("pull_requests.files.changed_since_viewed")),
+                    )
+                })
+                .into_any_element()
+        })
     }
 
     fn header_trailing(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {

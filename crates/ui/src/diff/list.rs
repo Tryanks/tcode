@@ -66,7 +66,7 @@ pub(crate) struct DiffList {
 impl DiffList {
     pub fn new(files: Vec<PreparedFile>, layouts: Vec<FileLayout>, cx: &mut App) -> Self {
         let state = cx.new(|cx| DiffState::new(files.iter().map(|file| file.document.clone()), cx));
-        Self {
+        let list = Self {
             files,
             layouts,
             state,
@@ -75,7 +75,22 @@ impl DiffList {
             visible_file: Rc::new(Cell::new(None)),
             source_anchor: Rc::new(RefCell::new(None)),
             subscription: RefCell::new(None),
-        }
+        };
+        list.apply_layouts(cx);
+        list
+    }
+    fn apply_layouts(&self, cx: &mut App) {
+        self.state.update(cx, |state, cx| {
+            for (index, file) in self.files.iter().enumerate() {
+                // Kit has no notice slot. Keep host-only binary/oversized details
+                // in the file annotation, suppressing its empty-document notice.
+                if file.all_rows.is_empty() && !file.full_source && !file.parse_error {
+                    state.set_file_collapsed(&file.path, true, cx);
+                } else if let Some(layout) = self.layouts.get(index) {
+                    state.set_file_collapsed(&file.path, *layout == FileLayout::Header, cx);
+                }
+            }
+        });
     }
     pub fn layout(&self, index: usize) -> FileLayout {
         self.layouts.get(index).copied().unwrap_or_default()
@@ -226,16 +241,8 @@ pub(crate) fn render_list<H: DiffListHost>(
             },
             cx,
         );
-        for (index, file) in list.files.iter().enumerate() {
-            // Kit has no notice slot. Keep host-only binary/oversized details
-            // in the file annotation, suppressing its empty-document notice.
-            if file.all_rows.is_empty() && !file.full_source && !file.parse_error {
-                state.set_file_collapsed(&file.path, true, cx);
-            } else if let Some(layout) = list.layouts.get(index) {
-                state.set_file_collapsed(&file.path, *layout == FileLayout::Header, cx);
-            }
-        }
     });
+    list.apply_layouts(cx);
     if list.subscription.borrow().is_none() {
         *list.subscription.borrow_mut() = Some(cx.subscribe(&state, |host, _, event, cx| {
             match event {
