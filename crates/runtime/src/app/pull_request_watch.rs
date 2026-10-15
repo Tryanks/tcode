@@ -58,8 +58,9 @@ pub(super) struct WatchRuntime {
     /// Review-thread replies past each thread's first page.
     tails: HashMap<GroupKey, Tails>,
     passing: bool,
-    /// Threads whose latest run the user stopped: an agent start is refused until a new turn.
-    stopped: HashSet<String>,
+    /// Resumed subscriptions must read detail and activity even if fingerprints did not move.
+    refresh: HashSet<(String, PullRequestKey)>,
+    sweep_pending: bool,
     worker: Option<HostTask<()>>,
 }
 
@@ -71,7 +72,8 @@ impl WatchRuntime {
             failures: HashMap::new(),
             tails: HashMap::new(),
             passing: false,
-            stopped: HashSet::new(),
+            refresh: HashSet::new(),
+            sweep_pending: false,
             worker: None,
         }
     }
@@ -211,14 +213,25 @@ impl AppState {
         let mut ending = Vec::new();
         let mut undelivered = Vec::new();
         for meta in &self.sessions {
-            if meta.archived_at.is_some() {
+            if meta.archived_at.is_some() || meta.pull_request_watches_paused {
                 continue;
             }
             for link in pull_request::watched(&meta.pull_requests) {
                 let watch = link.watch.as_ref().unwrap();
                 let key = (meta.project_id.clone(), link.key.clone());
                 present.insert(key.clone());
-                if let Some(wake) = &watch.pending_wake {
+                if let Some(wake) = &watch.pending_wake
+                    && (wake.last
+                        || !self
+                            .pull_request_watches
+                            .refresh
+                            .contains(&(meta.id.clone(), link.key.clone())))
+                {
+                    if wake.last {
+                        self.pull_request_watches
+                            .refresh
+                            .remove(&(meta.id.clone(), link.key.clone()));
+                    }
                     undelivered.push((meta.id.clone(), link.key.clone(), wake.clone()));
                     continue;
                 }
@@ -327,9 +340,15 @@ impl AppState {
                     fingerprinted
                         .into_iter()
                         .filter_map(|(group, fingerprint)| {
+                            let mut refresh = false;
+                            for target in &group.targets {
+                                refresh |= watches
+                                    .refresh
+                                    .remove(&(target.thread.clone(), group.key.1.clone()));
+                            }
                             let plan = plan(
                                 &group,
-                                watches.last_reads.get(&group.key),
+                                watches.last_reads.get(&group.key).filter(|_| !refresh),
                                 fingerprint.as_ref(),
                                 now,
                             );
@@ -337,7 +356,7 @@ impl AppState {
                                 watches
                                     .tails
                                     .remove(&group.key)
-                                    .filter(|_| !plan.reread_tails)
+                                    .filter(|_| !plan.reread_tails && !refresh)
                                     .unwrap_or_default()
                             });
                             plan.detail.then_some((group, fingerprint, plan, tails))
@@ -431,6 +450,9 @@ impl AppState {
                 .enqueue_and_wait(|state, cx| {
                     state.pull_request_watches.passing = false;
                     state.refresh_host_credentials(cx);
+                    if std::mem::take(&mut state.pull_request_watches.sweep_pending) {
+                        state.sweep_pull_request_watches(cx).detach();
+                    }
                 })
                 .await;
         })
@@ -453,6 +475,17 @@ impl AppState {
             Ok(read) => read,
             Err(error) => {
                 self.pull_request_watches.last_reads.remove(&key);
+                for target in &targets {
+                    if let Some(wake) = self.find_meta(&target.thread).and_then(|meta| {
+                        meta.pull_requests
+                            .into_iter()
+                            .find(|link| link.key == key.1)
+                            .and_then(|link| link.watch)
+                            .and_then(|watch| watch.pending_wake)
+                    }) {
+                        self.deliver_pull_request_wake(&target.thread, &key.1, &wake, cx);
+                    }
+                }
                 // The host's pause refuses later reads without a request, so waiting is free.
                 if rate_limited(&error) {
                     return;
@@ -570,6 +603,9 @@ impl AppState {
                         cx,
                     );
                 }
+                if let Some(wake) = &current.pending_wake {
+                    self.deliver_pull_request_wake(&target.thread, &key.1, wake, cx);
+                }
                 continue;
             }
             let text =
@@ -594,10 +630,8 @@ impl AppState {
         }
     }
 
-    /// Apply what a pass saw to one thread's watch, only while the same generation is on, so a
-    /// stop or restart that landed during the read wins. `next` is the watch to keep, `None` to
-    /// end it; a wake without `next` is the last message the agent reads before it ends. A wake
-    /// is written in the same metadata write as the watermark it reports, then delivered.
+    /// Only the same subscription generation may consume a read. Persist news with its
+    /// watermark; a resumed read combines it with any older undelivered news.
     fn record_pull_request_watch(
         &mut self,
         thread: &str,
@@ -609,7 +643,7 @@ impl AppState {
     ) -> bool {
         let Some(mut meta) = self
             .find_meta(thread)
-            .filter(|meta| meta.archived_at.is_none())
+            .filter(|meta| meta.archived_at.is_none() && !meta.pull_request_watches_paused)
         else {
             return false;
         };
@@ -623,7 +657,7 @@ impl AppState {
         let Some(current) = link
             .watch
             .as_ref()
-            .filter(|current| current.started_at == started_at && current.pending_wake.is_none())
+            .filter(|current| current.started_at == started_at)
         else {
             return false;
         };
@@ -640,8 +674,14 @@ impl AppState {
                 let last = next.is_none();
                 let mut recorded = next.unwrap_or_else(|| current.clone());
                 let pending = PendingWake {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    text,
+                    id: current.pending_wake.as_ref().map_or_else(
+                        || uuid::Uuid::new_v4().to_string(),
+                        |pending| pending.id.clone(),
+                    ),
+                    text: current.pending_wake.as_ref().map_or_else(
+                        || text.clone(),
+                        |pending| format!("{}\n\n{text}", pending.text),
+                    ),
                     last,
                 };
                 recorded.pending_wake = Some(pending.clone());
@@ -677,6 +717,12 @@ impl AppState {
         wake: &PendingWake,
         cx: &mut HostCx,
     ) {
+        if self
+            .find_meta(thread)
+            .is_none_or(|meta| meta.pull_request_watches_paused)
+        {
+            return;
+        }
         let kind = QueuedMessageKind::PullRequestWake {
             key: key.clone(),
             id: wake.id.clone(),
@@ -702,7 +748,7 @@ impl AppState {
                     .is_ok()
             });
             if sent {
-                self.acknowledge_pull_request_wake(thread, key, &wake.id, cx);
+                self.acknowledge_pull_request_wake(thread, key, &wake.id, &wake.text, cx);
                 return;
             }
             // Provider channel gone: the wake survives in the queue for the next turn.
@@ -724,6 +770,7 @@ impl AppState {
         thread: &str,
         key: &PullRequestKey,
         id: &str,
+        text: &str,
         cx: &mut HostCx,
     ) {
         let Some(mut meta) = self.find_meta(thread) else {
@@ -740,15 +787,51 @@ impl AppState {
             return;
         };
         let watch = link.watch.as_mut().unwrap();
-        if watch.pending_wake.take().is_some_and(|wake| wake.last) {
-            link.watch = None;
-        }
+        let pending = watch.pending_wake.as_mut().unwrap();
+        let remainder = if pending.text == text {
+            let last = pending.last;
+            watch.pending_wake = None;
+            if last {
+                link.watch = None;
+            }
+            None
+        } else if let Some(rest) = pending
+            .text
+            .strip_prefix(text)
+            .and_then(|rest| rest.strip_prefix("\n\n"))
+        {
+            // Catch-up can append news while the provider is accepting an older delivery.
+            pending.text = rest.to_owned();
+            pending.id = uuid::Uuid::new_v4().to_string();
+            Some(pending.clone())
+        } else {
+            return;
+        };
         self.save_pull_request_meta(meta, cx);
+        if let Some(pending) = remainder {
+            self.deliver_pull_request_wake(thread, key, &pending, cx);
+        }
     }
 
-    /// A new turn ran on this thread, so its agent may start watches again.
-    pub(super) fn clear_pull_request_watch_stop(&mut self, thread: &str) {
-        self.pull_request_watches.stopped.remove(thread);
+    pub(super) fn resume_pull_request_watches(&mut self, thread: &str, cx: &mut HostCx) {
+        let Some(mut meta) = self
+            .find_meta(thread)
+            .filter(|meta| meta.pull_request_watches_paused)
+        else {
+            return;
+        };
+        meta.pull_request_watches_paused = false;
+        for link in pull_request::watched(&meta.pull_requests) {
+            self.pull_request_watches
+                .refresh
+                .insert((thread.to_owned(), link.key.clone()));
+        }
+        self.save_pull_request_meta(meta, cx);
+        if self.pull_request_watches.passing {
+            self.pull_request_watches.sweep_pending = true;
+        } else {
+            self.sweep_pull_request_watches(cx).detach();
+        }
     }
 
     /// Drop the thread's queued wakes, all of them or those of one pull request. A wake the
@@ -771,34 +854,32 @@ impl AppState {
         }
     }
 
-    /// Stop: end every watch on the thread, discard its undelivered wakes, and refuse an agent
-    /// start that completes after it.
-    pub(super) fn stop_pull_request_watches(&mut self, thread: &str, cx: &mut HostCx) {
-        self.pull_request_watches.stopped.insert(thread.to_owned());
+    pub(super) fn pause_pull_request_watches(&mut self, thread: &str, cx: &mut HostCx) {
         self.discard_pull_request_wakes(thread, None);
-        if let Some(mut meta) = self.find_meta(thread)
-            && clear_watches(&mut meta)
-        {
+        if let Some(mut meta) = self.find_meta(thread) {
+            meta.pull_request_watches_paused = true;
             self.save_pull_request_meta(meta, cx);
         }
     }
 
     /// Settling or archiving a thread ends its watches in the same write.
     pub(super) fn end_pull_request_watches(&mut self, meta: &mut SessionMeta) {
+        meta.pull_request_watches_paused = false;
+        self.pull_request_watches
+            .refresh
+            .retain(|(thread, _)| thread != &meta.id);
         if clear_watches(meta) {
             self.discard_pull_request_wakes(&meta.id, None);
         }
     }
 
-    /// Start or stop watching. An agent start may link the pull request in the same write, and
-    /// is refused once the user stopped the run it belongs to.
+    /// An agent start may link the pull request in the same write.
     fn set_pull_request_watch(
         &mut self,
         thread: &str,
         key: &PullRequestKey,
         url: Option<String>,
         watching: bool,
-        agent: bool,
         cx: &mut HostCx,
     ) -> Result<(bool, bool), ProtocolError> {
         let mut meta = self
@@ -817,6 +898,9 @@ impl AppState {
                 return Ok((false, false));
             };
             link.watch = None;
+            self.pull_request_watches
+                .refresh
+                .remove(&(thread.to_owned(), key.clone()));
             self.discard_pull_request_wakes(thread, Some(key));
             self.save_pull_request_meta(meta, cx);
             return Ok((false, was_watching));
@@ -834,11 +918,6 @@ impl AppState {
         if meta.is_settled() {
             return Err(refused(
                 "This thread is settled. Unsettle it before starting a new watch.",
-            ));
-        }
-        if agent && self.pull_request_watches.stopped.contains(thread) {
-            return Err(refused(
-                "The user stopped this thread, so it cannot start watching now.",
             ));
         }
         let existing = meta
@@ -891,7 +970,7 @@ impl AppState {
         watching: bool,
         cx: &mut HostCx,
     ) -> Result<CommandResponse, ProtocolError> {
-        self.set_pull_request_watch(thread, key, None, watching, false, cx)
+        self.set_pull_request_watch(thread, key, None, watching, cx)
             .map(|_| CommandResponse::Unit)
     }
 
@@ -905,7 +984,7 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         let (now, before) = self
-            .set_pull_request_watch(thread, &key, Some(url.clone()), watching, true, cx)
+            .set_pull_request_watch(thread, &key, Some(url.clone()), watching, cx)
             .map_err(|error| error.message)?;
         Ok(serde_json::json!({
             "host": key.host,
@@ -914,6 +993,7 @@ impl AppState {
             "url": url,
             "watching": now,
             "wasWatching": before,
+            "paused": self.find_meta(thread).is_some_and(|meta| meta.pull_request_watches_paused),
         }))
     }
 }

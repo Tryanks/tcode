@@ -345,6 +345,46 @@ impl Harness {
             .expect("Stop is acknowledged")
     }
 
+    fn activity(&mut self) -> tcode_protocol::SessionActivity {
+        self.state.deliver(
+            &mut self.cx,
+            90,
+            tcode_protocol::ClientPayload::Subscribe(tcode_protocol::Subscription {
+                topic: tcode_protocol::Topic::Index,
+                after: None,
+                known_index: None,
+            }),
+        );
+        self.cx
+            .drain_outgoing()
+            .into_iter()
+            .find_map(|message| match message {
+                HostMessage::Event(EventEnvelope {
+                    event: ServerEvent::IndexSnapshot(index),
+                    ..
+                }) => index.summary.activity.get("thread").cloned(),
+                _ => None,
+            })
+            .expect("the index reports thread activity")
+    }
+
+    fn resume(&mut self) {
+        self.state.update(&mut self.cx, |state, cx| {
+            state.select_session("thread", cx);
+        });
+        self.state.dispatch_command(
+            &mut self.cx,
+            80,
+            Command::SendTurn {
+                session_id: "thread".into(),
+                text: "Continue.".into(),
+                attachment_paths: Vec::new(),
+            },
+        );
+        let (delivery, _) = self.delivered();
+        self.accept(delivery);
+    }
+
     /// Hold the next pull request read and start a pass; send on the returned channel to answer it.
     fn hold_pass(&mut self) -> mpsc::Sender<()> {
         let (release, gate) = mpsc::channel();
@@ -846,204 +886,327 @@ fn a_wake_steers_into_a_running_turn_and_is_not_repeated() {
 }
 
 #[test]
-fn stop_discards_a_read_in_flight_and_refuses_a_late_agent_start() {
-    let mut harness = Harness::new("tcode-watch-stop");
-    harness.host().checks = vec![check("build", "FAILURE")];
-    harness.watch_thread("thread", START);
-    harness.state.update(&mut harness.cx, |state, cx| {
-        state.select_session("thread", cx);
-        state.mcp.pull_request_registrations.insert(
-            "thread".into(),
-            crate::app::orchestrate::PullRequestRegistration {
-                registration: agent::McpRegistration {
-                    name: "tcode_pull_requests".into(),
-                    url: "http://127.0.0.1/pull-requests".into(),
-                    bearer_token: "token".into(),
-                },
-                hosts: "GitHub".into(),
-                instructions: String::new(),
-            },
+fn interrupt_pauses_an_idle_watch_and_resume_catches_up_once_after_restart() {
+    for change in [
+        "FAILURE",
+        "SUCCESS",
+        "comment",
+        "conflict",
+        "CLOSED",
+        "MERGED",
+        "unchanged",
+    ] {
+        let mut harness = Harness::new("tcode-watch-pause-resume");
+        harness.host().checks = vec![check("build", "PENDING")];
+        harness.watch_thread("thread", START);
+        harness.pass();
+        let baseline = harness.watch("thread").unwrap();
+        assert!(harness.activity().waiting);
+        assert_eq!(harness.stop(1), Ok(()));
+        assert_eq!(harness.watch("thread"), Some(baseline.clone()));
+        let activity = harness.activity();
+        assert!(
+            !activity.waiting && !activity.working,
+            "paused monitoring is idle"
         );
-    });
-    harness.state.dispatch_command(
-        &mut harness.cx,
-        1,
-        Command::SendTurn {
-            session_id: "thread".into(),
-            text: "Open a pull request and watch it.".into(),
-            attachment_paths: Vec::new(),
-        },
-    );
-    let (delivery_id, _) = harness.delivered();
-    harness
-        .events
-        .try_send(AgentEvent::TurnAccepted { delivery_id })
-        .unwrap();
-    harness.cx.run_until_parked();
-
-    let release = harness.hold_pass();
-    let (reply, answer) = async_channel::bounded(1);
-    harness.state.update(&mut harness.cx, |state, cx| {
-        state.handle_pull_request_request(
-            pull_request_mcp::BrokerRequest {
-                session_id: "thread".into(),
-                operation: pull_request_mcp::Operation::Watch(pull_request_mcp::Target {
-                    url: Some("https://github.com/sample/project/pull/1".into()),
-                    repository: None,
-                    number: None,
-                    host: None,
-                }),
-                reply,
-            },
-            cx,
+        {
+            let mut host = harness.host();
+            match change {
+                "FAILURE" | "SUCCESS" => host.checks = vec![check("build", change)],
+                "comment" => {
+                    host.comments = vec![comment("c1", "reviewer", "2026-01-01T00:05:00Z")]
+                }
+                "conflict" => host.mergeable = "CONFLICTING",
+                "CLOSED" | "MERGED" => host.state = change,
+                _ => {}
+            }
+        }
+        let mut harness = harness.restart();
+        assert!(harness.state.read(|state| {
+            state
+                .find_meta("thread")
+                .unwrap()
+                .pull_request_watches_paused
+        }));
+        harness.requests();
+        harness.pass();
+        assert!(
+            harness.requests().is_empty(),
+            "paused watches make no reads"
         );
-    });
-    harness.state.dispatch_command(
-        &mut harness.cx,
-        2,
-        Command::Interrupt {
-            session_id: "thread".into(),
-        },
-    );
-    assert_eq!(harness.watch("thread"), None);
-    release.send(()).unwrap();
-    harness
-        .cx
-        .run_until(|state| !state.pull_request_watches.passing && !answer.is_empty());
-    let refused = answer.try_recv().unwrap().unwrap_err();
-    assert!(refused.contains("stopped"), "{refused}");
-    assert_eq!(
-        harness.watch("thread"),
-        None,
-        "neither a late read nor a late agent start resurrects it"
-    );
-    let sent: Vec<_> = std::iter::from_fn(|| harness.commands.try_recv().ok()).collect();
-    assert!(
-        matches!(sent[..], [SessionCommand::Interrupt]),
-        "Stop reaches the provider and nothing is delivered: {sent:?}"
-    );
-    assert!(harness.notices().is_empty());
+        assert!(
+            harness.commands.is_empty(),
+            "a restart cannot wake a paused thread"
+        );
+        assert_eq!(harness.watch("thread"), Some(baseline));
+        assert!(!harness.activity().waiting);
 
-    harness.state.dispatch_command(
-        &mut harness.cx,
-        3,
-        Command::WatchPullRequest {
-            session_id: "thread".into(),
-            key: key(),
-            watching: true,
-        },
-    );
-    harness.cx.run_until_parked();
-    assert!(
-        harness.watch("thread").is_some(),
-        "the user may start a watch after Stop"
-    );
+        harness.resume();
+        harness
+            .cx
+            .run_until(|state| !state.pull_request_watches.passing);
+        if change == "unchanged" {
+            assert!(harness.commands.is_empty(), "resume without news is silent");
+            assert!(harness.notices().is_empty());
+        } else {
+            let (delivery, text) = harness.delivered();
+            let expected = match change {
+                "FAILURE" => "Checks failed",
+                "SUCCESS" => "passed",
+                "comment" => "note c1",
+                "conflict" => "conflicts with main",
+                "CLOSED" => "was closed",
+                "MERGED" => "was merged",
+                _ => unreachable!(),
+            };
+            assert!(text.contains(expected), "{change}: {text}");
+            assert_eq!(harness.notices().len(), 1, "one catch-up per PR");
+            harness.accept(delivery);
+        }
+        harness.pass();
+        assert!(
+            harness.commands.is_empty(),
+            "unchanged news is never repeated"
+        );
+        assert!(harness.notices().is_empty());
+    }
 }
 
 #[test]
-fn stop_ends_the_watches_of_an_idle_thread_without_interrupting_its_provider() {
-    let mut harness = Harness::new("tcode-watch-stop-idle");
+fn interrupt_blocks_an_in_flight_read_and_accepts_agent_watches_while_paused() {
+    let mut harness = Harness::new("tcode-watch-paused-registration");
     harness.host().checks = vec![check("build", "FAILURE")];
     harness.watch_thread("thread", START);
-    harness.state.update(&mut harness.cx, |state, cx| {
-        state.select_session("thread", cx);
-        state.mcp.pull_request_registrations.insert(
-            "thread".into(),
-            crate::app::orchestrate::PullRequestRegistration {
-                registration: agent::McpRegistration {
-                    name: "tcode_pull_requests".into(),
-                    url: "http://127.0.0.1/pull-requests".into(),
-                    bearer_token: "token".into(),
-                },
-                hosts: "GitHub".into(),
-                instructions: String::new(),
-            },
-        );
-    });
-    harness.state.dispatch_command(
-        &mut harness.cx,
-        1,
-        Command::SendTurn {
-            session_id: "thread".into(),
-            text: "Open a pull request and watch it.".into(),
-            attachment_paths: Vec::new(),
-        },
-    );
-    let (delivery_id, _) = harness.delivered();
-    harness.accept(delivery_id);
-
-    let release = harness.hold_pass();
-    let (reply, answer) = async_channel::bounded(1);
-    harness.state.update(&mut harness.cx, |state, cx| {
-        state.handle_pull_request_request(
-            pull_request_mcp::BrokerRequest {
-                session_id: "thread".into(),
-                operation: pull_request_mcp::Operation::Watch(pull_request_mcp::Target {
-                    url: Some("https://github.com/sample/project/pull/1".into()),
-                    repository: None,
-                    number: None,
-                    host: None,
-                }),
-                reply,
-            },
-            cx,
-        );
-    });
-    assert_eq!(harness.stop(2), Ok(()));
-    assert_eq!(harness.watch("thread"), None);
-    release.send(()).unwrap();
-    harness
-        .cx
-        .run_until(|state| !state.pull_request_watches.passing && !answer.is_empty());
-    let refused = answer.try_recv().unwrap().unwrap_err();
-    assert!(refused.contains("stopped"), "{refused}");
-    assert_eq!(
-        harness.watch("thread"),
-        None,
-        "neither a late read nor a late agent start resurrects it"
-    );
-    let sent: Vec<_> = std::iter::from_fn(|| harness.commands.try_recv().ok()).collect();
-    assert!(
-        sent.is_empty(),
-        "the idle provider is not interrupted and nothing is delivered: {sent:?}"
-    );
-    assert!(harness.notices().is_empty());
-    assert_eq!(
-        harness.stop(3).unwrap_err().code,
-        "no_running_turn",
-        "with no watch left, an idle thread has nothing to stop"
-    );
-}
-
-#[test]
-fn stop_ends_the_watches_of_a_thread_without_a_session() {
-    let mut harness = Harness::new("tcode-watch-stop-cold");
-    harness.host().checks = vec![check("build", "FAILURE")];
-    harness.watch_thread("thread", START);
-
+    let baseline = harness.watch("thread").unwrap();
     let release = harness.hold_pass();
     assert_eq!(harness.stop(1), Ok(()));
-    assert_eq!(harness.watch("thread"), None);
     release.send(()).unwrap();
     harness
         .cx
         .run_until(|state| !state.pull_request_watches.passing);
-    assert_eq!(
-        harness.store.load_index().unwrap()[0].pull_requests[0].watch,
-        None,
-        "the late read neither resurrects the watch nor records a wake"
+    assert_eq!(harness.watch("thread"), Some(baseline));
+    assert!(harness.commands.is_empty());
+    assert!(harness.notices().is_empty());
+
+    harness.state.dispatch_command(
+        &mut harness.cx,
+        2,
+        Command::WatchPullRequest {
+            session_id: "thread".into(),
+            key: key(),
+            watching: false,
+        },
     );
+    assert!(harness.watch("thread").is_none());
+    let (reply, answer) = async_channel::bounded(1);
+    harness.state.update(&mut harness.cx, |state, cx| {
+        state.mcp.pull_request_registrations.insert(
+            "thread".into(),
+            crate::app::orchestrate::PullRequestRegistration {
+                registration: agent::McpRegistration {
+                    name: "tcode_pull_requests".into(),
+                    url: "http://127.0.0.1/pull-requests".into(),
+                    bearer_token: "token".into(),
+                },
+                hosts: "GitHub".into(),
+                instructions: String::new(),
+            },
+        );
+        state.handle_pull_request_request(
+            pull_request_mcp::BrokerRequest {
+                session_id: "thread".into(),
+                operation: pull_request_mcp::Operation::Watch(pull_request_mcp::Target {
+                    url: Some("https://github.com/sample/project/pull/1".into()),
+                    repository: None,
+                    number: None,
+                    host: None,
+                }),
+                reply,
+            },
+            cx,
+        );
+    });
+    harness.cx.run_until(|_| !answer.is_empty());
+    let registered = answer.try_recv().unwrap().unwrap();
+    assert_eq!(registered["watching"], true);
+    assert_eq!(registered["paused"], true);
+    let registered = harness.watch("thread").unwrap();
+    harness.pass();
     assert!(
-        harness
-            .state
-            .read(|state| state.resident("thread").is_none())
+        harness.commands.is_empty(),
+        "new registrations inherit the pause"
     );
-    assert!(harness.commands.is_empty(), "no provider is started");
+    harness.resume();
+    let (delivery, text) = harness.delivered();
+    assert!(text.contains("Checks failed"));
     assert_eq!(
-        harness.stop(2).unwrap_err().code,
-        "unknown_session",
-        "with no watch left, a thread without a session has nothing to stop"
+        harness.watch("thread").unwrap().started_at,
+        registered.started_at
     );
+    harness.accept(delivery);
+    harness.pass();
+    assert!(harness.commands.is_empty());
+}
+
+#[test]
+fn a_late_turn_acceptance_cannot_resume_watches_after_interrupt() {
+    let mut harness = Harness::new("tcode-watch-late-acceptance");
+    harness.watch_thread("thread", START);
+    harness.state.update(&mut harness.cx, |state, cx| {
+        state.select_session("thread", cx);
+    });
+    harness.state.dispatch_command(
+        &mut harness.cx,
+        1,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "Watch this PR.".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    let (delivery, _) = harness.delivered();
+    assert_eq!(harness.stop(2), Ok(()));
+    assert!(matches!(
+        harness.commands.try_recv(),
+        Ok(SessionCommand::Interrupt)
+    ));
+    harness.host().checks = vec![check("build", "FAILURE")];
+    harness.accept(delivery);
+    harness.pass();
+    assert!(!harness.activity().waiting);
+    assert!(
+        harness.commands.is_empty(),
+        "accepting a pre-Stop turn cannot resume monitoring"
+    );
+    harness.resume();
+    let (delivery, text) = harness.delivered();
+    assert!(text.contains("Checks failed"));
+    harness.accept(delivery);
+}
+
+#[test]
+fn resume_combines_pending_news_with_changes_from_the_pause() {
+    let mut harness = Harness::new("tcode-watch-pending-catchup");
+    harness.watch_thread("thread", START);
+    harness.host().checks = vec![check("build", "FAILURE")];
+    harness.pass();
+    let (_, pending) = harness.delivered();
+    assert!(pending.contains("Checks failed"));
+    assert_eq!(harness.stop(1), Ok(()));
+    let mut harness = harness.restart();
+    harness.host().checks = vec![check("build", "SUCCESS")];
+    harness.host().comments = vec![comment("paused", "reviewer", "2026-01-01T00:05:00Z")];
+    harness.requests();
+    harness.pass();
+    assert!(harness.requests().is_empty());
+    harness.resume();
+    let (delivery, text) = harness.delivered();
+    assert!(text.contains("Checks failed"), "undelivered news survives");
+    assert!(
+        text.contains("passed") && text.contains("note paused"),
+        "resume refreshes despite pending news: {text}"
+    );
+    harness.accept(delivery);
+    harness.pass();
+    assert!(
+        harness.commands.is_empty(),
+        "combined news is delivered once"
+    );
+}
+
+#[test]
+fn late_acceptance_of_old_news_delivers_only_the_remaining_catchup() {
+    let mut harness = Harness::new("tcode-watch-live-pending");
+    harness.watch_thread("thread", START);
+    harness.host().checks = vec![check("build", "FAILURE")];
+    harness.pass();
+    let (old_delivery, old_text) = harness.delivered();
+    assert!(old_text.contains("Checks failed"));
+    assert_eq!(harness.stop(1), Ok(()));
+    assert!(matches!(
+        harness.commands.try_recv(),
+        Ok(SessionCommand::Interrupt)
+    ));
+    harness.host().checks = vec![check("build", "SUCCESS")];
+    harness.state.update(&mut harness.cx, |state, cx| {
+        state.select_session("thread", cx);
+    });
+    harness.state.dispatch_command(
+        &mut harness.cx,
+        2,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "Continue.".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    harness.cx.run_until(|state| {
+        state.find_meta("thread").unwrap().pull_requests[0]
+            .watch
+            .as_ref()
+            .and_then(|watch| watch.pending_wake.as_ref())
+            .is_some_and(|wake| wake.text.contains("passed"))
+    });
+    harness.accept(old_delivery);
+    let text = match harness.commands.try_recv() {
+        Ok(SessionCommand::Steer { text, .. }) => text,
+        other => panic!("catch-up steers into the accepted turn: {other:?}"),
+    };
+    assert!(text.contains("passed"));
+    assert!(
+        !text.contains("Checks failed"),
+        "acknowledged news is not repeated"
+    );
+    let (human_delivery, text) = harness.delivered();
+    assert_eq!(text, "Continue.");
+    harness.accept(human_delivery);
+    harness.pass();
+    assert!(harness.commands.is_empty());
+}
+
+#[test]
+fn ending_paused_watches_prevents_a_later_turn_from_restoring_them() {
+    for command in [
+        Command::SettleSession {
+            session_id: "thread".into(),
+        },
+        Command::ArchiveSession {
+            session_id: "thread".into(),
+        },
+        Command::WatchPullRequest {
+            session_id: "thread".into(),
+            key: key(),
+            watching: false,
+        },
+    ] {
+        let mut harness = Harness::new("tcode-watch-end-paused");
+        harness.watch_thread("thread", START);
+        assert_eq!(harness.stop(1), Ok(()));
+        let archived = matches!(command, Command::ArchiveSession { .. });
+        harness.state.dispatch_command(&mut harness.cx, 2, command);
+        harness.cx.run_until_parked();
+        assert!(harness.watch("thread").is_none());
+        if archived {
+            harness.state.dispatch_command(
+                &mut harness.cx,
+                3,
+                Command::UnarchiveSession {
+                    session_id: "thread".into(),
+                },
+            );
+        }
+        harness.state.dispatch_command(
+            &mut harness.cx,
+            4,
+            Command::UnsettleSession {
+                session_id: "thread".into(),
+            },
+        );
+        harness.resume();
+        harness.pass();
+        assert!(harness.watch("thread").is_none());
+        assert!(harness.commands.is_empty());
+    }
 }
 
 #[test]

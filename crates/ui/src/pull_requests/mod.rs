@@ -936,7 +936,18 @@ impl PullRequestsPanel {
         // The eye leads while the pull request is open or not yet read; the host ends the watch
         // once it merges or closes.
         if watched && snapshot.is_none_or(|s| s.state == PullRequestState::Open) {
-            let tooltip = crate::tr!("pull_requests.watching_tooltip").into_owned();
+            let store = self.store.read(cx);
+            let paused = store
+                .active_session_id()
+                .as_deref()
+                .and_then(|id| store.thread_meta(id))
+                .is_some_and(|meta| meta.pull_request_watches_paused);
+            let tooltip = crate::tr!(if paused {
+                "pull_requests.watching_paused_tooltip"
+            } else {
+                "pull_requests.watching_tooltip"
+            })
+            .into_owned();
             signals = signals.child(if compact {
                 // A 14px target is below touch size: the more menu stops it on a phone.
                 Icon::new(IconName::Eye)
