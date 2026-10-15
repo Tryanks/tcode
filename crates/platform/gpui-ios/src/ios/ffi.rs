@@ -108,6 +108,8 @@ unsafe extern "C" {
         input_action: u32,
     );
     fn gpui_ios_host_open_url(bytes: *const u8, length: usize);
+    fn gpui_ios_host_set_paste_input(owner: u64);
+    fn gpui_ios_host_set_paste_control(x: f64, y: f64, width: f64, height: f64);
     fn gpui_ios_host_clipboard_text_length() -> usize;
     fn gpui_ios_host_read_clipboard(bytes: *mut u8, capacity: usize) -> usize;
     fn gpui_ios_host_write_clipboard(bytes: *const u8, length: usize);
@@ -237,6 +239,24 @@ pub(crate) fn host_configure_text_input(configuration: &TextInputConfiguration) 
 pub(crate) fn host_open_url(url: &str) {
     // SAFETY: the buffer remains alive for the duration of the Swift call.
     unsafe { gpui_ios_host_open_url(url.as_ptr(), url.len()) }
+}
+
+pub(crate) fn host_set_paste_input(owner: u64) {
+    // SAFETY: UIKit only records this scalar identity.
+    unsafe { gpui_ios_host_set_paste_input(owner) };
+}
+
+pub(crate) fn host_set_paste_control_bounds(bounds: Option<gpui::Bounds<gpui::Pixels>>) {
+    let bounds = bounds.unwrap_or_default();
+    // UIKit only updates a subview's geometry; it must not call back into GPUI during paint.
+    unsafe {
+        gpui_ios_host_set_paste_control(
+            f64::from(bounds.origin.x),
+            f64::from(bounds.origin.y),
+            f64::from(bounds.size.width),
+            f64::from(bounds.size.height),
+        )
+    };
 }
 
 pub(crate) fn host_read_clipboard() -> Option<String> {
@@ -673,4 +693,15 @@ pub extern "C" fn gpui_ios_open_url_received(bytes: *const u8, length: usize) {
         return;
     };
     super::with_platform(|platform| platform.notify_open_urls(vec![url]));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_paste_text(bytes: *const u8, length: usize) {
+    if let Some(text) = utf8(bytes, length) {
+        with_window(|window| {
+            window
+                .with_input_handler(|handler| handler.paste(gpui::ClipboardItem::new_string(text)));
+            window.request_frame(true);
+        });
+    }
 }

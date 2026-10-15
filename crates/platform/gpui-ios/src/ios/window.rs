@@ -2,12 +2,11 @@
 
 use super::{IosDisplay, raw_handles::IosRawHandles};
 use gpui::{
-    Bounds, Capslock, DevicePixels, DispatchEventResult, FrameRequestSource, GpuSpecs,
-    KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
-    RequestFrameOptions, Scene, Size, TextInputConfiguration, TextInputStateChange,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets,
-    WindowParams, WindowVisibility, px, size,
+    Bounds, Capslock, DevicePixels, DispatchEventResult, FrameRequestSource, GpuSpecs, Modifiers,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size, TextInputConfiguration,
+    TextInputStateChange, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowInsets, WindowParams, WindowVisibility, px, size,
 };
 use gpui_wgpu::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
@@ -47,7 +46,7 @@ pub(crate) struct IosWindow {
     appearance: Cell<WindowAppearance>,
     active: Cell<bool>,
     mouse_position: Cell<Point<Pixels>>,
-    modifiers: Cell<Modifiers>,
+    keyboard: crate::key_input::Keyboard,
     background: Cell<WindowBackgroundAppearance>,
     first_frame_rendered: Cell<bool>,
     insets: RefCell<WindowInsets>,
@@ -172,7 +171,7 @@ impl IosWindow {
             appearance: Cell::new(metrics.appearance),
             active: Cell::new(metrics.active),
             mouse_position: Cell::new(Point::default()),
-            modifiers: Cell::new(Modifiers::default()),
+            keyboard: crate::key_input::Keyboard::default(),
             background: Cell::new(WindowBackgroundAppearance::Opaque),
             first_frame_rendered: Cell::new(false),
             insets: RefCell::new(metrics.insets()),
@@ -461,17 +460,9 @@ impl IosWindow {
     }
 
     pub(crate) fn delete_backward(&self) {
-        let keystroke = Keystroke {
-            modifiers: self.modifiers.get(),
-            key: "backspace".to_owned(),
-            key_char: None,
-        };
-        self.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
-            keystroke: keystroke.clone(),
-            is_held: false,
-            prefer_character_input: false,
-        }));
-        self.dispatch_input(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+        for input in self.keyboard.delete_backward() {
+            self.dispatch_input(input);
+        }
         self.request_frame(true);
     }
 
@@ -483,24 +474,9 @@ impl IosWindow {
         down: bool,
         repeat: bool,
     ) -> bool {
-        self.modifiers.set(modifiers);
-        let keystroke = Keystroke {
-            modifiers,
-            key,
-            key_char,
-        };
-        let input = if down {
-            PlatformInput::KeyDown(KeyDownEvent {
-                prefer_character_input: keystroke.key_char.is_some()
-                    && !modifiers.control
-                    && !modifiers.alt
-                    && !modifiers.platform,
-                keystroke,
-                is_held: repeat,
-            })
-        } else {
-            PlatformInput::KeyUp(KeyUpEvent { keystroke })
-        };
+        let input = self
+            .keyboard
+            .key_event(key, key_char, modifiers, down, repeat);
         let result = self.dispatch_input(input);
         self.request_frame(true);
         !result.propagate || result.default_prevented
@@ -577,7 +553,7 @@ impl PlatformWindow for IosWindow {
     }
 
     fn modifiers(&self) -> Modifiers {
-        self.modifiers.get()
+        self.keyboard.modifiers()
     }
 
     fn capslock(&self) -> Capslock {
