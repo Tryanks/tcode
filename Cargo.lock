@@ -10918,11 +10918,13 @@ dependencies = [
 name = "tcode-headless"
 version = "0.1.0"
 dependencies = [
+ "agent",
  "env_logger",
  "qrcode",
  "serde",
  "serde_json",
  "tcode-client",
+ "tcode-core",
  "tcode-protocol",
  "tcode-runtime",
  "tcode-services",
