@@ -4426,6 +4426,80 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn recorded_compaction_is_delivered_between_turns() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        smol::block_on(async {
+            let directory = std::env::temp_dir()
+                .join(format!("agent-claude-compaction-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let binary = directory.join("claude");
+            std::fs::write(
+                directory.join("compaction.jsonl"),
+                include_str!("../tests/fixtures/claude/compaction_recorded.jsonl"),
+            )
+            .unwrap();
+            std::fs::write(
+                &binary,
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.299'; exit; fi\nIFS= read -r request\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\"}'\ncat compaction.jsonl\nwhile IFS= read -r request; do :; done\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let handle = start(SessionOptions {
+                cwd: directory.clone(),
+                model: None,
+                resume: None,
+                fork: false,
+                binary_path: Some(binary),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            handle
+                .commands
+                .send(SessionCommand::SendTurn {
+                    delivery_id: 1,
+                    text: "fixture".into(),
+                    options: None,
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            smol::future::or(
+                async {
+                    while !matches!(
+                        handle.events.recv().await.unwrap(),
+                        AgentEvent::TurnCompleted { .. }
+                    ) {}
+                    assert!(matches!(
+                        handle.events.recv().await.unwrap(),
+                        AgentEvent::ContextCompacted(c) if c.in_progress
+                    ));
+                    assert!(matches!(
+                        handle.events.recv().await.unwrap(),
+                        AgentEvent::ContextCompacted(c)
+                            if !c.in_progress && c.trigger.as_deref() == Some("manual")
+                                && c.pre_tokens == Some(19555)
+                    ));
+                },
+                async {
+                    smol::Timer::after(std::time::Duration::from_secs(10)).await;
+                    panic!("compaction was not delivered while no turn was running");
+                },
+            )
+            .await;
+            shut_down(handle).await;
+            std::fs::remove_dir_all(directory).unwrap();
+        });
+    }
+
     #[test]
     fn recorded_multi_request_usage_keeps_latest_context() {
         let mut m = Mapper::new();

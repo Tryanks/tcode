@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_compacting_status_announces_one_compaction() {
+    fn repeated_compacting_status_announces_one_compaction_in_and_between_turns() {
         // Claude re-sends `status: compacting` per compaction phase and as a
         // 30s keepalive while one compaction runs.
         let compacting = || {
@@ -1688,6 +1688,11 @@ mod tests {
             compacting(),
             compacting(),
             compacted(),
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
             compacting(),
             compacting(),
             compacted(),
@@ -1702,6 +1707,15 @@ mod tests {
             })
             .collect();
         assert_eq!(compactions, [true, false, true, false]);
+        assert_eq!(timeline.turns.len(), 1);
+        assert_eq!(timeline.turns[0].status, Some(TurnStatus::Completed));
+        assert!(!timeline.turn_running);
+        assert!(timeline.running_turn().is_none());
+        assert!(timeline.entries.iter().all(|entry| entry.turn == 0));
+        assert!(matches!(
+            &timeline.entries.last().unwrap().content,
+            EntryContent::ContextCompacted(c) if c.trigger.as_deref() == Some("auto")
+        ));
     }
 
     #[test]
