@@ -10661,19 +10661,14 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     restarted.stopped.recv_blocking().unwrap();
 }
 
-/// A thread whose PR merged before the human resumed it stays open after a
-/// restart, however many records the resumed run wrote after the message;
-/// a dispatched child's lead still sees when its run started.
 #[test]
-fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
+fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() {
     use tcode_core::pull_request::{
         Mergeability, PullRequestKey, PullRequestSnapshot, PullRequestSource, PullRequestState,
         link_pull_request,
     };
-    use tcode_core::settlement::ThreadActivity;
     use tcode_services::store::Mutation;
 
-    let cx = &mut TestAppContext::default();
     let store = TestStore::new("startup-human-clock");
     let hour = 3_600_000;
     let created = now_millis() - 10 * hour;
@@ -10775,39 +10770,43 @@ fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
         store.apply(&mutations).unwrap();
     }
 
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, cx| {
-        state.settings.auto_settle_after_days = None;
-        state.settings.auto_settle_on_merge = true;
-        assert!(state.resident("resumed").is_none());
-        state.start_settlement_sweeps(cx);
-    });
-    cx.run_until(|state| {
-        ["resumed", "worker"]
-            .iter()
-            .all(|id| state.thread_activity.contains_key(*id))
-    });
-    state.read(|state| {
-        assert_eq!(
-            state.thread_activity["resumed"],
-            ThreadActivity {
-                last_message_at: Some(resumed),
-                last_human_message_at: Some(resumed),
-                last_run_started_at: Some(resumed + 1),
-                last_run_completed_at: Some(completed),
-                failed: false,
-                interrupted: false,
-            }
-        );
-        assert!(!state.find_meta("resumed").unwrap().is_settled());
-        let worker = state.index_snapshot().summary.activity["worker"]
-            .agent
-            .unwrap();
-        assert_eq!(
-            (worker.run_started_at, worker.run_completed_at),
-            (Some(resumed + 1), Some(completed))
-        );
-    });
+    let host =
+        crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
+    let link = host.link();
+    let events = crate::pipe::p4b_tests::observed_events(&link);
+    link.subscribe(Subscription {
+        known_index: None,
+        topic: Topic::Index,
+        after: None,
+    })
+    .unwrap();
+    loop {
+        if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&events).event {
+            assert_eq!(snapshot.summary.activity.len(), 3);
+            assert!(
+                !snapshot
+                    .sessions
+                    .iter()
+                    .find(|meta| meta.id == "resumed")
+                    .unwrap()
+                    .is_settled()
+            );
+            assert!(snapshot.summary.activity["lead"].waiting);
+            let worker = snapshot.summary.activity["worker"].agent.unwrap();
+            assert_eq!(
+                (worker.run_started_at, worker.run_completed_at),
+                (Some(resumed + 1), Some(completed))
+            );
+            assert_eq!(
+                worker.execution,
+                tcode_core::settlement::AgentExecution::Finished
+            );
+            break;
+        }
+    }
+    link.shutdown_blocking().unwrap();
+    host.to_host.close();
+    host.stopped.recv_blocking().unwrap();
 }
 
 #[test]
@@ -11883,11 +11882,7 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
         assert_eq!(idle.pinned_at, None, "settling unpins");
         for id in ["idle", "arranged"] {
             let meta = state.find_meta(id).unwrap();
-            assert_eq!(
-                meta.updated_at,
-                stamp / 1000,
-                "settling, by hand or by the sweep, is not activity"
-            );
+            assert_eq!(meta.updated_at, stamp / 1000, "settling is not activity");
         }
     });
 
@@ -12085,4 +12080,225 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
         std::fs::read_to_string(store.root().join("secrets.json")).unwrap(),
         unreadable
     );
+}
+
+#[test]
+fn an_old_profiles_activity_backfills_and_updates_the_index() {
+    let store = TestStore::new("activity-backfill");
+    std::fs::create_dir_all(store.root()).unwrap();
+    let metas: Vec<_> = (0..48)
+        .map(|index| {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+            meta.id = format!("old-{index}");
+            meta
+        })
+        .collect();
+    std::fs::write(
+        store.root().join("sessions.json"),
+        serde_json::to_vec(&serde_json::json!({"projects":[], "sessions":metas})).unwrap(),
+    )
+    .unwrap();
+    for meta in &metas {
+        std::fs::write(store.root().join(format!("{}.jsonl", meta.id)),
+            "{\"ts\":100,\"event\":{\"type\":\"provider_start_failed\",\"error\":\"cannot start\"}}\n").unwrap();
+    }
+    store
+        .migrate(|_| {}, &std::sync::atomic::AtomicBool::new(false))
+        .unwrap();
+    let host =
+        crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
+    let link = host.link();
+    let events = crate::pipe::p4b_tests::observed_events(&link);
+    link.subscribe(Subscription {
+        known_index: None,
+        topic: Topic::Index,
+        after: None,
+    })
+    .unwrap();
+    let mut activity = HashMap::new();
+    loop {
+        match next_host_event(&events).event {
+            ServerEvent::IndexSnapshot(snapshot) => activity = snapshot.summary.activity,
+            ServerEvent::IndexSummaryReplaced(summary) => activity = summary.activity,
+            ServerEvent::IndexActivitiesChanged { upserts, removed } => {
+                activity.extend(upserts);
+                for id in removed {
+                    activity.remove(&id);
+                }
+            }
+            _ => continue,
+        }
+        if activity.len() == metas.len() && activity.values().all(|activity| activity.failed) {
+            assert_eq!(activity.len(), metas.len());
+            break;
+        }
+    }
+    link.shutdown_blocking().unwrap();
+    host.to_host.close();
+    host.stopped.recv_blocking().unwrap();
+    let restarted = crate::pipe::spawn_host(
+        SessionStore::open_at(store.root().clone()).unwrap(),
+        crate::pipe::HostServices::default(),
+    )
+    .unwrap();
+    let link = restarted.link();
+    let events = crate::pipe::p4b_tests::observed_events(&link);
+    link.subscribe(Subscription {
+        known_index: None,
+        topic: Topic::Index,
+        after: None,
+    })
+    .unwrap();
+    loop {
+        if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&events).event {
+            assert_eq!(snapshot.summary.activity.len(), metas.len());
+            assert!(
+                snapshot
+                    .summary
+                    .activity
+                    .values()
+                    .all(|activity| activity.failed)
+            );
+            break;
+        }
+    }
+    link.shutdown_blocking().unwrap();
+    restarted.to_host.close();
+    restarted.stopped.recv_blocking().unwrap();
+}
+
+#[test]
+fn inactivity_settles_on_its_due_timer_and_rearms_when_settings_change() {
+    let store = TestStore::new("activity-due-timer");
+    let meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+    store.upsert_meta(&meta).unwrap();
+    let completed = now_millis() - 86_400_000 + 10_000;
+    store
+        .append_event(
+            &meta.id,
+            completed,
+            &AgentEvent::TurnCompleted {
+                turn_id: "finished".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        )
+        .unwrap();
+    std::fs::write(
+        store.root().join("settings.json"),
+        r#"{"auto_settle_after_days":null}"#,
+    )
+    .unwrap();
+    let host =
+        crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
+    let link = host.link();
+    let events = crate::pipe::p4b_tests::observed_events(&link);
+    link.subscribe(Subscription {
+        known_index: None,
+        topic: Topic::Index,
+        after: None,
+    })
+    .unwrap();
+    link.command_blocking(Command::PatchSettings {
+        patch: SettingsPatch::AutoSettleAfterDays(Some(1.0)),
+    })
+    .unwrap();
+    loop {
+        if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&events).event {
+            assert!(
+                !snapshot.sessions[0].is_settled(),
+                "the thread is open before its delay expires"
+            );
+            break;
+        }
+    }
+    assert!(
+        now_millis() < completed + 86_400_000,
+        "settings were enabled while the thread was still inside its inactivity window"
+    );
+    smol::block_on(smol::future::race(
+        async {
+            loop {
+                if let ServerEvent::IndexUpsertSession(settled) = events.recv().await.unwrap().event
+                    && settled.id == meta.id
+                    && settled.is_settled()
+                {
+                    assert!(now_millis() > completed + 86_400_000);
+                    assert_eq!(settled.settled_at, Some(completed / 1000));
+                    break;
+                }
+            }
+        },
+        async {
+            smol::Timer::after(Duration::from_secs(20)).await;
+            panic!("due timer did not settle the thread");
+        },
+    ));
+    link.shutdown_blocking().unwrap();
+    host.to_host.close();
+    host.stopped.recv_blocking().unwrap();
+}
+
+#[test]
+fn deleting_the_last_child_releases_its_leads_automatic_settlement() {
+    let store = TestStore::new("deleted-child-settlement");
+    let stamp = now_millis() - 10 * 86_400_000;
+    for (id, parent) in [("lead", None), ("worker", Some("lead"))] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_owned);
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(
+                id,
+                stamp,
+                &AgentEvent::TurnCompleted {
+                    turn_id: "finished".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            )
+            .unwrap();
+    }
+    let host =
+        crate::pipe::spawn_host((*store).clone(), crate::pipe::HostServices::default()).unwrap();
+    let link = host.link();
+    let events = crate::pipe::p4b_tests::observed_events(&link);
+    link.subscribe(Subscription {
+        known_index: None,
+        topic: Topic::Index,
+        after: None,
+    })
+    .unwrap();
+    loop {
+        if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&events).event {
+            assert!(snapshot.summary.activity["lead"].waiting);
+            assert!(
+                !snapshot
+                    .sessions
+                    .iter()
+                    .find(|meta| meta.id == "lead")
+                    .unwrap()
+                    .is_settled()
+            );
+            break;
+        }
+    }
+    link.command_blocking(Command::DeleteSession {
+        session_id: "worker".into(),
+        remove_worktree: false,
+    })
+    .unwrap();
+    loop {
+        if let ServerEvent::IndexUpsertSession(meta) = next_host_event(&events).event
+            && meta.id == "lead"
+            && meta.is_settled()
+        {
+            assert_eq!(meta.settled_at, Some(stamp / 1000));
+            break;
+        }
+    }
+    link.shutdown_blocking().unwrap();
+    host.to_host.close();
+    host.stopped.recv_blocking().unwrap();
 }

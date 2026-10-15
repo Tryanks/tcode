@@ -188,6 +188,16 @@ fn shared_sync_changes_only_observations_and_honors_terminal_cadence() {
             state.sessions.push(meta);
         }
     });
+    acked(
+        &state,
+        &mut cx,
+        1,
+        Command::SetAutoSettle {
+            session_id: "active".into(),
+            enabled: false,
+        },
+    )
+    .unwrap();
     sweep(&state, &mut cx);
     let mut first_reads = read_numbers();
     first_reads.sort_unstable();

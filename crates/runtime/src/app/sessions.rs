@@ -733,6 +733,15 @@ impl AppState {
             Ok(sessions) => {
                 let archived = self.archived_sessions();
                 self.sessions = sessions.into();
+                let missing: Vec<_> = self
+                    .sessions
+                    .iter()
+                    .filter(|meta| !self.thread_activity.contains_key(&meta.id))
+                    .map(|meta| meta.id.clone())
+                    .collect();
+                for id in missing {
+                    self.queue_activity_load(&id, cx);
+                }
                 if self.archived_sessions() != archived {
                     self.archived_revision += 1;
                 }
@@ -953,7 +962,7 @@ impl AppState {
             self.refresh_host_credentials(cx);
         }
         if settlement_changed {
-            self.request_settlement_sweep(cx);
+            self.evaluate_all_settlement(cx);
         }
         self.forget_disabled_plugin_catalogs(cx);
         self.providers.provider_secret_names =
@@ -1383,6 +1392,7 @@ impl AppState {
             },
             cx,
         );
+        self.queue_activity_load(&fork_id, cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = completed
@@ -1466,6 +1476,17 @@ impl AppState {
             .retain(|meta| !deleted.contains(meta.id.as_str()));
         self.thread_activity
             .retain(|id, _| !deleted.contains(id.as_str()));
+        self.settlement_deadlines
+            .retain(|id, _| !deleted.contains(id.as_str()));
+        self.rearm_settlement_timer(cx);
+        self.activity_pending
+            .retain(|id| !deleted.contains(id.as_str()));
+        self.activity_priority
+            .retain(|id| !deleted.contains(id.as_str()));
+        self.activity_queued
+            .retain(|id| !deleted.contains(id.as_str()));
+        self.activity_deferred
+            .retain(|id| !deleted.contains(id.as_str()));
         self.decision_revisions
             .retain(|id, _| !deleted.contains(id.as_str()));
         self.callback_generations
@@ -1499,6 +1520,14 @@ impl AppState {
             },
             cx,
         );
+        let parents: HashSet<_> = metas
+            .iter()
+            .filter_map(|meta| meta.parent_session_id.as_deref())
+            .filter(|id| !deleted.contains(*id))
+            .collect();
+        for parent in parents {
+            self.evaluate_thread_settlement(parent, cx);
+        }
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
         for (deleted_id, root, cwd) in worktree_removals {
@@ -1917,6 +1946,8 @@ impl AppState {
         let terminal_preferences = self.terminal_preferences_for(&draft);
         let restored_terminal = self.restore_terminal_workspace(&mut draft);
         let session_id = draft.meta.id.clone();
+        self.thread_activity
+            .insert(session_id.clone(), Default::default());
         if self.archived_sharing_affected(&draft.meta) {
             self.archived_revision += 1;
         }

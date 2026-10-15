@@ -346,6 +346,19 @@ impl AppState {
     }
 
     pub(super) fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
+        let old_parent = self
+            .sessions
+            .iter()
+            .find(|old| old.id == meta.id)
+            .and_then(|old| old.parent_session_id.clone());
+        let parent_changed = self
+            .sessions
+            .iter()
+            .find(|old| old.id == meta.id)
+            .is_some_and(|old| old.parent_session_id.is_some() != meta.parent_session_id.is_some());
+        if parent_changed {
+            self.thread_activity.remove(&meta.id);
+        }
         let discover = self
             .sessions
             .iter()
@@ -362,14 +375,19 @@ impl AppState {
             },
             cx,
         );
-        // Reflect the upsert in memory instead of reloading the whole index
-        // from the store: `persist_meta` runs on every turn, where re-reading
-        // and re-parsing every session's meta would stall the mailbox.
-        // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
         if discover {
             self.discover_pull_requests_for(&meta.id, true, cx);
         }
+        let id = meta.id.clone();
+        let former_parent =
+            old_parent.filter(|parent| Some(parent) != meta.parent_session_id.as_ref());
+        cx.enqueue(move |state, cx| {
+            state.evaluate_thread_settlement(&id, cx);
+            if let Some(parent) = former_parent {
+                state.evaluate_thread_settlement(&parent, cx);
+            }
+        });
     }
 
     /// Close what this thread's provider leaves open before it goes away: the

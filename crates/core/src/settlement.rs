@@ -24,7 +24,7 @@ pub struct ThreadActivity {
     pub interrupted: bool,
 }
 
-/// Bump when `fold_stored`, `moves_clock`, or `complete` changes persisted activity semantics.
+/// Bump when the persisted activity fold semantics change.
 pub const THREAD_ACTIVITY_FOLD_VERSION: u32 = 2;
 
 impl ThreadActivity {
@@ -87,18 +87,6 @@ impl ThreadActivity {
             }
             _ => {}
         }
-    }
-
-    /// Every clock the thread's decisions read is set, so this fold of a
-    /// log's last records holds the latest record of each and no earlier
-    /// record can change it, as long as timestamps do not decrease along the
-    /// log. The clocks are independent: a run's records can bury the message
-    /// that began it. Nothing reads a dispatched child's message clocks: it
-    /// never settles automatically, and its lead reads only its runs.
-    pub fn complete(&self, has_parent: bool) -> bool {
-        let runs = self.last_run_started_at.is_some() && self.last_run_completed_at.is_some();
-        runs && (has_parent
-            || (self.last_message_at.is_some() && self.last_human_message_at.is_some()))
     }
 
     pub fn last_activity_at(&self) -> Option<u64> {
@@ -195,17 +183,21 @@ impl SettlementBlockers {
     }
 }
 
-/// The activity stamp, in milliseconds, to record as the settlement time:
-/// when the thread's latest terminal pull request settles it, or when it has
-/// been inactive for longer than `days`.
-pub fn automatic_settlement_at(
+/// When to evaluate automatic settlement and the activity stamp it records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementDue {
+    pub due_at: u64,
+    pub activity_at: u64,
+}
+
+pub fn automatic_settlement_due(
     meta: &SessionMeta,
     activity: &ThreadActivity,
     blockers: SettlementBlockers,
     now_ms: u64,
     days: Option<f64>,
     on_merge: bool,
-) -> Option<u64> {
+) -> Option<SettlementDue> {
     let terminal = |snapshot: &PullRequestSnapshot| {
         let at = match snapshot.state {
             PullRequestState::Open => return None,
@@ -234,7 +226,6 @@ pub fn automatic_settlement_at(
         || meta.pinned_at.is_some()
         || meta.parent_session_id.is_some()
         || blockers.any()
-        || activity.queued_turn_start(now_ms)
     {
         return None;
     }
@@ -248,17 +239,95 @@ pub fn automatic_settlement_at(
         && (state == PullRequestState::Closed || on_merge)
         && terminal_at >= anchor
     {
-        return Some(last_activity.unwrap_or(meta.created_at.saturating_mul(1000)));
+        return Some(SettlementDue {
+            due_at: if activity.queued_turn_start(now_ms) {
+                activity
+                    .last_message_at?
+                    .saturating_add(QUEUED_TURN_START_GRACE_MS)
+                    .saturating_add(1)
+            } else {
+                now_ms
+            },
+            activity_at: last_activity.unwrap_or(meta.created_at.saturating_mul(1000)),
+        });
     }
     let days = days?;
     let last_activity = last_activity?;
-    ((last_activity as f64) < now_ms as f64 - days * 86_400_000.0).then_some(last_activity)
+    let mut due_at = (last_activity as f64 + days * 86_400_000.0).floor() as u64;
+    due_at = due_at.saturating_add(1);
+    if activity.queued_turn_start(now_ms) {
+        due_at = due_at.max(
+            activity
+                .last_message_at?
+                .saturating_add(QUEUED_TURN_START_GRACE_MS)
+                .saturating_add(1),
+        );
+    }
+    Some(SettlementDue {
+        due_at,
+        activity_at: last_activity,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::project::SettledOverride;
+
+    fn automatic_settlement_at(
+        meta: &SessionMeta,
+        activity: &ThreadActivity,
+        blockers: SettlementBlockers,
+        now: u64,
+        days: Option<f64>,
+        on_merge: bool,
+    ) -> Option<u64> {
+        automatic_settlement_due(meta, activity, blockers, now, days, on_merge)
+            .filter(|due| due.due_at <= now)
+            .map(|due| due.activity_at)
+    }
+
+    #[test]
+    fn settlement_deadlines_include_future_inactivity_and_queued_turn_grace() {
+        let meta = thread(&[]);
+        let activity = ThreadActivity {
+            last_run_completed_at: Some(NOW - HOUR),
+            ..Default::default()
+        };
+        assert_eq!(
+            automatic_settlement_due(
+                &meta,
+                &activity,
+                SettlementBlockers::default(),
+                NOW,
+                Some(3.0),
+                true
+            ),
+            Some(SettlementDue {
+                due_at: NOW - HOUR + 3 * 86_400_000 + 1,
+                activity_at: NOW - HOUR
+            })
+        );
+        let merged = thread(&[Some((PullRequestState::Merged, Some(NOW - HOUR)))]);
+        let queued = ThreadActivity {
+            last_message_at: Some(NOW),
+            ..Default::default()
+        };
+        assert_eq!(
+            automatic_settlement_due(
+                &merged,
+                &queued,
+                SettlementBlockers::default(),
+                NOW,
+                None,
+                true
+            ),
+            Some(SettlementDue {
+                due_at: NOW + 120_001,
+                activity_at: NOW
+            })
+        );
+    }
 
     #[test]
     fn inactivity_settles_at_the_last_activity_unless_blocked() {

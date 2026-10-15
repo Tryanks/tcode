@@ -233,7 +233,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.start_diff_pass(&mut cx);
             }
             state.sync_terminal_handles();
-            state.start_settlement_sweeps(&mut cx);
+            state.start_activity(&mut cx);
             let _ = ready_tx.send(Ok(()));
             let mut state =
                 smol::block_on(host_loop(state, cx, client_rx, mailbox_rx, original_rx));
