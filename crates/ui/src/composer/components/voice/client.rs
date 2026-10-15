@@ -1,98 +1,155 @@
-use gpui::{App, Subscription, Task};
-use gpui_component::speech::{
-    AudioFormat, AudioInput, AudioSink, RecognitionSession, SpeechError, SpeechRecognizer,
-    SpeechSink, SpeechState,
-};
-use std::rc::Rc;
-use tcode_client::speech::{SpeechEvent, SpeechSession};
-
-struct ClientRecognizer {
-    platform: Rc<dyn tcode_client::speech::SpeechRecognizer>,
-    locale: &'static str,
-}
+use gpui::{App, Context, EventEmitter, Task};
+use std::{cell::RefCell, rc::Rc, time::Duration};
+use tcode_client::speech::{Dictation, SpeechEvent, SpeechRecognizer, SpeechSession};
+pub(super) use tcode_client::speech::{DictationEvent, SpeechStatus};
 
 struct Session {
-    platform: Box<dyn SpeechSession>,
+    platform: Rc<RefCell<Box<dyn SpeechSession>>>,
+    id: u64,
     _events: Task<()>,
+    _timeout: Option<Task<()>>,
 }
 
-impl SpeechRecognizer for ClientRecognizer {
-    fn is_available(&self, _: &App) -> bool {
-        self.platform.is_available(self.locale)
+pub(super) struct SpeechState {
+    recognizer: Option<Rc<dyn SpeechRecognizer>>,
+    locale: &'static str,
+    dictation: Dictation,
+    session: Option<Session>,
+}
+
+impl EventEmitter<DictationEvent> for SpeechState {}
+
+impl SpeechState {
+    pub(super) fn new(_: &mut Context<Self>) -> Self {
+        Self {
+            recognizer: None,
+            locale: "en-US",
+            dictation: Dictation::default(),
+            session: None,
+        }
     }
 
-    fn start(
-        &self,
-        sink: SpeechSink,
-        cx: &mut App,
-    ) -> Result<Box<dyn RecognitionSession>, SpeechError> {
+    pub(super) fn recognizer(mut self, recognizer: Rc<dyn SpeechRecognizer>) -> Self {
+        self.recognizer = Some(recognizer);
+        self
+    }
+
+    pub(super) fn has_recognizer(&self) -> bool {
+        self.recognizer.is_some()
+    }
+    pub(super) fn is_available(&self, _: &App) -> bool {
+        self.recognizer
+            .as_ref()
+            .is_some_and(|recognizer| recognizer.is_available(self.locale))
+    }
+    pub(super) fn status(&self) -> SpeechStatus {
+        self.dictation.status()
+    }
+    pub(super) fn level(&self) -> f32 {
+        self.dictation.level()
+    }
+
+    pub(super) fn toggle(&mut self, cx: &mut Context<Self>) {
+        if self.status().is_active() {
+            self.stop(cx);
+        } else {
+            self.start(cx);
+        }
+    }
+
+    fn start(&mut self, cx: &mut Context<Self>) {
+        let Some(recognizer) = self.recognizer.clone() else {
+            return;
+        };
+        let id = self.dictation.start();
         let (sender, receiver) = async_channel::unbounded();
-        let platform = self
-            .platform
-            .start(self.locale, sender)
-            .map_err(|error| SpeechError::recognizer(std::io::Error::other(error)))?;
-        let events = cx.spawn(async move |cx| {
-            while let Ok(event) = receiver.recv().await {
-                let terminal = matches!(
-                    event,
-                    SpeechEvent::Finished
-                        | SpeechEvent::Error(_)
-                        | SpeechEvent::PermissionDenied
-                        | SpeechEvent::Unsupported
-                );
-                cx.update(|cx| match event {
-                    SpeechEvent::Ready => sink.ready(cx),
-                    SpeechEvent::Hypothesis(text) => sink.hypothesis(text, cx),
-                    SpeechEvent::Phrase(text) => sink.phrase(text, cx),
-                    SpeechEvent::Finished => sink.finish(cx),
-                    SpeechEvent::PermissionDenied => sink.error(SpeechError::PermissionDenied, cx),
-                    SpeechEvent::Unsupported => sink.error(SpeechError::Unsupported, cx),
-                    SpeechEvent::Error(error) => {
-                        sink.error(SpeechError::recognizer(std::io::Error::other(error)), cx)
-                    }
-                });
-                if terminal {
-                    break;
-                }
+        let platform = match recognizer.start(self.locale, sender) {
+            Ok(platform) => Rc::new(RefCell::new(platform)),
+            Err(error) => {
+                self.on_event(id, SpeechEvent::Error(error), cx);
+                return;
+            }
+        };
+        let events = cx.spawn({
+            let platform = platform.clone();
+            async move |this, cx| {
+                futures_lite::future::or(
+                    async {
+                        while let Ok(event) = receiver.recv().await {
+                            let active = this.update(cx, |this, cx| {
+                                this.on_event(id, event, cx);
+                                this.dictation.is_session(id)
+                            });
+                            if !matches!(active, Ok(true)) {
+                                break;
+                            }
+                        }
+                    },
+                    async {
+                        std::future::poll_fn(|cx| platform.borrow_mut().poll(cx)).await;
+                        std::future::pending().await
+                    },
+                )
+                .await;
             }
         });
-        Ok(Box::new(Session {
+        self.session = Some(Session {
             platform,
+            id,
             _events: events,
-        }))
+            _timeout: None,
+        });
+        cx.emit(DictationEvent::Started);
+        cx.notify();
+    }
+
+    pub(super) fn stop(&mut self, cx: &mut Context<Self>) {
+        if !self.dictation.stop() {
+            return;
+        }
+        if let Some(session) = &mut self.session {
+            session.platform.borrow_mut().finish();
+            let id = session.id;
+            let timeout = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                _ = this.update(cx, |this, cx| this.on_event(id, SpeechEvent::Finished, cx));
+            });
+            self.session.as_mut().unwrap()._timeout = Some(timeout);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(event) = self.dictation.cancel() {
+            self.session = None;
+            cx.emit(event);
+            cx.notify();
+        }
+    }
+
+    fn on_event(&mut self, id: u64, event: SpeechEvent, cx: &mut Context<Self>) {
+        if let Some(event) = self.dictation.apply(id, event) {
+            cx.emit(event);
+        }
+        if !self.dictation.status().is_active() {
+            self.session = None;
+        }
+        cx.notify();
     }
 }
 
-impl RecognitionSession for Session {
-    fn push_audio(&mut self, _: &[i16], _: &mut App) {}
-    fn finish(&mut self, _: &mut App) {
-        self.platform.finish();
-    }
-}
-
-struct PlatformCapture;
-impl AudioInput for PlatformCapture {
-    fn start(
-        &self,
-        _: AudioFormat,
-        _: AudioSink,
-        _: &mut App,
-    ) -> Result<Subscription, SpeechError> {
-        // The ClientHost session owns capture and releases it on finish or drop.
-        Ok(Subscription::new(|| {}))
-    }
-}
-
-pub(super) fn configure(state: SpeechState, locale: &'static str, cx: &App) -> SpeechState {
-    if let Some(platform) = cx
+pub(super) fn configure(mut state: SpeechState, locale: &'static str, cx: &App) -> SpeechState {
+    state.locale = locale;
+    let recognizer = cx
         .try_global::<crate::remote::ClientAttachment>()
-        .and_then(|attachment| attachment.host().speech_recognizer())
-    {
-        return state
-            .recognizer(ClientRecognizer { platform, locale })
-            .input(PlatformCapture);
+        .and_then(|attachment| attachment.host().speech_recognizer());
+    if let Some(recognizer) = recognizer {
+        return state.recognizer(recognizer);
     }
+    state.recognizer = None;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let state = state.recognizer(gpui_component::speech::SystemRecognizer::new().locale(locale));
+    if state.recognizer.is_none() {
+        state = state.recognizer(Rc::new(tcode_client::speech::SystemRecognizer::new(locale)));
+    }
     state
 }
