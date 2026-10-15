@@ -988,13 +988,23 @@ mod tests {
     #[gpui::test]
     fn empty_query_lists_commands_and_arrow_keys_keep_query_focus(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-palette-keyboard-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("palette-keyboard-test");
         let store = SessionStore::open_at(root.clone()).expect("open test store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let workspace_store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+            workspace_store.read_with(cx, |store, _| store.baseline_ready())
+        });
         let palette_store = workspace_store.clone();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             PaletteHarness::new(palette_store.clone(), window, cx)
@@ -1050,6 +1060,7 @@ mod tests {
         });
 
         drop(palette);
+        driver.shutdown(cx, &workspace_store, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1094,13 +1105,23 @@ mod tests {
     #[gpui::test]
     fn escape_from_the_query_and_a_backdrop_press_close_the_palette(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-palette-dismiss-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("palette-dismiss-test");
         let store = SessionStore::open_at(root.clone()).expect("open test store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let workspace_store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+            workspace_store.read_with(cx, |store, _| store.baseline_ready())
+        });
         let palette_store = workspace_store.clone();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             PaletteHarness::new(palette_store.clone(), window, cx)
@@ -1160,6 +1181,7 @@ mod tests {
         assert!(!is_open(cx), "a backdrop press closes the palette");
 
         drop(palette);
+        driver.shutdown(cx, &workspace_store, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1291,13 +1313,23 @@ mod tests {
     #[gpui::test]
     fn a_host_answer_for_a_superseded_query_is_discarded(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-palette-search-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("palette-search-test");
         let store = SessionStore::open_at(root.clone()).expect("open test store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let workspace_store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+            workspace_store.read_with(cx, |store, _| store.baseline_ready())
+        });
         let palette_store = workspace_store.clone();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             PaletteHarness::new(palette_store.clone(), window, cx)
@@ -1341,6 +1373,7 @@ mod tests {
         });
 
         drop(palette);
+        driver.shutdown(cx, &workspace_store, &host);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
     }

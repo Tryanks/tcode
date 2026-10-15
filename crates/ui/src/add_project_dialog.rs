@@ -722,10 +722,7 @@ mod tests {
     #[gpui::test]
     fn a_remote_project_root_is_judged_by_the_host(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-add-project-remote-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("add-project-remote");
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let host = spawn_host(

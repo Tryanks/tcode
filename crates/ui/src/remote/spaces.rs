@@ -1918,10 +1918,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-spaces-remove-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("spaces-remove");
         let member_dir = root.join("member");
         std::fs::create_dir_all(&member_dir).unwrap();
         // Idle pipes: no client attaches through the mux here.

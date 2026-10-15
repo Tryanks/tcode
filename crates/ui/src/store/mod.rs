@@ -346,13 +346,6 @@ impl WorkspaceStore {
         }
     }
 
-    /// An attached, blocking-seeded local store. Callers that must not block —
-    /// a phone or browser on a single-threaded executor — go through
-    /// [`WorkspaceStore::new_attached`] directly.
-    pub fn new(host: HostLink, cx: &mut Context<Self>) -> Self {
-        Self::new_attached(host, WorkspaceAttachment::Local, None, None, true, cx)
-    }
-
     /// Construct the complete projection for exactly one client link.
     ///
     /// `seed_blocking` waits for Scope and its allowed domain snapshots. Only the desktop composition root asks for it: it
@@ -374,8 +367,6 @@ impl WorkspaceStore {
         cx.set_global(images::HostImages {
             link: Some(host.clone()),
             namespace: image_namespace,
-            #[cfg(test)]
-            blocking_queries: seed_blocking,
         });
         let client_preferences = client_host
             .as_ref()
@@ -445,8 +436,9 @@ impl WorkspaceStore {
             topic: Topic::Scope,
             after: None,
         });
+        #[cfg(not(test))]
         let events = host.events();
-        #[cfg(not(target_family = "wasm"))]
+        #[cfg(not(any(test, target_family = "wasm")))]
         if seed_blocking {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !store.seed_ready() && std::time::Instant::now() < deadline {
@@ -464,16 +456,11 @@ impl WorkspaceStore {
                     Err(async_channel::TryRecvError::Closed) => break,
                 }
             }
-            // Under test nothing applies host events after this, so a store
-            // left unseeded would only show up later as empty lists.
-            #[cfg(test)]
-            assert!(store.seed_ready(), "host scope snapshot seeding timed out");
-            #[cfg(not(test))]
             if !store.seed_ready() {
                 log::error!("host scope snapshot seeding timed out");
             }
         }
-        #[cfg(target_family = "wasm")]
+        #[cfg(any(test, target_family = "wasm"))]
         let _ = seed_blocking;
 
         #[cfg(not(test))]
@@ -622,7 +609,7 @@ impl WorkspaceStore {
         }
     }
 
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(not(any(test, target_family = "wasm")))]
     fn seed_ready(&self) -> bool {
         self.baseline_topics.contains(&Topic::Scope)
             && self.baseline_topics.contains(&self.index_topic())
@@ -1045,8 +1032,6 @@ impl WorkspaceStore {
             cx.set_global(images::HostImages {
                 link: None,
                 namespace: self.image_namespace,
-                #[cfg(test)]
-                blocking_queries: false,
             });
         }
     }
@@ -3397,37 +3382,10 @@ impl WorkspaceStore {
         &mut self,
         session_id: String,
         timeline: Timeline,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
-        if self.selected_session_id.as_ref() == Some(&session_id) {
-            self.session_replica = Some((session_id, timeline));
-            return;
-        }
-        self.select_session(session_id.clone());
-        // The host answers the subscription once it has read the thread's
-        // log, after anything an acknowledgement could fence.
-        let topic = Topic::SessionEvents {
-            session_id: session_id.clone(),
-        };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let envelope = match self.host.events().try_recv() {
-                Ok(envelope) => envelope,
-                Err(_) => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "the session's window did not arrive"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    continue;
-                }
-            };
-            self.apply_domain_event(&envelope, cx);
-            if envelope.topic == topic
-                && matches!(envelope.event, ServerEvent::SessionSnapshot { .. })
-            {
-                break;
-            }
+        if self.selected_session_id.as_ref() != Some(&session_id) {
+            self.select_session(session_id.clone());
         }
         self.session_replica = Some((session_id, timeline));
     }
@@ -4484,11 +4442,7 @@ pub(crate) mod tests {
     fn preview_reads_the_attachment_route_when_saved_hosts_are_stale(cx: &mut TestAppContext) {
         use std::rc::Rc;
         use tcode_client::host::{ClientHost as _, LiveHost};
-        let root = std::env::temp_dir().join(format!(
-            "tcode-preview-route-{}-{}",
-            std::process::id(),
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("preview-route");
         let client = Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
         let mut host = tcode_client::pairing::PairedHost {
             host_id: "09e5c592f3234ef329634a0baa6bfe06193be6b64801121d84242af1d27dbecf".into(),
@@ -6116,7 +6070,7 @@ pub(crate) mod tests {
             workspace
         }
 
-        fn await_with_events<T>(
+        pub(crate) fn await_with_events<T>(
             &mut self,
             cx: &mut TestAppContext,
             store: &gpui::Entity<WorkspaceStore>,
@@ -6614,7 +6568,7 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    fn scratch_root(label: &str) -> std::path::PathBuf {
+    pub(crate) fn scratch_root(label: &str) -> std::path::PathBuf {
         static NEXT_ROOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::env::temp_dir().join(format!(
             "tcode-{label}-{}-{}-{}",

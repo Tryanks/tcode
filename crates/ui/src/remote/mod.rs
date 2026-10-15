@@ -1228,8 +1228,10 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "remote-hosting")]
     struct PairingProbe(Entity<RemotePanel>);
 
+    #[cfg(feature = "remote-hosting")]
     impl Render for PairingProbe {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
@@ -1464,10 +1466,7 @@ mod tests {
         use tcode_client::HostLink;
         use tcode_traverse::{HostConfig, HostMux, TraverseHost};
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let root = std::env::temp_dir().join(format!(
-            "tcode-hosts-invitation-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("hosts-invitation");
         std::fs::create_dir_all(&root).unwrap();
         let (to_host, _host_rx) = async_channel::unbounded::<String>();
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
@@ -1582,10 +1581,7 @@ mod tests {
     #[gpui::test]
     fn superseded_pairing_does_not_overwrite_the_saved_machine(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let root = std::env::temp_dir().join(format!(
-            "tcode-stale-pairing-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("stale-pairing");
         let client = Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
         cx.update(|cx| cx.set_global(ClientAttachment::new(client.clone(), false, |_, _, _| {})));
         let (probe, cx) = cx.add_window_view(|window, cx| {

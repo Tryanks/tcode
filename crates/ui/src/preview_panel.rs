@@ -691,16 +691,26 @@ mod tests {
     ) {
         use tcode_runtime::pipe::{HostServices, spawn_host};
 
-        let root = std::env::temp_dir().join(format!(
-            "tcode-preview-unsupported-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = crate::store::tests::scratch_root("preview-unsupported");
         let host = spawn_host(
             tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
         )
         .expect("spawn preview test host");
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (panel, cx) = cx.add_window_view(|window, cx| {
             PreviewPanel::new(store.clone(), window_state.clone(), window, cx)
@@ -723,7 +733,7 @@ mod tests {
             Err(crate::tr!("preview.unsupported_client").into_owned())
         );
 
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 

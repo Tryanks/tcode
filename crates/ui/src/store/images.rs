@@ -11,10 +11,6 @@ use web_time::Instant;
 pub(crate) struct HostImages {
     pub link: Option<HostLink>,
     pub namespace: u64,
-    /// Existing live-host UI fixtures pump on an OS thread. Keep its wakeups
-    /// outside GPUI's deterministic scheduler; scripted fixtures stay async.
-    #[cfg(test)]
-    pub blocking_queries: bool,
 }
 impl Global for HostImages {}
 
@@ -73,8 +69,6 @@ impl Asset for HostImage {
             .link
             .clone()
             .filter(|_| images.namespace == namespace);
-        #[cfg(test)]
-        let blocking_queries = images.blocking_queries;
         async move {
             let query = match request {
                 ImageRequest::Preview {
@@ -108,13 +102,6 @@ impl Asset for HostImage {
             let Some(host) = host else {
                 return HostRead::Unreached(Instant::now());
             };
-            #[cfg(test)]
-            let result = if blocking_queries {
-                futures_lite::future::block_on(host.query(query))
-            } else {
-                host.query(query).await
-            };
-            #[cfg(not(test))]
             let result = host.query(query).await;
             let bytes = match result {
                 Ok(QueryResponse::FileBytes(bytes)) => bytes,
@@ -232,8 +219,6 @@ impl Asset for PullRequestMediaAsset {
             .link
             .clone()
             .filter(|_| images.namespace == namespace);
-        #[cfg(test)]
-        let blocking_queries = images.blocking_queries;
         // The copy an expired answer left: the host may answer that it is still current.
         let held = cx
             .try_global::<PullRequestMediaCache>()
@@ -250,13 +235,6 @@ impl Asset for PullRequestMediaAsset {
                     validator: held.as_ref().and_then(|(_, validator)| validator.clone()),
                 },
             };
-            #[cfg(test)]
-            let result = if blocking_queries {
-                futures_lite::future::block_on(host.query(query))
-            } else {
-                host.query(query).await
-            };
-            #[cfg(not(test))]
             let result = host.query(query).await;
             use tcode_protocol::{PullRequestMedia, PullRequestReadResponse};
             let response = match result {
@@ -720,7 +698,6 @@ mod tests {
             cx.set_global(HostImages {
                 link: Some(link.clone()),
                 namespace: 1,
-                blocking_queries: false,
             });
         });
         let executor = cx.background_executor.clone();

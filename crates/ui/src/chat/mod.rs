@@ -5158,11 +5158,7 @@ mod tests {
         // Seed a catalog-backed model: the generic chat fixture has no model
         // options and therefore cannot detect a missing effort control.
         cx.update(crate::theme::init);
-        let data_root = std::env::temp_dir().join(format!(
-            "tcode-effort-layout-{}-{}",
-            std::process::id(),
-            tcode_services::store::now_millis()
-        ));
+        let data_root = crate::store::tests::scratch_root("effort-layout");
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(data_root).unwrap(),
             tcode_runtime::pipe::HostServices::default(),
@@ -5200,13 +5196,38 @@ mod tests {
             (id, active.timeline.clone())
         }))
         .unwrap();
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready()
+                    && store
+                        .provider_model_catalog(agent::ProviderKind::Codex)
+                        .iter()
+                        .any(|model| model.id == "effort-layout")
+            })
+        });
+        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        driver.wait_until(cx, &store, "selected conversation", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.chat_loading()
+            })
+        });
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
         });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         for locale in ["en", "zh-CN"] {
             crate::set_locale(locale);
             view.update(cx, |_, cx| cx.notify());
@@ -5252,6 +5273,7 @@ mod tests {
                 assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
             }
         }
+        driver.shutdown(cx, &store, &host);
     }
 
     #[gpui::test]
@@ -6294,7 +6316,7 @@ mod tests {
         let mut tail = Timeline::default();
         tail.turns = vec![TurnMeta::default()];
         tail.entries = vec![entry("assistant-1", assistant(&long_answer))];
-        let (store, window_state, session_id) = seed_chat_with_history(cx, tail, true);
+        let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         cx.simulate_resize(gpui::size(px(1024.), px(700.)));
@@ -6668,7 +6690,7 @@ mod tests {
             for entry in &mut tail.entries {
                 std::sync::Arc::make_mut(entry).turn -= 20;
             }
-            let (store, window_state, session_id) = seed_chat_with_history(cx, tail, true);
+            let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
             let (view, cx) = cx.add_window_view(|window, cx| {
                 ChatView::new(store.clone(), window_state, window, cx)
             });
@@ -6964,13 +6986,21 @@ mod tests {
     fn session_switch_does_not_resurrect_in_flight_markdown(cx: &mut TestAppContext) {
         let text = large_markdown("stale session");
         let timeline = single_assistant_timeline("large", &text);
-        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (workspace_store, window_state, _, mut driver) =
+            seed_chat_with_history(cx, timeline, false);
         let view = cx.add_window(|window, cx| {
             ChatView::new(workspace_store.clone(), window_state, window, cx)
         });
         let view = view.root(cx).expect("chat window should have a root");
         assert!(view.read_with(cx, |chat, _| chat.pending_md_builds.contains_key("large")));
 
+        workspace_store.update(cx, |store, _| {
+            store.select_session("replacement-session".into());
+        });
+        view.update(cx, |chat, cx| chat.sync_markdown_states(cx));
+        driver.wait_until(cx, &workspace_store, "replacement history snapshot", |cx| {
+            workspace_store.read_with(cx, |store, _| store.with_active_timeline(|_| ()).is_some())
+        });
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(
                 "replacement-session".into(),
@@ -6978,7 +7008,6 @@ mod tests {
                 cx,
             );
         });
-        view.update(cx, |chat, cx| chat.sync_markdown_states(cx));
         cx.run_until_parked();
 
         view.read_with(cx, |chat, _| {
@@ -7127,10 +7156,7 @@ This begins after the hard break."#;
 
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let data_root = std::env::temp_dir().join(format!(
-            "tcode-markdown-outer-list-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let data_root = crate::store::tests::scratch_root("markdown-outer-list-test");
         let store = SessionStore::open_at(data_root).expect("test session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
         let (session_id, timeline) =
@@ -7147,7 +7173,26 @@ This begins after the hard break."#;
                 (active.meta.id.clone(), active.timeline.clone())
             }))
             .expect("seed markdown host");
-        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(host.link(), cx));
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let workspace_store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+            workspace_store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        workspace_store.update(cx, |store, _| store.select_session(session_id.clone()));
+        driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
+            workspace_store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.chat_loading()
+            })
+        });
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
         });
@@ -7194,6 +7239,7 @@ This begins after the hard break."#;
             cx.debug_bounds("markdown-block-18").is_none(),
             "offscreen tail block was painted; block virtualization did not cull it"
         );
+        driver.shutdown(cx, &workspace_store, &host);
     }
 
     fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {
@@ -7285,7 +7331,8 @@ This begins after the hard break."#;
         cx: &mut TestAppContext,
         timeline: Timeline,
     ) -> (Entity<WorkspaceStore>, Entity<WindowState>, String) {
-        seed_chat_with_history(cx, timeline, false)
+        let (store, window_state, session_id, _) = seed_chat_with_history(cx, timeline, false);
+        (store, window_state, session_id)
     }
 
     fn seeded_chat_host(
@@ -7298,12 +7345,7 @@ This begins after the hard break."#;
 
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let data_root = std::env::temp_dir().join(format!(
-            "tcode-chat-residency-test-{}-{}-{}",
-            std::process::id(),
-            tcode_services::store::now_millis(),
-            NEXT_RESIDENCY_TEST_ID.fetch_add(1, Ordering::Relaxed)
-        ));
+        let data_root = crate::store::tests::scratch_root("chat-residency-test");
         let store = SessionStore::open_at(data_root).expect("test session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
         let (session_id, timeline) =
@@ -7338,62 +7380,72 @@ This begins after the hard break."#;
         cx: &mut TestAppContext,
         timeline: Timeline,
         paged: bool,
-    ) -> (Entity<WorkspaceStore>, Entity<WindowState>, String) {
+    ) -> (
+        Entity<WorkspaceStore>,
+        Entity<WindowState>,
+        String,
+        crate::store::tests::LocalHostDriver,
+    ) {
         let (host, session_id, timeline) = seeded_chat_host(cx, timeline, paged);
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let workspace_store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+            workspace_store.read_with(cx, |store, _| store.baseline_ready())
+        });
         if paged {
-            // The history is the thread's before a client opens it: the host
-            // answers a page only once it has read the log the records joined.
-            smol::block_on(
-                host.link()
-                    .query(tcode_protocol::Query::SessionHistoryPage {
+            let link = driver.link.clone();
+            driver
+                .await_with_events(
+                    cx,
+                    &workspace_store,
+                    link.query(tcode_protocol::Query::SessionHistoryPage {
                         session_id: session_id.clone(),
                         before: u64::MAX,
                         limit: 1,
                     }),
-            )
-            .expect("the seeded history is read");
+                )
+                .expect("the seeded history is read");
         }
-        let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        workspace_store.update(cx, |store, _| store.select_session(session_id.clone()));
+        driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
+            workspace_store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.chat_loading()
+            })
+        });
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
-        // GPUI's executor does not wait for the host's detached Git process.
-        smol::block_on(async {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                let id = session_id.clone();
-                if host
-                    .update_state_for_test(move |state, _| {
-                        state.git_status_snapshot(&id).status.is_some()
-                    })
-                    .await
-                    .expect("read fixture Git completion")
-                {
-                    break;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "chat fixture Git probe did not finish"
-                );
-                smol::Timer::after(Duration::from_millis(5)).await;
-            }
+        driver.wait_until(cx, &workspace_store, "Git status", |cx| {
+            workspace_store.read_with(cx, |store, _| store.chat_git_controls().is_some())
         });
         let window_state = cx.new(|_| WindowState::new(false));
+        let link = driver.link.clone();
         cx.on_quit(move || {
-            let link = host.link();
             let events = link.events();
             smol::block_on(smol::future::race(
-                async { link.shutdown().await.expect("stop chat test host") },
-                async {
-                    // The UI is gone at test teardown; drain its retired subscriptions.
-                    while events.recv().await.is_ok() {}
-                    std::future::pending::<()>().await;
-                },
+                link.pump(),
+                smol::future::race(
+                    async { link.shutdown().await.expect("stop chat test host") },
+                    async {
+                        // The UI is gone at test teardown; drain its retired subscriptions.
+                        while events.recv().await.is_ok() {}
+                        std::future::pending::<()>().await;
+                    },
+                ),
             ));
             host.stopped
                 .recv_blocking()
                 .expect("chat test host stopped");
         });
-        (workspace_store, window_state, session_id)
+        (workspace_store, window_state, session_id, driver)
     }
 }
