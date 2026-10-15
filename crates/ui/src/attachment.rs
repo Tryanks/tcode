@@ -124,7 +124,11 @@ impl Attachment {
                 .as_ref()
                 .and_then(|client| client.outbox_storage("local")),
         };
-        let link = HostLink::new(transport.to_host, transport.from_host);
+        let link = if matches!(target, AttachmentTarget::Local) {
+            HostLink::new(transport.to_host, transport.from_host)
+        } else {
+            HostLink::new_remote(transport.to_host, transport.from_host, transport.originals)
+        };
         if let Some(storage) = storage {
             if matches!(target, AttachmentTarget::Remote(_)) {
                 link.set_connection_state(tcode_client::ConnectionState::Reconnecting {
@@ -217,6 +221,7 @@ mod tests {
     ) -> Transport {
         let (_, state) = async_channel::unbounded();
         Transport {
+            originals: None,
             to_host: to_host.into(),
             from_host,
             state,

@@ -3224,6 +3224,7 @@ mod tests {
                 space_name: None,
             },
             transports: RefCell::new(vec![Transport {
+                originals: None,
                 to_host: to_host.into(),
                 from_host,
                 state,
@@ -3289,6 +3290,7 @@ mod tests {
             let (_incoming, from_host) = async_channel::unbounded();
             let (_states, state) = async_channel::unbounded();
             Transport {
+                originals: None,
                 to_host: to_host.into(),
                 from_host,
                 state,
@@ -3390,6 +3392,7 @@ mod tests {
                 space_name: None,
             },
             transports: RefCell::new(vec![Transport {
+                originals: None,
                 to_host: to_host.into(),
                 from_host,
                 state,
@@ -4819,6 +4822,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let (states, state) = async_channel::unbounded();
         let transport = RefCell::new(Some(Transport {
+            originals: None,
             to_host: to_host.into(),
             from_host,
             state,
@@ -4946,6 +4950,7 @@ mod tests {
             let (incoming, from_host) = async_channel::unbounded();
             let (_, state) = async_channel::unbounded();
             let transport = Transport {
+                originals: None,
                 to_host: to_host.into(),
                 from_host,
                 state,

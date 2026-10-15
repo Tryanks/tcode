@@ -32,4 +32,6 @@ web-sys = { version = "=0.3.98", features = [
     "MutationObserver", "MutationObserverInit", "MutationRecord", "NodeList",
     "Location", "Navigator", "Storage", "WebSocket", "Event", "EventTarget", "MessageEvent",
     "Blob", "BlobPropertyBag", "Url",
+    "AbortController", "AbortSignal", "Request", "RequestInit", "Response", "Headers",
+    "ReadableStream", "ReadableStreamDefaultReader",
 ] }

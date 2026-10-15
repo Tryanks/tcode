@@ -1521,7 +1521,6 @@ impl StreamTask {
         let first = match wire::read_control::<ClientLine>(&mut reader).await {
             Ok(first) => first,
             Err(error) => {
-                self.connection.close(2_u32.into(), b"protocol");
                 return Err(error);
             }
         };
@@ -1582,6 +1581,20 @@ impl StreamTask {
                     return refuse(send, "too many tunnels").await;
                 };
                 crate::tunnel::serve(send, reader, &host, port).await
+            }
+            ClientLine::Original { target } => {
+                let principal = self.principal.lock().unwrap().clone();
+                let Some(principal) = principal else {
+                    return refuse(send, "hello required").await;
+                };
+                crate::original::serve(
+                    &self.shared.mux,
+                    self.connection.remote_id().to_string(),
+                    principal,
+                    target,
+                    send,
+                )
+                .await
             }
             ClientLine::Pair { .. } => refuse(send, "pairing uses tcode/pair/1").await,
         }

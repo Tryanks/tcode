@@ -34,7 +34,11 @@ pub(crate) fn image_tiles(
                         .to_string_lossy()
                         .into_owned();
                     vec![(
-                        crate::store::item_image(session_id.into(), entry.id.clone(), 0),
+                        tcode_protocol::OriginalTarget::Item {
+                            session_id: session_id.into(),
+                            item_id: entry.id.clone(),
+                            image_index: 0,
+                        },
                         title,
                         Some(path),
                     )]
@@ -46,7 +50,11 @@ pub(crate) fn image_tiles(
                     .enumerate()
                     .map(|(index, _)| {
                         (
-                            crate::store::item_image(session_id.into(), entry.id.clone(), index),
+                            tcode_protocol::OriginalTarget::Item {
+                                session_id: session_id.into(),
+                                item_id: entry.id.clone(),
+                                image_index: index,
+                            },
                             format!("{name} · {}", index + 1),
                             None,
                         )

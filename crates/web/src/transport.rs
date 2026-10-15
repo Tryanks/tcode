@@ -144,6 +144,7 @@ pub fn connect(token: String, device: DeviceIdentity) -> Transport {
     let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
+    let originals = std::sync::Arc::new(BrowserOriginal(token.clone()));
     wasm_bindgen_futures::spawn_local(async move {
         // Receiver-only closure must also wake an idle connection/backoff.
         race(
@@ -158,11 +159,172 @@ pub fn connect(token: String, device: DeviceIdentity) -> Transport {
         outgoing.close();
     });
     Transport {
+        originals: Some(originals),
         to_host,
         from_host,
         state,
         current_host: None,
     }
+}
+
+struct BrowserOriginal(String);
+struct AbortOriginal(web_sys::AbortController);
+impl Drop for AbortOriginal {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl tcode_client::original::OriginalOpener for BrowserOriginal {
+    fn open(
+        &self,
+        target: tcode_protocol::OriginalTarget,
+    ) -> tcode_client::original::OriginalFuture<'static, tcode_client::original::OpenedOriginal>
+    {
+        let token = self.0.clone();
+        Box::pin(async move {
+            use tcode_client::original::{OpenedOriginal, error};
+            let abort = AbortOriginal(web_sys::AbortController::new().map_err(js_error)?);
+            let init = web_sys::RequestInit::new();
+            init.set_method("GET");
+            init.set_signal(Some(&abort.0.signal()));
+            let target = serde_json::to_string(&target).map_err(error)?;
+            let target = js_sys::encode_uri_component(&target)
+                .as_string()
+                .ok_or_else(|| error("invalid target"))?;
+            let request = web_sys::Request::new_with_str_and_init(
+                &format!("/original?target={target}"),
+                &init,
+            )
+            .map_err(js_error)?;
+            request
+                .headers()
+                .set("Authorization", &format!("Bearer {token}"))
+                .map_err(js_error)?;
+            let response: web_sys::Response =
+                original_await(window().fetch_with_request(&request), &abort.0)
+                    .await?
+                    .dyn_into()
+                    .map_err(js_error)?;
+            if response.status() != 200 {
+                return Err(tcode_protocol::ProtocolError {
+                    code: match response.status() {
+                        401 | 403 => "out_of_scope",
+                        404 => "not_found",
+                        409 => "changed",
+                        429 => "busy",
+                        _ => "io",
+                    }
+                    .into(),
+                    message: format!("original request failed ({})", response.status()),
+                });
+            }
+            let len = response
+                .headers()
+                .get("Content-Length")
+                .map_err(js_error)?
+                .ok_or_else(|| error("original has no length"))?
+                .parse::<u64>()
+                .map_err(error)?;
+            let mime = response.headers().get("Content-Type").map_err(js_error)?;
+            let reader: web_sys::ReadableStreamDefaultReader = response
+                .body()
+                .ok_or_else(|| error("original has no body"))?
+                .get_reader()
+                .dyn_into()
+                .map_err(js_error)?;
+            Ok(OpenedOriginal {
+                metadata: tcode_protocol::OriginalMetadata { len, mime },
+                reader: Box::new(BrowserOriginalReader {
+                    reader,
+                    abort,
+                    pending: None,
+                    offset: 0,
+                    remaining: len,
+                }),
+            })
+        })
+    }
+}
+
+struct BrowserOriginalReader {
+    reader: web_sys::ReadableStreamDefaultReader,
+    abort: AbortOriginal,
+    pending: Option<js_sys::Uint8Array>,
+    offset: u32,
+    remaining: u64,
+}
+impl tcode_client::original::OriginalReader for BrowserOriginalReader {
+    fn read(&mut self) -> tcode_client::original::OriginalFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async move {
+            use tcode_client::original::error;
+            loop {
+                if let Some(pending) = &self.pending {
+                    let end = (self.offset + 64 * 1024).min(pending.length());
+                    let bytes = pending.subarray(self.offset, end).to_vec();
+                    self.offset = end;
+                    if end == pending.length() {
+                        self.pending = None;
+                        self.offset = 0;
+                    }
+                    if bytes.len() as u64 > self.remaining {
+                        return Err(error("original exceeded its length"));
+                    }
+                    self.remaining -= bytes.len() as u64;
+                    if !bytes.is_empty() {
+                        return Ok(Some(bytes));
+                    }
+                }
+                let result = original_await(self.reader.read(), &self.abort.0).await?;
+                if js_sys::Reflect::get(&result, &JsValue::from_str("done"))
+                    .map_err(js_error)?
+                    .as_bool()
+                    == Some(true)
+                {
+                    return if self.remaining == 0 {
+                        Ok(None)
+                    } else {
+                        Err(error("original ended short"))
+                    };
+                }
+                let value =
+                    js_sys::Reflect::get(&result, &JsValue::from_str("value")).map_err(js_error)?;
+                self.pending = Some(value.dyn_into().map_err(js_error)?);
+            }
+        })
+    }
+    fn cancel(&mut self) {
+        self.abort.0.abort();
+        self.pending = None;
+    }
+}
+
+fn js_error(value: impl Into<JsValue>) -> tcode_protocol::ProtocolError {
+    let value = value.into();
+    tcode_client::original::error(value.as_string().unwrap_or_else(|| format!("{value:?}")))
+}
+
+async fn original_await(
+    promise: js_sys::Promise,
+    abort: &web_sys::AbortController,
+) -> Result<JsValue, tcode_protocol::ProtocolError> {
+    let (tx, elapsed) = async_channel::bounded(1);
+    let _timer = Timer::new(60_000, tx);
+    race(
+        async {
+            wasm_bindgen_futures::JsFuture::from(promise)
+                .await
+                .map_err(js_error)
+        },
+        async {
+            let _ = elapsed.recv().await;
+            abort.abort();
+            Err(tcode_client::original::error(
+                "original made no progress for 60 seconds",
+            ))
+        },
+    )
+    .await
 }
 
 enum Input {

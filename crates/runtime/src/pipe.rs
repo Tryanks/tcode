@@ -60,14 +60,62 @@ impl HostServices {
     }
 }
 
+type OriginalIngress = (
+    String,
+    async_channel::Sender<Result<tcode_client::original::OriginalSource, ProtocolError>>,
+);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OriginalAdmission {
+    principal: Principal,
+    target: tcode_protocol::OriginalTarget,
+}
+
 #[derive(Clone)]
 pub struct SpawnedHost {
+    originals: async_channel::Sender<OriginalIngress>,
     pub to_host: async_channel::Sender<String>,
     pub from_host: async_channel::Receiver<String>,
     pub stopped: async_channel::Receiver<()>,
     link: Arc<OnceLock<HostLink>>,
     #[cfg(any(test, feature = "test-support"))]
     test_mailbox: async_channel::Sender<HostFn>,
+}
+
+impl tcode_client::original::OriginalBackend for SpawnedHost {
+    fn open(
+        &self,
+        principal: Principal,
+        target: tcode_protocol::OriginalTarget,
+    ) -> tcode_client::original::OriginalFuture<'static, tcode_client::original::OriginalSource>
+    {
+        let ingress = self.originals.clone();
+        Box::pin(async move {
+            let (answer, result) = async_channel::bounded(1);
+            struct Cancel(
+                async_channel::Receiver<
+                    Result<tcode_client::original::OriginalSource, ProtocolError>,
+                >,
+            );
+            impl Drop for Cancel {
+                fn drop(&mut self) {
+                    self.0.close();
+                }
+            }
+            let cancel = Cancel(result);
+            let request = serde_json::to_string(&OriginalAdmission { principal, target })
+                .map_err(tcode_client::original::error)?;
+            ingress
+                .send((request, answer))
+                .await
+                .map_err(tcode_client::original::error)?;
+            cancel
+                .0
+                .recv()
+                .await
+                .map_err(tcode_client::original::error)?
+        })
+    }
 }
 
 impl SpawnedHost {
@@ -124,6 +172,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     fn assert_send<T: Send>() {}
     assert_send::<AppState>();
 
+    let (original_tx, original_rx) = async_channel::bounded::<OriginalIngress>(8);
     let (client_tx, client_rx) = async_channel::unbounded::<String>();
     let (event_tx, event_rx) = async_channel::unbounded::<String>();
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
@@ -186,7 +235,8 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             state.sync_terminal_handles();
             state.start_settlement_sweeps(&mut cx);
             let _ = ready_tx.send(Ok(()));
-            let mut state = smol::block_on(host_loop(state, cx, client_rx, mailbox_rx));
+            let mut state =
+                smol::block_on(host_loop(state, cx, client_rx, mailbox_rx, original_rx));
             if let Err(error) = state.close_store() {
                 log::error!("could not close the session store cleanly: {error}");
             }
@@ -200,6 +250,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     })??;
 
     Ok(SpawnedHost {
+        originals: original_tx,
         to_host: client_tx,
         from_host: event_rx,
         stopped: stopped_rx,
@@ -214,15 +265,23 @@ async fn host_loop(
     mut cx: HostCx,
     client: smol::channel::Receiver<String>,
     mailbox: smol::channel::Receiver<HostFn>,
+    originals: async_channel::Receiver<OriginalIngress>,
 ) -> AppState {
     let mut domain_diff = DomainDiff::new(&state);
     loop {
         enum Input {
             Client(Result<String, smol::channel::RecvError>),
             Internal(Result<HostFn, smol::channel::RecvError>),
+            Original(OriginalIngress),
         }
         match smol::future::race(async { Input::Client(client.recv().await) }, async {
-            Input::Internal(mailbox.recv().await)
+            smol::future::race(async { Input::Internal(mailbox.recv().await) }, async {
+                match originals.recv().await {
+                    Ok(request) => Input::Original(request),
+                    Err(_) => std::future::pending().await,
+                }
+            })
+            .await
         })
         .await
         {
@@ -236,6 +295,16 @@ async fn host_loop(
                 },
                 Err(_) => break,
             },
+            Input::Original((request, answer)) => {
+                match serde_json::from_str::<OriginalAdmission>(&request) {
+                    Ok(request) => {
+                        state.start_original(request.principal, request.target, answer, &mut cx)
+                    }
+                    Err(error) => {
+                        let _ = answer.try_send(Err(tcode_client::original::error(error)));
+                    }
+                }
+            }
             Input::Internal(message) => match message {
                 Ok(operation) => operation(&mut state, &mut cx),
                 Err(_) => break,

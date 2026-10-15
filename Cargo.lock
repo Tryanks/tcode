@@ -11008,6 +11008,7 @@ dependencies = [
 name = "tcode-traverse"
 version = "0.1.0"
 dependencies = [
+ "agent",
  "async-channel",
  "base64 0.23.1",
  "core-foundation 0.9.4",
@@ -11027,7 +11028,10 @@ dependencies = [
  "sha2 0.11.0",
  "system-configuration-sys",
  "tcode-client",
+ "tcode-core",
  "tcode-protocol",
+ "tcode-runtime",
+ "tcode-services",
  "tcode-traverse",
  "tokio",
  "tokio-tungstenite",

@@ -1192,6 +1192,11 @@ attach:
   tunnel_body: "'%{name}' is %{size} and this device reaches the machine across the internet, so sending it may take a while."
   tunnel_confirm: "Send anyway"
 image_viewer:
+  cancelled: "Original read cancelled"
+  progress: "%{received} / %{total} bytes"
+  connecting: "Opening original…"
+  cancel: "Cancel"
+  retry: "Retry"
   zoom_in: "Zoom in"
   zoom_out: "Zoom out"
   fit: "Fit to window"

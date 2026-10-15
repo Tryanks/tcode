@@ -13,7 +13,7 @@ enum ImageReadKind {
     Preview { width: u32, height: u32 },
 }
 
-fn decoded_len(encoded: &str) -> io::Result<u64> {
+pub fn decoded_len(encoded: &str) -> io::Result<u64> {
     let padding = encoded
         .bytes()
         .rev()

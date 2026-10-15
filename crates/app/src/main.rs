@@ -199,7 +199,8 @@ fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
         log::warn!("MCP servers unavailable: {error}");
     }
     let host = spawn_host(store, host_services)?;
-    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone())
+        .with_original_backend(std::sync::Arc::new(host.clone()));
     Ok((host, mux))
 }
 
@@ -399,6 +400,7 @@ impl LocalKernel {
         // receiver simply ends the forwarder on its first poll.
         let (_, state) = async_channel::unbounded();
         Transport {
+            originals: None,
             to_host: connection.to_host.into(),
             from_host: connection.from_host,
             state,

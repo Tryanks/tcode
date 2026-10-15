@@ -8,6 +8,8 @@ mod command;
 mod event;
 mod index;
 pub use index::index_fingerprint;
+mod original;
+pub use original::{OriginalMetadata, OriginalReply, OriginalRequest, OriginalTarget};
 mod preview;
 mod pull_request;
 mod query;
@@ -160,6 +162,7 @@ pub use wire::{
 // session status is unchanged; subscription replies remain full statuses.
 // IndexActivitiesChanged sends changed activity entries when other index facts
 // are unchanged; subscription replies remain full index snapshots.
+// Unreleased: explicit original reads use a raw-byte iroh bi-stream or the authenticated browser /original endpoint; bounded ReadFileBytes/ReadItemImage control queries are unchanged.
 pub const PROTOCOL_VERSION: u32 = 12;
 
 #[cfg(test)]

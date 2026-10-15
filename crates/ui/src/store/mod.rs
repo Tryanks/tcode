@@ -40,8 +40,8 @@ pub(crate) use history::HISTORY_WINDOW_SCREENS;
 pub(crate) mod images;
 mod intents;
 pub(crate) use images::{
-    MAX_PREVIEW_PIXELS, MediaState, host_image, image_preview, item_image, item_image_preview,
-    pull_request_media, pull_request_media_state, retry_failed_pull_request_media,
+    MAX_PREVIEW_PIXELS, MediaState, image_preview, item_image_preview, pull_request_media,
+    pull_request_media_state, retry_failed_pull_request_media,
 };
 mod snapshots;
 

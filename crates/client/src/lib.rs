@@ -2,7 +2,9 @@
 
 pub mod heartbeat;
 pub mod host;
+pub mod original;
 pub mod outbox;
+pub use original::OriginalTransfer;
 pub mod outgoing;
 pub mod pairing;
 pub mod recovery;
@@ -96,7 +98,13 @@ struct Delivery {
     acknowledged: VecDeque<outbox::Entry>,
 }
 
+enum OriginalRoute {
+    Local,
+    Remote(Option<Arc<dyn original::OriginalOpener>>),
+}
+
 struct HostLinkInner {
+    originals: OriginalRoute,
     to_host: outgoing::Outgoing,
     from_host: async_channel::Receiver<String>,
     pending: Mutex<HashMap<u64, Pending>>,
@@ -145,6 +153,7 @@ impl HostLink {
         let (connection_state_tx, connection_state_rx) = async_channel::unbounded();
         Self {
             inner: Arc::new(HostLinkInner {
+                originals: OriginalRoute::Local,
                 to_host: to_host.into(),
                 from_host,
                 pending: Mutex::new(HashMap::new()),
@@ -161,6 +170,25 @@ impl HostLink {
                 connection_state_rx,
             }),
         }
+    }
+
+    pub fn new_remote(
+        to_host: impl Into<outgoing::Outgoing>,
+        from_host: async_channel::Receiver<String>,
+        originals: Option<Arc<dyn original::OriginalOpener>>,
+    ) -> Self {
+        let mut link = Self::new(to_host, from_host);
+        Arc::get_mut(&mut link.inner).unwrap().originals = OriginalRoute::Remote(originals);
+        link
+    }
+
+    pub fn read_original(&self, target: tcode_protocol::OriginalTarget) -> OriginalTransfer {
+        let opener: Arc<dyn original::OriginalOpener> = match &self.inner.originals {
+            OriginalRoute::Local => Arc::new(original::LocalOriginal(self.clone())),
+            OriginalRoute::Remote(Some(opener)) => opener.clone(),
+            OriginalRoute::Remote(None) => Arc::new(original::UnsupportedOriginal),
+        };
+        OriginalTransfer::new(opener, target)
     }
 
     /// Decode and route host output until its transport channel closes.

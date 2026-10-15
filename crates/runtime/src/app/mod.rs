@@ -249,6 +249,7 @@ mod diff_pass;
 mod events;
 mod git;
 mod history;
+mod original;
 use history::{Hydration, Joined, SessionLog};
 mod lifecycle;
 mod options;
