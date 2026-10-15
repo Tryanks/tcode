@@ -56,7 +56,7 @@ pub fn utf16_slice(text: &str, range: Range<usize>) -> Option<&str> {
 
 pub fn text_length(handler: &mut PlatformInputHandler) -> Option<usize> {
     handler.text_length_utf16().or_else(|| {
-        // gpui-base 0.7.1 has no length query and clamps oversized reads to the document.
+        // gpui-base 0.7.3 has no length query and clamps oversized reads to the document.
         handler
             .text_for_range(0..usize::MAX / 2, &mut None)
             .map(|text| text.encode_utf16().count())
@@ -80,7 +80,7 @@ pub fn select_text(handler: &mut PlatformInputHandler, range: Range<usize>) {
     {
         return;
     }
-    // gpui-base 0.7.1 inherits the no-op selection setter. Its composition API
+    // gpui-base 0.7.3 inherits the no-op selection setter. Its composition API
     // sets selection; identical replacement text records no undo edit.
     let marked = handler.marked_text_range();
     let context = marked
@@ -100,7 +100,7 @@ pub fn select_text(handler: &mut PlatformInputHandler, range: Range<usize>) {
 }
 
 pub fn commit_marked_text(handler: &mut PlatformInputHandler) {
-    // gpui-base 0.7.1 leaves the mark/undo transaction open on blur, and
+    // gpui-base 0.7.3 leaves the mark/undo transaction open on blur, and
     // unmark_text emits no Change. Replacing the preedit commits and emits it.
     if let Some(marked) = handler.marked_text_range()
         && let Some(text) = read_text(handler, marked.clone())

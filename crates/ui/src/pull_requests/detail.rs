@@ -2261,14 +2261,15 @@ mod tests {
         let reread = reread.expect("an expired page 1 is read again");
 
         let scroll_to = |cx: &mut VisualTestContext, file: usize| {
-            view.update(cx, |view, _| {
+            view.update(cx, |view, cx| {
                 view.page()
                     .unwrap()
                     .files_view
                     .list
                     .as_ref()
                     .unwrap()
-                    .scroll_to_file(file)
+                    .scroll_to_file(file);
+                cx.notify();
             });
             settle(cx);
         };
@@ -2281,6 +2282,28 @@ mod tests {
             }],
             "nearing the end of page 1 reads page 2"
         );
+        view.update(cx, |view, cx| {
+            view.page()
+                .unwrap()
+                .files_view
+                .list
+                .as_ref()
+                .unwrap()
+                .unified_list
+                .scroll_by(px(7.));
+            cx.notify();
+        });
+        settle(cx);
+        let before_append = view.read_with(cx, |view, _| {
+            view.page()
+                .unwrap()
+                .files_view
+                .list
+                .as_ref()
+                .unwrap()
+                .unified_list
+                .logical_scroll_top()
+        });
         answer(
             &incoming,
             page_two[0].0,
@@ -2288,6 +2311,24 @@ mod tests {
             later,
         );
         settle(cx);
+        let after_append = view.read_with(cx, |view, _| {
+            view.page()
+                .unwrap()
+                .files_view
+                .list
+                .as_ref()
+                .unwrap()
+                .unified_list
+                .logical_scroll_top()
+        });
+        assert_eq!(
+            after_append.item_ix, before_append.item_ix,
+            "paging keeps the same source row"
+        );
+        assert_eq!(
+            after_append.offset_in_item, before_append.offset_in_item,
+            "paging keeps the exact offset within the row"
+        );
         scroll_to(cx, 120);
 
         answer(

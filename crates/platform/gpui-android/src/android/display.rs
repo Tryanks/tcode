@@ -33,6 +33,11 @@ impl PlatformDisplay for AndroidDisplay {
         DisplayId::new(0)
     }
 
+    fn refresh_interval(&self) -> Option<std::time::Duration> {
+        // The host bridge does not report the display's refresh rate.
+        None
+    }
+
     fn uuid(&self) -> Result<Uuid> {
         Ok(Uuid::new_v5(&Uuid::NAMESPACE_OID, b"gpui-android-primary"))
     }
