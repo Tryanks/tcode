@@ -996,6 +996,9 @@ approval:
   pending: "等待批准"
   cancel_turn: "取消本轮"
 diff:
+  binary: "二进制文件，不显示其内容。"
+  empty_file: "空文件。"
+  no_text: "无法获取文件内容。"
   title: "Diff"
   panel_tabs: "右侧面板标签页"
   scope_menu: "Diff 范围"

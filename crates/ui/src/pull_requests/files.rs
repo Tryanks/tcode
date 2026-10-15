@@ -120,7 +120,7 @@ impl PullRequestView {
             .iter()
             .map(|file| {
                 if !matches!(file.patch, PullRequestPatch::Hunks(_)) {
-                    FileLayout::Placeholder
+                    FileLayout::Notice
                 } else if self.collapsed(&file.path) {
                     FileLayout::Header
                 } else {
@@ -217,11 +217,9 @@ impl PullRequestView {
                 }
                 match page.files_view.list.as_mut().filter(|_| kept > 0) {
                     Some(list) => {
-                        list.files.extend(rendered);
-                        list.set_layouts(layouts);
-                        list.relayout();
+                        list.append(rendered, layouts);
                     }
-                    None => page.files_view.list = Some(DiffList::new(rendered, layouts)),
+                    None => page.files_view.list = Some(DiffList::new(rendered, layouts, cx)),
                 }
                 page.files_view.rendered = Some(key);
                 cx.notify();
@@ -350,11 +348,7 @@ impl PullRequestView {
         if let Some(slot) = list.files.get_mut(index) {
             *slot = rendered;
         }
-        let gap = list.files[index]
-            .collapsed
-            .iter()
-            .find(|gap| gap.contains(&start) || gap.start == start)
-            .cloned();
+        let gap = list.fold_for_line(index, start);
         match gap {
             Some(gap) => list.expand(index, gap, direction),
             None => list.relayout(),
@@ -1280,42 +1274,43 @@ impl PullRequestView {
             .into_owned();
             div().mx_2().mb_1().child(render_notice(text, cx))
         });
-        let footer = files
-            .next_cursor
-            .as_ref()
-            .filter(|_| page.files_view.page_loading || page.files_view.page_error.is_some())
-            .map(|_| {
-                let failed = page.files_view.page_error.is_some();
-                h_flex()
-                    .flex_none()
-                    .h(px(40.))
-                    .px_3()
-                    .gap_2()
-                    .items_center()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .when(!failed, |row| {
-                        row.child(crate::widgets::spinner::Spinner::new().small())
-                            .child(crate::tr!("pull_requests.files.loading_more"))
-                    })
-                    .when(failed, |row| {
-                        row.child(crate::tr!("pull_requests.files.rest_failed"))
-                            .child(
-                                Button::new("pr-files-rest-retry")
-                                    .outline()
-                                    .xsmall()
-                                    .label(crate::tr!("pull_requests.detail.retry"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(page) = this.page_mut() {
-                                            page.files_view.page_error = None;
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                    })
-            });
+        // Keep the paging footer until prepared rows are appended, so the old
+        // list cannot clamp to a larger viewport before the new page exists.
+        let footer = (page.files_view.page_loading
+            || (page.files_view.rendering && page.files_view.list.is_some())
+            || page.files_view.page_error.is_some())
+        .then(|| {
+            let failed = page.files_view.page_error.is_some();
+            h_flex()
+                .flex_none()
+                .h(px(40.))
+                .px_3()
+                .gap_2()
+                .items_center()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .when(!failed, |row| {
+                    row.child(crate::widgets::spinner::Spinner::new().small())
+                        .child(crate::tr!("pull_requests.files.loading_more"))
+                })
+                .when(failed, |row| {
+                    row.child(crate::tr!("pull_requests.files.rest_failed"))
+                        .child(
+                            Button::new("pr-files-rest-retry")
+                                .outline()
+                                .xsmall()
+                                .label(crate::tr!("pull_requests.detail.retry"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(page) = this.page_mut() {
+                                        page.files_view.page_error = None;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                })
+        });
         let body = if page.files_view.list.is_some() {
-            render_list(self, "pr-files-body", split, wrap, cx)
+            render_list(self, "pr-files-body", split, wrap, window, cx)
         } else {
             material::loading_skeleton(cx)
         };
@@ -1352,7 +1347,7 @@ impl PullRequestView {
             .into_any_element()
     }
 
-    fn placeholder_row(&self, file: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn file_notice(&self, file: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(entry) = self.files_of().and_then(|files| files.get(file)).cloned() else {
             return div().into_any_element();
         };
@@ -1631,8 +1626,8 @@ impl DiffListHost for PullRequestView {
         self.line_comment_menu(cx)
     }
 
-    fn placeholder(&self, file: usize, cx: &mut Context<Self>) -> AnyElement {
-        self.placeholder_row(file, cx)
+    fn notice(&self, file: usize, cx: &mut Context<Self>) -> AnyElement {
+        self.file_notice(file, cx)
     }
 }
 
@@ -1651,7 +1646,7 @@ fn render(
         PullRequestPatch::Hunks(hunks) => Some(hunks.as_str()),
         _ => None,
     };
-    build_file(
+    let mut rendered = build_file(
         &FileDiffInput {
             path: &file.path,
             kind: file.kind,
@@ -1666,5 +1661,10 @@ fn render(
         theme,
         colors,
         whitespace,
-    )
+    );
+    if !matches!(file.patch, PullRequestPatch::Hunks(_)) {
+        rendered.added = file.additions;
+        rendered.removed = file.deletions;
+    }
+    rendered
 }

@@ -34,6 +34,7 @@ struct PlatformCallbacks {
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     quit: Option<Box<dyn FnMut() -> bool>>,
     reopen: Option<Box<dyn FnMut()>>,
+    displays_changed: Option<Box<dyn FnMut()>>,
     system_sleep: Option<Box<dyn FnMut()>>,
     system_wake: Option<Box<dyn FnMut()>>,
     lifecycle: Option<Box<dyn FnMut(AppLifecyclePhase)>>,
@@ -170,6 +171,16 @@ impl AndroidPlatform {
         }
     }
 
+    fn emit_displays_changed(&self) {
+        let callback = self.callbacks.borrow_mut().displays_changed.take();
+        if let Some(mut callback) = callback {
+            callback();
+            if self.callbacks.borrow().displays_changed.is_none() {
+                self.callbacks.borrow_mut().displays_changed = Some(callback);
+            }
+        }
+    }
+
     fn emit_lifecycle(&self, phase: AppLifecyclePhase) {
         let callback = self.callbacks.borrow_mut().lifecycle.take();
         if let Some(mut callback) = callback {
@@ -256,6 +267,7 @@ impl AndroidPlatform {
                     (self.window(), self.app.native_window())
                 {
                     window.set_surface(Some(native_window));
+                    self.emit_displays_changed();
                 }
             }
             MainEvent::TerminateWindow { .. } => {
@@ -267,6 +279,7 @@ impl AndroidPlatform {
             MainEvent::WindowResized { .. } | MainEvent::ContentRectChanged { .. } => {
                 if let Some(window) = self.window() {
                     window.resize_from_native_window();
+                    self.emit_displays_changed();
                 }
             }
             MainEvent::RedrawNeeded { .. } => {
@@ -428,6 +441,10 @@ impl Platform for AndroidPlatform {
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
         vec![self.display.clone()]
+    }
+
+    fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
+        self.callbacks.borrow_mut().displays_changed = Some(callback);
     }
 
     fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {

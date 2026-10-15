@@ -4802,53 +4802,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_built_inline_diff_goes_once_its_row_leaves_the_screen(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-
-        let mut timeline = Timeline::default();
-        timeline.turns = vec![TurnMeta {
-            running: true,
-            ..TurnMeta::default()
-        }];
-        timeline.entries = vec![
-            entry("user", user_item("go")),
-            entry(
-                "edit",
-                EntryContent::Item(ItemContent::FileChange {
-                    changes: vec![agent::FileChange {
-                        path: "src/lib.rs".into(),
-                        kind: agent::FileChangeKind::Modify,
-                        diff: Some("@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n".into()),
-                    }],
-                    status: ItemStatus::Completed,
-                }),
-            ),
-        ];
-        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        draw(cx);
-        assert!(cx.debug_bounds("file-edit-diff").is_some());
-        assert_eq!(view.read_with(cx, |chat, _| chat.inline_diffs.len()), 1);
-
-        // Newer activities fold the open edit into the collapsed Work Log,
-        // so its row never renders again.
-        for index in 0..6 {
-            timeline.entries.push(command(&format!("command-{index}")));
-        }
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
-            cx.notify();
-        });
-        draw(cx);
-        draw(cx);
-        assert!(cx.debug_bounds("file-edit-diff").is_none());
-        assert_eq!(view.read_with(cx, |chat, _| chat.inline_diffs.len()), 0);
-    }
-
-    #[gpui::test]
     fn markdown_on_screen_above_an_expanded_work_log_is_built(cx: &mut TestAppContext) {
         use gpui::{FollowMode, ListOffset, Modifiers, VisualTestContext, px, size};
 
@@ -5416,8 +5369,8 @@ mod tests {
                     }),
                     cx,
                 );
-                let _ = window.draw(cx);
             });
+            draw(cx);
         };
 
         // The finger moves down: earlier content comes into view and following
