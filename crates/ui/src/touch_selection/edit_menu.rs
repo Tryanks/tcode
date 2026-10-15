@@ -26,6 +26,8 @@ pub(crate) struct EditMenuItem {
     /// Names the row for a test, independent of the locale.
     selector: &'static str,
     on_click: ItemHandler,
+    #[cfg(target_os = "ios")]
+    native_paste: bool,
 }
 
 impl EditMenuItem {
@@ -38,6 +40,21 @@ impl EditMenuItem {
             label: label.into(),
             selector,
             on_click: Rc::new(on_click),
+            #[cfg(target_os = "ios")]
+            native_paste: false,
+        }
+    }
+    pub(crate) fn native_paste(self) -> Self {
+        #[cfg(target_os = "ios")]
+        {
+            Self {
+                native_paste: true,
+                ..self
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            self
         }
     }
 }
@@ -93,6 +110,8 @@ impl RenderOnce for EditMenu {
         let last = self.items.len().saturating_sub(1);
         let items = self.items.into_iter().enumerate().flat_map(|(ix, item)| {
             let on_click = item.on_click;
+            #[cfg(target_os = "ios")]
+            let native_paste = item.native_paste;
             // Each item's press surface takes the bar's own corners: the
             // first the left pair, the last the right pair, the ones between
             // none.
@@ -116,8 +135,29 @@ impl RenderOnce for EditMenu {
                 .focusable(false)
                 .debug_selector(move || format!("edit-menu-{selector}"))
                 .label(item.label)
-                .on_click(move |_: &ClickEvent, window, cx| on_click(window, cx))
-                .into_any_element();
+                .on_click(move |_: &ClickEvent, window, cx| on_click(window, cx));
+            let button = button.into_any_element();
+            #[cfg(target_os = "ios")]
+            let button = if native_paste {
+                // UIPasteControl needs its full intrinsic height; Button's
+                // content canvas excludes its padding and clips the native UI.
+                div()
+                    .relative()
+                    .h(px(44.))
+                    .min_w(px(88.))
+                    .child(button)
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            |bounds, _, _, _| gpui_ios::set_paste_control_bounds(Some(bounds)),
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .into_any_element()
+            } else {
+                button
+            };
             // A rule between neighbours, none before the first, the full
             // height of the bar.
             (ix > 0)

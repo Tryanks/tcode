@@ -162,3 +162,6 @@ preview-mcp = { path = "../preview-mcp", optional = true }
 [target.'cfg(target_os = "android")'.dependencies]
 gpui-android = { path = "../platform/gpui-android", optional = true }
 futures = "0.3"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+gpui-ios = { path = "../platform/gpui-ios" }

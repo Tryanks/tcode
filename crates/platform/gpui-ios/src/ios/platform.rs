@@ -29,6 +29,7 @@ pub(crate) struct IosPlatform {
 #[derive(Default)]
 struct IosPlatformState {
     active_window: Option<AnyWindowHandle>,
+    native_paste: Option<ClipboardItem>,
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     on_quit: Option<Box<dyn FnMut() -> bool>>,
     on_reopen: Option<Box<dyn FnMut()>>,
@@ -48,6 +49,12 @@ impl IosPlatform {
             text_system: Arc::new(IosTextSystem::new()),
             state: RefCell::new(IosPlatformState::default()),
         }
+    }
+
+    pub(crate) fn with_native_paste(&self, item: ClipboardItem, paste: impl FnOnce()) {
+        let previous = self.state.borrow_mut().native_paste.replace(item);
+        paste();
+        self.state.borrow_mut().native_paste = previous;
     }
 
     pub(crate) fn notify_lifecycle(&self, phase: AppLifecyclePhase) {
@@ -291,7 +298,11 @@ impl Platform for IosPlatform {
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        super::ffi::host_read_clipboard().map(ClipboardItem::new_string)
+        self.state
+            .borrow()
+            .native_paste
+            .clone()
+            .or_else(|| super::ffi::host_read_clipboard().map(ClipboardItem::new_string))
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {

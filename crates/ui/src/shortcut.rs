@@ -20,6 +20,17 @@ pub(crate) fn init(cx: &mut App) {
         // the editor's earlier contextual one. Keep the editor's native action.
         KeyBinding::new("secondary-z", gpui_base::input::Undo, Some("Input")),
     ]);
+    // gpui-base 0.7.1 gates Apple's editor bindings to macOS. iOS hardware
+    // keyboards use Command too, while GPUI's secondary modifier is Control.
+    #[cfg(target_os = "ios")]
+    cx.bind_keys([
+        KeyBinding::new("cmd-a", gpui_base::input::SelectAll, Some("Input")),
+        KeyBinding::new("cmd-c", gpui_base::input::Copy, Some("Input")),
+        KeyBinding::new("cmd-x", gpui_base::input::Cut, Some("Input")),
+        KeyBinding::new("cmd-v", gpui_base::input::Paste, Some("Input")),
+        KeyBinding::new("cmd-z", gpui_base::input::Undo, Some("Input")),
+        KeyBinding::new("cmd-shift-z", gpui_base::input::Redo, Some("Input")),
+    ]);
     for number in 1..=9 {
         let key = format!("secondary-{number}");
         cx.bind_keys([

@@ -1,4 +1,6 @@
 //! Adds native keyboard intent to the upstream editor's input handler.
+#[cfg(target_os = "ios")]
+use gpui::Focusable as _;
 use gpui::{
     App, Bounds, ClipboardItem, ElementInputHandler, Entity, InputHandler, Pixels, Point,
     TextInputAction, TextInputConfiguration, UTF16Selection, Window,
@@ -11,6 +13,7 @@ pub(super) struct ConfiguredInput<M: InputModeKind> {
     inner: ElementInputHandler<InputBaseState<M>>,
     entity: Entity<InputBaseState<M>>,
     multi_line: bool,
+    text_assistance: bool,
 }
 
 impl<M: InputModeKind> ConfiguredInput<M> {
@@ -18,11 +21,13 @@ impl<M: InputModeKind> ConfiguredInput<M> {
         bounds: Bounds<Pixels>,
         entity: Entity<InputBaseState<M>>,
         multi_line: bool,
+        text_assistance: bool,
     ) -> Self {
         Self {
             inner: ElementInputHandler::new(bounds, entity.clone()),
             entity,
             multi_line,
+            text_assistance,
         }
     }
 }
@@ -80,6 +85,19 @@ impl<M: InputModeKind> InputHandler for ConfiguredInput<M> {
         self.inner.unmark_text(window, cx)
     }
     fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut App) {
+        #[cfg(target_os = "ios")]
+        {
+            // gpui-base's InputHandler uses ordinary typing replacement for
+            // paste. Its Paste action owns atomic undo and selection semantics.
+            let focus = self.entity.read(cx).focus_handle(cx);
+            if !focus.is_focused(window) {
+                return;
+            }
+            gpui_ios::with_native_paste(item, || {
+                focus.dispatch_action(&gpui_base::input::Paste, window, cx);
+            });
+        }
+        #[cfg(not(target_os = "ios"))]
         self.inner.paste(item, window, cx)
     }
     fn bounds_for_range(
@@ -141,6 +159,8 @@ impl<M: InputModeKind> InputHandler for ConfiguredInput<M> {
         cx: &mut App,
     ) -> TextInputConfiguration {
         let mut configuration = self.inner.text_input_configuration(window, cx);
+        configuration.autocorrect = self.text_assistance;
+        configuration.suggestions = self.text_assistance;
         configuration.input_action = if self.multi_line {
             TextInputAction::Enter
         } else {
@@ -163,7 +183,7 @@ mod tests {
             TextareaState::new(window, cx).default_value("😀 exmple here")
         });
         cx.update(|window, cx| {
-            let mut handler = ConfiguredInput::new(Bounds::default(), input.clone(), true);
+            let mut handler = ConfiguredInput::new(Bounds::default(), input.clone(), true, true);
             assert_eq!(handler.text_length_utf16(window, cx), Some(14));
             handler.set_selected_text_range(3..9, window, cx);
             handler.replace_text_in_range(None, "example", window, cx);
