@@ -603,6 +603,7 @@ impl Composer {
             }
         });
         let trigger = Button::new("overflow-controls")
+            .debug_selector(|| "overflow-controls".into())
             .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
             .ghost()
             .compact()
