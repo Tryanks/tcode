@@ -132,6 +132,9 @@ tcode-headless serve --name build-server   # prints the machine id, invitation l
 tcode-headless pair      # reprints the current invitation while it is valid
 ```
 
+For a NAS or homelab, [Docker images and a Compose template](docs/docker.md)
+provide Linux amd64/arm64 deployment with selectable CLIs and persistent logins.
+
 `serve --traverse off` or `--traverse https://your.instance` changes the
 Traverse mode. Headless release builds also serve the browser app, on
 `http://127.0.0.1:47420/` by default; `--browser-listen` binds it to a LAN
