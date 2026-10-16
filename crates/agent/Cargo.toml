@@ -28,6 +28,14 @@ smol = { version = "2", optional = true }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 env_logger = "0.11"
 toml = "1.1"

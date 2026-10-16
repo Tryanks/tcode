@@ -93,7 +93,7 @@ async fn with_server<T>(
 }
 
 struct Server {
-    child: Child,
+    child: crate::process::Tied<Child>,
     stdin: Option<BufWriter<ChildStdin>>,
     lines: Receiver<ChildOutput>,
     stderr_tail: StderrTail,
@@ -113,8 +113,12 @@ impl Server {
     }
 
     async fn start_once(context: &PluginContext) -> Result<Self, AgentError> {
-        let (child, stdin, lines, stderr_tail) =
-            spawn_server(context.binary_path.as_deref(), &[], &context.launch_env)?;
+        let (child, stdin, lines, stderr_tail) = spawn_server(
+            context.binary_path.as_deref(),
+            &[],
+            &context.launch_env,
+            None,
+        )?;
         let mut server = Self {
             child,
             stdin: Some(stdin),

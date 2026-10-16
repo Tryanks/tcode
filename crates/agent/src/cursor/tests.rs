@@ -107,6 +107,7 @@ impl Agent {
             extra_args: Vec::new(),
             acp: None,
             instructions: None,
+            provider_lease: None,
         }
     }
 

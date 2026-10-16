@@ -1286,6 +1286,7 @@ pub(super) fn session_options(
             launch: agent.launch.clone(),
         }),
         instructions: None,
+        provider_lease: None,
     }
 }
 

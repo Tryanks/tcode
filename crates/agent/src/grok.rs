@@ -61,6 +61,7 @@ pub async fn list_models(
         extra_args: Vec::new(),
         acp: None,
         instructions: None,
+        provider_lease: None,
     };
     acp_session::query(
         ProviderKind::Grok,
@@ -1105,6 +1106,7 @@ mod tests {
             extra_args: Vec::new(),
             acp: None,
             instructions: None,
+            provider_lease: None,
         }
     }
 

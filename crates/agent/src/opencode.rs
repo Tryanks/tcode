@@ -47,7 +47,7 @@ pub async fn list_models(
     crate::process::unblock(move || {
         let cwd = std::env::current_dir()?;
         let mut server =
-            OpenCodeServer::spawn(binary_path.as_deref(), &cwd, &launch_env, &[], &[])?;
+            OpenCodeServer::spawn(binary_path.as_deref(), &cwd, &launch_env, &[], &[], None)?;
         let result = (|| {
             server.wait_healthy(Duration::from_secs(15))?;
             let provider_state = server.http.get_json("/provider")?;
@@ -73,6 +73,7 @@ async fn run_actor(
         &opts.launch_env,
         &opts.extra_args,
         &opts.mcp_servers.iter().collect::<Vec<_>>(),
+        opts.provider_lease.as_ref(),
     ) {
         Ok(server) => server,
         Err(err) => {
@@ -1463,7 +1464,7 @@ fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<&str> {
 }
 
 struct OpenCodeServer {
-    child: Child,
+    child: crate::process::Tied<Child>,
     http: HttpClient,
     stderr_tail: crate::process::StderrTail,
 }
@@ -1475,11 +1476,12 @@ impl OpenCodeServer {
         launch_env: &LaunchEnv,
         extra_args: &[String],
         registrations: &[&crate::McpRegistration],
+        lease: Option<&crate::ProviderLease>,
     ) -> Result<Self, AgentError> {
         let binary = crate::resolve_binary(binary_path, "opencode")?;
         let port = reserve_loopback_port()?;
         let password = uuid::Uuid::new_v4().simple().to_string();
-        let mut command = crate::process::command(&binary);
+        let mut command = crate::process::provider_command(&binary);
         command
             .arg("serve")
             .args(extra_args)
@@ -1498,9 +1500,12 @@ impl OpenCodeServer {
         if let Some(config) = opencode_config_content(launch_env, registrations)? {
             command.env("OPENCODE_CONFIG_CONTENT", config);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())))?;
+        let mut child = crate::process::tie(
+            command.spawn().map_err(|err| {
+                AgentError::Spawn(format!("spawning `{}`: {err}", binary.display()))
+            })?,
+            lease,
+        );
         let stdout = child
             .stdout
             .take()
@@ -1864,7 +1869,12 @@ mod tests {
         let (_, sse) = smol::channel::unbounded();
         OpenCodeActor {
             server: OpenCodeServer {
-                child: crate::process::command("/usr/bin/true").spawn().unwrap(),
+                child: crate::process::tie(
+                    crate::process::provider_command("/usr/bin/true")
+                        .spawn()
+                        .unwrap(),
+                    None,
+                ),
                 http: HttpClient::new(format!("http://{address}"), "test".into()),
                 stderr_tail: crate::process::StderrTail::default(),
             },
@@ -2010,6 +2020,7 @@ mod tests {
             &LaunchEnv::default(),
             &[],
             &[],
+            None,
         )
         .unwrap();
         let started = Instant::now();

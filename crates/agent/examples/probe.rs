@@ -408,6 +408,7 @@ async fn run_probe(
         extra_args: Vec::new(),
         acp,
         instructions: None,
+        provider_lease: None,
     };
     let handle = match start_session(provider, opts).await {
         Ok(handle) => handle,

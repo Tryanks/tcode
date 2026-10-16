@@ -37,6 +37,8 @@ pub mod pi;
 #[cfg(feature = "process")]
 mod process;
 #[cfg(feature = "process")]
+pub use process::ProviderLease;
+#[cfg(feature = "process")]
 mod subagent_tail;
 
 use std::path::PathBuf;
@@ -770,6 +772,11 @@ pub struct SessionOptions {
     /// Tcode's instructions for the model, delivered through the provider's
     /// [`Caps::instruction_channel`]; never part of a user turn's text.
     pub instructions: Option<String>,
+    /// The host's claim on its data directory's providers; [`start_session`]
+    /// waits for it, so a session never resumes beside a provider an earlier
+    /// host left running. `None` outside a host.
+    #[cfg(feature = "process")]
+    pub provider_lease: Option<ProviderLease>,
 }
 
 /// The per-provider environment configured in Settings → Providers, applied to
@@ -1628,6 +1635,9 @@ pub async fn start_session(
             "working directory `{}` no longer exists",
             opts.cwd.display()
         )));
+    }
+    if let Some(lease) = opts.provider_lease.clone() {
+        process::unblock(move || lease.hold().map(drop)).await?;
     }
     match provider {
         ProviderKind::Codex => codex::start(opts).await,

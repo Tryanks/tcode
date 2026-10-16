@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
-use crate::process::{ChildOutput, StderrTail, send_json as write_json, spawn_line_reader};
+use crate::process::{ChildOutput, StderrTail, Tied, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
     ApprovalRequest, Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind,
@@ -228,7 +228,7 @@ pub async fn list_models(
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     let (mut child, mut stdin, lines, mut stderr_tail) =
-        spawn_server(binary_path.as_deref(), &[], &launch_env)?;
+        spawn_server(binary_path.as_deref(), &[], &launch_env, None)?;
     let result = collect_models(&mut stdin, &lines).await;
     // The stdout reader can observe EOF a few milliseconds before the process
     // becomes waitable. Give a self-exiting child time to publish its real
@@ -248,7 +248,7 @@ pub async fn read_rate_limits(
     launch_env: LaunchEnv,
 ) -> Result<Value, AgentError> {
     let (mut child, mut stdin, lines, mut stderr_tail) =
-        spawn_server(binary_path.as_deref(), &[], &launch_env)?;
+        spawn_server(binary_path.as_deref(), &[], &launch_env, None)?;
     let result = async {
         initialize(&mut stdin, &lines).await?;
         send_json(
@@ -574,7 +574,7 @@ enum ElicitFieldKind {
 }
 
 struct Actor {
-    child: Child,
+    child: Tied<Child>,
     stderr_tail: StderrTail,
     stdin: BufWriter<ChildStdin>,
     lines: Receiver<ChildOutput>,
@@ -647,14 +647,18 @@ async fn run_actor(
 ) {
     let mut extra_args = mcp_args(&opts.mcp_servers);
     extra_args.extend(opts.extra_args.iter().cloned());
-    let (mut child, mut stdin, lines, mut stderr_tail) =
-        match spawn_server(opts.binary_path.as_deref(), &extra_args, &opts.launch_env) {
-            Ok(parts) => parts,
-            Err(err) => {
-                let _ = ready.send(Err(err)).await;
-                return;
-            }
-        };
+    let (mut child, mut stdin, lines, mut stderr_tail) = match spawn_server(
+        opts.binary_path.as_deref(),
+        &extra_args,
+        &opts.launch_env,
+        opts.provider_lease.as_ref(),
+    ) {
+        Ok(parts) => parts,
+        Err(err) => {
+            let _ = ready.send(Err(err)).await;
+            return;
+        }
+    };
 
     let startup = initialize_and_open_thread(&opts, &mut stdin, &lines).await;
     let OpenedThread {
@@ -1133,22 +1137,24 @@ fn enrich_startup_error(
     }
 }
 
+/// A running `codex app-server`: the child, its stdin, its stdout lines and
+/// its stderr tail.
+type Server = (
+    Tied<Child>,
+    BufWriter<ChildStdin>,
+    Receiver<ChildOutput>,
+    StderrTail,
+);
+
 fn spawn_server(
     binary_path: Option<&Path>,
     extra_args: &[String],
     launch_env: &LaunchEnv,
-) -> Result<
-    (
-        Child,
-        BufWriter<ChildStdin>,
-        Receiver<ChildOutput>,
-        StderrTail,
-    ),
-    AgentError,
-> {
+    lease: Option<&crate::ProviderLease>,
+) -> Result<Server, AgentError> {
     // Absolute path: bare names break once a child sets its own cwd.
     let binary = crate::resolve_binary(binary_path, "codex")?;
-    let mut cmd = crate::process::command(&binary);
+    let mut cmd = crate::process::provider_command(&binary);
     cmd.arg("app-server")
         .args(extra_args)
         .stdin(Stdio::piped())
@@ -1165,9 +1171,11 @@ fn spawn_server(
             log::warn!("could not create CODEX_HOME {}: {err}", home.display());
         }
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| AgentError::Spawn(err.to_string()))?;
+    let mut child = crate::process::tie(
+        cmd.spawn()
+            .map_err(|err| AgentError::Spawn(err.to_string()))?,
+        lease,
+    );
     let stdin = BufWriter::new(
         child
             .stdin
@@ -4276,12 +4284,15 @@ mod tests {
     }
 
     fn test_actor() -> (Actor, Receiver<AgentEvent>) {
-        let mut child = crate::process::test_echo_command()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = crate::process::tie(
+            crate::process::test_echo_command()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+            None,
+        );
         let stdin = BufWriter::new(child.stdin.take().unwrap());
         let stdout = child.stdout.take().unwrap();
         let (line_tx, line_rx) = smol::channel::unbounded();

@@ -111,11 +111,12 @@ impl ProviderLauncher {
     fn launch(&self, provider: ProviderKind, options: SessionOptions) -> ProviderLaunchFuture {
         (self.0)(provider, options)
     }
-}
 
-impl Default for ProviderLauncher {
-    fn default() -> Self {
-        Self(Arc::new(|provider, options| {
+    /// The native adapters, holding `data_dir`'s provider lease.
+    fn native(data_dir: &std::path::Path) -> Self {
+        let lease = agent::ProviderLease::new(data_dir);
+        Self(Arc::new(move |provider, mut options| {
+            options.provider_lease = Some(lease.clone());
             Box::pin(agent::start_session(provider, options))
         }))
     }
@@ -558,6 +559,7 @@ impl AppState {
         let (store_writes, store_write_receiver) = smol::channel::unbounded();
         let (store_write_failures, store_write_failure_receiver) = smol::channel::unbounded();
         let session_search = Arc::new(std::sync::Mutex::new(SessionSearch::new(store.clone())));
+        let provider_launcher = ProviderLauncher::native(store.root());
         Ok(Self {
             store,
             user_directories,
@@ -614,7 +616,7 @@ impl AppState {
             resident_idle_grace: RESIDENT_IDLE_GRACE,
             ai_title_generation_enabled,
             title_generating: Default::default(),
-            provider_launcher: ProviderLauncher::default(),
+            provider_launcher,
             acp_registry: None,
             acp_registry_loading: false,
             acp_registry_error: None,

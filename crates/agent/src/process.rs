@@ -12,6 +12,10 @@ use smol::channel::Receiver;
 
 use crate::AgentError;
 
+mod tie;
+pub use tie::ProviderLease;
+pub(crate) use tie::{Tied, tie};
+
 const STDERR_TAIL_LINES: usize = 20;
 
 #[cfg(windows)]
@@ -35,6 +39,23 @@ pub(crate) fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Co
 /// exposes no `creation_flags`, so the flag rides in through the `From` impl.
 pub(crate) fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::process::Command {
     smol::process::Command::from(command(program))
+}
+
+/// A provider's command: it leads a process group of its own, which its
+/// [`tie`] then ends with the host.
+pub(crate) fn provider_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut cmd = command(program);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    cmd
+}
+
+/// [`provider_command`] for the async (`smol`) command type.
+pub(crate) fn provider_async_command<S: AsRef<std::ffi::OsStr>>(
+    program: S,
+) -> smol::process::Command {
+    smol::process::Command::from(provider_command(program))
 }
 
 /// Runs blocking work on `smol`'s blocking pool. The one approved
@@ -184,7 +205,7 @@ pub(crate) const TEST_ECHO_READY: &str = "TCODE_TEST_ECHO_READY";
 #[cfg(test)]
 pub(crate) fn test_echo_command() -> std::process::Command {
     // Reuse the test executable so actor fixtures need no shell or PATH tools.
-    let mut child = command(std::env::current_exe().unwrap());
+    let mut child = provider_command(std::env::current_exe().unwrap());
     child
         .args([
             "--exact",

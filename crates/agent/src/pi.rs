@@ -13,7 +13,7 @@ use smol::channel::{Receiver, Sender};
 #[cfg(test)]
 use crate::TurnStatus;
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
-use crate::process::{ChildOutput, send_json as write_json, spawn_line_reader};
+use crate::process::{ChildOutput, Tied, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
@@ -216,7 +216,7 @@ async fn run_actor(
             return;
         }
     };
-    let mut cmd = crate::process::command(&binary);
+    let mut cmd = crate::process::provider_command(&binary);
     cmd.args(&opts.extra_args).arg("--mode").arg("rpc");
     if let Some(thinking) = selected_thinking(&opts.option_selections) {
         cmd.arg("--thinking").arg(thinking);
@@ -232,7 +232,7 @@ async fn run_actor(
         cmd.env(key, value);
     }
     let mut child = match cmd.spawn() {
-        Ok(child) => child,
+        Ok(child) => crate::process::tie(child, opts.provider_lease.as_ref()),
         Err(err) => {
             let _ = ready
                 .send(Err(AgentError::Spawn(format!(
@@ -314,7 +314,7 @@ async fn run_actor(
 }
 
 struct PiActor {
-    child: Child,
+    child: Tied<Child>,
     stdin: BufWriter<ChildStdin>,
     lines: Receiver<ChildOutput>,
     events: Sender<AgentEvent>,

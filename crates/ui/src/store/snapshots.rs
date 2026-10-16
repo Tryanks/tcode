@@ -378,6 +378,7 @@ mod tests {
                     extra_args: vec![],
                     acp: None,
                     instructions: None,
+                    provider_lease: None,
                 })
                 .await
                 .unwrap();

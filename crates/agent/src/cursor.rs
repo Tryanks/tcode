@@ -78,6 +78,7 @@ pub async fn list_models(
         extra_args: Vec::new(),
         acp: None,
         instructions: None,
+        provider_lease: None,
     };
     let cursor = Cursor::new(&opts);
     acp_session::query(

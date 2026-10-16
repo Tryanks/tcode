@@ -93,7 +93,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let applied_permission_mode =
         effective_permission_mode(launch_permission_mode, &opts.extra_args);
 
-    let mut cmd = crate::process::async_command(&binary);
+    let mut cmd = crate::process::provider_async_command(&binary);
     cmd.arg("--print")
         .arg("--input-format")
         .arg("stream-json")
@@ -166,9 +166,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         cmd.env(key, value);
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AgentError::Spawn(format!("spawning `{binary}`: {e}")))?;
+    let mut child = crate::process::tie(
+        cmd.spawn()
+            .map_err(|e| AgentError::Spawn(format!("spawning `{binary}`: {e}")))?,
+        opts.provider_lease.as_ref(),
+    );
 
     let stdin = child
         .stdin
@@ -489,7 +491,7 @@ fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
 
 #[allow(clippy::too_many_arguments)]
 async fn actor_loop(
-    mut child: smol::process::Child,
+    mut child: crate::process::Tied<smol::process::Child>,
     mut stdin: smol::process::ChildStdin,
     cmd_rx: smol::channel::Receiver<SessionCommand>,
     line_rx: smol::channel::Receiver<String>,
@@ -3637,6 +3639,110 @@ mod tests {
         }
     }
 
+    /// A host killed without unwinding must not leave its Claude Code process
+    /// running, and the next host must not resume the thread beside it. The
+    /// stand-in behaves as the real CLI did after an aborted host: it keeps
+    /// working once stdin closes, and it outlasts SIGTERM.
+    #[cfg(unix)]
+    #[test]
+    fn resume_after_an_aborted_host_waits_for_its_provider_to_end() {
+        const HOST: &str = "TCODE_TEST_ABORTED_HOST_DIR";
+        const READY: &str = "TCODE_TEST_HOST_READY";
+        let options = |directory: &std::path::Path, resume: bool| SessionOptions {
+            cwd: directory.to_path_buf(),
+            model: None,
+            resume: resume.then(|| ResumeCursor(json!({"session_id": "native"}))),
+            fork: false,
+            binary_path: Some(directory.join("claude")),
+            option_selections: Vec::new(),
+            mcp_servers: Vec::new(),
+            launch_env: LaunchEnv::default(),
+            extra_args: Vec::new(),
+            acp: None,
+            instructions: None,
+            provider_lease: Some(crate::ProviderLease::new(directory)),
+        };
+        if let Some(directory) = std::env::var_os(HOST) {
+            let directory = PathBuf::from(directory);
+            smol::block_on(async {
+                let handle =
+                    crate::start_session(ProviderKind::ClaudeCode, options(&directory, false))
+                        .await
+                        .unwrap();
+                while !matches!(
+                    handle.events.recv().await.unwrap(),
+                    AgentEvent::ProviderOptions { .. }
+                ) {}
+                println!("{READY}");
+                std::thread::sleep(std::time::Duration::from_secs(600));
+            });
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory =
+            std::env::temp_dir().join(format!("agent-claude-aborted-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("claude");
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+if [ "$1" = --version ]; then printf '2.1.200\n'; exit 0; fi
+trap '' TERM
+cd "$(dirname "$0")"
+if [ -f pid ]; then
+  case "$(ps -o stat= -p "$(cat pid)")" in ''|Z*) echo gone ;; *) echo alive ;; esac > previous
+fi
+echo $$ > pid
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"native","permissionMode":"default"}'
+while IFS= read -r line; do :; done
+exec sleep 600
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut host = crate::process::command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "claude::tests::resume_after_an_aborted_host_waits_for_its_provider_to_end",
+                "--nocapture",
+            ])
+            .env(HOST, &directory)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let ready = std::io::BufRead::lines(std::io::BufReader::new(host.stdout.take().unwrap()))
+            .map_while(Result::ok)
+            .any(|line| line == READY);
+        assert!(ready, "the host never started its provider");
+        let first = std::fs::read_to_string(directory.join("pid")).unwrap();
+        // SIGKILL: the host runs no Drop, as after an abort.
+        host.kill().unwrap();
+        host.wait().unwrap();
+
+        smol::block_on(async {
+            let handle = crate::start_session(ProviderKind::ClaudeCode, options(&directory, true))
+                .await
+                .unwrap();
+            while !matches!(
+                handle.events.recv().await.unwrap(),
+                AgentEvent::ProviderOptions { .. }
+            ) {}
+            shut_down(handle).await;
+        });
+        let previous = std::fs::read_to_string(directory.join("previous")).unwrap();
+        if previous.trim() == "alive" {
+            // This test's own stand-in, which outlived its host.
+            let _ = crate::process::command("kill")
+                .args(["-KILL", first.trim()])
+                .status();
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(previous.trim(), "gone");
+    }
+
     #[cfg(unix)]
     #[test]
     fn instructions_append_to_the_system_prompt_on_creation_and_resume() {
@@ -3661,6 +3767,7 @@ mod tests {
                     extra_args: Vec::new(),
                     acp: None,
                     instructions: Some(instructions.into()),
+                    provider_lease: None,
                 })
                 .await
                 .unwrap();
@@ -3704,6 +3811,7 @@ mod tests {
                 extra_args: Vec::new(),
                 acp: None,
                 instructions: None,
+                provider_lease: None,
             })
             .await
             .unwrap();
