@@ -39,7 +39,7 @@ public func gpuiHostFirstFrameRendered() {
 
 @_cdecl("gpui_ios_host_schedule_frame")
 public func gpuiHostScheduleFrame() {
-    GPUIHostBridge.view?.setNeedsDisplay()
+    GPUIHostBridge.controller?.wakeFrames()
 }
 
 @_cdecl("gpui_ios_host_show_keyboard")

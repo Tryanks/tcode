@@ -41,7 +41,8 @@ void gpui_ios_init(void);
 uint8_t gpui_ios_attach_view(void *view, float width, float height, float scale,
                              uint8_t dark);
 void gpui_ios_detach_view(void *view);
-void gpui_ios_request_frame(void);
+uint8_t gpui_ios_request_frame(void);
+void gpui_ios_display_changed(double refresh_rate);
 
 void gpui_ios_touches_began(const GpuiIosTouch *touches, size_t count);
 void gpui_ios_touches_moved(const GpuiIosTouch *touches, size_t count);

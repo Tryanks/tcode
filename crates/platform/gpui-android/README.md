@@ -12,7 +12,16 @@ panic instead of pulling Android libraries into host builds.
 process-local platform. Android's native activity loop remains the GPUI
 foreground executor. Work submitted to the background executor is distributed
 over a small Rust worker pool; delayed work uses timer threads and foreground
-continuations wake the Android looper.
+continuations wake the Android looper. GPUI's `frame_waker` and
+`schedule_frame` request a coalesced Java `Choreographer` callback; unrelated
+looper wakes do not render. [FramePacer](../frame-pacing/src/lib.rs) owns demand
+and activity grace, shared with iOS. Isolated invalidations return to pause;
+touch input and next-frame animations keep callbacks scheduled. Pausing the
+activity or losing its surface suspends pacing without losing invalidation.
+The Java host reports the display's maximum refresh capability and uses
+`Surface.setFrameRate` on API 30+, with seamless-only switching on API 31+.
+Idle clears the frame-rate vote, leaving system power and thermal policy in
+control.
 
 The platform exposes one full-screen `PlatformWindow`. It owns the current
 `ANativeWindow`, a `gpui_wgpu::WgpuRenderer`, and the shared `WgpuContext`.
