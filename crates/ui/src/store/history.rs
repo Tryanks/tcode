@@ -161,6 +161,38 @@ impl WorkspaceStore {
         }
     }
 
+    /// Whether a report of the history window would change anything. One
+    /// that would not is not made: an update of the store builds every view
+    /// that reads it again.
+    pub(crate) fn history_window_changes(&self, screens: f32, following_tail: bool) -> bool {
+        if self.session_loading() || !screens.is_finite() {
+            return false;
+        }
+        let records = self.selected_history().map_or(0, |held| held.records.len());
+        self.history_logged_records != Some(records)
+            || self.wants_history_page(screens)
+            || self.history_trim_changes(following_tail)
+    }
+
+    fn wants_history_page(&self, screens: f32) -> bool {
+        screens < HISTORY_WINDOW_SCREENS
+            && self.history_error.is_none()
+            && self.history_page_loadable()
+    }
+
+    /// Whether the trim of pages above the tail is to be scheduled or
+    /// cancelled.
+    fn history_trim_changes(&self, following_tail: bool) -> bool {
+        if following_tail {
+            self.history_trim.is_none()
+                && self
+                    .selected_history()
+                    .is_some_and(HeldHistory::holds_pages_above_tail)
+        } else {
+            self.history_trim.is_some()
+        }
+    }
+
     /// Geometry is reported after layout, including the first frame on restore.
     /// Event counts cannot predict the height of folded turns.
     pub(crate) fn update_history_window(
@@ -183,16 +215,15 @@ impl WorkspaceStore {
             );
             self.history_logged_records = Some(records);
         }
-        if screens < HISTORY_WINDOW_SCREENS && self.history_error.is_none() {
+        if self.wants_history_page(screens) {
             self.load_history_pages(following_tail, cx);
+        }
+        if !self.history_trim_changes(following_tail) {
+            return;
         }
         if !following_tail {
             self.history_trim = None;
-        } else if self.history_trim.is_none()
-            && self
-                .selected_history()
-                .is_some_and(HeldHistory::holds_pages_above_tail)
-        {
+        } else {
             let generation = self.selection_generation;
             self.history_trim = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(HISTORY_TRIM_DELAY).await;
@@ -242,16 +273,20 @@ impl WorkspaceStore {
         self.load_history_pages(false, cx);
     }
 
+    fn history_page_loadable(&self) -> bool {
+        self.history_task.is_none()
+            && self.history_available()
+            && !self.session_loading()
+            && self.baseline_topics.contains(&Topic::SessionEvents {
+                session_id: self.selected_session_id.clone().expect("selected history"),
+            })
+    }
+
     fn load_history_pages(&mut self, tail: bool, cx: &mut Context<Self>) {
-        if self.history_task.is_some() || !self.history_available() || self.session_loading() {
+        if !self.history_page_loadable() {
             return;
         }
         let session_id = self.selected_session_id.clone().expect("selected history");
-        if !self.baseline_topics.contains(&Topic::SessionEvents {
-            session_id: session_id.clone(),
-        }) {
-            return;
-        }
         let before = self.selected_history().expect("selected history").from;
         let generation = self.selection_generation;
         let host = self.host.clone();

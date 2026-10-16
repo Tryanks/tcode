@@ -1272,19 +1272,28 @@ impl ChatView {
 
     /// Row hints only approximate the rows on screen, which can be far
     /// shorter than a hint assumes (an expanded Work Log's activities). Take
-    /// the rows the list painted when the hint missed some of them.
-    fn adopt_painted_rows(&mut self, painted: Range<usize>, cx: &mut Context<Self>) {
+    /// the rows the list painted when the hint missed some of them. `None`
+    /// when they change nothing.
+    fn painted_rows_change(&self, painted: Range<usize>) -> Option<PaintedRowsChange> {
         let row_count = self.rows.len();
         let painted = painted.start.min(row_count)..painted.end.min(row_count);
-        self.painted_tail_start = (self.list_state.is_following_tail() && painted.end == row_count)
+        let tail_start = (self.list_state.is_following_tail() && painted.end == row_count)
             .then_some(painted.start);
         let window = &self.markdown_visible_rows;
-        if window.start <= painted.start && painted.end <= window.end {
-            return;
+        let missed = painted.start < window.start || window.end < painted.end;
+        (missed || tail_start != self.painted_tail_start).then(|| PaintedRowsChange {
+            tail_start,
+            visible: missed.then_some(painted),
+        })
+    }
+
+    fn adopt_painted_rows(&mut self, change: PaintedRowsChange, cx: &mut Context<Self>) {
+        self.painted_tail_start = change.tail_start;
+        if let Some(visible) = change.visible {
+            self.markdown_visible_rows = visible;
+            self.sync_markdown_residency(None, cx);
+            cx.notify();
         }
-        self.markdown_visible_rows = painted;
-        self.sync_markdown_residency(None, cx);
-        cx.notify();
     }
 
     #[cfg(test)]
@@ -2373,8 +2382,11 @@ impl ChatView {
 
     /// Release the screens of panels no longer laid out and remeasure the
     /// rows whose panel changed height with a new screen.
-    fn settle_command_panels(&mut self, cx: &mut Context<Self>) {
-        let changes = self.command_panels.borrow_mut().settle();
+    fn apply_command_panel_changes(
+        &mut self,
+        changes: components::command_panel::PanelChanges,
+        cx: &mut Context<Self>,
+    ) {
         if !changes.unmounted.is_empty() {
             self.workspace_store.update(cx, |store, _| {
                 for id in &changes.unmounted {
@@ -3588,6 +3600,12 @@ struct ReservationScrollBack {
     measured: bool,
 }
 
+/// What the rows a frame painted change; see [`ChatView::painted_rows_change`].
+struct PaintedRowsChange {
+    tail_start: Option<usize>,
+    visible: Option<Range<usize>>,
+}
+
 impl ChatView {
     /// Space above the first turn's content: the edge padding plus the history
     /// reservation. Both move to the new first row when a page lands.
@@ -3647,19 +3665,32 @@ impl Render for ChatView {
         self.apply_reservation_scroll_back(window, cx);
         // Measure after this frame's list layout, including the initial tail
         // frame and frames caused by prepends. No scroll event is required.
+        // The chat is only read, and the store updated only when the report
+        // changes it: an update of either builds the chat again with the next
+        // render of the view around it.
         let chat = cx.entity().downgrade();
         window.on_next_frame(move |_, cx| {
-            let _ = chat.update(cx, |chat, cx| {
-                if chat.capture.is_none()
-                    && let Some(screens) =
-                        history_screens_covered(&chat.list_state, chat.leading_space())
-                {
-                    let following_tail = chat.list_state.is_following_tail();
-                    chat.workspace_store.update(cx, |store, cx| {
-                        store.update_history_window(screens, following_tail, cx);
-                    });
-                }
-            });
+            let Some(chat) = chat.upgrade() else {
+                return;
+            };
+            let chat = chat.read(cx);
+            if chat.capture.is_some() {
+                return;
+            }
+            let Some(screens) = history_screens_covered(&chat.list_state, chat.leading_space())
+            else {
+                return;
+            };
+            let following_tail = chat.list_state.is_following_tail();
+            let store = chat.workspace_store.clone();
+            if store
+                .read(cx)
+                .history_window_changes(screens, following_tail)
+            {
+                store.update(cx, |store, cx| {
+                    store.update_history_window(screens, following_tail, cx);
+                });
+            }
         });
         // A screen's height: the window's, which this render already knows.
         // The list's own height is only measured by this frame's layout.
@@ -4035,12 +4066,27 @@ impl Render for ChatView {
                                             let _ = view.update(cx, |_, cx| cx.notify());
                                         });
                                     }
+                                    // Only update the chat when the frame
+                                    // changed something: an update builds it
+                                    // again with the next render of the view
+                                    // around it.
                                     let painted = painted.get();
                                     window.defer(cx, move |_, cx| {
-                                        let _ = view.update(cx, |chat, cx| {
-                                            chat.settle_command_panels(cx);
-                                            if let Some((start, end)) = painted {
-                                                chat.adopt_painted_rows(start..end, cx);
+                                        let Some(view) = view.upgrade() else {
+                                            return;
+                                        };
+                                        let chat = view.read(cx);
+                                        let panels = chat.command_panels.borrow_mut().settle();
+                                        let painted = painted.and_then(|(start, end)| {
+                                            chat.painted_rows_change(start..end)
+                                        });
+                                        if panels.is_empty() && painted.is_none() {
+                                            return;
+                                        }
+                                        view.update(cx, |chat, cx| {
+                                            chat.apply_command_panel_changes(panels, cx);
+                                            if let Some(painted) = painted {
+                                                chat.adopt_painted_rows(painted, cx);
                                             }
                                         });
                                     });
@@ -4224,6 +4270,25 @@ mod tests {
             window.refresh();
             let _ = window.draw(cx);
         });
+    }
+
+    /// Delivers frames for as long as the window asks for them, spaced as a
+    /// display spaces them: gpui-base's scrollbar motion reads the wall clock,
+    /// and GPUI's animations the test clock.
+    fn settle_frames(cx: &mut gpui::VisualTestContext) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the window kept asking for frames"
+            );
+            std::thread::sleep(Duration::from_millis(16));
+            cx.executor().advance_clock(Duration::from_millis(16));
+        }
     }
 
     #[test]
@@ -7531,6 +7596,46 @@ This begins after the hard break."#;
             first > px(0.),
             "one short turn scrolls into the reservation above it"
         );
+    }
+
+    /// A thread with nothing new to show is drawn again from what it drew
+    /// when the view around it renders again, as the shell does for its own
+    /// reasons, and asks for no frame of its own.
+    #[gpui::test]
+    fn an_idle_chat_is_reused_when_the_view_around_it_renders(cx: &mut TestAppContext) {
+        use gpui::{
+            Context, IntoElement, ParentElement as _, Render, Styled as _, VisualTestContext,
+            Window, div, px, size,
+        };
+        struct Around(Entity<ChatView>);
+        impl Render for Around {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(6));
+        let (around, cx) = cx.add_window_view(|window, cx| {
+            Around(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(900.)));
+        settle_frames(cx);
+
+        for _ in 0..2 {
+            cx.update(|window, _| window.reset_layout_stats());
+            around.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            assert_eq!(
+                cx.update(|window, _| window.layout_stats().views_built),
+                1,
+                "the chat was built again with the view around it"
+            );
+            assert_eq!(
+                cx.update(|window, cx| window.simulate_next_frame(cx)),
+                0,
+                "the idle chat asked for another frame"
+            );
+        }
     }
 
     /// Whether the header's split buttons carry their labels follows the width

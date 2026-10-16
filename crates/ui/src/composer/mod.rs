@@ -159,17 +159,10 @@ pub struct Composer {
     /// Bumped by `/model` so the model-picker popover re-opens (a fresh popover
     /// instance, keyed by this token, starts open).
     model_picker_token: u64,
-    /// Measured width of the control row (written from the prepaint callback,
-    /// read at render time); drives the collapse to the "⋯" overflow layout at
-    /// narrow widths. Shared via `Rc<Cell>` because the paint-phase callback
-    /// cannot mutate the entity directly.
-    control_width: Rc<Cell<Option<f32>>>,
-    /// The width `render` last observed, to detect when a fresh measurement
-    /// arrived and drive the reflow convergence (see `render`).
-    prev_seen_width: Option<f32>,
-    /// Whether the current render was scheduled by our own animation-frame
-    /// request (vs. an external trigger). Used to stop the convergence loop.
-    raf_pending: bool,
+    /// Whether the control row was last laid out narrower than its controls
+    /// fit, which folds them into the "⋯" overflow menu. Only layout knows
+    /// the width, so its prepaint callback writes it here.
+    control_row_narrow: Rc<Cell<bool>>,
     /// The inline trigger (`@`/`/`/`$`) active at the cursor, recomputed on every
     /// input change. Drives the trigger menu.
     active_trigger: Option<ComposerTrigger>,
@@ -348,9 +341,7 @@ impl Composer {
             ui_dismissed_request_id: None,
             ui_expanded: false,
             model_picker_token: 0,
-            control_width: Rc::new(Cell::new(None)),
-            prev_seen_width: None,
-            raf_pending: false,
+            control_row_narrow: Rc::default(),
             active_trigger: None,
             menu_highlight: 0,
             menu_last_key: None,
@@ -1066,27 +1057,7 @@ impl Render for Composer {
         let border = cx.theme().border;
         let divider = move || div().w_px().h(px(16.)).bg(border);
 
-        // Collapse to the compact "⋯" layout once the row is measured narrower
-        // than the threshold. Until the first prepaint measurement lands we
-        // assume the full layout (the common wide case).
-        let measured = self.control_width.get();
-        let compact = self.compact || measured.is_some_and(|w| w < CONTROL_ROW_COMPACT_BELOW);
-
-        // The control row's width is only known after layout (the paint-phase
-        // callback below), one frame behind this render, and that callback
-        // cannot itself re-render. So we drive a short animation-frame loop:
-        // request another frame after any render that could have changed the
-        // measurement, and stop once two consecutive frames agree. This keeps
-        // the composer in sync when the diff panel toggles or the window/panels
-        // resize, without perpetually rendering when idle.
-        let external_trigger = !self.raf_pending;
-        self.raf_pending = false;
-        let need_frame = external_trigger || measured != self.prev_seen_width;
-        self.prev_seen_width = measured;
-        if need_frame {
-            self.raf_pending = true;
-            window.request_animation_frame();
-        }
+        let compact = self.compact || self.control_row_narrow.get();
 
         let control_row_base = h_flex()
             .w_full()
@@ -1140,19 +1111,14 @@ impl Render for Composer {
                 .child(self.render_primary_action(turn_running, cx))
         };
 
-        // Measure the control row's laid-out width so the next frame can decide
-        // whether to collapse. The paint-phase callback can't mutate the entity
-        // or re-run its render, so the width lives in a shared Cell; on a real
-        // change we schedule an entity notify on the next frame (outside paint)
-        // to re-render with the new layout.
-        let width_cell = self.control_width.clone();
-        let control_row = control_row.on_prepaint(move |bounds, _window, _cx| {
-            let width: f32 = bounds.size.width.into();
-            let changed = width_cell
-                .get()
-                .is_none_or(|prev| (prev - width).abs() > 0.5);
-            if changed {
-                width_cell.set(Some(width));
+        // The row's width is known only once it is laid out, after this
+        // render; one that folds or unfolds the controls renders again.
+        let narrow_cell = self.control_row_narrow.clone();
+        let composer = cx.entity_id();
+        let control_row = control_row.on_prepaint(move |bounds, window, _| {
+            let narrow = f32::from(bounds.size.width) < CONTROL_ROW_COMPACT_BELOW;
+            if narrow_cell.replace(narrow) != narrow {
+                window.on_next_frame(move |_, cx| cx.notify(composer));
             }
         });
 
@@ -1626,6 +1592,29 @@ mod replica_tests {
                 );
             }
         }
+    }
+
+    /// A desktop composer folds its controls into the overflow menu once its
+    /// row is laid out narrower than they fit, and unfolds them once wider,
+    /// in the frames that follow the resize.
+    #[gpui::test]
+    fn the_control_row_folds_with_the_width_it_is_laid_out_at(cx: &mut TestAppContext) {
+        let (store, _incoming, _outgoing, _status) = attach(cx);
+        let (_composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let resize = |width: f32, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_resize(gpui::size(px(width), px(800.)));
+            for _ in 0..100 {
+                cx.run_until_parked();
+                if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+                    return cx.debug_bounds("overflow-controls").is_some();
+                }
+            }
+            panic!("the composer kept asking for frames");
+        };
+        assert!(!resize(1200., cx), "a wide row folded its controls");
+        assert!(resize(400., cx), "a narrow row kept its controls");
+        assert!(!resize(1200., cx), "a row widened again kept them folded");
     }
 
     /// A value the provider reports as unavailable is shown but never sent.

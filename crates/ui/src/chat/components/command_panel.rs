@@ -55,6 +55,12 @@ pub(crate) struct PanelChanges {
     pub(crate) resized: Vec<(usize, String)>,
 }
 
+impl PanelChanges {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.unmounted.is_empty() && self.resized.is_empty()
+    }
+}
+
 pub(crate) struct CommandPanelCache {
     entries: HashMap<String, Panel>,
 }
