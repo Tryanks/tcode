@@ -20,6 +20,7 @@ members = [
     "crates/app",
     "crates/ios",
     "crates/platform/gpui-ios",
+    "crates/platform/frame-pacing",
     "crates/android",
 ]
 exclude = [

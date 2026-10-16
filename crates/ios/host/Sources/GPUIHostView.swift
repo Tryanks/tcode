@@ -4,6 +4,9 @@ import UIKit
 final class GPUIHostViewController: UIViewController {
     private var started = false
     private var displayLink: CADisplayLink?
+    private var framesSuspended = false
+    private weak var frameScreen: UIScreen?
+    private weak var frameScene: UIWindowScene?
     private var appBackgroundDark: Bool?
     private var launchCover: UIView?
 
@@ -57,17 +60,39 @@ final class GPUIHostViewController: UIViewController {
         gpui_ios_init()
         tcode_ios_start()
 
-        let link = CADisplayLink(target: self, selector: #selector(renderFrame))
-        let maximumFramesPerSecond = hostView.window?.windowScene?.screen.maximumFramesPerSecond
-            ?? 60
-        link.preferredFrameRateRange = CAFrameRateRange(
-            minimum: 30,
-            maximum: Float(maximumFramesPerSecond),
-            preferred: Float(maximumFramesPerSecond)
+        updateScreen()
+        wakeFrames()
+    }
+
+    func updateScreen() {
+        guard let scene = hostView.window?.windowScene else {
+            displayLink?.isPaused = true
+            return
+        }
+        let screen = scene.screen
+        gpui_ios_display_changed(Double(screen.maximumFramesPerSecond))
+        guard started else { return }
+        if frameScreen !== screen || frameScene !== scene {
+            displayLink?.invalidate()
+            if #available(iOS 27.0, *) {
+                displayLink = scene.displayLink(target: self, selector: #selector(renderFrame))
+            } else {
+                displayLink = screen.displayLink(withTarget: self, selector: #selector(renderFrame))
+            }
+            frameScreen = screen
+            frameScene = scene
+            displayLink?.add(to: .main, forMode: .common)
+        }
+        let maximum = Float(screen.maximumFramesPerSecond)
+        displayLink?.preferredFrameRateRange = CAFrameRateRange(
+            minimum: 1, maximum: maximum, preferred: maximum
         )
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-        gpui_ios_request_frame()
+        displayLink?.isPaused = framesSuspended
+    }
+
+    func wakeFrames() {
+        guard !framesSuspended, hostView.window != nil else { return }
+        displayLink?.isPaused = false
     }
 
     func firstFrameRendered() {
@@ -79,10 +104,13 @@ final class GPUIHostViewController: UIViewController {
     }
 
     func resumeFrames() {
-        displayLink?.isPaused = false
+        framesSuspended = false
+        updateScreen()
+        wakeFrames()
     }
 
     func pauseFrames() {
+        framesSuspended = true
         displayLink?.isPaused = true
     }
 
@@ -96,7 +124,7 @@ final class GPUIHostViewController: UIViewController {
     }
 
     @objc private func renderFrame() {
-        gpui_ios_request_frame()
+        displayLink?.isPaused = gpui_ios_request_frame() == 0
     }
 
     deinit {
@@ -198,6 +226,7 @@ final class GPUIHostView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        GPUIHostBridge.controller?.updateScreen()
         guard let screen = window?.windowScene?.screen else { return }
         contentScaleFactor = screen.scale
         metalLayer.contentsScale = screen.scale

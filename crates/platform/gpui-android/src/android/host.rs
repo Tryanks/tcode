@@ -12,6 +12,8 @@ use std::collections::VecDeque;
 
 #[derive(Debug)]
 pub(crate) enum HostEvent {
+    Frame,
+    RefreshRate(f32),
     CommitText(String),
     SetComposingText(String),
     FinishComposing,
@@ -76,6 +78,24 @@ fn enqueue(event: HostEvent) {
 
 pub(crate) fn drain() -> Vec<HostEvent> {
     EVENTS.lock().drain(..).collect()
+}
+
+pub fn frame() {
+    enqueue(HostEvent::Frame);
+}
+
+pub fn refresh_rate(rate: f32) {
+    if rate.is_finite() && rate > 0.0 {
+        enqueue(HostEvent::RefreshRate(rate));
+    }
+}
+
+pub(crate) fn request_frame() {
+    with_activity(jni_str!("gpuiRequestFrame"), jni_sig!(() -> void), vec![]);
+}
+
+pub(crate) fn pause_frames() {
+    with_activity(jni_str!("gpuiPauseFrames"), jni_sig!(() -> void), vec![]);
 }
 
 enum OwnedArgument {

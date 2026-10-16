@@ -36,8 +36,15 @@ The process-wide platform, attached view, and active window are therefore
 thread-local rather than marked `Send`. `IosDispatcher` sends foreground work
 to the GCD main queue, background work to GCD global queues selected by GPUI
 priority, delayed work through `dispatch_after_f`, and realtime work to a
-named Rust thread. `CADisplayLink` calls `gpui_ios_request_frame` so animations,
-touch gesture deadlines, and fling momentum keep advancing.
+named Rust thread. GPUI's `frame_waker` and `schedule_frame` wake the attached
+screen's `CADisplayLink`; `gpui_ios_request_frame` returns whether it should
+continue ticking. [FramePacer](../frame-pacing/src/lib.rs) owns demand and the
+activity grace period. Isolated invalidations, including caret timers and
+incoming content, receive one frame and return to pause; touch input and
+next-frame animations sustain the source. The host requests the screen's
+maximum refresh rate with a permissive minimum, so system power and thermal
+policy can clamp it. `gpui_ios_display_changed` reports that screen's maximum
+rate to GPUI and screen/scene changes recreate the native display link.
 
 The host is a universal iPhone/iPad app. iPhone supports portrait and both
 landscapes; iPad additionally supports upside-down portrait. During rotation,

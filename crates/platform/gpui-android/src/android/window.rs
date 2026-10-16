@@ -1,8 +1,5 @@
 use super::{display::AndroidDisplay, host};
-use android_activity::{
-    AndroidApp,
-    input::{KeyAction, Keycode, MotionAction},
-};
+use android_activity::input::{KeyAction, Keycode, MotionAction};
 use gpui::{
     Bounds, Capslock, DevicePixels, DispatchEventResult, Edges, FrameRequestSource, GpuSpecs,
     KeyUpEvent, Keystroke, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
@@ -11,6 +8,7 @@ use gpui::{
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowInsets, WindowVisibility,
     point, px, size,
 };
+use gpui_mobile_pacing::FramePacer;
 use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
 use ndk::native_window::NativeWindow;
 use raw_window_handle::{
@@ -73,6 +71,7 @@ struct Callbacks {
     hover: Option<Box<dyn FnMut(bool)>>,
     resize: Option<ResizeCallback>,
     moved: Option<Box<dyn FnMut()>>,
+    display: Option<Box<dyn FnMut()>>,
     should_close: Option<Box<dyn FnMut() -> bool>>,
     hit_test: Option<Box<dyn FnMut() -> Option<gpui::WindowControlArea>>>,
     close: Option<Box<dyn FnOnce()>>,
@@ -102,13 +101,13 @@ struct WindowState {
 }
 
 pub(crate) struct AndroidWindowInner {
-    app: AndroidApp,
     display: Rc<AndroidDisplay>,
     gpu_context: GpuContext,
     state: RefCell<WindowState>,
     callbacks: RefCell<Callbacks>,
-    frame_requested: Cell<bool>,
+    pacing: RefCell<FramePacer>,
     forced_frame_requested: Cell<bool>,
+    frames_suspended: Cell<bool>,
     /// Run once the next frame has been presented.
     after_frame: RefCell<Vec<Box<dyn FnOnce()>>>,
     reported_visibility: Cell<Option<WindowVisibility>>,
@@ -121,7 +120,6 @@ pub(crate) struct AndroidWindow(pub(crate) Rc<AndroidWindowInner>);
 
 impl AndroidWindow {
     pub(crate) fn new(
-        app: AndroidApp,
         display: Rc<AndroidDisplay>,
         gpu_context: GpuContext,
         scale_factor: f32,
@@ -147,7 +145,6 @@ impl AndroidWindow {
         )?;
 
         Ok(Self(Rc::new(AndroidWindowInner {
-            app,
             display,
             gpu_context,
             state: RefCell::new(WindowState {
@@ -166,8 +163,9 @@ impl AndroidWindow {
                 back_enabled: false,
             }),
             callbacks: RefCell::new(Callbacks::default()),
-            frame_requested: Cell::new(true),
+            pacing: RefCell::new(FramePacer::default()),
             forced_frame_requested: Cell::new(true),
+            frames_suspended: Cell::new(false),
             after_frame: RefCell::new(Vec::new()),
             reported_visibility: Cell::new(None),
             keyboard_tap: Cell::new(None),
@@ -201,11 +199,12 @@ impl AndroidWindow {
                 state.native_surface = Some(surface);
                 drop(state);
                 self.resize_from_native_window();
-                self.0.frame_requested.set(true);
+                self.schedule_frame();
                 self.0.forced_frame_requested.set(true);
-                self.0.app.create_waker().wake();
             }
             None => {
+                self.0.pacing.borrow_mut().suspend();
+                host::pause_frames();
                 state.renderer.unconfigure_surface();
                 state.native_surface = None;
                 drop(state);
@@ -369,6 +368,18 @@ impl AndroidWindow {
     }
 
     pub(crate) fn handle_host_event(&self, event: host::HostEvent) {
+        if matches!(
+            &event,
+            host::HostEvent::InputState { .. }
+                | host::HostEvent::CommitText(_)
+                | host::HostEvent::SetComposingText(_)
+                | host::HostEvent::FinishComposing
+                | host::HostEvent::DeleteBackward
+                | host::HostEvent::Key { .. }
+        ) {
+            self.0.pacing.borrow_mut().input(std::time::Instant::now());
+            host::request_frame();
+        }
         match event {
             host::HostEvent::InputState {
                 revision,
@@ -421,7 +432,10 @@ impl AndroidWindow {
                 ime_bottom,
             } => self.update_insets(left, top, right, bottom, ime_bottom),
             // The platform answers these itself; a window handler is never asked.
-            host::HostEvent::Back | host::HostEvent::ScrollCapture(_) => {}
+            host::HostEvent::Back
+            | host::HostEvent::ScrollCapture(_)
+            | host::HostEvent::Frame
+            | host::HostEvent::RefreshRate(_) => {}
         }
     }
 
@@ -484,6 +498,12 @@ impl AndroidWindow {
         ) {
             return false;
         }
+
+        self.0.pacing.borrow_mut().set_touching(
+            !matches!(action, MotionAction::Up | MotionAction::Cancel),
+            std::time::Instant::now(),
+        );
+        host::request_frame();
 
         let action_pointer = event
             .pointer_index()
@@ -636,22 +656,25 @@ impl AndroidWindow {
     }
 
     pub(crate) fn pump_frame(&self, force: bool) {
-        let signal_source = if force {
-            FrameRequestSource::NativeCallback
-        } else {
-            FrameRequestSource::LocalSchedule
-        };
-        let force = force || self.0.forced_frame_requested.replace(false);
-        if !force && !self.0.frame_requested.replace(false) {
+        if self.0.frames_suspended.get() || self.current_visibility() != WindowVisibility::Visible {
+            host::pause_frames();
             return;
         }
-        self.0.frame_requested.set(false);
+        let now = std::time::Instant::now();
+        let needed = self.0.pacing.borrow_mut().begin_frame(now);
+        let forced = self.0.forced_frame_requested.replace(false);
+        let force = force || forced;
+        if !force && !needed {
+            host::pause_frames();
+            return;
+        }
+        let require_presentation = force || self.0.pacing.borrow().active(now);
         let callback = self.0.callbacks.borrow_mut().request_frame.take();
         if let Some(mut callback) = callback {
             callback(RequestFrameOptions {
-                require_presentation: true,
+                require_presentation,
                 force_render: force,
-                signal_source,
+                signal_source: FrameRequestSource::NativeCallback,
                 ..Default::default()
             });
             self.0.callbacks.borrow_mut().request_frame = Some(callback);
@@ -659,6 +682,16 @@ impl AndroidWindow {
         // `request_frame` presents synchronously, so the frame is on screen.
         for callback in std::mem::take(&mut *self.0.after_frame.borrow_mut()) {
             callback();
+        }
+        if self
+            .0
+            .pacing
+            .borrow_mut()
+            .end_frame(std::time::Instant::now())
+        {
+            host::request_frame();
+        } else {
+            host::pause_frames();
         }
         self.sync_input_state(false);
         if let Some(position) = self.0.keyboard_tap.take() {
@@ -675,6 +708,24 @@ impl AndroidWindow {
         }
     }
 
+    pub(crate) fn set_frames_suspended(&self, suspended: bool) {
+        self.0.frames_suspended.set(suspended);
+        if suspended {
+            self.0.pacing.borrow_mut().suspend();
+            host::pause_frames();
+        } else {
+            self.schedule_forced_frame();
+        }
+    }
+
+    pub(crate) fn display_changed(&self) {
+        let callback = self.0.callbacks.borrow_mut().display.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.0.callbacks.borrow_mut().display = Some(callback);
+        }
+    }
+
     pub(crate) fn schedule_forced_frame(&self) {
         self.0.forced_frame_requested.set(true);
         self.schedule_frame();
@@ -686,6 +737,8 @@ impl AndroidWindow {
     }
 
     fn dispatch_input(&self, input: PlatformInput) -> DispatchEventResult {
+        self.0.pacing.borrow_mut().input(std::time::Instant::now());
+        host::request_frame();
         let callback = self.0.callbacks.borrow_mut().input.take();
         if let Some(mut callback) = callback {
             let result = callback(input);
@@ -968,8 +1021,8 @@ impl PlatformWindow for AndroidWindow {
         self.0.callbacks.borrow_mut().resize = Some(callback);
     }
 
-    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {
-        // This host exposes one fixed display; geometry changes use on_resize.
+    fn on_display_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.callbacks.borrow_mut().display = Some(callback);
     }
 
     fn on_moved(&self, callback: Box<dyn FnMut()>) {
@@ -1005,8 +1058,10 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn schedule_frame(&self) {
-        self.0.frame_requested.set(true);
-        self.0.app.create_waker().wake();
+        self.0.pacing.borrow_mut().request();
+        if !self.0.frames_suspended.get() {
+            host::request_frame();
+        }
     }
 
     fn sprite_atlas(&self) -> RcOrArcAtlas {
