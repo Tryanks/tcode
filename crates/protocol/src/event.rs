@@ -23,20 +23,42 @@ pub type SessionEventRecord = StoredEvent;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Topic {
-    SessionEvents { session_id: String },
-    SessionStatus { session_id: String },
-    SessionPlan { session_id: String },
+    SessionEvents {
+        session_id: String,
+    },
+    SessionStatus {
+        session_id: String,
+    },
+    SessionPlan {
+        session_id: String,
+    },
     Index,
-    SpaceIndex { space_id: String },
+    SpaceIndex {
+        space_id: String,
+    },
     Scope,
     Settings,
     Providers,
-    GitStatus { session_id: String },
+    GitStatus {
+        session_id: String,
+    },
     RuntimeEvents,
 
-    Terminal { terminal_id: u64 },
+    Terminal {
+        terminal_id: u64,
+    },
+    /// One command execution's output, rendered by the host at `cols`
+    /// (clamped into [`crate::STORED_OUTPUT_COLS`]). Answered on subscribe and
+    /// again while the output grows.
+    CommandOutput {
+        session_id: String,
+        item_id: String,
+        cols: u16,
+    },
     Preview,
-    ExternalImport { project_id: String },
+    ExternalImport {
+        project_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,6 +83,9 @@ pub enum ServerEvent {
         terminal_id: u64,
         delta: Box<crate::terminal::TerminalDelta>,
     },
+    /// The whole rendered screen of a [`Topic::CommandOutput`]: no cursor and
+    /// no scrollback, trailing blank rows trimmed.
+    CommandOutputReplaced(Box<crate::terminal::TerminalFrame>),
     PreviewRequest {
         request_id: u64,
         session_id: String,

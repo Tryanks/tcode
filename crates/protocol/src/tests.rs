@@ -706,20 +706,26 @@ fn applying_a_delta_replaces_rows_and_trims_history_at_the_cap() {
     );
 }
 
-/// Stored output is re-rendered by the host, so its request and its answer are
-/// what an older or non-Rust client has to speak.
+/// Command output is rendered by the host and pushed on a topic, so the
+/// subscription and the pushed screen are what an older or non-Rust client has
+/// to speak.
 #[test]
-fn stored_output_rendering_uses_its_documented_wire_shape() {
+fn command_output_subscription_uses_its_documented_wire_shape() {
     use crate::terminal::{TerminalCell, TerminalFrame, TerminalRow, TerminalStyle};
 
+    let topic = Topic::CommandOutput {
+        session_id: "session-1".into(),
+        item_id: "cmd-1".into(),
+        cols: 40,
+    };
     let request = ClientMessage {
         principal: None,
         key: None,
         id: 11,
-        payload: ClientPayload::Query(Query::RenderStoredOutput {
-            session_id: "session-1".into(),
-            item_id: "cmd-1".into(),
-            cols: 40,
+        payload: ClientPayload::Subscribe(Subscription {
+            known_index: None,
+            topic: topic.clone(),
+            after: None,
         }),
     };
     assert_eq!(
@@ -727,10 +733,13 @@ fn stored_output_rendering_uses_its_documented_wire_shape() {
         json!({
             "id": 11,
             "payload": {
-                "type": "query",
+                "type": "subscribe",
                 "content": {
-                    "type": "render_stored_output",
-                    "content": {"session_id": "session-1", "item_id": "cmd-1", "cols": 40},
+                    "topic": {
+                        "type": "command_output",
+                        "content": {"session_id": "session-1", "item_id": "cmd-1", "cols": 40},
+                    },
+                    "after": null,
                 },
             },
         })
@@ -740,10 +749,11 @@ fn stored_output_rendering_uses_its_documented_wire_shape() {
         request
     );
 
-    // A finished screen: no cursor, no scrollback, no session behind it.
-    let answer = HostMessage::QueryResult {
-        id: 11,
-        result: Ok(QueryResponse::TerminalFrame(Box::new(TerminalFrame {
+    // A rendered screen: no cursor, no scrollback, no session behind it.
+    let pushed = HostMessage::Event(EventEnvelope {
+        request_id: None,
+        topic,
+        event: ServerEvent::CommandOutputReplaced(Box::new(TerminalFrame {
             cols: 40,
             rows: 1,
             styles: vec![
@@ -763,16 +773,19 @@ fn stored_output_rendering_uses_its_documented_wire_shape() {
                 wrapped: false,
             }],
             ..TerminalFrame::default()
-        }))),
-    };
+        })),
+    });
     assert_eq!(
-        serde_json::to_value(&answer).unwrap(),
+        serde_json::to_value(&pushed).unwrap(),
         json!({
-            "type": "query_result",
+            "type": "event",
             "content": {
-                "id": 11,
-                "result": {"Ok": {
-                    "type": "terminal_frame",
+                "topic": {
+                    "type": "command_output",
+                    "content": {"session_id": "session-1", "item_id": "cmd-1", "cols": 40},
+                },
+                "event": {
+                    "type": "command_output_replaced",
                     "content": {
                         "cols": 40,
                         "rows": 1,
@@ -788,13 +801,13 @@ fn stored_output_rendering_uses_its_documented_wire_shape() {
                         "visible": [{"cells": [{"text": "x", "style": 1}]}],
                         "title": "",
                     },
-                }},
+                },
             },
         })
     );
     assert_eq!(
-        decode_host_line(&encode_line(&answer).unwrap()).unwrap(),
-        answer
+        decode_host_line(&encode_line(&pushed).unwrap()).unwrap(),
+        pushed
     );
 }
 

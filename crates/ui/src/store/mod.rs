@@ -27,7 +27,7 @@ use tcode_protocol::{
     ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus, IndexSummary, PathEntry,
     ProtocolError, ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir, Scope,
     ScopedProviderChoice, ServerEvent, SessionPlan, SessionSearchHit, SessionStatus, Subscription,
-    TerminalFrame, Topic,
+    Topic,
 };
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
@@ -35,6 +35,7 @@ use terminal::TerminalWorkspace;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
 
+mod command_output;
 mod history;
 pub(crate) use history::HISTORY_WINDOW_SCREENS;
 pub(crate) mod images;
@@ -65,6 +66,7 @@ pub enum TopicKind {
     RuntimeEvents,
     ActiveSession,
     Terminal,
+    CommandOutput,
     Preview,
     ExternalImport,
 }
@@ -83,6 +85,7 @@ impl From<&Topic> for TopicKind {
             Topic::GitStatus { .. } => Self::GitStatus,
             Topic::RuntimeEvents => Self::RuntimeEvents,
             Topic::Terminal { .. } => Self::Terminal,
+            Topic::CommandOutput { .. } => Self::CommandOutput,
             Topic::Preview => Self::Preview,
             Topic::ExternalImport { .. } => Self::ExternalImport,
         }
@@ -167,6 +170,8 @@ pub struct WorkspaceStore {
     attachment_tasks: Vec<Task<()>>,
     /// Replicated terminal grids, keyed by the host's terminal id.
     terminals: HashMap<u64, std::rc::Rc<ClientTerminal>>,
+    /// Command output screens of the selected thread, keyed by item id.
+    command_outputs: HashMap<String, command_output::CommandOutputReplica>,
     /// Preview requests routed to this client. Every client owns the channel:
     /// one without a backend still has to answer `unsupported` rather than
     /// leave the agent's call hanging.
@@ -384,6 +389,7 @@ impl WorkspaceStore {
             image_namespace,
             attachment_tasks: Vec::new(),
             terminals: HashMap::new(),
+            command_outputs: HashMap::new(),
             remote_preview: async_channel::unbounded(),
             import_statuses: HashMap::new(),
             connection_state: if remote {
@@ -1148,6 +1154,14 @@ impl WorkspaceStore {
                     delta,
                 },
             ) if terminal_id == delta_id => self.apply_terminal_delta(*terminal_id, delta),
+            (
+                Topic::CommandOutput {
+                    session_id,
+                    item_id,
+                    cols,
+                },
+                ServerEvent::CommandOutputReplaced(frame),
+            ) => self.apply_command_output(session_id, item_id, *cols, frame),
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 if let Some(archived) = &mut self.archived_replica {
                     archived.sessions.retain(|archived| archived.id != meta.id);
@@ -3227,32 +3241,6 @@ impl WorkspaceStore {
             {
                 Ok(QueryResponse::ItemOutput(output)) => Ok(output),
                 Ok(other) => Err(format!("unexpected item-output response: {other:?}")),
-                Err(error) => Err(error.message),
-            }
-        })
-    }
-
-    /// Ask the host to re-render a stored command's output at `cols`. The
-    /// emulator is the host's; a client only ever asks for a width.
-    pub fn render_stored_output(
-        &self,
-        session_id: String,
-        item_id: String,
-        cols: u16,
-        cx: &mut App,
-    ) -> Task<Result<TerminalFrame, String>> {
-        let host = self.host.clone();
-        cx.spawn(async move |_| {
-            match host
-                .query(Query::RenderStoredOutput {
-                    session_id,
-                    item_id,
-                    cols,
-                })
-                .await
-            {
-                Ok(QueryResponse::TerminalFrame(frame)) => Ok(*frame),
-                Ok(other) => Err(format!("unexpected stored-output response: {other:?}")),
                 Err(error) => Err(error.message),
             }
         })
