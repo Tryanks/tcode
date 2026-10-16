@@ -22,12 +22,11 @@ gpui-base = { version = "0.7.3", features = ["gpui-fast"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 core-foundation = "0.10"
-core-graphics = "0.24"
-core-text = "21"
+core-graphics = "0.25"
+core-text = "22"
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
-# libc 0.2.190 gates AF_SYS_CONTROL, SYSPROTO_* and the _dyld_* image functions to
-# macOS, but backtrace 0.3.76 (via gpui) still calls them on every Apple target, so
-# the iOS check fails. Held below 0.2.190 until backtrace gates them too (#668).
+# libc 0.2.190 gates dyld bindings and in6_ifreq to macOS; backtrace 0.3.76
+# and netdev 0.46.3 require them on iOS (#668).
 libc = ">=0.2, <0.2.190"
 pathfinder_geometry = "0.5"
 uuid = { version = "1", features = ["v5"] }
