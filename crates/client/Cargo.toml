@@ -37,5 +37,5 @@ objc2-avf-audio = { version = "0.3", default-features = false, features = ["std"
 objc2-speech = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognitionMetadata", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognizer", "SFTranscription"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-cpal = { version = "0.15.3", optional = true }
+cpal = { version = "0.18.2", optional = true }
 windows = { version = "0.58", features = ["Foundation_Collections", "Globalization", "Media_SpeechRecognition", "Win32_Foundation"], optional = true }
