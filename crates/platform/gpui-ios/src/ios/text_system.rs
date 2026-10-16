@@ -212,7 +212,7 @@ impl TextSystemState {
                         unsafe { core_graphics::data_provider::CGDataProvider::from_slice(bytes) };
                     let font = core_graphics::font::CGFont::from_data_provider(provider)
                         .map_err(|()| anyhow!("could not load embedded font"))?;
-                    let font = FontKitFont::from_core_graphics_font(font);
+                    let font = font_kit_font(&font);
                     Ok(Handle::from_native(&font))
                 }
                 Cow::Owned(bytes) => Ok(Handle::from_memory(Arc::new(bytes), 0)),
@@ -261,8 +261,7 @@ impl TextSystemState {
         let id = FontId(self.fonts.len());
         self.ids_by_postscript_name.insert(name.clone(), id);
         self.postscript_names.insert(id, name);
-        self.fonts
-            .push(FontKitFont::from_core_graphics_font(font.copy_to_CGFont()));
+        self.fonts.push(font_kit_font(&font.copy_to_CGFont()));
         id
     }
 
@@ -344,8 +343,10 @@ impl TextSystemState {
         let shift = params
             .subpixel_variant
             .map(|value| value as f32 / SUBPIXEL_VARIANTS_X as f32);
-        self.fonts[params.font_id.0]
-            .native_font()
+        let native = self.fonts[params.font_id.0].native_font();
+        // SAFETY: Both core-text versions wrap the same retained CTFontRef.
+        let native = unsafe { CTFont::wrap_under_get_rule(native.as_concrete_TypeRef().cast()) };
+        native
             .clone_with_font_size(f32::from(params.font_size) as CGFloat)
             .draw_glyphs(
                 &[params.glyph_id.0 as CGGlyph],
@@ -484,6 +485,19 @@ impl<'a> StringIndexConverter<'a> {
         }
         self.utf8 = self.text.len();
     }
+}
+
+fn font_kit_font(font: &core_graphics::font::CGFont) -> FontKitFont {
+    let native = core_text::font::new_from_CGFont(font, 16.0);
+    // SAFETY: font-kit uses core-text 21, which wraps the same CTFontRef as
+    // core-text 22. The get rule retains it before `native` is dropped.
+    let native = unsafe {
+        font_kit::loaders::core_text::NativeFont::wrap_under_get_rule(
+            native.as_concrete_TypeRef().cast(),
+        )
+    };
+    // SAFETY: `native` owns a retained CoreText font.
+    unsafe { FontKitFont::from_core_text_font_no_path(native) }
 }
 
 fn rect_f_bounds(rect: RectF) -> Bounds<f32> {
