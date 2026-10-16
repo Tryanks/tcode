@@ -244,10 +244,20 @@ impl AndroidPlatform {
 
     fn process_host_events(&self) {
         for event in host::drain() {
+            if let HostEvent::RefreshRate(rate) = event {
+                if self.display.set_refresh_rate(rate) {
+                    if let Some(window) = self.window() {
+                        window.display_changed();
+                    }
+                    self.emit_displays_changed();
+                }
+                continue;
+            }
             let Some(window) = self.window() else {
                 continue;
             };
             match event {
+                HostEvent::Frame => window.pump_frame(false),
                 HostEvent::Back => {
                     if !window.handle_back() {
                         self.emit_process_back();
@@ -309,12 +319,13 @@ impl AndroidPlatform {
                 self.emit_lifecycle(AppLifecyclePhase::Active);
                 if let Some(window) = self.window() {
                     window.set_active(true);
-                    window.schedule_forced_frame();
+                    window.set_frames_suspended(false);
                 }
             }
             MainEvent::Pause => {
                 self.emit_lifecycle(AppLifecyclePhase::Inactive);
                 if let Some(window) = self.window() {
+                    window.set_frames_suspended(true);
                     window.set_active(false);
                 }
             }
@@ -414,9 +425,6 @@ impl Platform for AndroidPlatform {
             }
             self.dispatcher.drain_main_queue();
             self.process_host_events();
-            if let Some(window) = self.window() {
-                window.pump_frame(false);
-            }
             if self.quit_pending.replace(false) {
                 self.try_quit();
             }
@@ -468,7 +476,6 @@ impl Platform for AndroidPlatform {
             .native_window()
             .ok_or_else(|| anyhow!("Android native window is not available"))?;
         let window = AndroidWindow::new(
-            self.app.clone(),
             self.display.clone(),
             self.gpu_context.clone(),
             self.scale_factor(),

@@ -32,6 +32,15 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
 
+    func windowScene(
+        _ windowScene: UIWindowScene,
+        didUpdate previousCoordinateSpace: UICoordinateSpace,
+        interfaceOrientation previousInterfaceOrientation: UIInterfaceOrientation,
+        traitCollection previousTraitCollection: UITraitCollection
+    ) {
+        hostController?.updateScreen()
+    }
+
     func sceneWillEnterForeground(_ scene: UIScene) {
         gpui_ios_lifecycle_foreground()
         // The network may have changed while suspended; the Traverse

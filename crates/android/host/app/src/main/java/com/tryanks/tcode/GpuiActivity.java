@@ -12,6 +12,13 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
+import android.hardware.display.DisplayManager;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Choreographer;
+import android.view.Display;
+import android.view.Surface;
+import android.view.SurfaceHolder;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -40,6 +47,84 @@ import java.util.Locale;
 
 /** Minimal NativeActivity host for GPUI. */
 public final class GpuiActivity extends NativeActivity {
+    private boolean framePosted;
+    private boolean framesActive;
+    private Surface renderSurface;
+    private float maximumFrameRate;
+    private DisplayManager displayManager;
+    private final Choreographer.FrameCallback frameCallback = frameTimeNanos -> {
+        framePosted = false;
+        if (renderSurface != null && renderSurface.isValid()) nativeFrame();
+    };
+    private final DisplayManager.DisplayListener displayListener = new DisplayManager.DisplayListener() {
+        @Override public void onDisplayAdded(int id) { updateDisplayRate(); }
+        @Override public void onDisplayRemoved(int id) { updateDisplayRate(); }
+        @Override public void onDisplayChanged(int id) { updateDisplayRate(); }
+    };
+
+    private native void nativeFrame();
+    private native void nativeRefreshRate(float rate);
+
+    private void updateDisplayRate() {
+        Display display = getWindow().getDecorView().getDisplay();
+        if (display == null) return;
+        Display.Mode current = display.getMode();
+        maximumFrameRate = current.getRefreshRate();
+        for (Display.Mode mode : display.getSupportedModes()) {
+            if (mode.getPhysicalWidth() == current.getPhysicalWidth()
+                    && mode.getPhysicalHeight() == current.getPhysicalHeight()) {
+                maximumFrameRate = Math.max(maximumFrameRate, mode.getRefreshRate());
+            }
+        }
+        nativeRefreshRate(maximumFrameRate);
+        if (framesActive) hintFrameRate(maximumFrameRate);
+    }
+
+    private void hintFrameRate(float rate) {
+        if (renderSurface == null || !renderSurface.isValid()) return;
+        if (Build.VERSION.SDK_INT >= 31) {
+            renderSurface.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                    Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
+        } else if (Build.VERSION.SDK_INT >= 30) {
+            renderSurface.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+        }
+    }
+
+    public void gpuiRequestFrame() {
+        if (renderSurface == null || !renderSurface.isValid()) return;
+        if (!framesActive) {
+            framesActive = true;
+            hintFrameRate(maximumFrameRate);
+        }
+        if (!framePosted) {
+            framePosted = true;
+            Choreographer.getInstance().postFrameCallback(frameCallback);
+        }
+    }
+
+    public void gpuiPauseFrames() {
+        if (framePosted) Choreographer.getInstance().removeFrameCallback(frameCallback);
+        framePosted = false;
+        if (framesActive) {
+            framesActive = false;
+            // Zero releases the vote while the last buffer remains visible.
+            hintFrameRate(0);
+        }
+    }
+
+    @Override public void surfaceCreated(SurfaceHolder holder) {
+        renderSurface = holder.getSurface();
+        updateDisplayRate();
+        super.surfaceCreated(holder);
+        gpuiRequestFrame();
+    }
+
+    @Override public void surfaceDestroyed(SurfaceHolder holder) {
+        gpuiPauseFrames();
+        renderSurface = null;
+        super.surfaceDestroyed(holder);
+    }
+
     private static final int REQUEST_CAMERA = 6102;
     private static final int REQUEST_IMAGES = 6103;
     private static final int HOST_OK = 0;
@@ -191,11 +276,16 @@ public final class GpuiActivity extends NativeActivity {
             return insets;
         });
         decor.requestApplyInsets();
+        displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        displayManager.registerDisplayListener(displayListener, new Handler(Looper.getMainLooper()));
+        updateDisplayRate();
         watchDefaultNetwork();
     }
 
     @Override
     protected void onDestroy() {
+        if (displayManager != null) displayManager.unregisterDisplayListener(displayListener);
+        gpuiPauseFrames();
         unwatchDefaultNetwork();
         super.onDestroy();
     }

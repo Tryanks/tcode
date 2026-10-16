@@ -5,13 +5,19 @@ use uuid::Uuid;
 
 pub(crate) struct AndroidDisplay {
     bounds: Cell<Bounds<Pixels>>,
+    refresh_rate: Cell<f32>,
 }
 
 impl AndroidDisplay {
     pub(crate) fn new(bounds: Bounds<Pixels>) -> Self {
         Self {
             bounds: Cell::new(bounds),
+            refresh_rate: Cell::new(0.0),
         }
+    }
+
+    pub(crate) fn set_refresh_rate(&self, rate: f32) -> bool {
+        self.refresh_rate.replace(rate) != rate
     }
 
     pub(crate) fn set_bounds(&self, bounds: Bounds<Pixels>) {
@@ -34,8 +40,8 @@ impl PlatformDisplay for AndroidDisplay {
     }
 
     fn refresh_interval(&self) -> Option<std::time::Duration> {
-        // The host bridge does not report the display's refresh rate.
-        None
+        let rate = f64::from(self.refresh_rate.get());
+        (rate > 0.0).then(|| std::time::Duration::from_secs_f64(1.0 / rate))
     }
 
     fn uuid(&self) -> Result<Uuid> {

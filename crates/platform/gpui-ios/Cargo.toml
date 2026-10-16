@@ -7,6 +7,7 @@ publish = false
 description = "iOS platform backend for gpui-fast (Metal via gpui_wgpu)"
 
 [dependencies]
+gpui-mobile-pacing = { path = "../frame-pacing" }
 gpui = { package = "gpui-fast", version = "0.1.7", default-features = false }
 gpui_wgpu = { package = "gpui-fast-wgpu", version = "0.1.7" }
 anyhow = "1"

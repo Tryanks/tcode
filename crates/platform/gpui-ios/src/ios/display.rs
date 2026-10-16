@@ -12,8 +12,8 @@ impl PlatformDisplay for IosDisplay {
     }
 
     fn refresh_interval(&self) -> Option<std::time::Duration> {
-        // The host bridge does not report the display's refresh rate.
-        None
+        let rate = super::ffi::host_metrics().refresh_rate;
+        (rate > 0.0).then(|| std::time::Duration::from_secs_f64(1.0 / rate))
     }
 
     fn uuid(&self) -> anyhow::Result<Uuid> {

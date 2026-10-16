@@ -144,6 +144,23 @@ mod jni_exports {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeFrame(
+        _env: EnvUnowned<'_>,
+        _activity: JObject<'_>,
+    ) {
+        gpui_android::jni_frame();
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeRefreshRate(
+        _env: EnvUnowned<'_>,
+        _activity: JObject<'_>,
+        rate: f32,
+    ) {
+        gpui_android::jni_refresh_rate(rate);
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeFirstFrameRendered(
         _env: EnvUnowned,
         _activity: JObject,

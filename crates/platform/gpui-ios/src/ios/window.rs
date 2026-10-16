@@ -8,6 +8,7 @@ use gpui::{
     TextInputStateChange, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
     WindowControlArea, WindowInsets, WindowParams, WindowVisibility, px, size,
 };
+use gpui_mobile_pacing::FramePacer;
 use gpui_wgpu::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
@@ -20,6 +21,7 @@ use std::{
     ptr::NonNull,
     rc::Rc,
     sync::Arc,
+    time::Instant,
 };
 
 type RequestFrameCallback = Box<dyn FnMut(RequestFrameOptions)>;
@@ -68,6 +70,10 @@ pub(crate) struct IosWindow {
     dispatching_input: Cell<bool>,
     pending_input: RefCell<VecDeque<PlatformInput>>,
     requesting_frame: Cell<bool>,
+    pacing: Rc<RefCell<FramePacer>>,
+    forced_frame: Cell<bool>,
+    active_touches: Cell<usize>,
+    display_callback: RefCell<Option<UnitCallback>>,
     using_input_handler: Cell<bool>,
     text_input_active: Cell<bool>,
 }
@@ -193,6 +199,10 @@ impl IosWindow {
             dispatching_input: Cell::new(false),
             pending_input: RefCell::new(VecDeque::new()),
             requesting_frame: Cell::new(false),
+            pacing: Rc::new(RefCell::new(FramePacer::default())),
+            forced_frame: Cell::new(true),
+            active_touches: Cell::new(0),
+            display_callback: RefCell::new(None),
             using_input_handler: Cell::new(false),
             text_input_active: Cell::new(false),
         })
@@ -249,7 +259,7 @@ impl IosWindow {
         *self.raw_handles.borrow_mut() = raw_handles;
         self.surface_attached.set(true);
         self.resize_from_host(width, height, scale_factor);
-        self.request_frame(true);
+        self.schedule_forced_frame();
         self.report_visibility();
         log::info!("GPUI iOS Metal surface replaced at scale factor {scale_factor:.2}");
         Ok(())
@@ -259,6 +269,8 @@ impl IosWindow {
         if self.view.get() != view || !self.surface_attached.replace(false) {
             return;
         }
+        self.active_touches.set(0);
+        self.pacing.borrow_mut().suspend();
         self.renderer.borrow_mut().unconfigure_surface();
         self.report_visibility();
     }
@@ -266,6 +278,12 @@ impl IosWindow {
     pub(crate) fn update_background(&self, in_background: bool) {
         if self.in_background.replace(in_background) == in_background {
             return;
+        }
+        if in_background {
+            self.active_touches.set(0);
+            self.pacing.borrow_mut().suspend();
+        } else {
+            self.schedule_frame();
         }
         self.report_visibility();
     }
@@ -298,30 +316,70 @@ impl IosWindow {
         }
     }
 
-    pub(crate) fn request_frame(&self, force_render: bool) {
+    pub(crate) fn schedule_forced_frame(&self) {
+        self.forced_frame.set(true);
+        self.schedule_frame();
+    }
+
+    pub(crate) fn display_link_tick(&self) -> bool {
+        if self.current_visibility() != WindowVisibility::Visible {
+            return false;
+        }
+        let now = Instant::now();
         if self.requesting_frame.replace(true) {
-            return;
+            return true;
         }
-        let mut callback = self.request_frame_callback.borrow_mut().take();
-        if let Some(callback) = callback.as_mut() {
-            callback(RequestFrameOptions {
-                require_presentation: true,
-                force_render,
-                signal_source: if force_render {
-                    FrameRequestSource::LocalSchedule
-                } else {
-                    FrameRequestSource::NativeCallback
-                },
-                ..Default::default()
-            });
-        }
-        if self.request_frame_callback.borrow().is_none() {
-            *self.request_frame_callback.borrow_mut() = callback;
+        if self.pacing.borrow_mut().begin_frame(now) {
+            let force_render = self.forced_frame.replace(false);
+            let require_presentation = self.pacing.borrow().active(now);
+            let mut callback = self.request_frame_callback.borrow_mut().take();
+            if let Some(callback) = callback.as_mut() {
+                callback(RequestFrameOptions {
+                    require_presentation,
+                    force_render,
+                    signal_source: FrameRequestSource::NativeCallback,
+                    ..Default::default()
+                });
+            }
+            if self.request_frame_callback.borrow().is_none() {
+                *self.request_frame_callback.borrow_mut() = callback;
+            }
         }
         self.requesting_frame.set(false);
+        self.pacing.borrow_mut().end_frame(Instant::now())
+    }
+
+    pub(crate) fn display_changed(&self) {
+        let mut callback = self.display_callback.borrow_mut().take();
+        if let Some(callback) = callback.as_mut() {
+            callback();
+        }
+        *self.display_callback.borrow_mut() = callback;
+        self.schedule_frame();
+    }
+
+    pub(crate) fn touch_activity(&self, count: usize, phase: gpui::TouchPhase) {
+        let active = match phase {
+            gpui::TouchPhase::Started => self.active_touches.get() + count,
+            gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled => {
+                self.active_touches.get().saturating_sub(count)
+            }
+            gpui::TouchPhase::Moved => self.active_touches.get(),
+        };
+        self.active_touches.set(active);
+        self.pacing
+            .borrow_mut()
+            .set_touching(active > 0, Instant::now());
+        super::ffi::host_schedule_frame();
+    }
+
+    pub(crate) fn input_activity(&self) {
+        self.pacing.borrow_mut().input(Instant::now());
+        super::ffi::host_schedule_frame();
     }
 
     pub(crate) fn dispatch_input(&self, input: PlatformInput) -> DispatchEventResult {
+        self.input_activity();
         if self.dispatching_input.replace(true) {
             self.pending_input.borrow_mut().push_back(input);
             return DispatchEventResult::default();
@@ -370,11 +428,9 @@ impl IosWindow {
         if self.resize_callback.borrow().is_none() {
             *self.resize_callback.borrow_mut() = callback;
         }
-        self.request_frame(true);
+        self.schedule_forced_frame();
     }
 
-    /// GPUI refreshes the window from these callbacks; the display link
-    /// presents the next frame, so no frame is requested here.
     pub(crate) fn update_insets(&self, insets: WindowInsets) {
         let previous = self.insets.replace(insets.clone());
         if previous == insets {
@@ -424,7 +480,7 @@ impl IosWindow {
         if self.appearance_callback.borrow().is_none() {
             *self.appearance_callback.borrow_mut() = callback;
         }
-        self.request_frame(true);
+        self.schedule_forced_frame();
     }
 
     pub(crate) fn with_input_handler<R>(
@@ -463,7 +519,7 @@ impl IosWindow {
         for input in self.keyboard.delete_backward() {
             self.dispatch_input(input);
         }
-        self.request_frame(true);
+        self.schedule_forced_frame();
     }
 
     pub(crate) fn key_event(
@@ -478,7 +534,7 @@ impl IosWindow {
             .keyboard
             .key_event(key, key_char, modifiers, down, repeat);
         let result = self.dispatch_input(input);
-        self.request_frame(true);
+        self.schedule_forced_frame();
         !result.propagate || result.default_prevented
     }
 }
@@ -624,6 +680,14 @@ impl PlatformWindow for IosWindow {
         true
     }
 
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let pacing = self.pacing.clone();
+        Some(Rc::new(move || {
+            pacing.borrow_mut().request();
+            super::ffi::host_schedule_frame();
+        }))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         *self.request_frame_callback.borrow_mut() = Some(callback);
     }
@@ -650,8 +714,8 @@ impl PlatformWindow for IosWindow {
         *self.resize_callback.borrow_mut() = Some(callback);
     }
 
-    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {
-        // This host exposes one fixed display; geometry changes use on_resize.
+    fn on_display_changed(&self, callback: Box<dyn FnMut()>) {
+        *self.display_callback.borrow_mut() = Some(callback);
     }
 
     fn on_moved(&self, callback: Box<dyn FnMut()>) {
@@ -681,6 +745,7 @@ impl PlatformWindow for IosWindow {
     }
 
     fn schedule_frame(&self) {
+        self.pacing.borrow_mut().request();
         super::ffi::host_schedule_frame();
     }
 

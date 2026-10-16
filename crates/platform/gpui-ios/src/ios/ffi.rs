@@ -37,6 +37,7 @@ pub(crate) struct HostMetrics {
     pub(crate) width: f32,
     pub(crate) height: f32,
     pub(crate) scale: f32,
+    pub(crate) refresh_rate: f64,
     pub(crate) safe_top: f32,
     pub(crate) safe_right: f32,
     pub(crate) safe_bottom: f32,
@@ -52,6 +53,7 @@ impl Default for HostMetrics {
             width: 0.0,
             height: 0.0,
             scale: 1.0,
+            refresh_rate: 0.0,
             safe_top: 0.0,
             safe_right: 0.0,
             safe_bottom: 0.0,
@@ -298,6 +300,7 @@ fn dispatch_touches(touches: *const GpuiIosTouch, count: usize, phase: TouchPhas
     // synchronous function returns.
     let touches = unsafe { slice::from_raw_parts(touches, count) };
     with_window(|window| {
+        window.touch_activity(count, phase);
         for touch in touches {
             let position = point(px(touch.x as f32), px(touch.y as f32));
             window.set_mouse_position(position);
@@ -408,8 +411,28 @@ pub extern "C" fn gpui_ios_detach_view(view: *mut c_void) {
 
 /// Drives one GPUI frame from `CADisplayLink`.
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_ios_request_frame() {
-    with_window(|window| window.request_frame(false));
+pub extern "C" fn gpui_ios_request_frame() -> u8 {
+    let mut keep_running = false;
+    with_window(|window| keep_running = window.display_link_tick());
+    u8::from(keep_running)
+}
+
+/// Updates the attached screen's capability, independently of its current system clamp.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_display_changed(refresh_rate: f64) {
+    if !refresh_rate.is_finite() || refresh_rate <= 0.0 {
+        return;
+    }
+    let changed = HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        let changed = host.metrics.refresh_rate != refresh_rate;
+        host.metrics.refresh_rate = refresh_rate;
+        changed
+    });
+    if changed {
+        with_window(IosWindow::display_changed);
+        super::with_platform(super::IosPlatform::notify_displays_changed);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -580,6 +603,7 @@ pub extern "C" fn gpui_ios_replace_text(
 ) {
     if let Some(text) = utf8(bytes, length) {
         with_window(|window| {
+            window.input_activity();
             let replace = |handler: &mut gpui::PlatformInputHandler| {
                 if marked != 0 {
                     handler.replace_and_mark_text_in_range(range.range(), &text, selection.range());
@@ -602,6 +626,7 @@ pub extern "C" fn gpui_ios_select_text(range: TextRange) {
         return;
     };
     with_window(|window| {
+        window.input_activity();
         window.with_input_handler(|handler| text_input::select_text(handler, range));
     });
 }
@@ -609,6 +634,7 @@ pub extern "C" fn gpui_ios_select_text(range: TextRange) {
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_unmark_text() {
     with_window(|window| {
+        window.input_activity();
         window.with_stored_input_handler(text_input::commit_marked_text);
     });
 }
@@ -704,7 +730,7 @@ pub extern "C" fn gpui_ios_paste_text(bytes: *const u8, length: usize) {
         with_window(|window| {
             window
                 .with_input_handler(|handler| handler.paste(gpui::ClipboardItem::new_string(text)));
-            window.request_frame(true);
+            window.schedule_forced_frame();
         });
     }
 }

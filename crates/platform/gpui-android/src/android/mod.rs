@@ -15,8 +15,9 @@ pub use host::{ScrollCaptureRequest, scroll_capture_bounds, scroll_capture_rende
 #[doc(hidden)]
 pub use host::{
     commit_text as jni_commit_text, delete_backward as jni_delete_backward,
-    finish_composing_text as jni_finish_composing_text, input_state as jni_input_state,
-    key_event as jni_key_event, on_back as jni_on_back, on_insets as jni_on_insets,
+    finish_composing_text as jni_finish_composing_text, frame as jni_frame,
+    input_state as jni_input_state, key_event as jni_key_event, on_back as jni_on_back,
+    on_insets as jni_on_insets, refresh_rate as jni_refresh_rate,
     scroll_capture as jni_scroll_capture, set_composing_text as jni_set_composing_text,
 };
 
