@@ -980,6 +980,100 @@ mod tests {
         }
     }
 
+    fn paragraphs(count: usize) -> String {
+        (0..count)
+            .map(|ix| format!("Paragraph {ix}."))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// The layout work of the frames `update` causes. A test window draws
+    /// whenever an update leaves it dirty, as the platform's next frame would.
+    fn layout_work(
+        cx: &mut VisualTestContext,
+        update: impl FnOnce(&mut VisualTestContext),
+    ) -> gpui::LayoutStats {
+        cx.update(|window, _| window.reset_layout_stats());
+        update(cx);
+        cx.update(|window, _| window.layout_stats())
+    }
+
+    #[gpui::test]
+    fn streamed_appends_lay_out_only_the_trailing_block(cx: &mut TestAppContext) {
+        const BLOCKS: usize = 400;
+        let (root, cx) = open_timeline_row(&paragraphs(BLOCKS), cx);
+        scroll_to_end(&root, cx);
+        for (delta, last_block) in [
+            (" grows", "markdown-block-399"),
+            (" again", "markdown-block-399"),
+            ("\n\nA new block.", "markdown-block-400"),
+        ] {
+            let work = layout_work(cx, |cx| {
+                root.update(cx, |root, cx| {
+                    root.markdown.update(cx, |md, cx| md.push_str(delta, cx));
+                    // The chat remeasures the row of a message that changed.
+                    root.list_state.remeasure_items(0..1);
+                });
+                cx.run_until_parked();
+            });
+            // One frame takes the delta. A frame that builds a tree of every
+            // block, or one more that replaces it, is work in proportion to
+            // the whole message.
+            assert!(
+                work.frames == 1
+                    && work.measure_calls < BLOCKS as u64 / 4
+                    && work.nodes_created + work.nodes_reused < BLOCKS as u64 / 2,
+                "{delta:?}: {work:?}"
+            );
+            // The row sizes to the grown message: its last block is painted
+            // at the bottom of the row the outer list scrolled to.
+            assert!(
+                cx.debug_bounds(last_block).is_some(),
+                "{delta:?}: the trailing block is outside the row"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn a_diagram_resolving_its_size_remeasures_only_its_block(cx: &mut TestAppContext) {
+        const BLOCKS: usize = 400;
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (root, cx) = cx.add_window_view(|_, cx| OuterListRoot::new("", cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        let source = format!(
+            "```mermaid\nflowchart LR\n  A --> B\n```\n\n{}",
+            paragraphs(BLOCKS)
+        );
+        // The diagram is decoded off the main thread; the frames this update
+        // draws lay it out before it has a size.
+        root.update(cx, |root, cx| {
+            root.markdown.update(cx, |md, cx| md.set_text(&source, cx));
+            root.list_state.remeasure_items(0..1);
+        });
+        let pending = cx
+            .debug_bounds("markdown-mermaid-root-0")
+            .expect("the diagram block is painted")
+            .size
+            .height;
+
+        let work = layout_work(cx, |cx| cx.run_until_parked());
+        let resolved = cx
+            .debug_bounds("markdown-mermaid-root-0")
+            .expect("the diagram block is painted")
+            .size
+            .height;
+        assert!(
+            resolved != pending,
+            "the diagram resolved its size: {pending:?} -> {resolved:?}"
+        );
+        assert!(
+            work.measure_calls < BLOCKS as u64 / 4
+                && work.nodes_created + work.nodes_reused < BLOCKS as u64 / 2,
+            "resolving one diagram: {work:?}"
+        );
+    }
+
     #[gpui::test]
     fn wide_table_shrinks_to_viewport_and_wraps(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
