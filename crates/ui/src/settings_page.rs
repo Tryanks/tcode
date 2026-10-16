@@ -389,6 +389,7 @@ pub struct SettingsPage {
     /// reading position across rerenders.
     section_scroll: ScrollHandle,
     content_scroll: ScrollHandle,
+    project_rules_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -626,6 +627,7 @@ impl SettingsPage {
             toggle_focus: HashMap::new(),
             section_scroll: ScrollHandle::new(),
             content_scroll,
+            project_rules_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         };
         page._subscriptions
@@ -1334,16 +1336,25 @@ impl SettingsPage {
             Section::Remote => v_flex().child(self.hosting_panel.clone()),
             Section::Archived => self.render_archived(cx),
         };
+        let scroll = if self.section == Section::ProjectThreadRules {
+            &self.project_rules_scroll
+        } else {
+            &self.content_scroll
+        };
+        self.render_content_column(column, scroll)
+    }
+
+    fn render_content_column(&self, column: gpui::Div, scroll: &ScrollHandle) -> AnyElement {
         crate::scroll::page_viewport(
             "settings-scroll-bounce",
-            crate::wheel_easing::Handle::Scroll(self.content_scroll.clone()),
+            crate::wheel_easing::Handle::Scroll(scroll.clone()),
             div()
                 .id("settings-scroll")
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
                 .lock_scroll_axis()
-                .track_scroll(&self.content_scroll)
+                .track_scroll(scroll)
                 .child(
                     gpui_base::h_flex()
                         .w_full()
@@ -3051,9 +3062,20 @@ impl SettingsPage {
     /// One section's content, as the compact detail page's body.
     pub(crate) fn render_compact_section(
         &mut self,
+        destination: crate::window_state::Destination,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // SettingsSection and its project-rules child share SettingsPage. Render
+        // the real parent controls without mounting the child editor twice or
+        // changing the selection. Each page retains its own scroll handle.
+        if destination == crate::window_state::Destination::SettingsSection
+            && self.window_state.read(cx).destination()
+                == crate::window_state::Destination::SettingsThreadRules
+        {
+            let column = self.render_thread_behavior(cx);
+            return self.render_content_column(column, &self.content_scroll);
+        }
         if self.section == Section::ProjectThreadRules
             && self.window_state.read(cx).destination()
                 != crate::window_state::Destination::SettingsThreadRules

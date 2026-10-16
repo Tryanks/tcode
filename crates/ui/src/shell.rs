@@ -159,9 +159,11 @@ impl Render for DestinationView {
                     Destination::Thread => shell.render_thread_page(window, cx),
                     Destination::Panel => shell.render_panel_page(window, cx),
                     Destination::PullRequest => shell.render_pull_request_page(window, cx),
-                    Destination::Settings => shell.render_settings_page(false, window, cx),
+                    Destination::Settings => {
+                        shell.render_settings_page(Destination::Settings, window, cx)
+                    }
                     Destination::SettingsSection | Destination::SettingsThreadRules => {
-                        shell.render_settings_page(true, window, cx)
+                        shell.render_settings_page(destination, window, cx)
                     }
                     Destination::ArrangeThreads => shell.render_arrange_page(window, cx),
                 })
@@ -269,6 +271,8 @@ pub struct AppShell {
     hosts: Entity<RemotePanel>,
     nav: Entity<NavStackState>,
     back_swipe: Option<BackSwipe>,
+    // Settlement outlives the pan contact, including GPUI's fling cancellation.
+    page_back: Option<PageBack>,
     /// The navigation history as the compact stack currently has it mounted.
     /// [`AppShell::sync_nav`] reconciles it with `window_state`'s history, which
     /// is the only authority for where the window is.
@@ -297,6 +301,13 @@ struct BackSwipe {
     sheet: Option<Entity<crate::overlay::SheetBack>>,
     last_moved_at: Instant,
     finished: bool,
+}
+
+struct PageBack {
+    previous: AnyView,
+    current: AnyView,
+    progress: f32,
+    target: Option<f32>,
 }
 
 /// The right panel's default width.
@@ -433,6 +444,7 @@ impl AppShell {
             hosts,
             nav: cx.new(|_| NavStackState::new()),
             back_swipe: None,
+            page_back: None,
             mounted: Vec::new(),
             panel_shows_terminal: false,
             navigation: setup.restore_navigation.then_some(NavigationPersistence {
@@ -948,6 +960,8 @@ impl AppShell {
             .window_state
             .update(cx, |state, cx| state.set_compact(compact, cx));
         if flipped {
+            self.move_edge_back(TouchPhase::Cancelled, window, cx);
+            self.page_back = None;
             // The visit survives the resize; only a thread selected in the wide
             // split — which is not a page there — has to become one here.
             if compact
@@ -974,6 +988,9 @@ impl AppShell {
     /// entry, so the same destination visited twice is two independent pages.
     fn sync_nav(&mut self, motion: NavMotion, cx: &mut Context<Self>) {
         let history = self.window_state.read(cx).history().to_vec();
+        if self.mounted != history {
+            self.page_back = None;
+        }
         if self.mounted != history
             && let Some(swipe) = &mut self.back_swipe
         {
@@ -1785,7 +1802,7 @@ impl AppShell {
     /// section's detail. Both wear the same nav bar as every other page.
     fn render_settings_page(
         &mut self,
-        detail: bool,
+        destination: Destination,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1797,14 +1814,19 @@ impl AppShell {
         else {
             return div().into_any_element();
         };
-        let title = if detail {
+        let detail = destination != Destination::Settings;
+        let title = if destination == Destination::SettingsSection
+            && self.destination(cx) == Destination::SettingsThreadRules
+        {
+            crate::tr!("settings.thread_behavior").into_owned().into()
+        } else if detail {
             settings.read(cx).section_title(cx)
         } else {
             crate::tr!("settings.title").into_owned().into()
         };
         let body = settings.update(cx, |page, cx| {
             if detail {
-                page.render_compact_section(window, cx)
+                page.render_compact_section(destination, window, cx)
             } else {
                 page.render_compact_list(cx)
             }
@@ -2262,7 +2284,31 @@ impl AppShell {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .page_back
+            .as_ref()
+            .is_some_and(|page| page.target.is_some())
+        {
+            return;
+        }
         let sheet = crate::overlay::active_sheet(window, cx);
+        self.page_back = if sheet.is_none()
+            && self.compact(cx)
+            && !(self.destination(cx) == Destination::Thread && self.agent_lead(cx).is_some())
+            && !crate::window_seam::keyboard_covers_window(window)
+        {
+            let mut views = self.nav.read(cx).views().cloned().collect::<Vec<_>>();
+            views.pop().and_then(|current| {
+                views.pop().map(|previous| PageBack {
+                    previous,
+                    current,
+                    progress: 0.,
+                    target: None,
+                })
+            })
+        } else {
+            None
+        };
         self.back_swipe = Some(BackSwipe {
             origin,
             progress: crate::edge_back::BackProgress {
@@ -2298,6 +2344,11 @@ impl AppShell {
             });
             if commit {
                 close(window, cx);
+            }
+        } else if let Some(page) = &mut self.page_back {
+            page.progress = progress;
+            if ended {
+                page.target = Some(if commit { 1. } else { 0. });
             }
         } else if commit {
             self.back(window, cx);
@@ -2433,31 +2484,104 @@ impl AppShell {
             self.sync_nav(NavMotion::Immediate, cx);
         }
         let width = window.viewport_size().width;
+        // gpui-base 0.7.3 exposes NavPage::progress read-only and mounts the
+        // previous entry only after pop. Bind interactive progress here, at the
+        // navigation owner, until base supplies that API. Retain the same views;
+        // compact ChatView excludes the terminal, so Thread and Panel never
+        // mount the composer or terminal twice.
+        if self.page_back.is_none() {
+            crate::edge_back::settle("page-edge-back", 0., true, window, cx);
+        }
+        let interactive = self.page_back.as_ref().map(|page| {
+            let progress = crate::edge_back::settle(
+                "page-edge-back",
+                page.target.unwrap_or(page.progress),
+                page.target.is_none(),
+                window,
+                cx,
+            );
+            (
+                page.previous.clone(),
+                page.current.clone(),
+                progress,
+                page.target,
+            )
+        });
+        let interactive = interactive.and_then(|(previous, current, progress, target)| {
+            if target == Some(progress) {
+                self.page_back = None;
+                if target == Some(1.) {
+                    self.back(window, cx);
+                    self.sync_nav(NavMotion::Immediate, cx);
+                }
+                None
+            } else {
+                Some((previous, current, progress))
+            }
+        });
         // 200ms lateral push/pop. GPUI has no paint transform, so each page is
         // offset by its own insets; setting `left` and `right` in opposite
         // directions slides it without resizing it.
-        let stack = NavStack::new(&self.nav)
-            .size_full()
-            .overflow_hidden()
-            .transition(Transition::new(NAV_TRANSITION))
-            .item(move |page, _, _| {
-                let rest = 1. - page.progress();
-                let (offset, opacity) = match (page.phase(), page.operation()) {
-                    (PresencePhase::Entering, Some(NavOperation::Pop)) => {
-                        (width * -0.25 * rest, 1.)
-                    }
-                    (PresencePhase::Entering, Some(_)) => (width * rest, page.progress()),
-                    (PresencePhase::Exiting, Some(NavOperation::Pop)) => {
-                        (width * page.progress(), 1.)
-                    }
-                    (PresencePhase::Exiting, Some(_)) => (width * -0.25 * page.progress(), 1.),
-                    _ => (px(0.), 1.),
-                };
-                page.left(offset)
-                    .right(px(0.) - offset)
-                    .opacity(opacity)
-                    .into_any_element()
-            });
+        let stack = if let Some((previous, current, progress)) = interactive {
+            let offset = crate::edge_back::BackProgress::offset(progress, width);
+            let underneath = (offset - width) * 0.25;
+            div()
+                .relative()
+                .size_full()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(underneath)
+                        .right(-underneath)
+                        .debug_selector(|| "back-previous-page".into())
+                        .child(previous)
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .bg(gpui::black().opacity(0.15 * (1. - progress))),
+                        ),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(offset)
+                        .right(-offset)
+                        .debug_selector(|| "back-current-page".into())
+                        .child(current),
+                )
+                .child(div().absolute().inset_0().occlude())
+                .into_any_element()
+        } else {
+            NavStack::new(&self.nav)
+                .size_full()
+                .overflow_hidden()
+                .transition(Transition::new(NAV_TRANSITION))
+                .item(move |page, _, _| {
+                    let rest = 1. - page.progress();
+                    let (offset, opacity) = match (page.phase(), page.operation()) {
+                        (PresencePhase::Entering, Some(NavOperation::Pop)) => {
+                            (width * -0.25 * rest, 1.)
+                        }
+                        (PresencePhase::Entering, Some(_)) => (width * rest, page.progress()),
+                        (PresencePhase::Exiting, Some(NavOperation::Pop)) => {
+                            (width * page.progress(), 1.)
+                        }
+                        (PresencePhase::Exiting, Some(_)) => (width * -0.25 * page.progress(), 1.),
+                        _ => (px(0.), 1.),
+                    };
+                    page.left(offset)
+                        .right(px(0.) - offset)
+                        .opacity(opacity)
+                        .into_any_element()
+                })
+                .into_any_element()
+        };
         v_flex()
             .id("app-shell")
             .relative()
@@ -5442,20 +5566,218 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_tap_right_after_flung_edge_swipe_reaches_revealed_page(cx: &mut TestAppContext) {
-        use gpui::TouchPhase::{Ended, Moved, Started};
+    fn compact_edge_swipe_tracks_cancels_and_completes_before_next_tap(cx: &mut TestAppContext) {
+        use gpui::TouchPhase::{Cancelled, Ended, Moved, Started};
 
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
+        let (shell, host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
         let root = shell.read_with(cx, |shell, cx| shell.nav.read(cx).depth());
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            "/tmp/tcode-compact-panel".into(),
+            None,
+        );
+        meta.id = "thread-1".into();
+        for (topic, event) in [
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: vec![meta],
+                    projects: Vec::new(),
+                }),
+            ),
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let conversation = (0..24)
+            .flat_map(|index| {
+                [
+                    agent::AgentEvent::TurnStarted {
+                        turn_id: format!("scroll-{index}"),
+                    },
+                    agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                        id: format!("message-{index}"),
+                        parent_item_id: None,
+                        content: agent::ItemContent::UserMessage {
+                            text: format!("Keep reading position {index}\n").repeat(4),
+                            context_len: None,
+                            attachments: Vec::new(),
+                        },
+                    }),
+                    agent::AgentEvent::TurnCompleted {
+                        turn_id: format!("scroll-{index}"),
+                        status: agent::TurnStatus::Completed,
+                        usage: None,
+                    },
+                ]
+            })
+            .collect();
+        seed_wide_diff_with(&shell, &host, cx, conversation);
+        draw(cx);
+        let chat = shell.read_with(cx, |shell, _| {
+            shell.attachment.as_ref().unwrap().chat.clone()
+        });
+        let mut reading_position = None;
         for destination in [Destination::Thread, Destination::Panel] {
             shell.update(cx, |shell, cx| shell.go(destination, cx));
             draw(cx);
             cx.executor().advance_clock(Duration::from_millis(250));
             draw(cx);
+            if destination == Destination::Thread {
+                let viewport = chat.read_with(cx, |chat, _| chat.capture_viewport().unwrap());
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: viewport.center(),
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1000.))),
+                    ..Default::default()
+                });
+                draw(cx);
+                cx.executor().advance_clock(Duration::from_secs(1));
+                draw(cx);
+                assert!(
+                    cx.debug_bounds("scroll-to-end").is_some(),
+                    "fixture scrolls away from the conversation tail"
+                );
+                reading_position = (0..100).find_map(|index| {
+                    let selector: &'static str = format!("timeline-row-{index}").leak();
+                    let bounds = cx.debug_bounds(selector)?;
+                    (bounds.top() >= viewport.top() && bounds.top() < viewport.bottom())
+                        .then_some((selector, bounds.top()))
+                });
+                assert!(
+                    reading_position.is_some(),
+                    "a scrolled conversation row is visible"
+                );
+            }
         }
+        let (reading_row, reading_top) = reading_position.unwrap();
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        let history = state.read_with(cx, |state, _| state.history().to_vec());
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+        });
+        cx.update(|window, cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_draft("keep this draft", window, cx);
+            })
+        });
+        draw_until(&shell, cx, &host, "diff-body", None);
+        let line = "diff-line-new-a/deeply/nested/module/tree/with/an/absurdly/long/file_name.rs-1";
+        for (id, mode, end_x, elapsed, commits) in [
+            (3, crate::theme::ThemeMode::Light, 70., 400, false),
+            (4, crate::theme::ThemeMode::Light, 180., 400, true),
+            (5, crate::theme::ThemeMode::Light, 70., 40, true),
+            (6, crate::theme::ThemeMode::Dark, 70., 400, false),
+            (7, crate::theme::ThemeMode::Dark, 180., 400, true),
+            (8, crate::theme::ThemeMode::Dark, 70., 40, true),
+        ] {
+            cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
+            draw(cx);
+            let initial_line = cx.debug_bounds(line).expect("diff line before scrolling");
+            let body = cx.debug_bounds("diff-body").unwrap();
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: body.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(-120.), px(0.))),
+                ..Default::default()
+            });
+            draw(cx);
+            cx.executor().advance_clock(Duration::from_secs(1));
+            draw(cx);
+            let before_swipe = cx.debug_bounds(line).expect("diff before gesture");
+            assert!(
+                before_swipe.left() < initial_line.left(),
+                "fixture scrolls real content"
+            );
+            touch_drag(
+                cx,
+                id,
+                &[
+                    (Started, 10., 300., 0),
+                    (Moved, 40., 300., elapsed / 2),
+                    (Moved, end_x, 300., elapsed / 2),
+                ],
+            );
+            let current = cx
+                .debug_bounds("back-current-page")
+                .expect("page follows finger");
+            assert!((current.left() - px(end_x - 10.)).abs() < px(1.));
+            let previous = cx
+                .debug_bounds("back-previous-page")
+                .expect("real previous page");
+            assert!(previous.left() < px(0.) && previous.right() < px(393.));
+            assert!(cx.debug_bounds("compact-thread-page").is_some());
+            assert!(
+                cx.debug_bounds("chat-composer").is_some(),
+                "underlying composer is visible"
+            );
+            assert_eq!(
+                cx.debug_bounds(reading_row).unwrap().top(),
+                reading_top,
+                "previous page keeps its scroll position"
+            );
+            assert_eq!(
+                state.read_with(cx, |state, _| state.history().to_vec()),
+                history
+            );
+            touch_drag(cx, id, &[(Ended, end_x, 300., 10)]);
+            assert_eq!(
+                cx.debug_bounds("back-current-page").unwrap(),
+                current,
+                "release starts at the finger"
+            );
+            cx.executor().advance_clock(Duration::from_secs(1));
+            draw(cx);
+            assert!(cx.debug_bounds("back-current-page").is_none());
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                "keep this draft"
+            );
+            if commits {
+                assert_eq!(
+                    state.read_with(cx, |state, _| state.destination()),
+                    Destination::Thread
+                );
+                shell.update(cx, |shell, cx| shell.go(Destination::Panel, cx));
+                draw(cx);
+                cx.executor().advance_clock(Duration::from_millis(250));
+                draw(cx);
+            } else {
+                assert_eq!(
+                    cx.debug_bounds(line).unwrap(),
+                    before_swipe,
+                    "cancel keeps scroll position for gesture {id}"
+                );
+                assert_eq!(
+                    state.read_with(cx, |state, _| state.history().to_vec()),
+                    history
+                );
+            }
+        }
+        touch_drag(cx, 9, &[(Started, 10., 300., 0), (Moved, 70., 300., 200)]);
+        assert!(cx.debug_bounds("back-current-page").is_some());
+        resize(cx, 1024.);
+        resize(cx, 393.);
+        touch_drag(cx, 9, &[(Cancelled, 70., 300., 0)]);
+        assert!(cx.debug_bounds("back-current-page").is_none());
+        assert_eq!(
+            state.read_with(cx, |state, _| state.history().to_vec()),
+            history
+        );
         // Touch hardware reports a moving finger every 8–16ms, so the release
         // carries a fling velocity.
         let mut swipe = vec![(Started, 10., 300., 0)];
