@@ -916,6 +916,7 @@ impl AppState {
             }
             // Answered from the session's log by `reply_to_subscription`.
             Topic::SessionEvents { .. } => return None,
+            Topic::CommandOutput { .. } => return None,
             Topic::RuntimeEvents => return None,
             Topic::Preview => return None,
             // Retained latest-run status, so a client that subscribes after a

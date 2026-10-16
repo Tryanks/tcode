@@ -171,6 +171,10 @@ pub use wire::{
 // ReadFileBytes/ReadItemImage control queries unchanged; Project.quick_chat
 // identifies host-owned quick chats in replicated metadata; and the protocol
 // adds SettleChildren and its ChildrenSettled command response.
+//
+// Unreleased: the CommandOutput topic and its CommandOutputReplaced event,
+// pushed while a command's output grows, replace the RenderStoredOutput query
+// and the TerminalFrame query response.
 pub const PROTOCOL_VERSION: u32 = 13;
 
 #[cfg(test)]

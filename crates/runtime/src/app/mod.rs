@@ -244,6 +244,7 @@ mod acp;
 mod active_session;
 mod approvals;
 mod authorization;
+mod command_output;
 mod command_validation;
 mod diff_pass;
 mod events;
@@ -382,6 +383,10 @@ pub struct AppState {
     terminal_registry: TerminalRegistry,
     /// The replicated grid published on `Topic::Terminal`, one per live PTY.
     terminal_projections: HashMap<u64, TerminalProjection>,
+    /// The command output screens published on `Topic::CommandOutput`, one
+    /// per subscribed width.
+    command_output_feeds: HashMap<Topic, command_output::CommandOutputFeed>,
+    next_command_output_feed: u64,
     preview_pending: HashMap<u64, async_channel::Sender<Result<preview_mcp::PreviewReply, String>>>,
     next_preview_request: u64,
     /// Provider-native rewind requested while a session is live or starting.
@@ -597,6 +602,8 @@ impl AppState {
             terminal_workspaces: HashMap::new(),
             terminal_registry: TerminalRegistry::default(),
             terminal_projections: HashMap::new(),
+            command_output_feeds: HashMap::new(),
+            next_command_output_feed: 0,
             preview_pending: HashMap::new(),
             next_preview_request: 0,
             pending_native_rewinds: HashMap::new(),

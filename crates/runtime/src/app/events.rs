@@ -668,6 +668,10 @@ impl AppState {
             activity.apply(&record, has_parent);
         }
         self.advance_decision_revision(session_id);
+        let output_item = record
+            .item_id()
+            .filter(|_| !self.command_output_feeds.is_empty())
+            .map(str::to_owned);
         let topic = Topic::SessionEvents {
             session_id: session_id.to_string(),
         };
@@ -691,6 +695,9 @@ impl AppState {
             {
                 self.hold_record(session_id, record, cx);
             }
+        }
+        if let Some(item_id) = output_item {
+            self.command_output_changed(session_id, &item_id, cx);
         }
         self.enqueue_store_write(
             StoreWrite::AppendEvent {
