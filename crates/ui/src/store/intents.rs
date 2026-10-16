@@ -401,6 +401,7 @@ impl WorkspaceStore {
         self.session_turn_offset = 0;
         self.session_catching_up = false;
         self.clear_terminal_topics();
+        self.clear_command_outputs();
         if let Some(session_id) = self.selected_session_id.take() {
             if let Some(thread) = self.threads.get_mut(&session_id) {
                 thread.left_at = self.selection_generation;

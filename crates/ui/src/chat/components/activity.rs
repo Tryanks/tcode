@@ -287,7 +287,7 @@ fn activity_detail(
         EntryContent::Item(ItemContent::CommandExecution {
             command, output, ..
         }) => command_detail.unwrap_or_else(|| {
-            CommandPanelCache::new().render(&entry.id, command, output, None, cx)
+            CommandPanelCache::new().render(entry, command, output, Default::default(), None, cx)
         }),
         EntryContent::Item(ItemContent::ToolCall { input, output, .. }) => {
             let mut input_brief = tool_brief(input);

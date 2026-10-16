@@ -112,7 +112,8 @@ impl AppState {
                 Topic::SessionEvents { session_id }
                 | Topic::SessionStatus { session_id }
                 | Topic::SessionPlan { session_id }
-                | Topic::GitStatus { session_id } => session(session_id),
+                | Topic::GitStatus { session_id }
+                | Topic::CommandOutput { session_id, .. } => session(session_id),
                 Topic::Terminal { terminal_id } => terminal(*terminal_id).map(|_| ()),
                 Topic::Index
                 | Topic::SpaceIndex { .. }
@@ -339,8 +340,7 @@ impl AppState {
                 | Query::ReadItemOutput { session_id, .. }
                 | Query::ReadItemImage { session_id, .. }
                 | Query::ReadItemImagePreview { session_id, .. }
-                | Query::PullRequest { session_id, .. }
-                | Query::RenderStoredOutput { session_id, .. } => session(session_id),
+                | Query::PullRequest { session_id, .. } => session(session_id),
                 Query::ReadProjectIcon { project_id, .. } => self
                     .projects
                     .iter()

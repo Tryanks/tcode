@@ -75,6 +75,7 @@ impl AppState {
                 Topic::Terminal { terminal_id } => {
                     self.refresh_terminal_projection(*terminal_id);
                 }
+                Topic::CommandOutput { .. } => self.open_command_output(&subscription.topic),
                 _ => {}
             }
         }
@@ -86,6 +87,9 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         self.subscriptions.remove(&subscription.topic);
+        if let Topic::CommandOutput { .. } = &subscription.topic {
+            self.close_command_output(&subscription.topic);
+        }
         if let Topic::SpaceIndex { space_id } = &subscription.topic {
             self.space_scopes.remove(space_id);
             if let Some(archive) = self.space_archives.remove(space_id) {

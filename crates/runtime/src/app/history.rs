@@ -1058,6 +1058,10 @@ impl AppState {
         subscription: Subscription,
         cx: &mut HostCx,
     ) {
+        if let Topic::CommandOutput { .. } = &subscription.topic {
+            self.reply_command_output(request_id, subscription.topic, cx);
+            return;
+        }
         if let Topic::SessionEvents { session_id } = &subscription.topic {
             if let Some(log) = self.event_records.get(session_id) {
                 self.reply_with(

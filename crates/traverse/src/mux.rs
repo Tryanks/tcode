@@ -374,6 +374,7 @@ async fn pump(
                                         *kind,
                                         "session_plan_replaced"
                                             | "git_status_replaced"
+                                            | "command_output_replaced"
                                             | "providers_replaced"
                                             | "index_summary_replaced"
                                     )

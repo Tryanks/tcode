@@ -164,10 +164,6 @@ const ASYNC_MARKDOWN_THRESHOLD_BYTES: usize = 4 * 1024;
 /// Target minimum time for the latest activity and its immediate predecessor.
 /// An activity with two newer successors folds immediately instead.
 const AUTO_ACTIVITY_MIN_VISIBILITY: Duration = Duration::from_millis(500);
-/// A window drag walks through every intermediate width. Rendering stored
-/// output is the host's work, so only the width the drag settles on is asked
-/// for.
-const COMMAND_PANEL_DEBOUNCE: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoActivityExpansion {
@@ -2291,18 +2287,27 @@ impl ChatView {
                 }) => {
                     let panel_id = entry.id.clone();
                     let on_cols_change = cx.listener(move |_this, cols: &u16, window, cx| {
-                        // Fires from `on_prepaint`, i.e. while `List` holds its state
-                        // borrowed; remeasuring inline would panic. Defer past the frame.
+                        // Fires from `on_prepaint`, in the middle of laying the
+                        // list out. Subscribe once the frame is done.
                         let cols = *cols;
                         let panel_id = panel_id.clone();
                         cx.defer_in(window, move |this, _window, cx| {
-                            this.request_stored_output(panel_id, cols, turn, cx);
+                            this.workspace_store.update(cx, |store, _| {
+                                store.watch_command_output(&panel_id, cols);
+                            });
                         });
                     });
+                    let store = self.workspace_store.read(cx);
+                    let replica = store.command_output(&entry.id);
+                    let screen = components::command_panel::OutputScreen {
+                        watched: replica.and_then(|replica| replica.watched()),
+                        frame: replica.and_then(|replica| replica.frame()),
+                    };
                     Some(self.command_panels.borrow_mut().render(
-                        &entry.id,
+                        entry,
                         command,
                         output,
+                        screen,
                         Some(Box::new(on_cols_change)),
                         cx,
                     ))
@@ -2399,47 +2404,24 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Ask the host to render one stored command's output at `cols`.
-    ///
-    /// The request waits out [`COMMAND_PANEL_DEBOUNCE`] first, and the task is
-    /// parked on the panel: a width that moves again replaces this task, which
-    /// drops both the timer and any query already in flight for the old width.
-    fn request_stored_output(
-        &mut self,
-        item_id: String,
-        cols: u16,
-        turn: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session_id) = self.session_key.clone() else {
-            return;
-        };
-        let Some(generation) = self.command_panels.borrow_mut().claim(&item_id, cols) else {
-            return;
-        };
-        let id = item_id.clone();
-        let task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(COMMAND_PANEL_DEBOUNCE).await;
-            let Ok(query) = this.update(cx, |this, cx| {
-                this.workspace_store.update(cx, |store, cx| {
-                    store.render_stored_output(session_id, id.clone(), cols, cx)
-                })
-            }) else {
-                return;
-            };
-            let frame = query.await.ok();
-            let _ = this.update(cx, |this, cx| {
-                if this
-                    .command_panels
-                    .borrow_mut()
-                    .adopt(&id, generation, frame)
-                {
-                    this.remeasure_activity(turn, &id, cx);
+    /// Release the screens of panels no longer laid out and remeasure the
+    /// rows whose panel changed height with a new screen.
+    fn settle_command_panels(&mut self, cx: &mut Context<Self>) {
+        let changes = self.command_panels.borrow_mut().settle();
+        if !changes.unmounted.is_empty() {
+            self.workspace_store.update(cx, |store, _| {
+                for id in &changes.unmounted {
+                    store.unwatch_command_output(id);
                 }
-                cx.notify();
             });
-        });
-        self.command_panels.borrow_mut().hold(&item_id, task);
+        }
+        if changes.resized.is_empty() {
+            return;
+        }
+        for (turn, id) in &changes.resized {
+            self.remeasure_activity(*turn, id, cx);
+        }
+        cx.notify();
     }
 
     /// The phone entry to the Agents view: a pill above the composer that
@@ -4072,13 +4054,15 @@ impl Render for ChatView {
                                             let _ = view.update(cx, |_, cx| cx.notify());
                                         });
                                     }
-                                    if let Some((start, end)) = painted.get() {
-                                        window.defer(cx, move |_, cx| {
-                                            let _ = view.update(cx, |chat, cx| {
+                                    let painted = painted.get();
+                                    window.defer(cx, move |_, cx| {
+                                        let _ = view.update(cx, |chat, cx| {
+                                            chat.settle_command_panels(cx);
+                                            if let Some((start, end)) = painted {
                                                 chat.adopt_painted_rows(start..end, cx);
-                                            });
+                                            }
                                         });
-                                    }
+                                    });
                                 }
                             },
                             |_, _, _, _| {},
@@ -5039,6 +5023,223 @@ mod tests {
                 "the next {selector} did not open automatically"
             );
         }
+    }
+
+    /// A running command's panel shows the screens the host renders at the
+    /// panel's width, pushed as the output grows, over one subscription per
+    /// width that collapsing the panel or leaving the thread releases.
+    #[gpui::test]
+    fn a_running_command_shows_the_screens_the_host_pushes_for_its_width(cx: &mut TestAppContext) {
+        use crate::terminal_drawer::TERMINAL_CELL_HEIGHT;
+        use gpui::{VisualTestContext, px, size};
+        use tcode_protocol::{Topic, terminal::TerminalColor};
+
+        let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
+        let seeded_id = session_id.clone();
+        let other_id = smol::block_on(host.update_state_for_test(move |state, cx| {
+            state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
+            for (ts, event) in [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: "turn".into(),
+                },
+                agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: "user".into(),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "build it".into(),
+                        context_len: None,
+                        attachments: Vec::new(),
+                    },
+                }),
+                agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                    id: "run".into(),
+                    parent_item_id: None,
+                    content: ItemContent::CommandExecution {
+                        command: "make".into(),
+                        output: String::new(),
+                        exit_code: None,
+                        status: ItemStatus::InProgress,
+                    },
+                }),
+            ]
+            .iter()
+            .enumerate()
+            {
+                state.record_event_for_replica_test(&seeded_id, ts as u64, event, cx);
+            }
+            let other = state.start_draft("other-thread".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&other).expect("second draft");
+            active.draft = false;
+            let meta = active.meta.clone();
+            state.sessions.push(meta);
+            other
+        }))
+        .expect("record the running command");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        driver.wait_until(cx, &store, "chat baseline", |cx| {
+            store.read_with(cx, |store, _| !store.chat_loading())
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (_, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(900.)));
+
+        let link = driver.link.clone();
+        let output_topics = || {
+            link.subscribed_topics()
+                .into_iter()
+                .filter_map(|topic| match topic {
+                    Topic::CommandOutput {
+                        session_id,
+                        item_id,
+                        cols,
+                    } => Some((session_id, item_id, cols)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let watched = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .command_output("run")
+                    .and_then(|output| output.watched())
+            })
+        };
+        let frame = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .command_output("run")
+                    .and_then(|output| output.frame().cloned())
+            })
+        };
+        let mut settle = |cx: &mut VisualTestContext,
+                          description: &str,
+                          ready: &dyn Fn(&mut VisualTestContext) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                driver.step(cx, &store);
+                draw(cx);
+                if ready(cx) {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "waiting for {description}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        // Nothing drives this turn on the host, so its Work Log reads as
+        // finished and folded: open it and the command, as a reader would.
+        settle(cx, "the Work Log", &|cx| {
+            cx.debug_bounds("worklog-header-0-run").is_some()
+        });
+        let header = cx.debug_bounds("worklog-header-0-run").unwrap();
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        settle(cx, "the command row", &|cx| {
+            cx.debug_bounds("activity-row-run").is_some()
+        });
+        if cx.debug_bounds("activity-detail").is_none() {
+            let row = cx.debug_bounds("activity-row-run").unwrap();
+            cx.simulate_click(row.center(), gpui::Modifiers::default());
+        }
+        settle(cx, "the panel to measure its width", &|cx| {
+            watched(cx).is_some()
+        });
+        let cols = watched(cx).unwrap();
+        let subscribed = vec![(session_id.clone(), "run".to_string(), cols)];
+        assert_eq!(output_topics(), subscribed);
+
+        let mut long_line = "x".repeat(usize::from(cols));
+        long_line.push_str("yz");
+        let growth = [
+            "10%\r".to_string(),
+            "50%\r".into(),
+            "100%\n".into(),
+            format!("{long_line}\n"),
+            "\u{1b}[32mok\u{1b}[0m\n".into(),
+        ];
+        for (index, text) in growth.into_iter().enumerate() {
+            let seeded_id = session_id.clone();
+            smol::block_on(host.update_state_for_test(move |state, cx| {
+                state.record_event_for_replica_test(
+                    &seeded_id,
+                    10 + index as u64,
+                    &agent::AgentEvent::Delta {
+                        item_id: "run".into(),
+                        kind: agent::DeltaKind::CommandOutput,
+                        text,
+                    },
+                    cx,
+                );
+            }))
+            .expect("grow the command output");
+            settle(cx, "one host turn", &|_| true);
+            assert_eq!(output_topics(), subscribed, "growth re-subscribed");
+        }
+        settle(cx, "the screen after the last growth", &|cx| {
+            frame(cx).is_some_and(|frame| frame.rows == 4)
+        });
+        let screen = frame(cx).unwrap();
+        let text = |row: usize| {
+            screen.visible[row]
+                .cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(screen.cols, cols);
+        assert_eq!(text(0), "100%", "the progress bar was not redrawn in place");
+        assert_eq!(text(1), "x".repeat(usize::from(cols)));
+        assert_eq!(text(2), "yz");
+        assert_eq!(text(3), "ok");
+        assert_eq!(
+            screen.style(&screen.visible[3].cells[0]).fg,
+            TerminalColor::Indexed(2)
+        );
+        assert_eq!(output_topics(), subscribed);
+        // The panel is as tall as the host's screen, not as the raw output's
+        // three lines.
+        let output = cx
+            .debug_bounds("command-output-run")
+            .expect("the output grid");
+        assert_eq!(output.size.height, px(4. * TERMINAL_CELL_HEIGHT));
+
+        cx.simulate_resize(size(px(600.), px(900.)));
+        settle(cx, "the narrower screen", &|cx| {
+            watched(cx).is_some_and(|watched| watched < cols)
+                && frame(cx).is_some_and(|frame| Some(frame.cols) == watched(cx))
+        });
+        let narrower = watched(cx).unwrap();
+        assert_eq!(
+            output_topics(),
+            vec![(session_id.clone(), "run".to_string(), narrower)]
+        );
+
+        let header = cx.debug_bounds("activity-row-run").expect("command row");
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        settle(cx, "the collapsed panel to release its screen", &|_| {
+            output_topics().is_empty()
+        });
+        let header = cx.debug_bounds("activity-row-run").expect("command row");
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        settle(cx, "the reopened panel", &|_| output_topics().len() == 1);
+
+        store.update(cx, |store, _| store.select_session(other_id));
+        settle(cx, "leaving the thread", &|_| output_topics().is_empty());
+        driver.shutdown(cx, &store, &host);
     }
 
     #[test]

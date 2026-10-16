@@ -82,15 +82,6 @@ pub enum Query {
         query: String,
         limit: u32,
     },
-    /// Re-render a stored command's output at `cols`. The emulator lives on the
-    /// host, so a client asks for the wrapped, styled grid instead of parsing
-    /// ANSI itself. `cols` outside [`STORED_OUTPUT_COLS`] is clamped into it.
-    RenderStoredOutput {
-        session_id: String,
-        /// Timeline entry id of the command execution.
-        item_id: String,
-        cols: u16,
-    },
     /// The whole output of a tool call or command whose history record carried
     /// only [`OUTPUT_PREVIEW_BYTES`] of it.
     ReadItemOutput {
@@ -122,11 +113,11 @@ pub enum Query {
     },
 }
 
-/// Widths the host will render stored output at. Narrower than the low bound is
+/// Widths the host will render command output at. Narrower than the low bound is
 /// unreadable; wider is a client asking for a grid nobody can see.
 pub const STORED_OUTPUT_COLS: std::ops::RangeInclusive<u16> = 20..=400;
 
-/// Screen rows the host emulates stored output into. Trailing blank rows are
+/// Screen rows the host emulates command output into. Trailing blank rows are
 /// trimmed, so a shorter output returns a shorter frame.
 pub const STORED_OUTPUT_ROWS: u16 = 16;
 
@@ -172,10 +163,6 @@ pub enum QueryResponse {
         mime: String,
     },
     SessionContentHits(Vec<SessionSearchHit>),
-    /// Stored output rendered into the same grid DTO the live terminal
-    /// replicates. `history` is empty and there is no cursor: it is a finished
-    /// screen, not a session.
-    TerminalFrame(Box<crate::terminal::TerminalFrame>),
     ItemOutput(String),
     ArchivedSessions(crate::ArchivedSessions),
     PullRequest {

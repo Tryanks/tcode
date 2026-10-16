@@ -1151,22 +1151,6 @@ fn dispatch_query(
             let archived = app.scoped_archived_sessions(&cx.principal);
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })
         }
-        Query::RenderStoredOutput {
-            session_id,
-            item_id,
-            cols,
-        } => {
-            let read = app.stored_command_output(&session_id, item_id, cx);
-            let host_cx = cx.clone();
-            cx.spawn_background(async move {
-                let output = read.await?;
-                Ok(QueryResponse::TerminalFrame(Box::new(
-                    host_cx
-                        .unblock(move || crate::terminal::render_stored_output(&output, cols))
-                        .await,
-                )))
-            })
-        }
     }
 }
 
@@ -1485,22 +1469,23 @@ mod tests {
         std::fs::remove_dir_all(data_root).expect("remove test data");
     }
 
-    /// Stored command output is re-wrapped by the host, not by the client: the
-    /// same item asked for at two widths comes back as two grids, each carrying
-    /// the styles the shell wrote.
+    /// Command output is rendered by the host at the width a subscriber asked
+    /// for: a finished command is answered once per width, and a running one
+    /// is pushed again, coalesced, while its output grows, until the
+    /// subscriber leaves.
     #[test]
-    fn rendering_stored_output_rewraps_at_the_requested_width() {
-        use tcode_protocol::terminal::{CellFlags, TerminalColor};
+    fn command_output_is_rendered_per_width_and_pushed_while_it_grows() {
+        use tcode_protocol::terminal::{CellFlags, TerminalColor, TerminalFrame};
 
         let data_root =
-            std::env::temp_dir().join(format!("tcode-stored-output-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("tcode-command-output-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(data_root.clone()).expect("open session store");
         let mut meta = tcode_core::project::SessionMeta::new(
             agent::ProviderKind::ClaudeCode,
             data_root.join("workspace"),
             Some("opus".into()),
         );
-        meta.id = "stored-output-session".into();
+        meta.id = "command-output-session".into();
         store
             .append_event(
                 &meta.id,
@@ -1540,35 +1525,50 @@ mod tests {
 
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
         let link = host.link();
-        let _events = super::p4b_tests::observed_events(&link);
-        // The host only renders what it has folded; a client reads a thread by
-        // subscribing to it, which is what makes the timeline resident.
+        let events = super::p4b_tests::observed_events(&link);
+        let session_topic = Topic::SessionEvents {
+            session_id: meta.id.clone(),
+        };
         link.subscribe(tcode_protocol::Subscription {
             known_index: None,
-            topic: Topic::SessionEvents {
-                session_id: meta.id.clone(),
-            },
+            topic: session_topic.clone(),
             after: None,
         })
         .expect("subscribe to the session");
+        next_event(&events, |event| {
+            event.topic == session_topic
+                && matches!(event.event, ServerEvent::SessionSnapshot { .. })
+        });
 
-        let frame = |item_id: &str, cols: u16| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                match smol::block_on(link.query(Query::RenderStoredOutput {
-                    session_id: meta.id.clone(),
-                    item_id: item_id.into(),
-                    cols,
-                })) {
-                    Ok(QueryResponse::TerminalFrame(frame)) => return *frame,
-                    Ok(other) => panic!("unexpected stored-output response: {other:?}"),
-                    Err(error) if std::time::Instant::now() < deadline => {
-                        assert_eq!(error.code, "unknown_stored_output");
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    Err(error) => panic!("stored output never became readable: {error:?}"),
-                }
-            }
+        let topic = |item_id: &str, cols: u16| Topic::CommandOutput {
+            session_id: meta.id.clone(),
+            item_id: item_id.into(),
+            cols,
+        };
+        let subscribe = |topic: &Topic| {
+            link.subscribe(tcode_protocol::Subscription {
+                known_index: None,
+                topic: topic.clone(),
+                after: None,
+            })
+            .expect("subscribe to command output");
+        };
+        let frame_of = |event: EventEnvelope| match event.event {
+            ServerEvent::CommandOutputReplaced(frame) => *frame,
+            other => panic!("unexpected command output event: {other:?}"),
+        };
+        let reply = |topic: &Topic| {
+            subscribe(topic);
+            frame_of(next_event(&events, |event| {
+                event.topic == *topic && event.request_id.is_some()
+            }))
+        };
+        let text = |frame: &TerminalFrame, row: usize| {
+            frame.visible[row]
+                .cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
         };
 
         for (requested, cols, first_line_rows) in [
@@ -1578,24 +1578,17 @@ mod tests {
             (40, 40, 1),
             (4000, 400, 1),
         ] {
-            let rendered = frame("cmd-1", requested);
+            let rendered = reply(&topic("cmd-1", requested));
             assert_eq!(rendered.cols, cols);
             assert_eq!(usize::from(rendered.rows), first_line_rows + 2);
-            let text = |row: usize| {
-                rendered.visible[row]
-                    .cells
-                    .iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-            };
             if cols == 20 {
-                assert_eq!(text(0), "abcdefghijklmnopqrst");
-                assert_eq!(text(1), "uvwxy");
+                assert_eq!(text(&rendered, 0), "abcdefghijklmnopqrst");
+                assert_eq!(text(&rendered, 1), "uvwxy");
             } else {
-                assert_eq!(text(0), "abcdefghijklmnopqrstuvwxy");
+                assert_eq!(text(&rendered, 0), "abcdefghijklmnopqrstuvwxy");
             }
-            assert_eq!(text(first_line_rows), "plain");
-            assert_eq!(text(first_line_rows + 1), "end");
+            assert_eq!(text(&rendered, first_line_rows), "plain");
+            assert_eq!(text(&rendered, first_line_rows + 1), "end");
             for row in &rendered.visible[..first_line_rows] {
                 for cell in &row.cells {
                     let style = rendered.style(cell);
@@ -1611,15 +1604,75 @@ mod tests {
             );
             assert!(rendered.history.is_empty() && rendered.cursor.is_none());
         }
-        assert_eq!(frame("empty-output", 40).rows, 0);
+        assert_eq!(reply(&topic("empty-output", 40)).rows, 0);
 
-        let missing = smol::block_on(link.query(Query::RenderStoredOutput {
-            session_id: meta.id.clone(),
-            item_id: "no-such-item".into(),
-            cols: 80,
-        }))
-        .expect_err("an unknown item must be refused");
-        assert_eq!(missing.code, "unknown_stored_output");
+        let session_id = meta.id.clone();
+        let record = |events: Vec<agent::AgentEvent>| {
+            let session_id = session_id.clone();
+            smol::block_on(host.update_state_for_test(move |state, cx| {
+                for (ts, event) in events.iter().enumerate() {
+                    state.record_event_for_replica_test(&session_id, 10 + ts as u64, event, cx);
+                }
+            }))
+            .expect("record provider events");
+        };
+        let delta = |text: &str| agent::AgentEvent::Delta {
+            item_id: "run-1".into(),
+            kind: agent::DeltaKind::CommandOutput,
+            text: text.into(),
+        };
+        record(vec![agent::AgentEvent::ItemStarted(agent::ThreadItem {
+            id: "run-1".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::CommandExecution {
+                command: "build".into(),
+                output: String::new(),
+                exit_code: None,
+                status: agent::ItemStatus::InProgress,
+            },
+        })]);
+        let running = topic("run-1", 40);
+        assert_eq!(reply(&running).rows, 0);
+
+        // A progress bar redrawn in place, then a green verdict.
+        let mut growth = (1..=9)
+            .map(|step| delta(&format!("{}%\r", step * 10)))
+            .collect::<Vec<_>>();
+        growth.push(delta("100%\n\u{1b}[32mok\u{1b}[0m\n"));
+        let deltas = growth.len();
+        record(growth);
+        let mut pushes = 0;
+        let latest = loop {
+            let frame = frame_of(next_event(&events, |event| event.topic == running));
+            pushes += 1;
+            if frame.rows == 2 {
+                break frame;
+            }
+        };
+        assert!(pushes < deltas, "{pushes} pushes for {deltas} deltas");
+        assert_eq!(text(&latest, 0), "100%");
+        assert_eq!(text(&latest, 1), "ok");
+        assert_eq!(
+            latest.style(&latest.visible[1].cells[0]).fg,
+            TerminalColor::Indexed(2)
+        );
+
+        link.unsubscribe(tcode_protocol::Subscription {
+            known_index: None,
+            topic: running.clone(),
+            after: None,
+        })
+        .expect("unsubscribe");
+        record(vec![delta("unseen\n")]);
+        // Nothing reaches a topic nobody holds: the next event on it is the
+        // answer to subscribing again, already holding the line it missed.
+        subscribe(&running);
+        let resubscribed = next_event(&events, |event| event.topic == running);
+        assert!(
+            resubscribed.request_id.is_some(),
+            "pushed after unsubscribe"
+        );
+        assert_eq!(text(&frame_of(resubscribed), 2), "unseen");
 
         link.shutdown_blocking().expect("stop host");
         host.stopped.recv_blocking().expect("host thread stopped");

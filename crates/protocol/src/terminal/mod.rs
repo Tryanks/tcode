@@ -258,8 +258,8 @@ pub struct TerminalClipboard {
 
 /// The complete replicated grid.
 ///
-/// Sent on subscribe for a live terminal, and returned whole by
-/// [`crate::Query::RenderStoredOutput`] for a stored command's output.
+/// Sent on subscribe for a live terminal, and as every
+/// [`crate::ServerEvent::CommandOutputReplaced`] for a command's output.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalFrame {
     pub cols: u16,

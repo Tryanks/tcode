@@ -1,8 +1,8 @@
-//! Render a stored command's captured output into a [`TerminalFrame`].
+//! Render a command's captured output into a [`TerminalFrame`].
 //!
-//! Clients keep no emulator, so the width they can show is a request and the
-//! wrapped, styled grid is the answer. This runs on the host's blocking-I/O
-//! executor: it is pure CPU over one string.
+//! Clients keep no emulator, so the width they can show is a subscription and
+//! the wrapped, styled grid is what the host pushes. This runs on the host's
+//! blocking-I/O executor: it is pure CPU over one string.
 
 use tcode_protocol::{STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS, terminal::TerminalFrame};
 use term::{GridEmulator, Projector};
