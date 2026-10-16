@@ -150,26 +150,28 @@ pub use wire::{
 // instruction channel, an MCP server's instructions, Codex's developer
 // instructions).
 //
-// Unreleased: SessionMeta carries pull_request_watches_paused for retained watch subscriptions.
-// Unreleased: ReadFileBytes accepts an optional max_bytes read budget, capped by the host attachment policy.
-// Unreleased: ReadItemImagePreview returns optional previews of recorded tool images.
-// Unreleased: ReadImagePreview returns optional size-specific static attachment previews.
-// Unreleased: ReadItemImage accepts the same optional network read budget.
-// Unreleased: adds TurnRetry events, SessionStatus.turn_retry and the RetryTurn command
-// for native capacity continuations.
-// Unreleased: the agent event stream gains steer_rejected, a provider's
-// report that the correlated steer reached it after its turn had ended; the
-// host then sends the text as an ordinary turn. Index subscriptions may carry
-// known_index; matching content receives IndexUnchanged instead of a snapshot.
-// ReadFilePreview rejects files larger than 512 KiB before transferring bytes.
-// SessionUsageChanged carries usage and meter capacity when the rest of the
-// session status is unchanged; subscription replies remain full statuses.
-// IndexActivitiesChanged sends changed activity entries when other index facts
-// are unchanged; subscription replies remain full index snapshots.
-// Unreleased: explicit original reads use a raw-byte iroh bi-stream or the authenticated browser /original endpoint; bounded ReadFileBytes/ReadItemImage control queries are unchanged.
-// Unreleased: Project.quick_chat identifies host-owned quick chats in replicated metadata.
-// Unreleased: adds SettleChildren and its ChildrenSettled command response.
-pub const PROTOCOL_VERSION: u32 = 12;
+// Version 13 (v0.2.5) gives SessionMeta pull_request_watches_paused for
+// retained watch subscriptions; ReadFileBytes accepts an optional max_bytes
+// read budget, capped by the host attachment policy; ReadItemImagePreview
+// returns optional previews of recorded tool images; ReadImagePreview returns
+// optional size-specific static attachment previews; ReadItemImage accepts
+// the same optional network read budget; TurnRetry events,
+// SessionStatus.turn_retry and the RetryTurn command support native capacity
+// continuations; the agent event stream gains steer_rejected, a provider's
+// report that the correlated steer reached it after its turn had ended, after
+// which the host sends the text as an ordinary turn; index subscriptions may
+// carry known_index, with matching content receiving IndexUnchanged instead
+// of a snapshot; ReadFilePreview rejects files larger than 512 KiB before
+// transferring bytes; SessionUsageChanged carries usage and meter capacity
+// when the rest of the session status is unchanged, while subscription replies
+// remain full statuses; IndexActivitiesChanged sends changed activity entries
+// when other index facts are unchanged, while subscription replies remain full
+// index snapshots; explicit original reads use a raw-byte iroh bi-stream or
+// the authenticated browser /original endpoint, with bounded
+// ReadFileBytes/ReadItemImage control queries unchanged; Project.quick_chat
+// identifies host-owned quick chats in replicated metadata; and the protocol
+// adds SettleChildren and its ChildrenSettled command response.
+pub const PROTOCOL_VERSION: u32 = 13;
 
 #[cfg(test)]
 mod tests;
