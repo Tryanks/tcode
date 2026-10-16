@@ -235,7 +235,8 @@ impl Panel {
                 let (model, rows) = output_model(frame, budget);
                 (rows > 0).then(|| grid_element(&model, rows, cols, palette))
             }
-            None => plain_output(output, budget),
+            None => plain_output(output, cols, budget)
+                .map(|(model, rows)| grid_element(&model, rows, cols, palette)),
         };
         // The host has not answered for this width yet, so keep asking even
         // when the measured width itself did not move.
@@ -275,23 +276,21 @@ fn output_model(frame: &TerminalFrame, budget: usize) -> (TerminalModel, usize) 
 }
 
 /// What the panel shows before the host answers, and on every client while a
-/// command is still producing output.
-fn plain_output(output: &str, budget: usize) -> Option<AnyElement> {
+/// command is still producing output: the raw text, wrapped into the same grid.
+///
+/// gpui-fast 0.1.8 can carry a text leaf's layout node across frames without
+/// measuring the element now on it, and its text prepaint then aborts the app.
+/// A grid paints its cells and lays out no text (#68 upstream).
+fn plain_output(output: &str, cols: u16, budget: usize) -> Option<(TerminalModel, usize)> {
     let lines = output.lines().collect::<Vec<_>>();
-    let tail = &lines[lines.len().saturating_sub(budget)..];
-    (!tail.is_empty()).then(|| {
-        v_flex()
-            .w_full()
-            .overflow_hidden()
-            .font_family(TERMINAL_FONT_FAMILY)
-            .text_size(px(TERMINAL_FONT_SIZE))
-            .line_height(px(TERMINAL_CELL_HEIGHT))
-            .children(
-                tail.iter()
-                    .map(|line| div().child(line.to_string()).into_any_element()),
-            )
-            .into_any_element()
-    })
+    let tail = lines[lines.len().saturating_sub(budget)..]
+        .join("\n")
+        .replace('\t', "    ");
+    if tail.is_empty() {
+        return None;
+    }
+    let (model, rows) = output_model(&text_frame(&tail, cols, None), budget);
+    (rows > 0).then_some((model, rows))
 }
 
 fn grid_element(
@@ -333,8 +332,17 @@ fn command_model(
     cols: u16,
     command_theme: Option<&CommandTheme>,
 ) -> (TerminalModel, usize) {
+    let frame = text_frame(&clamp_command(command, cols.max(2)), cols, command_theme);
+    let rows = frame.visible.len();
+    let mut model = TerminalModel::new(String::new());
+    model.apply_frame(frame);
+    (model, rows)
+}
+
+/// `command` wrapped into grid rows `cols` wide, coloured as a command when a
+/// theme is given and in the default style otherwise.
+fn text_frame(command: &str, cols: u16, command_theme: Option<&CommandTheme>) -> TerminalFrame {
     let cols = cols.max(2);
-    let command = clamp_command(command, cols);
     let highlights = command_theme
         .map(|theme| highlight::highlight_source(&command, "bash", &theme.highlight_theme))
         .unwrap_or_default();
@@ -393,15 +401,13 @@ fn command_model(
     }
 
     let rows = visible.len().max(1);
-    let mut model = TerminalModel::new(String::new());
-    model.apply_frame(TerminalFrame {
+    TerminalFrame {
         cols,
         rows: rows.min(u16::MAX as usize) as u16,
         styles,
         visible,
         ..TerminalFrame::default()
-    });
-    (model, rows)
+    }
 }
 
 /// The command reads as context, not as output, so it sits at 70% contrast.
