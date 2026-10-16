@@ -16,12 +16,12 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::copy::copy_button;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, EntityId, FontStyle,
-    FontWeight, Global, GlobalElementId, HighlightStyle, Image, ImageSource, InspectorElementId,
-    InteractiveElement as _, IntoElement, LayoutId, ListState, MouseButton, ObjectFit,
-    ParentElement as _, Pixels, Rems, Role, SharedString, StatefulInteractiveElement as _, Style,
-    Styled as _, StyledImage as _, StyledText, TextLayout, Window, div, img,
-    prelude::FluentBuilder as _, px, rems, size,
+    AnyElement, App, AvailableSpace, Bounds, Display, Element, ElementId, Entity, EntityId,
+    FlexDirection, FontStyle, FontWeight, Global, GlobalElementId, HighlightStyle, Image,
+    ImageSource, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ListState,
+    MouseButton, ObjectFit, ParentElement as _, Pixels, Rems, Role, SharedString,
+    StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, StyledText, TextLayout,
+    Window, div, img, prelude::FluentBuilder as _, px, relative, rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -332,7 +332,7 @@ pub(super) fn render_root(
     node: Rc<BlockNode>,
     items: Rc<[RootItem]>,
     list_state: ListState,
-    content_height: Option<Pixels>,
+    heights: Rc<RefCell<ItemHeights>>,
     state: &Entity<MarkdownState>,
     window: &mut Window,
     cx: &mut App,
@@ -342,6 +342,7 @@ pub(super) fn render_root(
     }
     if list_state.item_count() != items.len() {
         list_state.reset(items.len());
+        heights.borrow_mut().reset(items.len());
     }
 
     div()
@@ -351,10 +352,61 @@ pub(super) fn render_root(
             root: node,
             items,
             list_state,
-            content_height,
+            heights,
             state: state.clone(),
         })
         .into_any_element()
+}
+
+/// The root block a render path such as `root-3-1/image/0` lies in.
+pub(super) fn root_block_of(path: &str) -> Option<usize> {
+    let rest = path.strip_prefix("root-")?;
+    let end = rest
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// The height of each root item at the width the root list was last laid
+/// out at, which the whole document reports as its own height.
+///
+/// `ListState` measures only while it prepaints, keeps its sizes to itself
+/// and cannot be given them, and an outer list lays the rows in its overdraw
+/// out without prepainting them; so the document measures the items it has
+/// no height for itself, at that width, and the inner list measures its own.
+pub(super) struct ItemHeights {
+    width: Option<Pixels>,
+    heights: Vec<Option<Pixels>>,
+}
+
+impl ItemHeights {
+    pub(super) fn new(count: usize) -> Self {
+        Self {
+            width: None,
+            heights: vec![None; count],
+        }
+    }
+
+    /// Forget the items from `start` on, and hold `count` items in all.
+    pub(super) fn splice(&mut self, start: usize, count: usize) {
+        self.heights.truncate(start);
+        self.heights.resize(count, None);
+    }
+
+    pub(super) fn invalidate(&mut self, items: Range<usize>) {
+        self.heights[items].fill(None);
+    }
+
+    pub(super) fn reset(&mut self, count: usize) {
+        self.splice(0, count);
+    }
+
+    fn total(&self) -> Pixels {
+        self.heights
+            .iter()
+            .flatten()
+            .fold(px(0.), |sum, h| sum + *h)
+    }
 }
 
 enum RootItemLayout {
@@ -423,8 +475,90 @@ struct VirtualizedBlockList {
     root: Rc<BlockNode>,
     items: Rc<[RootItem]>,
     list_state: ListState,
-    content_height: Option<Pixels>,
+    heights: Rc<RefCell<ItemHeights>>,
     state: Entity<MarkdownState>,
+}
+
+/// What a document laid out before it knew its width: a column of its
+/// items, whose heights it keeps once it is placed.
+struct ColumnLayout {
+    _items: Vec<AnyElement>,
+    item_layouts: Vec<LayoutId>,
+}
+
+impl VirtualizedBlockList {
+    fn measuring<R>(
+        &self,
+        f: impl FnOnce(&Rc<RefCell<CodeMeasurement>>, &mut App) -> R,
+        cx: &mut App,
+    ) -> R {
+        let measurement = Rc::new(RefCell::new(CodeMeasurement::default()));
+        let result = f(&measurement, cx);
+        let keep = {
+            let measurement = measurement.borrow();
+            !measurement.layouts.is_empty() && measurement.weight() <= CODE_MEASUREMENT_WEIGHT_LIMIT
+        };
+        // The shapes of the last measurement that laid code out stay alive,
+        // so the next one reuses the lines it shares with it.
+        if keep {
+            let owner = self.state.entity_id();
+            let measurements = &mut cx.default_global::<CodeMeasurements>().0;
+            measurements.remove(&owner);
+            measurements.get_or_insert_with(owner, || measurement);
+        }
+        result
+    }
+
+    /// Lay out, at `width`, the items without a height, each under a key of
+    /// its own so a frame measuring another item does not take over its node.
+    fn measure_missing(&self, width: Pixels, window: &mut Window, cx: &mut App) {
+        let missing = {
+            let heights = self.heights.borrow();
+            heights
+                .heights
+                .iter()
+                .enumerate()
+                .filter_map(|(ix, height)| height.is_none().then_some(ix))
+                .collect::<Vec<_>>()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let measured = self.measuring(
+            |measurement, cx| {
+                missing
+                    .into_iter()
+                    .map(|ix| {
+                        let item = render_root_item(
+                            &self.root,
+                            &self.items,
+                            ix,
+                            RootItemLayout::Measure(measurement.clone()),
+                            &self.state,
+                            window,
+                            cx,
+                        );
+                        let mut item = div()
+                            .id(("markdown-measured-item", ix))
+                            .w_full()
+                            .child(item)
+                            .into_any_element();
+                        let size = item.layout_as_root(
+                            size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
+                            window,
+                            cx,
+                        );
+                        (ix, size.height)
+                    })
+                    .collect::<Vec<_>>()
+            },
+            cx,
+        );
+        let mut heights = self.heights.borrow_mut();
+        for (ix, height) in measured {
+            heights.heights[ix] = Some(height);
+        }
+    }
 }
 
 impl IntoElement for VirtualizedBlockList {
@@ -436,7 +570,7 @@ impl IntoElement for VirtualizedBlockList {
 }
 
 impl Element for VirtualizedBlockList {
-    type RequestLayoutState = Option<AnyElement>;
+    type RequestLayoutState = Option<ColumnLayout>;
     type PrepaintState = Option<AnyElement>;
 
     fn id(&self) -> Option<ElementId> {
@@ -454,36 +588,47 @@ impl Element for VirtualizedBlockList {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let Some(content_height) = self.content_height else {
-            clear_code_measurements(self.state.entity_id(), cx);
-            let measurement = Rc::new(RefCell::new(CodeMeasurement::default()));
-            // Outer-list overdraw lays out rows without prepainting them. A
-            // regular column measures cold blocks at the actual parent width;
-            // an Infer list would cache their min-content heights instead.
-            let mut column = v_flex()
-                .w_full()
-                .children((0..self.items.len()).map(|ix| {
-                    render_root_item(
-                        &self.root,
-                        &self.items,
-                        ix,
-                        RootItemLayout::Measure(measurement.clone()),
-                        &self.state,
-                        window,
-                        cx,
-                    )
-                }))
-                .into_any_element();
-            let layout = column.request_layout(window, cx);
-            if !measurement.borrow().layouts.is_empty()
-                && measurement.borrow().weight() <= CODE_MEASUREMENT_WEIGHT_LIMIT
-            {
-                cx.default_global::<CodeMeasurements>()
-                    .0
-                    .get_or_insert_with(self.state.entity_id(), || measurement);
-            }
-            return (layout, Some(column));
+        let Some(width) = self.heights.borrow().width else {
+            // Before it is first placed, the document does not know its
+            // width: a column measures its items at the width its parent
+            // gives it, and prepaint keeps their heights.
+            let (items, item_layouts): (Vec<_>, Vec<_>) = self.measuring(
+                |measurement, cx| {
+                    (0..self.items.len())
+                        .map(|ix| {
+                            let mut item = render_root_item(
+                                &self.root,
+                                &self.items,
+                                ix,
+                                RootItemLayout::Measure(measurement.clone()),
+                                &self.state,
+                                window,
+                                cx,
+                            );
+                            let layout = item.request_layout(window, cx);
+                            (item, layout)
+                        })
+                        .unzip()
+                },
+                cx,
+            );
+            let mut style = Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                ..Default::default()
+            };
+            style.size.width = relative(1.).into();
+            let layout_id = window.request_layout(style, item_layouts.iter().copied(), cx);
+            return (
+                layout_id,
+                Some(ColumnLayout {
+                    _items: items,
+                    item_layouts,
+                }),
+            );
         };
+        self.measure_missing(width, window, cx);
+        let content_height = self.heights.borrow().total();
         let layout_id = window.request_measured_layout(
             Style::default(),
             move |known_dimensions, available_space, _, _| {
@@ -504,10 +649,30 @@ impl Element for VirtualizedBlockList {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
+        column: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        {
+            let mut heights = self.heights.borrow_mut();
+            if heights.width != Some(bounds.size.width) {
+                let resized = heights.width.is_some();
+                heights.width = Some(bounds.size.width);
+                let count = heights.heights.len();
+                heights.reset(count);
+                if let Some(column) = column {
+                    for (height, layout) in heights.heights.iter_mut().zip(&column.item_layouts) {
+                        *height = Some(window.layout_bounds(*layout).size.height);
+                    }
+                } else if resized {
+                    // This frame was laid out at the old width; the next one
+                    // measures the items at this one.
+                    drop(heights);
+                    self.state.update(cx, |_, cx| cx.notify());
+                }
+            }
+        }
+
         let visible = bounds.intersect(&window.content_mask().bounds);
         if visible.size.width <= px(0.) || visible.size.height <= px(0.) {
             return None;
