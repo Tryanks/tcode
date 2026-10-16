@@ -163,10 +163,12 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
 
 /// The largest size with `intrinsic`'s aspect ratio that fits the available
 /// width and [`MAX_HEIGHT`], never larger than `intrinsic` itself. An image that has not
-/// loaded keeps a small square so it can still be clicked.
+/// loaded holds the tile drawn for an image without a preview, the size it keeps if it
+/// never loads; neither the host's preview nor a Mermaid picture reports its size before
+/// it is decoded.
 fn fit(intrinsic: Size<Pixels>, available_width: Option<Pixels>) -> Size<Pixels> {
     if intrinsic.width <= Pixels::ZERO || intrinsic.height <= Pixels::ZERO {
-        return size(MIN_SIDE, MIN_SIDE);
+        return fit(UNPREVIEWED, available_width);
     }
     let ratio = intrinsic.height / intrinsic.width;
     let width = available_width

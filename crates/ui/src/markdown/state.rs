@@ -2,8 +2,9 @@
 //! Apache-2.0 `text/state.rs` implementation.
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
-    ops::RangeInclusive,
+    ops::{Range, RangeInclusive},
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -84,9 +85,8 @@ pub struct MarkdownState {
     root_block_starts: Option<Vec<usize>>,
     has_potential_link_reference_definition: bool,
     pub(super) list_state: ListState,
-    measured_content_height: Option<Pixels>,
+    item_heights: Rc<RefCell<render::ItemHeights>>,
     image_sizes: HashMap<String, Size<Pixels>>,
-    image_layout_dirty: bool,
     selection_revision: usize,
     pub(super) selection_adapter: MarkdownSelectionAdapter,
     #[cfg(test)]
@@ -134,10 +134,9 @@ impl MarkdownState {
             // Measure every item once so the list has a stable total height,
             // then construct/layout/paint only the visible items on warm frames.
             list_state: ListState::new(items.len(), ListAlignment::Top, px(1000.)).measure_all(),
+            item_heights: Rc::new(RefCell::new(render::ItemHeights::new(items.len()))),
             items,
-            measured_content_height: None,
             image_sizes: HashMap::new(),
-            image_layout_dirty: false,
             selection_revision: 0,
             selection_adapter,
             #[cfg(test)]
@@ -299,36 +298,51 @@ impl MarkdownState {
         size: Size<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if revision != self.selection_revision || self.image_sizes.get(&path) == Some(&size) {
+        if revision != self.selection_revision {
             return;
         }
-        self.image_sizes.insert(path, size);
-        if std::mem::replace(&mut self.image_layout_dirty, true) {
+        let items = self.items_of(&path);
+        // The first size seen is the one the image's item was measured with.
+        if self
+            .image_sizes
+            .insert(path, size)
+            .is_none_or(|old| old == size)
+        {
             return;
         }
-        self.selection_adapter
-            .virtual_blocks
-            .borrow_mut()
-            .forget_positions();
-        self.list_state.remeasure_items(0..self.items.len());
-        self.measured_content_height = None;
-        cx.notify();
+        self.remeasure(items, cx);
     }
 
     pub(super) fn set_math_source(&mut self, path: &str, source: bool, cx: &mut Context<Self>) {
         self.prepare_reparse(cx);
         self.selection_revision = self.selection_revision.wrapping_add(1);
-        self.selection_adapter
-            .virtual_blocks
-            .borrow_mut()
-            .forget_positions();
         if source {
             self.math_sources.insert(path.into());
         } else {
             self.math_sources.remove(path);
         }
-        self.list_state.reset(self.items.len());
-        self.measured_content_height = None;
+        let items = self.items_of(path);
+        self.remeasure(items, cx);
+    }
+
+    /// The root items that draw what lies at render `path`: every item when
+    /// the path is not in a root block.
+    fn items_of(&self, path: &str) -> Range<usize> {
+        let Some(block) = render::root_block_of(path) else {
+            return 0..self.items.len();
+        };
+        self.items.partition_point(|item| item.block < block)
+            ..self.items.partition_point(|item| item.block <= block)
+    }
+
+    /// Measure `items` again; the blocks after them move.
+    fn remeasure(&mut self, items: Range<usize>, cx: &mut Context<Self>) {
+        self.selection_adapter
+            .virtual_blocks
+            .borrow_mut()
+            .forget_positions();
+        self.item_heights.borrow_mut().invalidate(items.clone());
+        self.list_state.remeasure_items(items);
         cx.notify();
     }
 
@@ -452,7 +466,9 @@ impl MarkdownState {
                 .splice(invalid..old_item_count, self.items.len() - invalid);
             // `splice` creates unmeasured items but does not re-arm measure_all.
             self.list_state.remeasure_items(invalid..self.items.len());
-            self.measured_content_height = None;
+            self.item_heights
+                .borrow_mut()
+                .splice(invalid, self.items.len());
         }
         cx.notify();
     }
@@ -492,7 +508,7 @@ impl MarkdownState {
         // Even an edit that preserves the number of root blocks can change
         // their heights, so every reparse must invalidate the cached sizes.
         self.list_state.reset(self.items.len());
-        self.measured_content_height = None;
+        self.item_heights.borrow_mut().reset(self.items.len());
         cx.notify();
     }
 
@@ -578,53 +594,17 @@ impl MarkdownState {
         count.checked_sub(1)
     }
 
-    fn update_layout(
-        &mut self,
-        bounds: Bounds<Pixels>,
-        measured_content_height: Option<Pixels>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let width_changed = self.bounds.size.width != bounds.size.width;
-        let resized = self.bounds.size != bounds.size;
-        let had_measured_height = self.measured_content_height.is_some();
-        self.bounds = bounds;
-
-        if width_changed {
-            self.measured_content_height = None;
+    /// Record where the document was placed; whether its size changed.
+    fn update_layout(&mut self, bounds: Bounds<Pixels>) -> bool {
+        if self.bounds.size.width != bounds.size.width {
             self.selection_adapter
                 .virtual_blocks
                 .borrow_mut()
                 .forget_positions();
-            if had_measured_height {
-                // The custom warm-frame list only measures its visible slice.
-                // Throw away every old-width item size, then run one complete,
-                // width-correct measuring frame before caching the new height.
-                self.list_state.reset(self.list_state.item_count());
-                cx.notify();
-                return resized;
-            }
         }
-        if let Some(height) = measured_content_height
-            && self.measured_content_height != Some(height)
-        {
-            self.measured_content_height = Some(height);
-            cx.notify();
-        } else if width_changed {
-            // Re-enter the width-correct measuring pass on the next frame.
-            cx.notify();
-        }
+        let resized = self.bounds.size != bounds.size;
+        self.bounds = bounds;
         resized
-    }
-
-    fn list_content_height(&self) -> Option<Pixels> {
-        let count = self.list_state.item_count();
-        if count == 0 {
-            return Some(px(0.));
-        }
-        let viewport = self.list_state.viewport_bounds();
-        self.list_state.bounds_for_item(count - 1).map(|last| {
-            last.bottom() - viewport.top() - self.list_state.scroll_px_offset_for_scrollbar().y
-        })
     }
 
     #[cfg(test)]
@@ -659,16 +639,14 @@ fn contains_potential_link_reference_definition(source: &str) -> bool {
 
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.image_layout_dirty = false;
         let state = cx.entity();
-        let measured_content_height = self.measured_content_height;
         v_flex()
             .w_full()
             .child(render::render_root(
                 self.parsed.clone(),
                 self.items.clone(),
                 self.list_state.clone(),
-                measured_content_height,
+                self.item_heights.clone(),
                 &state,
                 window,
                 cx,
@@ -683,12 +661,11 @@ impl Render for MarkdownState {
                     )
                 };
                 let mut revision_changed = false;
-                let resized = state.update(cx, |state, cx| {
+                let resized = state.update(cx, |state, _| {
                     revision_changed = state
                         .selection_adapter
                         .update_layout_revision(state.selection_revision, state.is_selecting);
-                    let measured_height = state.list_content_height();
-                    state.update_layout(bounds, measured_height, cx)
+                    state.update_layout(bounds)
                 });
                 if !is_selecting
                     && ((resized && selection_involves_view) || (revision_changed && has_snapshot))
