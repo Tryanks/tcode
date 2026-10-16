@@ -156,7 +156,8 @@ pub struct RemotePanel {
     /// [`ClientHost::fixed_machine`]: a browser lists its one machine and
     /// no way to add or re-pair one.
     fixed_machine: bool,
-    page_scroll: ScrollHandle,
+    hosts_scroll: ScrollHandle,
+    pair_scroll: ScrollHandle,
     /// Repaints the invitation's countdown while this machine offers one.
     #[cfg(feature = "remote-hosting")]
     invitation_ticker: Option<gpui::Task<()>>,
@@ -219,7 +220,8 @@ impl RemotePanel {
             window_state,
             form,
             fixed_machine,
-            page_scroll: ScrollHandle::new(),
+            hosts_scroll: ScrollHandle::new(),
+            pair_scroll: ScrollHandle::new(),
             #[cfg(feature = "remote-hosting")]
             invitation_ticker: None,
             #[cfg(feature = "remote-hosting")]
@@ -610,7 +612,7 @@ impl RemotePanel {
         if !self.fixed_machine {
             column = column.child(self.add_machine(cx));
         }
-        self.page(column.into_any_element(), cx)
+        self.page(column.into_any_element(), &self.hosts_scroll, cx)
     }
 
     /// What this machine offers other devices: the live invitation while
@@ -964,11 +966,11 @@ impl RemotePanel {
 
     /// The scrolling page body, centered in the wide content column and
     /// full-bleed in compact.
-    fn page(&self, body: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+    fn page(&self, body: AnyElement, scroll: &ScrollHandle, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
         crate::scroll::page_viewport(
             "hosts-scroll-bounce",
-            crate::wheel_easing::Handle::Scroll(self.page_scroll.clone()),
+            crate::wheel_easing::Handle::Scroll(scroll.clone()),
             div()
                 .id("hosts-scroll")
                 .flex_1()
@@ -976,7 +978,7 @@ impl RemotePanel {
                 .w_full()
                 .overflow_y_scroll()
                 .lock_scroll_axis()
-                .track_scroll(&self.page_scroll)
+                .track_scroll(scroll)
                 .on_action(cx.listener(Self::on_disconnect))
                 .on_action(cx.listener(Self::on_forget))
                 .child(
@@ -999,7 +1001,7 @@ impl RemotePanel {
     ) -> AnyElement {
         v_flex()
             .size_full()
-            .child(self.page(body, cx))
+            .child(self.page(body, &self.pair_scroll, cx))
             .child(
                 h_flex().flex_none().w_full().justify_center().child(
                     div()
