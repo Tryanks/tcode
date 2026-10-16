@@ -172,10 +172,10 @@ pub use wire::{
 // identifies host-owned quick chats in replicated metadata; and the protocol
 // adds SettleChildren and its ChildrenSettled command response.
 //
-// Unreleased: the CommandOutput topic and its CommandOutputReplaced event,
-// pushed while a command's output grows, replace the RenderStoredOutput query
-// and the TerminalFrame query response.
-pub const PROTOCOL_VERSION: u32 = 13;
+// Version 14 (v0.2.6) adds the CommandOutput topic and its
+// CommandOutputReplaced event, pushed while a command's output grows, which
+// replace the RenderStoredOutput query and the TerminalFrame query response.
+pub const PROTOCOL_VERSION: u32 = 14;
 
 #[cfg(test)]
 mod tests;
