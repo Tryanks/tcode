@@ -3841,7 +3841,11 @@ impl Render for ChatView {
                     matches!(next.part, RowPart::WorkLogActivity | RowPart::WorkLogLive)
                 });
                 let painted = this.painted_rows.clone();
+                // gpui-fast 0.1.8 can retain a reparented child without measuring it.
+                // Key rows by their content so expanding a Work Log does not hand
+                // the following message's layout nodes to a different row (#68 upstream).
                 v_flex()
+                    .id(("timeline-row", row.identity))
                     .debug_selector(move || format!("timeline-row-{index}"))
                     .on_prepaint(move |_, _, _| {
                         painted.set(Some(
@@ -4624,6 +4628,82 @@ mod tests {
             Some(reading),
             "the live window settling moved the reader"
         );
+    }
+
+    #[gpui::test]
+    fn collapsing_work_log_preserves_following_message_bounds(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            start_ts: Some(1_000),
+            end_ts: Some(2_600),
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![
+            entry("user", user_item("Check the layout.")),
+            entry(
+                "command",
+                EntryContent::Item(ItemContent::CommandExecution {
+                    command: "printf 'layout checked\\n'".into(),
+                    output: "layout checked\n".into(),
+                    exit_code: Some(0),
+                    status: ItemStatus::Completed,
+                }),
+            ),
+            entry(
+                "answer",
+                assistant(
+                    "The layout check is complete. The final assistant message stays in the centred content column.\n\nThe footer belongs below this last line.",
+                ),
+            ),
+        ];
+        let (store, window_state, _) = seed_chat(cx, timeline);
+        let (_view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        for (mode, width) in [
+            (crate::theme::ThemeMode::Light, 1_400.),
+            (crate::theme::ThemeMode::Light, 393.),
+            (crate::theme::ThemeMode::Dark, 1_400.),
+            (crate::theme::ThemeMode::Dark, 393.),
+        ] {
+            cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
+            cx.simulate_resize(size(px(width), px(900.)));
+            draw(cx);
+            let before = [
+                cx.debug_bounds("markdown-block-0").expect("answer start"),
+                cx.debug_bounds("markdown-block-1")
+                    .expect("answer last line"),
+            ];
+            let footer_before = cx.debug_bounds("turn-time-row").expect("turn footer");
+            for expanded in [true, false] {
+                let header = cx
+                    .debug_bounds("worklog-header-0-command")
+                    .expect("work log toggle");
+                cx.simulate_click(header.center(), Modifiers::default());
+                draw(cx);
+                assert_eq!(
+                    cx.debug_bounds("activity-row-command").is_some(),
+                    expanded,
+                    "the click must toggle the work log"
+                );
+            }
+            let after = [
+                cx.debug_bounds("markdown-block-0").expect("answer start"),
+                cx.debug_bounds("markdown-block-1")
+                    .expect("answer last line"),
+            ];
+            let footer_after = cx.debug_bounds("turn-time-row").expect("turn footer");
+            assert_eq!(
+                after, before,
+                "collapsing moved or resized the answer at {width}px in {mode:?}"
+            );
+            assert_eq!(footer_after, footer_before, "collapsing moved the footer");
+            assert!(
+                footer_after.top() >= after[1].bottom(),
+                "the footer overlaps the answer's last line: {after:?}, {footer_after:?}"
+            );
+        }
     }
 
     #[gpui::test]
