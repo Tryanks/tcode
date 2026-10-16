@@ -107,12 +107,6 @@ pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 532.;
 const PARENT_LINK_COMPACT_WIDTH: f32 = 28.;
 const PARENT_LINK_LABELLED_WIDTH: f32 = 273.;
 
-/// Whether a header last laid out `width` wide, `extra` of it beyond the plain
-/// header, labels its split buttons. Before the first layout it does.
-fn header_labels_fit(width: Option<f32>, extra: f32) -> bool {
-    width.is_none_or(|width| width - extra >= HEADER_LABELS_MIN_WIDTH)
-}
-
 /// The thread the active one was reached from: its id and title.
 fn parent_session(store: &WorkspaceStore) -> Option<(String, String)> {
     let active = store.active_session_id()?;
@@ -460,10 +454,6 @@ pub struct ChatView {
     /// The rows the timeline paints in the frame being drawn: GPUI's list
     /// prepaints only the rows on screen.
     painted_rows: Rc<Cell<Option<(usize, usize)>>>,
-    /// The header's laid-out width on the last frame, which decides whether the
-    /// next one labels its split buttons. The header is as wide as the chat
-    /// column whatever it holds, so the choice cannot feed back into it.
-    header_width: Rc<Cell<Option<f32>>>,
     /// The first row painted while following the tail.
     painted_tail_start: Option<usize>,
     /// Open/closed keys for collapsibles other than activity details.
@@ -476,8 +466,6 @@ pub struct ChatView {
     session_key: Option<String>,
     /// Turn selected from a command-palette content hit.
     highlighted_turn: Option<usize>,
-    /// 100ms ticker kept alive while a turn runs, driving the elapsed-time label.
-    _tick: Option<Task<()>>,
     /// 1s ticker kept alive while an error card shows a scheduled resume.
     _limit_tick: Option<Task<()>>,
     /// Keyed `plan`, `user:<id>`, `assistant:<id>` or `error:<id>`.
@@ -770,7 +758,6 @@ impl ChatView {
             markdown_visible_rows: 0..0,
             markdown_scroll_top: None,
             painted_rows: Rc::default(),
-            header_width: Rc::default(),
             painted_tail_start: None,
             expanded: HashSet::new(),
             auto_activity_expansions: AutoActivityExpansions::default(),
@@ -779,7 +766,6 @@ impl ChatView {
             full_outputs: HashMap::new(),
             session_key: None,
             highlighted_turn: None,
-            _tick: None,
             _limit_tick: None,
             copied: CopiedMark::default(),
             commit_dialog: None,
@@ -814,7 +800,6 @@ impl ChatView {
         } else {
             TimelineContinuity::Complete
         };
-        let running = self.workspace_store.read(cx).composer_state().turn_running;
         let (list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
@@ -977,23 +962,6 @@ impl ChatView {
 
         self.sync_markdown_residency(requested_row, cx);
 
-        // Keep a 100ms ticker alive while a turn runs so the live elapsed timer
-        // advances at decisecond precision; dropping it cancels the task.
-        if running && self._tick.is_none() {
-            self._tick = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(100))
-                        .await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-            }));
-        } else if !running {
-            self._tick = None;
-        }
-
         let scheduled_limit_resume = {
             let store = self.workspace_store.read(cx);
             let deadlines: HashSet<u64> = store
@@ -1087,8 +1055,7 @@ impl ChatView {
                     }
                     let row = row_of_entry(&self.rows, index, entry.turn);
                     match &entry.content {
-                        EntryContent::Item(ItemContent::AssistantMessage { text })
-                        | EntryContent::Item(ItemContent::Reasoning { text }) => {
+                        EntryContent::Item(ItemContent::AssistantMessage { text }) => {
                             texts.push((row, entry.id.clone(), text.clone()));
                         }
                         content => {
@@ -2666,12 +2633,43 @@ impl ChatView {
             crate::pull_requests::open_link_dialog(self.workspace_store.clone(), id, window, cx);
         }
     }
+
+    /// The header, laid out for the width it is given in this frame: whether
+    /// its split buttons are labelled depends on that width.
     fn render_header(
         &self,
         title: Option<String>,
         is_draft: bool,
         cwd: Option<PathBuf>,
         agents: Option<&crate::agents_panel::Agents>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let agents_cue = agents.map(|agents| agents.cue(cx));
+        let header = cx.processor(move |this, width: gpui::Pixels, window, cx| {
+            this.render_header_bar(
+                title.clone(),
+                is_draft,
+                cwd.clone(),
+                agents_cue,
+                f32::from(width),
+                window,
+                cx,
+            )
+        });
+        gpui::container_query(move |size, window, cx| header(size.width, window, cx))
+            .flex_none()
+            .h(px(52.))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_header_bar(
+        &self,
+        title: Option<String>,
+        is_draft: bool,
+        cwd: Option<PathBuf>,
+        agents_cue: Option<Option<gpui::Hsla>>,
+        width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2692,8 +2690,7 @@ impl ChatView {
             window.is_fullscreen(),
             true,
         );
-        let labelled = header_labels_fit(self.header_width.get(), labelled_extra);
-        let header_width = self.header_width.clone();
+        let labelled = width - labelled_extra >= HEADER_LABELS_MIN_WIDTH;
         let base = h_flex()
             .flex_shrink_0()
             .h(px(52.))
@@ -2797,7 +2794,6 @@ impl ChatView {
         let right_tab = panel.right_tab;
         let plan_showing = right_panel_open && right_tab == RightTab::Plan;
         let agents_showing = right_panel_open && right_tab == RightTab::Agents;
-        let agents_cue = agents.map(|agents| agents.cue(cx));
         let preview_showing = right_panel_open && right_tab == RightTab::Preview;
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
@@ -2991,15 +2987,6 @@ impl ChatView {
             .flex_none()
             .w_full()
             .h(px(52.))
-            .on_prepaint(move |bounds, window, _| {
-                let width = Some(f32::from(bounds.size.width));
-                let previous = header_width.replace(width);
-                if header_labels_fit(previous, labelled_extra)
-                    != header_labels_fit(width, labelled_extra)
-                {
-                    window.request_animation_frame();
-                }
-            })
             .child(header)
             .overflow_x_scroll_area()
             .into_any_element()
@@ -3035,6 +3022,7 @@ impl ChatView {
             )
         };
         let mut main = main_base
+            .debug_selector(|| "git-main".into())
             .h_full()
             .px_2()
             .gap_1p5()
@@ -3579,7 +3567,6 @@ fn markdown_entries_for_residency(
         let markdown_bearing = matches!(
             entry.content,
             EntryContent::Item(ItemContent::AssistantMessage { .. })
-                | EntryContent::Item(ItemContent::Reasoning { .. })
         ) || user_content(&entry.content).is_some();
         if markdown_bearing {
             entries.push(MarkdownEntry {
@@ -3674,8 +3661,10 @@ impl Render for ChatView {
                 }
             });
         });
+        // A screen's height: the window's, which this render already knows.
+        // The list's own height is only measured by this frame's layout.
         let placeholder = if self.workspace_store.read(cx).history_available() {
-            self.list_state.viewport_bounds().size.height.max(px(1.))
+            window.viewport_size().height
         } else {
             px(0.)
         };
@@ -3726,7 +3715,7 @@ impl Render for ChatView {
         let Some((title, cwd, is_draft)) = active else {
             return root
                 .when(!self.window_state.read(cx).compact, |el| {
-                    el.child(self.render_header(None, false, None, None, window, cx))
+                    el.child(self.render_header(None, false, None, None, cx))
                 })
                 .child(self.render_empty_state(window, cx));
         };
@@ -3739,14 +3728,7 @@ impl Render for ChatView {
                 .map(|id| crate::agents_panel::Agents::of(store, &id))
                 .filter(|agents| !agents.is_empty())
         };
-        let header = self.render_header(
-            title,
-            is_draft,
-            Some(cwd.clone()),
-            agents.as_ref(),
-            window,
-            cx,
-        );
+        let header = self.render_header(title, is_draft, Some(cwd.clone()), agents.as_ref(), cx);
         let panel = self.workspace_store.read(cx).panel_state();
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let terminal_height = panel.terminal_height;
@@ -3969,26 +3951,25 @@ impl Render for ChatView {
                             })
                             .child(text),
                     )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(if failure.is_some() {
-                                cx.theme().danger
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .child(failure.clone().unwrap_or_else(|| {
-                                if acknowledged {
-                                    return String::new();
-                                }
-                                crate::tr!(if waiting {
-                                    "chat.waiting_connection"
+                    .when(failure.is_some() || !acknowledged, |row| {
+                        row.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(if failure.is_some() {
+                                    cx.theme().danger
                                 } else {
-                                    "chat.sending"
+                                    cx.theme().muted_foreground
                                 })
-                                .into_owned()
-                            })),
-                    )
+                                .child(failure.clone().unwrap_or_else(|| {
+                                    crate::tr!(if waiting {
+                                        "chat.waiting_connection"
+                                    } else {
+                                        "chat.sending"
+                                    })
+                                    .into_owned()
+                                })),
+                        )
+                    })
                     .when(failure.is_some(), |row| {
                         row.child(
                             h_flex()
@@ -5375,7 +5356,9 @@ mod tests {
 
         let candidates = markdown_entries_for_residency(&timeline, &rows, &scope);
 
-        assert_eq!(candidates.len(), 172);
+        // Rows 48..216 and the four tail rows hold 115 user and assistant
+        // messages; a reasoning run holds no Markdown.
+        assert_eq!(candidates.len(), 115);
         assert!(candidates.len() < timeline.entries.len());
         // A running turn far from the viewport is history like any other.
         assert!(!candidates.iter().any(|entry| entry.id == "assistant-5"));
@@ -7071,10 +7054,11 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        // The 15 rows the tail paints, and the 24-row build margin above them.
+        // The messages of the 15 rows the tail paints and of the 24-row build
+        // margin above them: two of every turn's three rows.
         assert_eq!(
             view.read_with(cx, |chat, _| chat.resident_markdown_state_count()),
-            39
+            26
         );
         let list_state = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(!view.read_with(cx, |chat, _| {
@@ -7095,7 +7079,7 @@ mod tests {
             view.read_with(cx, |chat, _| {
                 (
                     chat.resident_markdown_state_count(),
-                    ["user-40", "reasoning-40", "assistant-40"]
+                    ["user-40", "assistant-40"]
                         .iter()
                         .all(|id| chat.has_resident_markdown_state(id)),
                     !chat.has_resident_markdown_state("assistant-230"),
@@ -7117,7 +7101,9 @@ mod tests {
             resident <= 96,
             "old-turn window retained {resident} MarkdownStates; expected at most 96"
         );
-        assert_eq!(resident, 64);
+        // The messages of the 64 rows built around the target and at the
+        // tail: a reasoning run holds no Markdown.
+        assert_eq!(resident, 43);
         let scroll_top = list_state.logical_scroll_top();
         assert_eq!(scroll_top.item_ix, TARGET);
         assert_eq!(
@@ -7477,6 +7463,102 @@ This begins after the hard break."#;
             "offscreen tail block was painted; block virtualization did not cull it"
         );
         driver.shutdown(cx, &workspace_store, &host);
+    }
+
+    /// Reasoning is shown as plain text, so a streaming reasoning run parses
+    /// no Markdown: neither when it opens nor as its deltas arrive.
+    #[gpui::test]
+    fn a_streaming_reasoning_run_parses_no_markdown(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+        let running = |thought: &str| {
+            let mut timeline = Timeline::default();
+            timeline.turn_running = true;
+            timeline.turns = vec![TurnMeta {
+                running: true,
+                ..TurnMeta::default()
+            }];
+            timeline.entries.extend([
+                entry("user", user_item("go")),
+                entry("reasoning", reasoning(thought)),
+            ]);
+            timeline
+        };
+        let (store, window_state, session_id) = seed_chat(cx, running("Let me **look**"));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw(cx);
+        for delta in ["Let me **look** at", "Let me **look** at the `code`"] {
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), running(delta), cx);
+                cx.notify();
+            });
+            draw(cx);
+        }
+        view.read_with(cx, |chat, cx| {
+            let row = chat
+                .markdown_row("reasoning", cx)
+                .expect("the reasoning row");
+            assert!(!chat.has_resident_markdown_state("reasoning"));
+            assert!(
+                !chat.markdown_remeasured_rows.contains(&row),
+                "the reasoning row was remeasured for Markdown"
+            );
+            assert!(chat.has_resident_markdown_state("user"));
+        });
+    }
+
+    /// Unloaded history reserves a screen above the first turn from the first
+    /// frame, so the timeline's extent is settled by it.
+    #[gpui::test]
+    fn the_history_reservation_is_settled_by_the_first_frame(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px};
+        let (store, window_state, _, _driver) =
+            seed_chat_with_history(cx, synthetic_markdown_timeline(1), true);
+        // Opening the window draws its first frame.
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        let first = list.max_offset_for_scrollbar().y;
+        view.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(list.max_offset_for_scrollbar().y, first);
+        assert!(
+            first > px(0.),
+            "one short turn scrolls into the reservation above it"
+        );
+    }
+
+    /// Whether the header's split buttons carry their labels follows the width
+    /// it is laid out at, from the frame a resize draws.
+    #[gpui::test]
+    fn header_labels_follow_the_width_of_the_frame(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(1));
+        let (_view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        draw(cx);
+        // A resize draws its frame at the new size.
+        let git_main = |width: f32, cx: &mut VisualTestContext| {
+            cx.simulate_resize(size(px(width), px(700.)));
+            cx.debug_bounds("git-main")
+                .expect("the git button")
+                .size
+                .width
+        };
+        let labelled = git_main(1_024., cx);
+        let narrow = git_main(600., cx);
+        assert!(narrow < labelled, "a 600pt header kept its labels");
+        assert_eq!(
+            git_main(1_024., cx),
+            labelled,
+            "a 1024pt header lost its labels"
+        );
     }
 
     fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {

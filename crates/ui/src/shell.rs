@@ -6833,6 +6833,159 @@ mod tests {
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
     }
 
+    /// A reader scrolled up from a running turn reads still history: the
+    /// turn's clock, out of view, no longer invalidates the timeline.
+    #[gpui::test]
+    fn a_running_turn_out_of_view_leaves_the_timeline_still(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // With motion reduced the clock is all that moves: the scrollbar's
+        // fade after the scroll, timed by the wall clock, draws no frames.
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (shell, host, cx) = mount(cx);
+        let session = "thread-1";
+        let mut status = session_status(session, std::path::Path::new("/tmp/tcode-running"));
+        status.activity.working = true;
+        status.activity.turn_running = true;
+        status.running_turn = Some(tcode_core::session::RunningTurn {
+            turn: 19,
+            started_at: Some(crate::time::now_millis()),
+        });
+        let item = |id: String, content: agent::ItemContent| {
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id,
+                parent_item_id: None,
+                content,
+            })
+        };
+        let answer = "A paragraph of the answer.\n\n".repeat(12);
+        let mut records = Vec::new();
+        for turn in 0..20 {
+            let turn_id = format!("turn-{turn}");
+            records.push(agent::AgentEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+            });
+            records.push(item(
+                format!("user-{turn}"),
+                agent::ItemContent::UserMessage {
+                    text: format!("Question {turn}"),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            ));
+            if turn < 19 {
+                records.push(item(
+                    format!("assistant-{turn}"),
+                    agent::ItemContent::AssistantMessage {
+                        text: answer.clone(),
+                    },
+                ));
+                records.push(agent::AgentEvent::TurnCompleted {
+                    turn_id,
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                });
+            }
+        }
+        let end = records.len() as u64;
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            "/tmp/tcode-running".into(),
+            None,
+        );
+        meta.id = session.into();
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: vec![meta],
+                    projects: Vec::new(),
+                }),
+            ),
+            (
+                Topic::SessionStatus {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                    from: 0,
+                    end,
+                    records: records.into_iter().map(Into::into).collect(),
+                },
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, _| store.select_session(session.into()));
+        await_restore_update(&shell, cx, |store| {
+            store.composer_state().turn_running && !store.chat_loading()
+        });
+        resize(cx, 1024.);
+        assert!(cx.debug_bounds("working-status-19").is_some());
+
+        let timeline = cx.debug_bounds("timeline-row-0").map_or_else(
+            || cx.debug_bounds("chat-header-scroll").unwrap().bottom() + px(200.),
+            |row| row.center().y,
+        );
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(px(600.), timeline),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(20_000.))),
+            ..Default::default()
+        });
+        // Frames as the platform delivers them, each after a clock tick.
+        let frame = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        // The scroll's frame, and the one after it settling what it laid out.
+        frame(cx);
+        frame(cx);
+        draw(cx);
+        assert!(cx.debug_bounds("working-status-19").is_none());
+
+        let chat = shell.read_with(cx, |shell, _| {
+            shell.attachment.as_ref().expect("attached").chat.clone()
+        });
+        let invalidations = Rc::new(Cell::new(0));
+        let _observer = cx.update(|_, cx| {
+            let invalidations = invalidations.clone();
+            cx.observe(&chat, move |_, _| {
+                invalidations.set(invalidations.get() + 1)
+            })
+        });
+        for _ in 0..5 {
+            frame(cx);
+        }
+        assert_eq!(invalidations.get(), 0, "the clock invalidated the timeline");
+    }
+
     #[gpui::test]
     fn switching_language_retitles_the_window(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
