@@ -350,7 +350,6 @@ impl DiffPanel {
                         result,
                     });
                     panel.loading_key = None;
-                    panel.cache = None;
                     cx.notify();
                 }
             });
@@ -372,13 +371,13 @@ impl DiffPanel {
         }
         let reusable = self
             .cache
-            .take()
+            .as_ref()
             .filter(|cache| {
                 cache.session == key.session
                     && cache.scope == key.scope
                     && cache.revision == key.revision
             })
-            .map(|cache| cache.fallback_texts)
+            .map(|cache| cache.fallback_texts.clone())
             .unwrap_or_default();
         self.render_loading_key = Some(key.clone());
         let workspace_store = self.workspace_store.clone();
@@ -466,6 +465,17 @@ impl DiffPanel {
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 if panel.render_loading_key.as_ref() == Some(&key) {
+                    let previous = panel
+                        .cache
+                        .take()
+                        .filter(|cache| cache.session == key.session && cache.scope == key.scope);
+                    let list = match previous {
+                        Some(DiffCache { mut list, .. }) => {
+                            list.replace_files(files);
+                            list
+                        }
+                        None => DiffList::new(files, Vec::new(), cx),
+                    };
                     panel.cache = Some(DiffCache {
                         session: key.session.clone(),
                         scope: key.scope,
@@ -473,7 +483,7 @@ impl DiffPanel {
                         dark: key.dark,
                         ignore_ws: key.ignore_ws,
                         show_invisibles: key.show_invisibles,
-                        list: DiffList::new(files, Vec::new(), cx),
+                        list,
                         fallback_texts: sources,
                     });
                     panel.render_loading_key = None;
@@ -518,6 +528,22 @@ impl DiffPanel {
             };
             (session, scope, store.diff_refresh_generation(), active.cwd)
         };
+        // Another view's files and build are dropped; this view's stay on screen while a
+        // newer build is pending, so a refresh never blanks the panel.
+        if self
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.session != session || cache.scope != scope)
+        {
+            self.cache = None;
+        }
+        if self
+            .render_loading_key
+            .as_ref()
+            .is_some_and(|key| key.session != session || key.scope != scope)
+        {
+            self.render_loading_key = None;
+        }
         if matches!(scope, DiffScope::WorkingTree | DiffScope::Branch) {
             let base = (scope == DiffScope::Branch)
                 .then(|| self.bases.get(&session).cloned())
@@ -540,8 +566,10 @@ impl DiffPanel {
                     && preview.revision == revision
                     && preview.ignore_ws == self.ignore_ws
             }) else {
-                self.cache = None;
-                return false;
+                return self
+                    .cache
+                    .as_ref()
+                    .is_some_and(|c| !c.list.files.is_empty());
             };
         }
 

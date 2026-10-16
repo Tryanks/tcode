@@ -149,6 +149,38 @@ impl DiffList {
         reconcile_rows(&self.split_list, &self.split_items, &items.split);
         self.unified_items = items.unified;
         self.split_items = items.split;
+        self.remap_selection();
+    }
+
+    /// Shows newer files in place of these with the reader kept on the same file and line.
+    /// Rows are identified by index, so an unchanged index can hold different text: unlike
+    /// [`Self::relayout`], no measured row is kept, and the gap expansions of the old text
+    /// are dropped.
+    pub(crate) fn replace_files(&mut self, files: Vec<RenderedFile>) {
+        let anchors = [
+            row_anchor(&self.files, &self.unified_items, &self.unified_list),
+            row_anchor(&self.files, &self.split_items, &self.split_list),
+        ];
+        let items = build_list_items_with(&files, &[]);
+        self.width_candidates = width_candidates(&files);
+        self.unified_list = ListState::new(items.unified.len(), ListAlignment::Top, px(180.));
+        self.split_list = ListState::new(items.split.len(), ListAlignment::Top, px(180.));
+        self.files = files;
+        self.layouts.clear();
+        self.unified_items = items.unified;
+        self.split_items = items.split;
+        for (anchor, items, state) in [
+            (&anchors[0], &self.unified_items, &self.unified_list),
+            (&anchors[1], &self.split_items, &self.split_list),
+        ] {
+            if let Some(anchor) = anchor {
+                state.scroll_to(anchor.locate(&self.files, items));
+            }
+        }
+        self.remap_selection();
+    }
+
+    fn remap_selection(&mut self) {
         if let Some(selection) = &mut self.selection {
             let row_for_line = |line| {
                 self.files
@@ -487,6 +519,92 @@ pub(crate) fn render_list<H: DiffListHost>(
             .inset_0(),
         )
         .into_any_element()
+}
+
+/// The row at the top of a list, by what it shows rather than by its index.
+struct RowAnchor {
+    path: String,
+    /// The code row's old and new line; none for a file's header.
+    lines: Option<(Option<u32>, Option<u32>)>,
+    offset: gpui::Pixels,
+    item_ix: usize,
+}
+
+fn code_lines(file: &RenderedFile, item: &DiffListItem) -> Option<(Option<u32>, Option<u32>)> {
+    let DiffListItem::Code { left, right, .. } = *item else {
+        return None;
+    };
+    let line = |ix: Option<usize>, side: fn(&super::model::RenderedRow) -> Option<u32>| {
+        ix.and_then(|ix| file.all_rows.get(ix)).and_then(side)
+    };
+    Some((line(left, |row| row.old), line(right, |row| row.new)))
+}
+
+fn row_anchor(
+    files: &[RenderedFile],
+    items: &[DiffListItem],
+    state: &ListState,
+) -> Option<RowAnchor> {
+    let top = state.logical_scroll_top();
+    let item = items.get(top.item_ix)?;
+    let file_ix = item.file();
+    let file = files.get(file_ix)?;
+    let (lines, offset) = match item {
+        DiffListItem::Header(_) => (None, top.offset_in_item),
+        DiffListItem::Code { .. } => (code_lines(file, item), top.offset_in_item),
+        // A hunk, gap or notice row is re-found by the first line under it.
+        _ => (
+            items[top.item_ix..]
+                .iter()
+                .take_while(|item| item.file() == file_ix)
+                .find_map(|item| code_lines(file, item)),
+            px(0.),
+        ),
+    };
+    Some(RowAnchor {
+        path: file.path.clone(),
+        lines,
+        offset,
+        item_ix: top.item_ix,
+    })
+}
+
+impl RowAnchor {
+    fn locate(&self, files: &[RenderedFile], items: &[DiffListItem]) -> ListOffset {
+        let at = |item_ix, offset_in_item| ListOffset {
+            item_ix,
+            offset_in_item,
+        };
+        let Some(file_ix) = files.iter().position(|file| file.path == self.path) else {
+            return at(self.item_ix, px(0.));
+        };
+        let file = &files[file_ix];
+        let rows = || {
+            items
+                .iter()
+                .enumerate()
+                .filter(move |(_, item)| item.file() == file_ix)
+        };
+        let header = rows()
+            .find(|(_, item)| matches!(item, DiffListItem::Header(_)))
+            .map(|(ix, _)| ix)
+            .unwrap_or(self.item_ix);
+        let Some((old, new)) = self.lines else {
+            return at(header, self.offset);
+        };
+        // Compare on the side the anchor has: the new line, or the old one for a removed line.
+        let key = |lines: (Option<u32>, Option<u32>)| if new.is_some() { lines.1 } else { lines.0 };
+        let Some(wanted) = new.or(old) else {
+            return at(header, px(0.));
+        };
+        let line_of = |item: &DiffListItem| code_lines(file, item).and_then(key);
+        if let Some((ix, _)) = rows().find(|(_, item)| line_of(item) == Some(wanted)) {
+            return at(ix, self.offset);
+        }
+        rows()
+            .find(|(_, item)| line_of(item).is_some_and(|line| line > wanted))
+            .map_or(at(header, px(0.)), |(ix, _)| at(ix, px(0.)))
+    }
 }
 
 fn reconcile_rows(state: &ListState, old: &[DiffListItem], new: &[DiffListItem]) {

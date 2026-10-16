@@ -7381,29 +7381,8 @@ mod tests {
     fn diff_tab_reads_the_working_tree_again_when_chosen(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
-        let session = "thread-1";
-        let cwd = std::path::Path::new("/tmp/tcode-working-tree");
-        host.incoming
-            .try_send(
-                encode_line(&HostMessage::Event(EventEnvelope {
-                    request_id: None,
-                    topic: Topic::SessionStatus {
-                        session_id: session.into(),
-                    },
-                    event: ServerEvent::SessionStatusReplaced(Box::new(session_status(
-                        session, cwd,
-                    ))),
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+        open_working_tree_panel(&shell, &host, cx);
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        resize(cx, 1200.);
-
-        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
         let clean = tcode_protocol::GitDiffResult::default();
         assert_eq!(draw_until(&shell, cx, &host, "diff-empty", Some(&clean)), 1);
         assert!(
@@ -7433,6 +7412,296 @@ mod tests {
             1,
             "choosing the Diff tab reads the working tree again and lists the changed file"
         );
+    }
+
+    /// A thread whose turn is running, with the diff panel open on its working tree.
+    fn open_working_tree_panel(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        cx: &mut VisualTestContext,
+    ) {
+        let session = "thread-1";
+        let cwd = std::path::Path::new("/tmp/tcode-working-tree");
+        let events = [
+            (
+                Topic::SessionStatus {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(session_status(session, cwd))),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                    from: 0,
+                    end: 1,
+                    records: vec![
+                        agent::AgentEvent::TurnStarted {
+                            turn_id: "turn-1".into(),
+                        }
+                        .into(),
+                    ],
+                },
+            ),
+        ];
+        for (topic, event) in events {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let store = store_of(shell, cx);
+        store.update(cx, |store, _| store.select_session(session.into()));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        resize(cx, 1200.);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+    }
+
+    /// Lets the client run and draw while the host holds every working-tree read; any other
+    /// query is refused, as a workspace without a checkout would. Returns the held reads in
+    /// the order the client made them.
+    fn held_git_diff_reads(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        cx: &mut VisualTestContext,
+    ) -> Vec<u64> {
+        let mut reads = Vec::new();
+        for _ in 0..6 {
+            store_of(shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            while let Ok(line) = host.outgoing.try_recv() {
+                let line = decode_client_line(&line).expect("client line");
+                let ClientPayload::Query(query) = line.payload else {
+                    continue;
+                };
+                if matches!(query, tcode_protocol::Query::LoadGitDiff { .. }) {
+                    reads.push(line.id);
+                    continue;
+                }
+                answer_query(
+                    host,
+                    line.id,
+                    Err(tcode_protocol::ProtocolError {
+                        code: "not_found".into(),
+                        message: "no checkout in this test".into(),
+                    }),
+                );
+            }
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            draw(cx);
+        }
+        reads
+    }
+
+    fn answer_query(
+        host: &MountedShell,
+        id: u64,
+        result: Result<tcode_protocol::QueryResponse, tcode_protocol::ProtocolError>,
+    ) {
+        host.incoming
+            .try_send(encode_line(&HostMessage::QueryResult { id, result }).unwrap())
+            .unwrap();
+    }
+
+    fn answer_git_diff(host: &MountedShell, id: u64, diff: &tcode_protocol::GitDiffResult) {
+        answer_query(
+            host,
+            id,
+            Ok(tcode_protocol::QueryResponse::GitDiff(diff.clone())),
+        );
+    }
+
+    /// A working tree in which each of `files` was created with `lines` lines.
+    fn created_files(files: &[(&str, u32)]) -> tcode_protocol::GitDiffResult {
+        let (changes, texts) = files
+            .iter()
+            .map(|&(path, lines)| {
+                let text = (1..=lines).map(|line| format!("{path} line {line}\n"));
+                let patch = format!(
+                    "@@ -0,0 +1,{lines} @@\n{}",
+                    text.clone()
+                        .map(|line| format!("+{line}"))
+                        .collect::<String>()
+                );
+                (
+                    agent::FileChange {
+                        path: path.into(),
+                        kind: agent::FileChangeKind::Create,
+                        diff: Some(patch),
+                    },
+                    tcode_protocol::GitFileText {
+                        old: None,
+                        new: Some(text.collect()),
+                    },
+                )
+            })
+            .unzip();
+        tcode_protocol::GitDiffResult {
+            changes,
+            texts,
+            ..Default::default()
+        }
+    }
+
+    /// The agent ends a turn, so the working tree is read again.
+    fn complete_turn(host: &MountedShell) {
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "thread-1".into(),
+                    },
+                    event: ServerEvent::SessionEvent(
+                        agent::AgentEvent::TurnCompleted {
+                            turn_id: "turn-1".into(),
+                            status: agent::TurnStatus::Completed,
+                            usage: None,
+                        }
+                        .into(),
+                    ),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// While an agent works the tree changes under the reader. Reading it again leaves the
+    /// diff they were reading on screen — not a loading state — until the new one is built.
+    #[gpui::test]
+    fn working_tree_refresh_keeps_the_previous_diff_until_the_new_one_lands(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        open_working_tree_panel(&shell, &host, cx);
+        let reads = held_git_diff_reads(&shell, &host, cx);
+        assert_eq!(reads.len(), 1, "opening the panel reads the working tree");
+        answer_git_diff(&host, reads[0], &created_files(&[("first.rs", 3)]));
+        assert!(held_git_diff_reads(&shell, &host, cx).is_empty());
+        assert!(cx.debug_bounds("diff-line-new-first.rs-1").is_some());
+
+        complete_turn(&host);
+        let reads = held_git_diff_reads(&shell, &host, cx);
+        assert_eq!(reads.len(), 1, "the finished turn reads the tree again");
+        assert!(
+            cx.debug_bounds("diff-line-new-first.rs-1").is_some(),
+            "the previous diff stays on screen while the host reads the tree"
+        );
+
+        answer_git_diff(
+            &host,
+            reads[0],
+            &created_files(&[("first.rs", 3), ("second.rs", 2)]),
+        );
+        held_git_diff_reads(&shell, &host, cx);
+        assert!(
+            cx.debug_bounds("diff-line-new-second.rs-1").is_some(),
+            "the new diff replaces it once built"
+        );
+    }
+
+    /// Swapping in the new diff keeps the reader on the line they were reading, even when a
+    /// file now listed above it pushes every row down.
+    #[gpui::test]
+    fn working_tree_refresh_keeps_the_reading_position(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        open_working_tree_panel(&shell, &host, cx);
+        let reads = held_git_diff_reads(&shell, &host, cx);
+        answer_git_diff(&host, reads[0], &created_files(&[("long.rs", 300)]));
+        held_git_diff_reads(&shell, &host, cx);
+
+        let body = cx
+            .debug_bounds("diff-body")
+            .expect("the diff body laid out");
+        // A wheel turn at a time, each eased out and drawn, as a reader scrolls.
+        for _ in 0..12 {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: body.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100.))),
+                ..Default::default()
+            });
+            for _ in 0..5 {
+                cx.executor().advance_clock(Duration::from_millis(100));
+                draw(cx);
+            }
+        }
+        // Debug selectors are looked up by `&'static str`.
+        let selector =
+            |line: u32| -> &'static str { format!("diff-line-new-long.rs-{line}").leak() };
+        let top_line = |cx: &mut VisualTestContext| {
+            (1..=300).find_map(|line| {
+                cx.debug_bounds(selector(line))
+                    .filter(|bounds| bounds.top() >= body.top())
+                    .map(|bounds| (line, bounds.top()))
+            })
+        };
+        let (line, top) = top_line(cx).expect("a line of long.rs is on screen");
+        assert!(line > 20, "the reader scrolled into the file: {line}");
+
+        complete_turn(&host);
+        let reads = held_git_diff_reads(&shell, &host, cx);
+        answer_git_diff(
+            &host,
+            reads[0],
+            &created_files(&[("added.rs", 20), ("long.rs", 300)]),
+        );
+        held_git_diff_reads(&shell, &host, cx);
+        assert!(
+            cx.debug_bounds("diff-line-new-added.rs-1").is_none(),
+            "the file listed above is out of view"
+        );
+        let after = cx
+            .debug_bounds(selector(line))
+            .expect("the line read before the refresh is still on screen");
+        assert!(
+            (after.top() - top).abs() < px(1.),
+            "it stays where it was: {top:?} then {:?}",
+            after.top()
+        );
+    }
+
+    /// Reads answered out of order: an earlier read the host finishes last is superseded and
+    /// never replaces the newer diff, nor what was shown while both were pending.
+    #[gpui::test]
+    fn working_tree_refresh_ignores_a_superseded_read(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        open_working_tree_panel(&shell, &host, cx);
+        let reads = held_git_diff_reads(&shell, &host, cx);
+        answer_git_diff(&host, reads[0], &created_files(&[("first.rs", 3)]));
+        held_git_diff_reads(&shell, &host, cx);
+
+        complete_turn(&host);
+        let earlier = held_git_diff_reads(&shell, &host, cx);
+        complete_turn(&host);
+        let later = held_git_diff_reads(&shell, &host, cx);
+        assert_eq!((earlier.len(), later.len()), (1, 1));
+
+        answer_git_diff(&host, earlier[0], &created_files(&[("stale.rs", 3)]));
+        held_git_diff_reads(&shell, &host, cx);
+        assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
+        assert!(
+            cx.debug_bounds("diff-line-new-first.rs-1").is_some(),
+            "a superseded read leaves the shown diff in place"
+        );
+
+        answer_git_diff(&host, later[0], &created_files(&[("newest.rs", 3)]));
+        held_git_diff_reads(&shell, &host, cx);
+        assert!(cx.debug_bounds("diff-line-new-newest.rs-1").is_some());
+        assert!(cx.debug_bounds("diff-line-new-stale.rs-1").is_none());
     }
 
     #[test]
