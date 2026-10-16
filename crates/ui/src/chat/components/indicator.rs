@@ -4,9 +4,10 @@ use std::time::Duration;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Hsla, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
-    div, prelude::FluentBuilder as _, px,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, ElementId, Entity,
+    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Task, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex};
 
@@ -16,6 +17,60 @@ use super::super::model::{
 };
 use crate::time::now_millis;
 use tcode_core::session::TurnMeta;
+
+/// A running turn's working indicator, drawn by a view whose clock ticks
+/// only while a frame draws it: the view is the element's state, so a turn
+/// scrolled out of the timeline's rows drops it, and its clock with it.
+#[derive(IntoElement)]
+struct WorkingIndicator {
+    id: ElementId,
+    started_at: Option<u64>,
+}
+
+impl RenderOnce for WorkingIndicator {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let started_at = self.started_at;
+        window.with_global_id(self.id, |id, window| {
+            window.with_element_state(id, |view: Option<Entity<WorkingClock>>, _| {
+                let view = view
+                    .filter(|view| view.read(cx).started_at == started_at)
+                    .unwrap_or_else(|| cx.new(|cx| WorkingClock::new(started_at, cx)));
+                (view.clone(), view)
+            })
+        })
+    }
+}
+
+struct WorkingClock {
+    started_at: Option<u64>,
+    _tick: Task<()>,
+}
+
+impl WorkingClock {
+    fn new(started_at: Option<u64>, cx: &mut Context<Self>) -> Self {
+        // The elapsed time is shown to the decisecond.
+        let tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            started_at,
+            _tick: tick,
+        }
+    }
+}
+
+impl Render for WorkingClock {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        working_indicator("working".into(), self.started_at, cx)
+    }
+}
 
 pub(crate) fn shimmer_label(id: SharedString, label: Cow<'static, str>, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -123,11 +178,10 @@ pub(crate) fn turn_working_indicator(
         .items_center()
         .text_size(px(12.5))
         .text_color(cx.theme().muted_foreground)
-        .child(working_indicator(
-            SharedString::from(format!("working-{turn}")),
+        .child(WorkingIndicator {
+            id: SharedString::from(format!("working-{turn}")).into(),
             started_at,
-            cx,
-        ))
+        })
         .when_some(served_model, |row, served| {
             let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
             row.child(
