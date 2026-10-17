@@ -175,6 +175,10 @@ pub use wire::{
 // Version 14 (v0.2.6) adds the CommandOutput topic and its
 // CommandOutputReplaced event, pushed while a command's output grows, which
 // replace the RenderStoredOutput query and the TerminalFrame query response.
+//
+// Unreleased: AgentStatus gains `report`, what a dispatched child owes its
+// lead (none, expected, reported, unreported, failed), and SessionMeta carries
+// the child's `expectation`.
 pub const PROTOCOL_VERSION: u32 = 14;
 
 #[cfg(test)]

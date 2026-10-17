@@ -1,13 +1,14 @@
 use super::*;
+use tcode_core::project::ChildExpectation;
 use tcode_core::session::{
-    ORCHESTRATE_BRIEF_REPORT_LABEL, ORCHESTRATE_OUTPUT_TAIL_LABEL, ORCHESTRATE_REPORT_LABEL,
+    ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_OUTPUT_TAIL_LABEL, ORCHESTRATE_REPORT_LABEL,
 };
 use tcode_core::settings::{OrchestrateChildModel, orchestrate_efforts};
-use tcode_core::settlement::AgentDelivery;
+use tcode_core::settlement::{AgentDelivery, AgentReport};
 
 /// Appended to every dispatched brief so the report contract reaches the child
 /// regardless of what the orchestrator wrote.
-pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_report report_result tool is the only channel through which your work reaches the orchestrator that dispatched you; it cannot see your transcript. When your work is complete, send your complete final report through it, then end your turn. Make the report self-contained: for a discussion, give your reasoning, recommendations, disagreements, and open questions; for execution, include files changed and commands actually run with their outcomes. Include the evidence behind your conclusions. Only if the tool call fails, write that same complete report as your final message instead — it is sent back as the fallback, truncated when long.";
+pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_report report_result tool is the only channel through which your work reaches the orchestrator that dispatched you; it cannot see your transcript, and your own turns, waits, background tasks and wake-ups never reach it. When your work is complete, send your complete final report through it once, then end your turn. Make the report self-contained: for a discussion, give your reasoning, recommendations, disagreements, and open questions; for execution, include files changed and commands actually run with their outcomes. Include the evidence behind your conclusions. Only if the tool call fails, write that same complete report as your final message instead — it is sent back as the fallback, truncated when long.";
 
 /// A thread's pull request tool registration.
 pub(super) struct PullRequestRegistration {
@@ -330,7 +331,6 @@ impl AppState {
     }
 
     pub(super) fn revoke_orchestrate_child_registration(&mut self, session_id: &str) {
-        self.child_reported_results.remove(session_id);
         if let Some(registration) = self.mcp.orchestrate_child_registrations.remove(session_id)
             && let Some(tokens) = &self.mcp.orchestrate_child_tokens
         {
@@ -407,6 +407,8 @@ impl AppState {
         } else {
             brief
         };
+        let mut meta = meta;
+        meta.expectation = Some(ChildExpectation::opened(now_secs()));
         self.thread_activity
             .insert(meta.id.clone(), Default::default());
         self.enqueue_store_write(
@@ -661,62 +663,31 @@ impl AppState {
                     if let Some(fast) = fast {
                         self.set_child_fast(&thread_id, fast, cx);
                     }
-                    // A follow-up starts a new piece of work: a result reported
-                    // before it must not be delivered as the answer to it.
-                    self.child_reported_results.remove(&thread_id);
                     // A follow-up revives an archived child: it returns to its
                     // lead's Agents view so the user can watch the retry.
                     if archived {
                         self.unarchive_session(&thread_id, cx);
                     }
-                    // A live turn accepts the message right away — same routing as
-                    // parent callbacks. Queueing a mid-turn correction until the
-                    // turn ends would deliver it after the work it was meant to
-                    // redirect (and never, if the turn hangs).
-                    let can_steer = self
-                        .resident(&thread_id)
-                        .is_some_and(|child| child.turn_in_flight && child.can_steer());
-                    if can_steer {
-                        let request_id = self.record_steer_request(&thread_id, &message, &[], cx);
-                        let sent = self.resident_mut(&thread_id).is_some_and(|child| {
-                            child
-                                .steer_now(request_id, message.clone(), Vec::new())
-                                .is_ok()
-                        });
-                        if sent {
-                            return Ok(serde_json::json!({ "ok": true, "delivery": "steered" }));
-                        }
-                        // Provider channel gone: fall through so the text survives
-                        // in the queue for the wake-up path.
-                    }
-                    if !can_steer {
-                        self.reactivate_session(&thread_id, cx);
-                    }
-                    if self.residents.live.contains_key(&thread_id) {
-                        let child = self.resident_mut(&thread_id).unwrap();
-                        child.push_queued(message, Vec::new());
-                        child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
-                        let idle = matches!(child.runtime, Runtime::Idle);
-                        if self.dispatch_next_queued(&thread_id, cx).is_err() {
-                            return Err("child provider is unavailable".into());
-                        }
-                        if idle {
-                            self.ensure_started(&thread_id, cx);
-                        }
-                        return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
-                    }
-                    self.ensure_child_loaded(&thread_id, cx)?;
-                    let child = self.resident_mut(&thread_id).unwrap();
-                    child.push_queued(message, Vec::new());
-                    child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
-                    let idle = matches!(child.runtime, Runtime::Idle);
-                    if !idle && !child.turn_in_flight {
-                        self.on_background_turn_completed(&thread_id, cx);
-                    }
-                    if idle {
-                        self.ensure_session_started(&thread_id, cx);
-                    }
-                    Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
+                    // A follow-up is new work the lead is owed a report for: a
+                    // report not yet delivered for the previous message is not
+                    // the answer to this one.
+                    let superseded = self
+                        .find_meta(&thread_id)
+                        .is_some_and(|meta| meta.report().pending());
+                    let mut expectation = ChildExpectation::opened(now_secs());
+                    // A report made before this message answers the previous
+                    // one, not this one.
+                    expectation.delivered_item = self
+                        .loaded_child_timeline(&thread_id)
+                        .and_then(Timeline::last_report)
+                        .map(|(item, _)| item.to_owned());
+                    self.set_child_expectation(&thread_id, Some(expectation), cx);
+                    let delivery = self.deliver_to_child(&thread_id, message, cx)?;
+                    Ok(serde_json::json!({
+                        "ok": true,
+                        "delivery": delivery,
+                        "expectation": if superseded { "replaced" } else { "opened" },
+                    }))
                 })();
                 let _ = reply.try_send(result);
             }
@@ -764,12 +735,13 @@ impl AppState {
                     if !is_child {
                         return Err("unknown thread or not an orchestrated child".into());
                     }
-                    let chars = text.chars().count();
-                    self.child_reported_results.insert(child_id, text);
+                    // The report is read back from this call's own tool item when
+                    // the turn ends (`Timeline::last_report`), so nothing is
+                    // stored here: the transcript is the one copy.
                     Ok(serde_json::json!({
                         "ok": true,
-                        "chars": chars,
-                        "note": "delivered to the orchestrator in full when this turn ends",
+                        "chars": text.chars().count(),
+                        "delivered_when": "turn_ends",
                     }))
                 })();
                 let _ = reply.try_send(result);
@@ -816,7 +788,6 @@ impl AppState {
     /// transcript and no longer holds its lead.
     pub(crate) fn cancel_child(&mut self, thread_id: &str, cx: &mut HostCx) {
         self.clear_approvals(thread_id);
-        self.invalidate_child_callback(thread_id);
         if self.residents.live.contains_key(thread_id) {
             if let Some(child) = self.resident_mut(thread_id) {
                 child.queue.clear();
@@ -830,6 +801,7 @@ impl AppState {
             return;
         };
         meta.cancelled_at = Some(now_secs());
+        meta.expectation = None;
         meta.updated_at = now_secs();
         if let Some(child) = self.resident_mut(thread_id) {
             child.meta = meta.clone();
@@ -1055,26 +1027,36 @@ impl AppState {
         self.resident(session_id).map(|child| &child.timeline)
     }
 
-    pub(super) fn child_result(
-        &self,
-        meta: &SessionMeta,
-        timeline: &Timeline,
-    ) -> (&'static str, String, Option<agent::TokenUsage>) {
+    /// What the lead can learn about a child from its thread: whether it is
+    /// still running, what it owes, its latest report and its final message.
+    pub(super) fn child_result(&self, meta: &SessionMeta, timeline: &Timeline) -> ChildResult {
         let running = self
             .resident(&meta.id)
             .is_some_and(ActiveSession::is_unfinished);
-        let state = if running {
+        let state = if running || meta.report().pending() {
             "running"
         } else if trailing_start_error(timeline).is_some() {
             "failed"
         } else {
-            match timeline.last_turn_status {
-                Some(TurnStatus::Completed) => "completed",
-                Some(TurnStatus::Failed | TurnStatus::Interrupted) => "failed",
-                None => "idle",
+            match meta.report() {
+                AgentReport::Reported => "reported",
+                AgentReport::Unreported => "unreported",
+                AgentReport::Failed => "failed",
+                // Children dispatched before expectations were recorded.
+                AgentReport::Expected | AgentReport::None => match timeline.last_turn_status {
+                    Some(TurnStatus::Completed) => "completed",
+                    Some(TurnStatus::Failed | TurnStatus::Interrupted) => "failed",
+                    None => "idle",
+                },
             }
         };
-        (state, final_assistant_message(timeline), timeline.usage)
+        ChildResult {
+            state,
+            report: meta.report(),
+            reported: timeline.last_report().map(|(_, text)| text.to_owned()),
+            final_message: final_assistant_message(timeline),
+            usage: timeline.usage,
+        }
     }
 
     pub(super) fn orchestrate_result_json(
@@ -1082,18 +1064,27 @@ impl AppState {
         meta: &SessionMeta,
         timeline: &Timeline,
     ) -> Result<serde_json::Value, String> {
-        let (state, final_message, usage) = self.child_result(meta, timeline);
-        if state == "running" {
-            return Err("thread is still running".into());
+        let result = self.child_result(meta, timeline);
+        let mut json = match &result.reported {
+            Some(report) => serde_json::json!({
+                "state": result.state,
+                "report": result.report,
+                "source": "report",
+                "text": report,
+                "final_message": result.final_message,
+            }),
+            None => serde_json::json!({
+                "state": result.state,
+                "report": result.report,
+                "source": "fallback",
+                "text": result.final_message,
+                "final_message": result.final_message,
+            }),
+        };
+        if let Some(usage) = result.usage.as_ref() {
+            json["tokens"] = token_usage_json(usage);
         }
-        let mut result = serde_json::json!({
-            "state": state,
-            "final_message": final_message,
-        });
-        if let Some(usage) = usage.as_ref() {
-            result["tokens"] = token_usage_json(usage);
-        }
-        Ok(result)
+        Ok(json)
     }
 
     pub(super) fn orchestrate_status_json(
@@ -1119,7 +1110,7 @@ impl AppState {
         meta: &SessionMeta,
         timeline: &Timeline,
     ) -> serde_json::Value {
-        let (state, final_message, usage) = self.child_result(meta, timeline);
+        let result = self.child_result(meta, timeline);
         let approval = self.first_approval(&meta.id);
         let waiting_approval = approval.map(approval_request_summary);
         let approval_request_id = approval.map(|request| request.id.as_str());
@@ -1127,109 +1118,247 @@ impl AppState {
             "thread_id": meta.id,
             "title": meta.title,
             "provider": provider_name(meta.provider),
-            "state": state,
+            "state": result.state,
+            "report": result.report,
             "delivery": self.agent_status(meta).map(|status| status.delivery),
             "archived": meta.archived_at.is_some(),
             "waiting_approval": waiting_approval,
             "approval_request_id": approval_request_id,
-            "last_output_tail": tail_chars(&final_message, 600),
+            "last_output_tail": tail_chars(&result.final_message, 600),
             "updated_at": meta.updated_at,
         });
         if let Some(error) = trailing_start_error(timeline) {
             status["start_error"] = serde_json::json!(error);
         }
-        if let Some(usage) = usage.as_ref() {
+        if let Some(usage) = result.usage.as_ref() {
             status["tokens"] = token_usage_json(usage);
         }
         status
     }
 
-    pub(super) fn deliver_child_callback(
+    /// Record what a child owes its lead, on the thread and in the store.
+    pub(super) fn set_child_expectation(
+        &mut self,
+        thread_id: &str,
+        expectation: Option<ChildExpectation>,
+        cx: &mut HostCx,
+    ) {
+        let Some(mut meta) = self.find_meta(thread_id) else {
+            return;
+        };
+        if meta.expectation == expectation {
+            return;
+        }
+        meta.expectation = expectation;
+        meta.updated_at = now_secs();
+        if let Some(child) = self.resident_mut(thread_id) {
+            child.meta = meta.clone();
+        }
+        self.persist_meta(&meta, cx);
+    }
+
+    /// Hand the lead's (or tcode's own) message to a child: steered into a
+    /// live turn, otherwise queued as the child's next turn. Reports which.
+    pub(super) fn deliver_to_child(
+        &mut self,
+        thread_id: &str,
+        message: String,
+        cx: &mut HostCx,
+    ) -> Result<&'static str, String> {
+        // A live turn accepts the message right away — same routing as
+        // parent callbacks. Queueing a mid-turn correction until the
+        // turn ends would deliver it after the work it was meant to
+        // redirect (and never, if the turn hangs).
+        let can_steer = self
+            .resident(thread_id)
+            .is_some_and(|child| child.turn_in_flight && child.can_steer());
+        if can_steer {
+            let request_id = self.record_steer_request(thread_id, &message, &[], cx);
+            let sent = self.resident_mut(thread_id).is_some_and(|child| {
+                child
+                    .steer_now(request_id, message.clone(), Vec::new())
+                    .is_ok()
+            });
+            if sent {
+                return Ok("steered");
+            }
+            // Provider channel gone: fall through so the text survives
+            // in the queue for the wake-up path.
+        }
+        if !can_steer {
+            self.reactivate_session(thread_id, cx);
+        }
+        if self.residents.live.contains_key(thread_id) {
+            let child = self.resident_mut(thread_id).unwrap();
+            child.push_queued(message, Vec::new());
+            child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
+            let idle = matches!(child.runtime, Runtime::Idle);
+            if self.dispatch_next_queued(thread_id, cx).is_err() {
+                return Err("child provider is unavailable".into());
+            }
+            if idle {
+                self.ensure_started(thread_id, cx);
+            }
+            return Ok("queued");
+        }
+        self.ensure_child_loaded(thread_id, cx)?;
+        let child = self.resident_mut(thread_id).unwrap();
+        child.push_queued(message, Vec::new());
+        child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
+        let idle = matches!(child.runtime, Runtime::Idle);
+        if !idle && !child.turn_in_flight {
+            self.on_background_turn_completed(thread_id, cx);
+        }
+        if idle {
+            self.ensure_session_started(thread_id, cx);
+        }
+        Ok("queued")
+    }
+
+    /// Nothing is left inside the thread that could still produce a report
+    /// on its own: no turn, nothing queued, no background task or wake-up,
+    /// no request waiting on an answer.
+    pub(super) fn thread_quiescent(&self, id: &str) -> bool {
+        !self.settle_thread_busy(id)
+            && self.resident(id).is_none_or(|session| {
+                session.queue.is_empty()
+                    && session.background_task_count == 0
+                    && matches!(session.runtime, Runtime::Idle | Runtime::Live(_))
+            })
+    }
+
+    /// The child meta and its lead, when the child still owes or has owed a
+    /// report and both sides are current.
+    fn expectant_child(&self, child_id: &str) -> Option<(SessionMeta, String, ChildExpectation)> {
+        let child = self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
+            .filter(|meta| meta.archived_at.is_none() && meta.cancelled_at.is_none())?
+            .clone();
+        let expectation = child.expectation.clone()?;
+        let parent_id = child.parent_session_id.clone()?;
+        if !self
+            .find_meta(&parent_id)
+            .is_some_and(|meta| meta.archived_at.is_none())
+        {
+            return None;
+        }
+        Some((child, parent_id, expectation))
+    }
+
+    /// A child's turn ended (or its background work did): decide whether the
+    /// lead is owed anything now. A report the child made is delivered; a
+    /// child that owes one and has gone quiet is reminded once, then its
+    /// final message is delivered in the report's place. Turns that end for
+    /// the child's own reasons — wake-ups, monitors, background tasks —
+    /// deliver nothing.
+    pub(super) fn settle_child_expectation(
         &mut self,
         child_id: &str,
         status: TurnStatus,
         cx: &mut HostCx,
     ) {
-        let Some(child) = self
-            .sessions
-            .iter()
-            .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
-            .cloned()
-        else {
+        let Some((child, parent_id, mut expectation)) = self.expectant_child(child_id) else {
             return;
         };
-        if self
-            .resident(child_id)
-            .is_some_and(|child| !child.queue.is_empty())
-        {
+        let Some(resident) = self.resident(child_id) else {
+            return;
+        };
+        if resident.turn_in_flight {
             return;
         }
-        let child_id = child_id.to_string();
-        let parent_id = child.parent_session_id.clone().unwrap();
-        let title = child.title;
-        let result_max_chars = child.result_max_chars;
-        let generation = self.callback_generation(&child_id);
-        let fold = self.folded_log(&child_id, cx);
-        let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let timeline = fold.await;
-            host_cx.enqueue(move |state, cx| {
-                let timeline = match timeline {
-                    Ok(timeline) => timeline,
-                    Err(error) => {
-                        state.report_error(
-                            RuntimeError::External(format!(
-                                "could not read thread {child_id} to report its completion: {error}"
-                            )),
-                            cx,
-                        );
-                        return;
-                    }
-                };
-                // New work for the child, or archiving or deleting either side,
-                // while its log was read makes this completion stale.
-                let current = state.callback_generation(&child_id) == generation
-                    && state
-                        .find_meta(&parent_id)
-                        .is_some_and(|meta| meta.archived_at.is_none())
-                    && state.sessions.iter().any(|meta| {
-                        meta.id == child_id
-                            && meta.archived_at.is_none()
-                            && meta.parent_session_id.as_deref() == Some(parent_id.as_str())
-                    });
-                if !current {
-                    return;
-                }
-                let turn = timeline.turns.len();
-                // A failed start folds into the turn that was already reported,
-                // so it is not deduplicated against that turn's callback; and its
-                // final message is that old turn's, so it is not repeated.
-                let text = if let Some(error) = trailing_start_error(&timeline) {
-                    format!(
-                        "[orchestrate] thread {child_id} (\"{title}\") failed to start: {error}"
-                    )
-                } else {
-                    if state.callback_last_turn.get(&child_id).copied() == Some(turn) {
-                        return;
-                    }
-                    // A report pushed via the child's report_result tool supersedes
-                    // the last-message digest and is delivered in full; consuming it
-                    // here keeps the fallback per turn.
-                    let reported = state.child_reported_results.remove(&child_id);
-                    assemble_callback_text(
-                        &child_id,
-                        &title,
-                        status,
-                        &final_assistant_message(&timeline),
-                        reported.as_deref(),
-                        timeline.usage.as_ref(),
-                        result_max_chars,
-                    )
-                };
-                state.callback_last_turn.insert(child_id.clone(), turn);
-                state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
-            });
-        });
+        let timeline = &resident.timeline;
+        let usage = timeline.usage;
+        let report = timeline
+            .last_report()
+            .map(|(item, text)| (item.to_owned(), text.to_owned()));
+        // The child chose this text for its lead: deliver it whatever else the
+        // child is doing, once per report.
+        if let Some((item, text)) = report
+            && expectation.delivered_item.as_deref() != Some(item.as_str())
+        {
+            let state = if expectation.delivered_item.is_some() {
+                "updated"
+            } else {
+                "reported"
+            };
+            let text = assemble_report_callback(
+                child_id,
+                &child.title,
+                state,
+                CallbackBody::Report(&text),
+                usage.as_ref(),
+            );
+            expectation.state = AgentReport::Reported;
+            expectation.delivered_item = Some(item);
+            self.set_child_expectation(child_id, Some(expectation), cx);
+            self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+            return;
+        }
+        if !expectation.state.pending() {
+            return;
+        }
+        match status {
+            TurnStatus::Completed => {}
+            // The user stopped the child: they have it now.
+            TurnStatus::Interrupted => return,
+            TurnStatus::Failed => {
+                let error = trailing_error(timeline)
+                    .unwrap_or("the turn failed")
+                    .to_owned();
+                self.fail_child_expectation(child_id, &error, cx);
+                return;
+            }
+        }
+        if !self.thread_quiescent(child_id) {
+            return;
+        }
+        if !expectation.reminded && child.provider.caps().mcp_servers {
+            expectation.reminded = true;
+            self.set_child_expectation(child_id, Some(expectation), cx);
+            if let Err(error) = self.deliver_to_child(child_id, CHILD_REPORT_REMINDER.into(), cx) {
+                self.fail_child_expectation(child_id, &error, cx);
+            }
+            return;
+        }
+        let final_message = final_assistant_message(timeline);
+        let text = assemble_report_callback(
+            child_id,
+            &child.title,
+            "unreported",
+            CallbackBody::Fallback {
+                final_message: &final_message,
+                max_chars: child.result_max_chars,
+            },
+            usage.as_ref(),
+        );
+        expectation.state = AgentReport::Unreported;
+        self.set_child_expectation(child_id, Some(expectation), cx);
+        self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+    }
+
+    /// The child can no longer deliver what it owes: its lead hears why, once.
+    pub(super) fn fail_child_expectation(&mut self, child_id: &str, error: &str, cx: &mut HostCx) {
+        let Some((child, parent_id, mut expectation)) = self.expectant_child(child_id) else {
+            return;
+        };
+        if !expectation.state.pending() {
+            return;
+        }
+        let usage = self
+            .resident(child_id)
+            .and_then(|child| child.timeline.usage);
+        let text = assemble_report_callback(
+            child_id,
+            &child.title,
+            "failed",
+            CallbackBody::Failure(error),
+            usage.as_ref(),
+        );
+        expectation.state = AgentReport::Failed;
+        self.set_child_expectation(child_id, Some(expectation), cx);
+        self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
     }
 
     pub(super) fn deliver_child_approval_callback(
@@ -1344,6 +1473,19 @@ impl AppState {
 
 pub(super) const ORCHESTRATE_GUIDANCE: &str =
     include_str!("../../../../assets/orchestrate/workflow.md");
+/// Sent to a child that ended its turn owing a report, once per expectation.
+pub(super) const CHILD_REPORT_REMINDER: &str =
+    include_str!("../../../../assets/orchestrate/reminder.md");
+
+/// What the lead can learn about a child (see `AppState::child_result`).
+pub(super) struct ChildResult {
+    pub(super) state: &'static str,
+    pub(super) report: AgentReport,
+    /// The child's latest `report_result` text, if it ever reported.
+    pub(super) reported: Option<String>,
+    pub(super) final_message: String,
+    pub(super) usage: Option<agent::TokenUsage>,
+}
 pub(super) const COLLABORATION_GUIDANCE: &str =
     include_str!("../../../../assets/orchestrate/collaboration.md");
 
@@ -1905,6 +2047,15 @@ pub(super) fn final_assistant_message(timeline: &Timeline) -> String {
     parts.concat()
 }
 
+/// The error entry a failed turn ended on, when it is the thread's last entry.
+fn trailing_error(timeline: &Timeline) -> Option<&str> {
+    match &timeline.entries.last()?.content {
+        EntryContent::Error { message, .. } => Some(message),
+        EntryContent::ProviderStartError { error } => Some(error),
+        _ => None,
+    }
+}
+
 /// The error of a provider start that failed after the thread's last entry.
 fn trailing_start_error(timeline: &Timeline) -> Option<&str> {
     match &timeline.entries.last()?.content {
@@ -1953,19 +2104,24 @@ pub(super) fn token_usage_json(usage: &agent::TokenUsage) -> serde_json::Value {
     serde_json::Value::Object(value)
 }
 
-pub(super) fn assemble_callback_text(
+pub(super) enum CallbackBody<'a> {
+    /// The child's own report, delivered verbatim.
+    Report(&'a str),
+    /// The child never reported: its final message stands in, bounded.
+    Fallback {
+        final_message: &'a str,
+        max_chars: Option<u32>,
+    },
+    Failure(&'a str),
+}
+
+pub(super) fn assemble_report_callback(
     child_id: &str,
     title: &str,
-    status: TurnStatus,
-    final_message: &str,
-    reported: Option<&str>,
+    state: &str,
+    body: CallbackBody<'_>,
     usage: Option<&agent::TokenUsage>,
-    max_chars: Option<u32>,
 ) -> String {
-    let state = match status {
-        TurnStatus::Completed => "completed",
-        TurnStatus::Failed | TurnStatus::Interrupted => "failed",
-    };
     let mut token_parts = Vec::new();
     if let Some(usage) = usage {
         if let Some(input) = usage.input_tokens {
@@ -1988,33 +2144,29 @@ pub(super) fn assemble_callback_text(
     } else {
         format!(" tokens: {}.", token_parts.join(", "))
     };
-    let digest = || {
-        if final_message.is_empty() {
-            return "(no assistant output)".to_string();
+    let body = match body {
+        CallbackBody::Report(report) => format!("{ORCHESTRATE_REPORT_LABEL}{report}"),
+        CallbackBody::Fallback {
+            final_message,
+            max_chars,
+        } => {
+            let digest = if final_message.is_empty() {
+                "(no assistant output)".to_string()
+            } else {
+                let count = final_message.chars().count();
+                let cap = max_chars.unwrap_or(1200) as usize;
+                if cap == 0 || count <= cap {
+                    final_message.to_string()
+                } else {
+                    format!(
+                        "{ORCHESTRATE_OUTPUT_TAIL_LABEL}{count} chars total; result {child_id} has the full text):\n{}",
+                        tail_chars(final_message, 600.min(cap))
+                    )
+                }
+            };
+            format!("{ORCHESTRATE_FALLBACK_LABEL}{digest}")
         }
-        let count = final_message.chars().count();
-        let cap = max_chars.unwrap_or(1200) as usize;
-        if cap == 0 || count <= cap {
-            final_message.to_string()
-        } else {
-            format!(
-                "{ORCHESTRATE_OUTPUT_TAIL_LABEL}{count} chars total; the tail plus the diff is usually enough — result {child_id} has the full text):\n{}",
-                tail_chars(final_message, 600.min(cap))
-            )
-        }
-    };
-    let body = if let Some(report) = reported.filter(|report| !report.trim().is_empty()) {
-        // The child chose this text deliberately via report_result, so it is
-        // delivered verbatim and never truncated.
-        let mut body = format!("{ORCHESTRATE_REPORT_LABEL}{report}");
-        // A brief report must not hide a more substantive final message.
-        if report.chars().count() < 200 && final_message.chars().count() > report.chars().count() {
-            body.push_str(ORCHESTRATE_BRIEF_REPORT_LABEL);
-            body.push_str(&digest());
-        }
-        body
-    } else {
-        digest()
+        CallbackBody::Failure(error) => error.to_string(),
     };
     format!("[orchestrate] thread {child_id} (\"{title}\") {state}.{token_segment}\n{body}")
 }

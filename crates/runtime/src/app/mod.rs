@@ -364,7 +364,6 @@ pub struct AppState {
     settlement_deadlines: HashMap<String, u64>,
     settlement_timer: Option<(u64, HostTask<()>)>,
     decision_revisions: HashMap<String, u64>,
-    callback_generations: HashMap<String, u64>,
     thread_activity: Revisioned<HashMap<String, tcode_core::settlement::ThreadActivity>>,
     space_scopes: HashMap<String, BTreeSet<String>>,
     space_policy_revisions: HashMap<String, u64>,
@@ -427,12 +426,7 @@ pub struct AppState {
     /// Native plugin catalogs by profile id, listed on demand.
     plugin_catalogs: HashMap<String, plugins::PluginCatalog>,
     mcp: McpWiring,
-    callback_last_turn: HashMap<String, usize>,
     callback_approval_requests: HashSet<(String, String)>,
-    /// RESULT text pushed by child threads via their `report_result` tool,
-    /// keyed by child id; consumed by the next completion callback (a child
-    /// that never reports falls back to its final assistant message).
-    child_reported_results: HashMap<String, String>,
     /// Live provider approvals for every resident session. This is the sole
     /// host-side authority; persisted timeline approvals remain client state.
     approvals: Revisioned<HashMap<String, Vec<agent::ApprovalRequest>>>,
@@ -590,7 +584,6 @@ impl AppState {
             settlement_deadlines: HashMap::new(),
             settlement_timer: None,
             decision_revisions: HashMap::new(),
-            callback_generations: HashMap::new(),
             thread_activity: thread_activity.into(),
             space_scopes: HashMap::new(),
             space_policy_revisions: HashMap::new(),
@@ -628,9 +621,7 @@ impl AppState {
             acp_installing: std::collections::HashSet::new(),
             plugin_catalogs: HashMap::new(),
             mcp: McpWiring::default(),
-            callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
-            child_reported_results: HashMap::new(),
             approvals: Default::default(),
             git_status: HashMap::new(),
             git_busy: HashSet::new(),

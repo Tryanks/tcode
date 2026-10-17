@@ -247,7 +247,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "List child thread status, optionally for one thread. delivery is running, awaiting_settle (finished, its result not yet accepted with settle), settled, or not_delivered (cancelled or archived)."
+        description = "List child thread status, optionally for one thread. state is running, reported, unreported, failed, or idle. report is what the child owes for your latest message: none, expected (your message is out and no report_result has come back), reported, unreported (it went quiet twice without reporting; its final message was delivered as a fallback), or failed (its provider could not deliver). delivery is running, awaiting_settle (finished, its result not yet accepted with settle), settled, or not_delivered (cancelled or archived)."
     )]
     async fn status(&self, Parameters(p): Parameters<StatusParams>) -> CallToolResult {
         run_op(
@@ -261,7 +261,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Send follow-up messages to this session's child threads, one entry per message in messages. If a child has a turn in flight the message is steered into it immediately; otherwise it is queued and sent as the child's next turn. The response lists one object per entry in order with its thread_id and which happened (delivery: steered | queued), or an error for that entry alone. A settled, cancelled or archived child reopens and must be settled again once you accept its new result."
+        description = "Send follow-up messages to this session's child threads, one entry per message in messages. If a child has a turn in flight the message is steered into it immediately; otherwise it is queued and sent as the child's next turn. Each message opens a new expectation: you receive one completion callback for it, carrying the child's report_result text; a report not yet delivered for the previous message is superseded. Progress inside the child never reaches you, so poll status or send when you need to know. The response lists one object per entry in order with its thread_id and which happened (delivery: steered | queued), or an error for that entry alone. A settled, cancelled or archived child reopens and must be settled again once you accept its new result."
     )]
     async fn send(&self, Parameters(p): Parameters<SendBatch>) -> CallToolResult {
         let ops = p
@@ -280,7 +280,9 @@ impl OrchestrateTools {
         run_ops(&self.broker, ops).await
     }
 
-    #[tool(description = "Read a finished child thread's final assistant message.")]
+    #[tool(
+        description = "Read a child's latest report_result text. Falls back to its final assistant message, marked source: fallback, when it never reported. Works while the child is still running."
+    )]
     async fn result(&self, Parameters(p): Parameters<ThreadParams>) -> CallToolResult {
         run_op(
             &self.broker,
@@ -388,7 +390,7 @@ impl ChildReportTools {
     }
 
     #[tool(
-        description = "Send your complete final report (RESULT) to the thread that initiated this work or discussion. This is the orchestrator's only view of your work — it cannot see your transcript — so make the report self-contained: your reasoning, recommendations, disagreements, and open questions for a discussion; files changed and commands actually run with outcomes for execution; evidence for your conclusions in either case. Call it once when your work is complete, before ending your turn; calling again replaces the previous report (last call wins). Only if this call fails, write the same complete report as your final message instead — it is sent back as the fallback, truncated when long."
+        description = "Send your complete final report (RESULT) to the thread that initiated this work or discussion. The orchestrator sees nothing of your turns, wake-ups, Monitor or background work — only this call reaches it, delivered when your current turn ends — so make the report self-contained: your reasoning, recommendations, disagreements, and open questions for a discussion; files changed and commands actually run with outcomes for execution; evidence for your conclusions in either case. Call it once when the work is complete, before ending your turn; calling again replaces the previous report (last call wins). Only if this call fails, write the same complete report as your final message instead — it is sent back as the fallback, truncated when long."
     )]
     async fn report_result(&self, Parameters(p): Parameters<ReportResultParams>) -> CallToolResult {
         run_op(
@@ -457,11 +459,10 @@ pub fn tool_descriptions() -> Vec<(String, String)> {
 }
 
 /// The orchestrating thread's server `instructions`, read at initialization.
-pub const INSTRUCTIONS: &str = "Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, send to continue either thread, and settle each child whose result you have accepted, or use settle_all to accept every finished child at once. dispatch, send, cancel and settle take a list, so act on every child that is ready in one call.";
+pub const INSTRUCTIONS: &str = "Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, send to continue either thread, and settle each child whose result you have accepted, or use settle_all to accept every finished child at once. Children report through report_result; you receive one completion callback per message you sent a child, carrying that report (or a labelled fallback or failure), and nothing of its progress in between. dispatch, send, cancel and settle take a list, so act on every child that is ready in one call.";
 
 /// A dispatched child's server `instructions`, read at initialization.
-pub const REPORT_INSTRUCTIONS: &str =
-    "Report this thread's final result to the orchestrator that dispatched it.";
+pub const REPORT_INSTRUCTIONS: &str = "Report this thread's final result to the orchestrator that dispatched it with report_result; it sees nothing else of this thread.";
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ChildReportTools {

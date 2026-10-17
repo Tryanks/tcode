@@ -2,6 +2,7 @@ use super::test_support::*;
 use super::*;
 use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
+use tcode_core::project::ChildExpectation;
 use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{Command, CommandResponse, HostMessage, Subscription};
 #[test]
@@ -3312,7 +3313,33 @@ fn session_launch_scopes_mcp_registrations() {
 }
 
 #[test]
-fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
+fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
+    use tcode_core::session::{ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_REPORT_LABEL};
+
+    // A report is the child's own words: never truncated, never supplemented.
+    let report = "界".repeat(5000);
+    let text = assemble_report_callback(
+        "child",
+        "Title",
+        "reported",
+        CallbackBody::Report(&report),
+        None,
+    );
+    assert_eq!(
+        text,
+        format!(
+            "[orchestrate] thread child (\"Title\") reported.\n{ORCHESTRATE_REPORT_LABEL}{report}"
+        )
+    );
+    let callback = tcode_core::session::parse_orchestrate_callback(&text).unwrap();
+    assert_eq!(callback.state, "reported");
+    assert_eq!(
+        callback.report(),
+        report,
+        "the lead's view shows the report alone"
+    );
+
+    // A fallback is labelled as such and bounded by the dispatch's cap.
     for (output, cap, expected_tail, truncated) in [
         (String::new(), None, "(no assistant output)".into(), false),
         ("done".into(), None, "done".into(), false),
@@ -3322,79 +3349,30 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
         ("界".repeat(5000), Some(300), "界".repeat(300), true),
         ("界".repeat(5000), Some(0), "界".repeat(5000), false),
     ] {
-        let text = assemble_callback_text(
+        let text = assemble_report_callback(
             "child",
             "Title",
-            TurnStatus::Completed,
-            &output,
+            "unreported",
+            CallbackBody::Fallback {
+                final_message: &output,
+                max_chars: cap,
+            },
             None,
-            None,
-            cap,
         );
-        assert!(text.starts_with("[orchestrate] thread child (\"Title\") completed.\n"));
+        assert!(text.starts_with(&format!(
+            "[orchestrate] thread child (\"Title\") unreported.\n{ORCHESTRATE_FALLBACK_LABEL}"
+        )));
         assert!(!text.contains("tokens:"));
         assert_eq!(text.contains("Final output tail"), truncated);
         assert_eq!(text.lines().last().unwrap(), expected_tail);
         let callback = tcode_core::session::parse_orchestrate_callback(&text).unwrap();
+        assert_eq!(callback.state, "unreported");
         assert_eq!(
             callback.report(),
             expected_tail,
             "the lead's view shows the output"
         );
     }
-    let final_message = "f".repeat(3000);
-    for (report, supplemented) in [
-        ("R".repeat(199), true),
-        ("R".repeat(200), false),
-        ("R".repeat(5000), false),
-    ] {
-        let text = assemble_callback_text(
-            "child",
-            "Title",
-            TurnStatus::Completed,
-            &final_message,
-            Some(&report),
-            None,
-            Some(300),
-        );
-        assert!(text.contains(&format!("Result (reported via report_result):\n{report}")));
-        assert_eq!(text.contains("The report is brief"), supplemented);
-        let callback = tcode_core::session::parse_orchestrate_callback(&text).unwrap();
-        assert_eq!(
-            callback.report(),
-            report,
-            "the lead's view shows the report alone"
-        );
-        if supplemented {
-            assert!(text.contains("Final output tail (3000 chars total"));
-            assert_eq!(text.lines().last().unwrap(), "f".repeat(300));
-        } else {
-            assert!(text.ends_with(&report));
-            assert!(!text.contains("Final output tail"));
-            assert!(!text.contains(&"f".repeat(300)));
-        }
-    }
-    let blank_report = assemble_callback_text(
-        "child",
-        "Title",
-        TurnStatus::Completed,
-        "final message",
-        Some("  \n"),
-        None,
-        None,
-    );
-    assert!(blank_report.ends_with("\nfinal message"));
-    let short_output = assemble_callback_text(
-        "child",
-        "Title",
-        TurnStatus::Completed,
-        "ok",
-        Some("complete"),
-        None,
-        None,
-    );
-    assert!(short_output.ends_with("Result (reported via report_result):\ncomplete"));
-    assert!(!short_output.contains("The report is brief"));
 
     let usage = agent::TokenUsage {
         input_tokens: Some(100),
@@ -3403,42 +3381,56 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
         total_processed_tokens: Some(165),
         ..Default::default()
     };
-    for (status, description) in [
-        (TurnStatus::Completed, "completed"),
-        (TurnStatus::Failed, "failed"),
-        (TurnStatus::Interrupted, "failed"),
-    ] {
-        assert_eq!(
-            assemble_callback_text("child", "Title", status, "done", None, Some(&usage), None,),
-            format!(
-                "[orchestrate] thread child (\"Title\") {description}. tokens: input 100 (+25 cached), output 40, total 165.\ndone"
-            )
-        );
-    }
+    assert_eq!(
+        assemble_report_callback(
+            "child",
+            "Title",
+            "failed",
+            CallbackBody::Failure("the provider closed"),
+            Some(&usage),
+        ),
+        "[orchestrate] thread child (\"Title\") failed. tokens: input 100 (+25 cached), output 40, total 165.\nthe provider closed"
+    );
 }
 
 #[test]
-fn reported_result_reaches_parent_and_fallback_covers_silent_children() {
+fn only_report_result_reaches_the_lead_and_a_silent_child_is_reminded_then_fallen_back() {
+    use tcode_core::session::{ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_REPORT_LABEL};
+    use tcode_core::settlement::AgentReport;
+
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-report-result-test");
     let store = (*test_store).clone();
     let state = cx.new_entity(TestClientState::new(store));
     let (parent_commands, parent_receiver) = smol::channel::unbounded();
+    let (silent_commands, silent_receiver) = smol::channel::unbounded();
+    let callbacks = || {
+        std::iter::from_fn(|| parent_receiver.try_recv().ok())
+            .filter_map(|command| match command {
+                SessionCommand::Steer { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
 
     state.update(cx, |state, cx| {
         let mut parent = live_session(ProviderKind::Codex, parent_commands);
         parent.meta.id = "parent".into();
         parent.turn_in_flight = true;
+        state.sessions.push(parent.meta.clone());
         state
             .residents
             .parked
             .insert(parent.meta.id.clone(), parent);
 
-        for id in ["reporter", "silent"] {
-            let (commands, _receiver) = smol::channel::unbounded();
+        for (id, commands) in [
+            ("reporter", smol::channel::unbounded().0),
+            ("silent", silent_commands),
+        ] {
             let mut child = live_session(ProviderKind::Codex, commands);
             child.meta.id = id.into();
             child.meta.parent_session_id = Some("parent".into());
+            child.meta.expectation = Some(ChildExpectation::opened(1));
             child.turn_in_flight = true;
             state.sessions.push(child.meta.clone());
             state.residents.parked.insert(child.meta.id.clone(), child);
@@ -3455,7 +3447,6 @@ fn reported_result_reaches_parent_and_fallback_covers_silent_children() {
             cx,
         );
         assert!(response.try_recv().unwrap().is_err());
-
         let (reply, response) = smol::channel::bounded(1);
         state.handle_orchestrate_op(
             orchestrate_mcp::OrchestrateOp::ReportResult {
@@ -3465,51 +3456,258 @@ fn reported_result_reaches_parent_and_fallback_covers_silent_children() {
             reply,
             cx,
         );
-        assert!(response.try_recv().unwrap().is_ok());
+        assert_eq!(
+            response.try_recv().unwrap().unwrap()["delivered_when"],
+            "turn_ends"
+        );
 
-        for id in ["reporter", "silent"] {
-            state.on_event(id, persisted_assistant_event("last message"), cx);
-            state.on_event(
-                id,
-                AgentEvent::TurnCompleted {
-                    turn_id: format!("turn-{id}"),
-                    status: TurnStatus::Completed,
-                    usage: None,
-                },
-                cx,
-            );
-        }
+        // The report rides in the child's own transcript as the tool call.
+        state.on_event("reporter", persisted_assistant_event("working"), cx);
+        state.on_event(
+            "reporter",
+            report_result_event("rep-1", "the full reported RESULT"),
+            cx,
+        );
+        state.on_event("reporter", persisted_assistant_event("done"), cx);
+        state.on_event("reporter", completed_turn("turn-1"), cx);
+        state.on_event("silent", persisted_assistant_event("last message"), cx);
+        state.on_event("silent", completed_turn("turn-1"), cx);
     });
+    cx.run_until_parked();
 
-    cx.run_until(|state| {
-        ["reporter", "silent"]
-            .iter()
-            .all(|id| state.callback_last_turn.contains_key(*id))
-    });
-
-    let mut callbacks = Vec::new();
-    while let Ok(command) = parent_receiver.try_recv() {
-        if let SessionCommand::Steer { text, .. } = command {
-            callbacks.push(text);
-        }
-    }
-    assert_eq!(callbacks.len(), 2, "one callback per completed child");
-    let reported = callbacks
-        .iter()
-        .find(|text| text.contains("thread reporter"))
-        .unwrap();
-    assert!(reported.contains("Result (reported via report_result):\nthe full reported RESULT"));
-    assert!(!reported.contains("last message"));
-    let silent = callbacks
-        .iter()
-        .find(|text| text.contains("thread silent"))
-        .unwrap();
-    assert!(silent.ends_with("\nlast message"));
-
+    let delivered = callbacks();
+    assert_eq!(
+        delivered.len(),
+        1,
+        "only the report is delivered: {delivered:?}"
+    );
+    assert!(delivered[0].starts_with("[orchestrate] thread reporter (\""));
+    assert!(delivered[0].contains(&format!(
+        "reported.\n{ORCHESTRATE_REPORT_LABEL}the full reported RESULT"
+    )));
+    assert!(!delivered[0].contains("done"));
     state.read(|state| {
-        assert!(
-            state.child_reported_results.is_empty(),
-            "delivery should consume the stored report"
+        assert_eq!(
+            state.find_meta("reporter").unwrap().report(),
+            AgentReport::Reported
+        );
+        let silent = state.find_meta("silent").unwrap();
+        assert_eq!(silent.report(), AgentReport::Expected);
+        assert!(silent.expectation.as_ref().unwrap().reminded);
+    });
+    // The silent child is reminded once, visibly, instead of being reported on.
+    let reminder = match silent_receiver.try_recv() {
+        Ok(SessionCommand::SendTurn {
+            delivery_id, text, ..
+        }) => {
+            assert_eq!(text, CHILD_REPORT_REMINDER);
+            delivery_id
+        }
+        other => panic!("expected the reminder as the silent child's next turn, got {other:?}"),
+    };
+
+    state.update(cx, |state, cx| {
+        // The reporter wakes itself (a monitor, a scheduled wake-up): nothing
+        // new for the lead.
+        state.on_event(
+            "reporter",
+            AgentEvent::TurnStarted {
+                turn_id: "turn-2".into(),
+            },
+            cx,
+        );
+        state.on_event(
+            "reporter",
+            persisted_assistant_event("Four of 10 done."),
+            cx,
+        );
+        state.on_event("reporter", completed_turn("turn-2"), cx);
+
+        // The silent child runs the reminder turn and still does not report.
+        state.on_event(
+            "silent",
+            AgentEvent::TurnAccepted {
+                delivery_id: reminder,
+            },
+            cx,
+        );
+        state.on_event(
+            "silent",
+            AgentEvent::TurnStarted {
+                turn_id: "turn-2".into(),
+            },
+            cx,
+        );
+        state.on_event("silent", persisted_assistant_event("still nothing"), cx);
+        state.on_event("silent", completed_turn("turn-2"), cx);
+    });
+    cx.run_until_parked();
+
+    let delivered = callbacks();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(delivered[0].starts_with("[orchestrate] thread silent (\""));
+    assert!(delivered[0].contains(&format!(
+        "unreported.\n{ORCHESTRATE_FALLBACK_LABEL}still nothing"
+    )));
+    state.read(|state| {
+        assert_eq!(
+            state.find_meta("silent").unwrap().report(),
+            AgentReport::Unreported
+        );
+    });
+    assert!(silent_receiver.try_recv().is_err(), "no second reminder");
+
+    // A late report still reaches the lead, once.
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "silent",
+            AgentEvent::TurnStarted {
+                turn_id: "turn-3".into(),
+            },
+            cx,
+        );
+        state.on_event("silent", report_result_event("rep-2", "late report"), cx);
+        state.on_event("silent", completed_turn("turn-3"), cx);
+        state.on_event(
+            "silent",
+            AgentEvent::TurnStarted {
+                turn_id: "turn-4".into(),
+            },
+            cx,
+        );
+        state.on_event("silent", completed_turn("turn-4"), cx);
+    });
+    cx.run_until_parked();
+    let delivered = callbacks();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(delivered[0].contains(&format!("reported.\n{ORCHESTRATE_REPORT_LABEL}late report")));
+}
+
+/// The child's `report_result` call as its transcript records it.
+fn report_result_event(id: &str, text: &str) -> AgentEvent {
+    AgentEvent::ItemCompleted(ThreadItem {
+        id: id.into(),
+        parent_item_id: None,
+        content: ItemContent::ToolCall {
+            image_reads: Vec::new(),
+            name: "mcp__tcode_report__report_result".into(),
+            input: serde_json::json!({ "text": text }),
+            output: Some("{\"ok\":true}".into()),
+            status: ItemStatus::Completed,
+        },
+    })
+}
+
+fn completed_turn(turn_id: &str) -> AgentEvent {
+    AgentEvent::TurnCompleted {
+        turn_id: turn_id.into(),
+        status: TurnStatus::Completed,
+        usage: None,
+    }
+}
+
+/// Recorded from a dispatched Claude Code child (thread 660c1acb…, October
+/// 2026): its brief ran a background script, the Monitor tool woke it nine
+/// times with one-line progress messages (turns 2–10), and it reported once,
+/// in turn 12. Its lead received twelve "completed" callbacks. The contract is
+/// one: the report. `BackgroundTasksChanged` is not persisted, so the Monitor's
+/// liveness is replayed the way the CLI publishes it — set when the monitor
+/// starts, cleared with the result of the turn in which it ended.
+#[test]
+fn a_child_waking_itself_reports_to_its_lead_once() {
+    use tcode_core::session::StoredEvent;
+    use tcode_core::settlement::AgentReport;
+
+    const RECORDING: &str = include_str!("fixtures/monitor_wakeups_child.jsonl");
+
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orchestrate-monitor-wakeups");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
+    let (child_commands, child_receiver) = smol::channel::unbounded();
+
+    state.update(cx, |state, cx| {
+        let mut parent = live_session(ProviderKind::ClaudeCode, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        state.sessions.push(parent.meta.clone());
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
+        let mut child = live_session(ProviderKind::ClaudeCode, child_commands);
+        child.meta.id = "child".into();
+        child.meta.title = "测试注解改成人话（10 条样例）".into();
+        child.meta.parent_session_id = Some("parent".into());
+        child.meta.expectation = Some(ChildExpectation::opened(1));
+        state.sessions.push(child.meta.clone());
+        state.residents.parked.insert(child.meta.id.clone(), child);
+
+        let records: Vec<StoredEvent> = RECORDING
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let last_turn = records
+            .iter()
+            .rev()
+            .find_map(|record| match &record.event {
+                AgentEvent::TurnCompleted { turn_id, .. } => Some(turn_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        for record in records {
+            let monitor_started = matches!(
+                &record.event,
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::ToolCall { name, .. },
+                    ..
+                }) if name == "Monitor"
+            );
+            if matches!(&record.event, AgentEvent::TurnCompleted { turn_id, .. } if *turn_id == last_turn)
+            {
+                state.on_event("child", AgentEvent::BackgroundTasksChanged { count: 0 }, cx);
+            }
+            if let AgentEvent::TurnStarted { .. } = &record.event {
+                state.resident_mut("child").unwrap().turn_in_flight = true;
+            }
+            state.on_event("child", record.event, cx);
+            if monitor_started {
+                state.on_event("child", AgentEvent::BackgroundTasksChanged { count: 1 }, cx);
+            }
+        }
+    });
+    cx.run_until_parked();
+
+    let callbacks: Vec<_> = std::iter::from_fn(|| parent_receiver.try_recv().ok())
+        .filter_map(|command| match command {
+            SessionCommand::Steer { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        callbacks.len(),
+        1,
+        "one report, one callback: {callbacks:?}"
+    );
+    assert!(
+        callbacks[0].starts_with(
+            "[orchestrate] thread child (\"测试注解改成人话（10 条样例）\") reported."
+        )
+    );
+    assert!(callbacks[0].ends_with("\n<report>"));
+    assert!(
+        !callbacks.iter().any(|text| text.contains("of 10 done")),
+        "progress lines stay in the child"
+    );
+    assert!(
+        std::iter::from_fn(|| child_receiver.try_recv().ok())
+            .all(|command| !matches!(command, SessionCommand::SendTurn { .. })),
+        "a child waiting on its monitor is not reminded"
+    );
+    state.read(|state| {
+        assert_eq!(
+            state.find_meta("child").unwrap().report(),
+            AgentReport::Reported
         );
     });
 }
@@ -3585,22 +3783,15 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
         child.meta.parent_session_id = Some("parent".into());
         child.meta.cwd = cwd.clone();
         child.meta.project_id = Some("project".into());
+        child.meta.expectation = Some(ChildExpectation::opened(1));
         child.turn_in_flight = true;
         state.sessions.push(child.meta.clone());
         state.residents.parked.insert(child.meta.id.clone(), child);
 
-        state.on_event("child", persisted_assistant_event("old report"), cx);
-        state.on_event(
-            "child",
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
+        state.on_event("child", report_result_event("rep-1", "old report"), cx);
+        state.on_event("child", completed_turn("turn-1"), cx);
     });
-    cx.run_until(|state| state.callback_last_turn.contains_key("child"));
+    cx.run_until(|_| !parent_receiver.is_empty());
     assert!(matches!(
         parent_receiver.try_recv(),
         Ok(SessionCommand::Steer { text, .. }) if text.ends_with("\nold report")
@@ -3641,7 +3832,7 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
     assert_eq!(
         text,
         format!(
-            "[orchestrate] thread child (\"{}\") failed to start: failed to spawn provider process: working directory `{}` no longer exists",
+            "[orchestrate] thread child (\"{}\") failed.\nfailed to spawn provider process: working directory `{}` no longer exists",
             state.read(|state| state.find_meta("child").unwrap().title.clone()),
             cwd.display()
         )
@@ -9823,6 +10014,7 @@ fn a_child_completing_while_its_log_is_read_reports_that_turn() {
     let mut child = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
     child.id = "child".into();
     child.parent_session_id = Some("parent".into());
+    child.expectation = Some(ChildExpectation::opened(1));
     store.upsert_meta(&child).unwrap();
     persist_streamed_turns(&store, "child", 1);
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -9841,6 +10033,7 @@ fn a_child_completing_while_its_log_is_read_reports_that_turn() {
             AgentEvent::TurnStarted {
                 turn_id: "turn-new".into(),
             },
+            report_result_event("rep-new", "the new report"),
             persisted_assistant_event("the new answer"),
             AgentEvent::TurnCompleted {
                 turn_id: "turn-new".into(),
@@ -9862,7 +10055,8 @@ fn a_child_completing_while_its_log_is_read_reports_that_turn() {
             cx,
         );
         let status = response.try_recv().unwrap().unwrap();
-        assert_eq!(status[0]["state"], "completed");
+        assert_eq!(status[0]["state"], "reported");
+        assert_eq!(status[0]["report"], "reported");
         assert_eq!(status[0]["last_output_tail"], "the new answer");
         let (reply, response) = smol::channel::bounded(1);
         state.handle_orchestrate_op(
@@ -9874,11 +10068,13 @@ fn a_child_completing_while_its_log_is_read_reports_that_turn() {
             cx,
         );
         let result = response.try_recv().unwrap().unwrap();
-        assert_eq!(result["state"], "completed");
+        assert_eq!(result["state"], "reported");
+        assert_eq!(result["source"], "report");
+        assert_eq!(result["text"], "the new report");
         assert_eq!(result["final_message"], "the new answer");
     });
 
-    cx.run_until(|state| state.callback_last_turn.contains_key("child"));
+    cx.run_until(|_| !parent_receiver.is_empty());
     let callback = std::iter::from_fn(|| parent_receiver.try_recv().ok())
         .find_map(|command| match command {
             SessionCommand::Steer { text, .. } => Some(text),
@@ -9886,7 +10082,7 @@ fn a_child_completing_while_its_log_is_read_reports_that_turn() {
         })
         .expect("the parent is called back");
     assert!(callback.starts_with("[orchestrate] thread child"));
-    assert!(callback.ends_with("\nthe new answer"));
+    assert!(callback.ends_with("\nthe new report"));
 }
 
 #[test]
@@ -10899,11 +11095,10 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
 }
 
 #[test]
-fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets() {
+fn a_report_reopens_only_its_lead_and_never_reaches_an_archived_or_deleted_one() {
     for case in [
         "valid",
         "renamed",
-        "new_work",
         "archived_child",
         "archived_parent",
         "deleted_parent",
@@ -10913,7 +11108,7 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
         let state = cx.new_entity(TestClientState::new((*store).clone()));
         let (parent_commands, parent_received) = smol::channel::unbounded();
         let (child_commands, _child_received) = smol::channel::unbounded();
-        state.update(cx, |state, cx| {
+        state.update(cx, |state, _| {
             let mut ancestor = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
             ancestor.id = "ancestor".into();
             ancestor.settled_at = Some(1);
@@ -10924,43 +11119,18 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
             let mut child = live_session(ProviderKind::Codex, child_commands);
             child.meta.id = "child".into();
             child.meta.parent_session_id = Some("parent".into());
+            child.meta.expectation = Some(ChildExpectation::opened(1));
             state
                 .sessions
                 .extend([ancestor, parent.meta.clone(), child.meta.clone()]);
             state.residents.parked.insert("parent".into(), parent);
             state.install_selected(child);
-            state.on_event(
-                "child",
-                AgentEvent::TurnStarted {
-                    turn_id: "finished-run".into(),
-                },
-                cx,
-            );
-            state.on_event(
-                "child",
-                persisted_assistant_event("completion evidence"),
-                cx,
-            );
-            state.on_event(
-                "child",
-                AgentEvent::TurnCompleted {
-                    turn_id: "finished-run".into(),
-                    status: TurnStatus::Completed,
-                    usage: None,
-                },
-                cx,
-            );
         });
-        // Each command lands while the child's log is read for its completion.
+        // Each command lands before the child runs and reports.
         let command = match case {
             "renamed" => Some(Command::RenameSession {
                 session_id: "child".into(),
                 title: "Renamed".into(),
-            }),
-            "new_work" => Some(Command::SendTurn {
-                session_id: "child".into(),
-                text: "new human work".into(),
-                attachment_paths: vec![],
             }),
             "archived_child" => Some(Command::ArchiveSession {
                 session_id: "child".into(),
@@ -10977,6 +11147,21 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
         if let Some(command) = command {
             state.dispatch_command(cx, 1, command);
         }
+        cx.run_until_parked();
+        state.update(cx, |state, cx| {
+            if state.resident("child").is_none() {
+                return;
+            }
+            for event in [
+                AgentEvent::TurnStarted {
+                    turn_id: "finished-run".into(),
+                },
+                report_result_event("rep", "completion evidence"),
+                completed_turn("finished-run"),
+            ] {
+                state.on_event("child", event, cx);
+            }
+        });
         if case == "valid" || case == "renamed" {
             cx.run_until(|_| !parent_received.is_empty());
             assert!(
@@ -11004,7 +11189,7 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
 
 #[test]
 fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
-    use tcode_core::settlement::{AgentDelivery, AgentExecution};
+    use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
     use tcode_protocol::AgentStatus;
 
     let cx = &mut TestAppContext::default();
@@ -11052,6 +11237,7 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
         Some(AgentStatus {
             execution,
             delivery,
+            report: AgentReport::None,
             run_started_at: Some(stamp),
             run_completed_at: Some(stamp),
         })

@@ -277,7 +277,11 @@ impl AppState {
                                 if let Some(child) = state.resident_mut(&session_id) {
                                     child.queue.clear();
                                 }
-                                state.deliver_child_callback(&session_id, TurnStatus::Failed, cx);
+                                state.fail_child_expectation(
+                                    &session_id,
+                                    &err.to_string(),
+                                    cx,
+                                );
                             }
                             state.evaluate_thread_settlement(&session_id, cx);
                             let missing_cwd = state
