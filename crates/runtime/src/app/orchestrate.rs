@@ -1279,7 +1279,7 @@ impl AppState {
         let instruction = if self.settings.orchestrate.child_approval == ChildApprovalMode::Manual {
             "The user answers in the child thread."
         } else {
-            "You are the approver: use the approve tool with option: <exact id> or cancel: true; reject anything outside the brief's scope."
+            "You are the approver: use the approve tool with option: <exact id> or cancel: true; reject anything outside the brief's scope. To allow, prefer an allow_always option over allow_once when one is offered."
         };
         let text = format!(
             "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {} (request_id: {}). Native options: {}. {}",
