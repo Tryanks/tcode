@@ -47,17 +47,6 @@ impl AppState {
 
     /// Advanced when a child's completion in flight stops being the one to
     /// deliver: new work was admitted for it, or it was cancelled or archived.
-    pub(super) fn invalidate_child_callback(&mut self, id: &str) {
-        let generation = self.callback_generations.entry(id.to_owned()).or_default();
-        *generation = generation
-            .checked_add(1)
-            .expect("callback generation overflow");
-    }
-
-    pub(super) fn callback_generation(&self, id: &str) -> u64 {
-        self.callback_generations.get(id).copied().unwrap_or(0)
-    }
-
     pub(crate) fn subscribe(
         &mut self,
         subscription: &tcode_protocol::Subscription,
@@ -1197,7 +1186,6 @@ impl AppState {
         let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
             return;
         };
-        self.invalidate_child_callback(id);
         if meta.settled_override.is_none()
             && meta.settled_at.is_none()
             && meta.cancelled_at.is_none()
@@ -1282,7 +1270,6 @@ impl AppState {
             .collect();
 
         for id in &ids {
-            self.invalidate_child_callback(id);
             self.retire_provider_work(id, cx);
             self.shutdown_active(id, cx);
             // An archived conversation must not leave an off-screen PTY running.
@@ -1492,8 +1479,6 @@ impl AppState {
         self.activity_deferred
             .retain(|id| !deleted.contains(id.as_str()));
         self.decision_revisions
-            .retain(|id, _| !deleted.contains(id.as_str()));
-        self.callback_generations
             .retain(|id, _| !deleted.contains(id.as_str()));
         let mut kept_worktrees = Vec::new();
         let mut worktree_removals = Vec::new();

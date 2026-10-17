@@ -444,6 +444,7 @@ impl<'a> ActivityProjection<'a> {
         Some(AgentStatus {
             execution,
             delivery: AgentDelivery::of(meta, execution),
+            report: meta.report(),
             run_started_at: activity.and_then(|activity| activity.last_run_started_at),
             run_completed_at: activity.and_then(|activity| activity.last_run_completed_at),
         })

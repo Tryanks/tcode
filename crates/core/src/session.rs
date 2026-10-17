@@ -621,6 +621,28 @@ impl Timeline {
         self.apply_at(stored.ts, &stored.event);
     }
 
+    /// The latest `report_result` call this thread made: the tool-call item id
+    /// and the report text. Read from the call itself, so a reload or a cold log
+    /// sees exactly the report the live stream did. A call the broker failed
+    /// still counts: the child chose that text as its report.
+    pub fn last_report(&self) -> Option<(&str, &str)> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.content {
+                EntryContent::Item(ItemContent::ToolCall {
+                    name,
+                    input,
+                    status,
+                    ..
+                }) if is_report_result_tool(name) && *status != ItemStatus::InProgress => input
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|text| (entry.id.as_str(), text)),
+                _ => None,
+            })
+    }
+
     /// Clear any lingering "running" state (used after replaying a stored
     /// session whose provider process is no longer live).
     pub fn mark_idle(&mut self) {
@@ -1394,11 +1416,18 @@ pub const ORCHESTRATE_CALLBACK_PREFIX: &str = "[orchestrate] thread ";
 /// Opens a callback body carrying the report the child chose with
 /// `report_result`.
 pub const ORCHESTRATE_REPORT_LABEL: &str = "Result (reported via report_result):\n";
-/// Follows a brief report, before the final assistant message delivered with it.
-pub const ORCHESTRATE_BRIEF_REPORT_LABEL: &str =
-    "\n\nThe report is brief; the final assistant message follows:\n";
+/// Opens a callback body carrying a child's final message because it went
+/// quiet twice without calling `report_result`.
+pub const ORCHESTRATE_FALLBACK_LABEL: &str =
+    "Final message (the child ended without report_result; this is a fallback, not its report):\n";
 /// Opens the line before the tail of a final message too long to deliver whole.
 pub const ORCHESTRATE_OUTPUT_TAIL_LABEL: &str = "Final output tail (";
+
+/// The tool a dispatched child reports through, as every provider names it:
+/// Claude Code `mcp__tcode_report__report_result`, Codex `tcode_report/report_result`.
+pub fn is_report_result_tool(name: &str) -> bool {
+    name.ends_with("report_result") && name.contains("tcode_report")
+}
 
 /// The parts of an orchestrate child-thread callback user message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1418,14 +1447,16 @@ impl OrchestrateCallback {
     /// with: its report, or else its final message.
     pub fn report(&self) -> &str {
         if let Some(report) = self.body.strip_prefix(ORCHESTRATE_REPORT_LABEL) {
-            return report
-                .split_once(ORCHESTRATE_BRIEF_REPORT_LABEL)
-                .map_or(report, |(report, _)| report);
+            return report;
         }
-        if self.body.starts_with(ORCHESTRATE_OUTPUT_TAIL_LABEL) {
-            return self.body.split_once('\n').map_or("", |(_, tail)| tail);
+        let body = self
+            .body
+            .strip_prefix(ORCHESTRATE_FALLBACK_LABEL)
+            .unwrap_or(&self.body);
+        if body.starts_with(ORCHESTRATE_OUTPUT_TAIL_LABEL) {
+            return body.split_once('\n').map_or("", |(_, tail)| tail);
         }
-        &self.body
+        body
     }
 }
 

@@ -12,7 +12,7 @@ use tcode_core::{
     provider_status::ProviderSnapshot,
     session::{PendingUserInput, ReviewComment, RunningTurn, StoredEvent},
     settings::Settings,
-    settlement::{AgentDelivery, AgentExecution},
+    settlement::{AgentDelivery, AgentExecution, AgentReport},
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
@@ -447,6 +447,9 @@ pub struct SessionActivity {
 pub struct AgentStatus {
     pub execution: AgentExecution,
     pub delivery: AgentDelivery,
+    /// Whether the child has reported to its lead (see `AgentReport`).
+    #[serde(default)]
+    pub report: AgentReport,
     /// When its latest run started and ended (unix ms); an end before the
     /// start belongs to an earlier run.
     #[serde(default, skip_serializing_if = "Option::is_none")]

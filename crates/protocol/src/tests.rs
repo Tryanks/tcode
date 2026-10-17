@@ -5,7 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use super::*;
-use tcode_core::settlement::{AgentDelivery, AgentExecution};
+use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
 
 #[test]
 fn provider_update_command_and_toasts_have_literal_wire_contracts() {
@@ -982,6 +982,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                         agent: Some(AgentStatus {
                             execution: AgentExecution::Finished,
                             delivery: AgentDelivery::AwaitingSettle,
+                            report: AgentReport::Reported,
                             run_started_at: Some(1_000),
                             run_completed_at: Some(81_000),
                         }),
@@ -1002,7 +1003,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
             "fork":"available"},
             "child": {"working":false,"turn_running":false,"waiting":false,
             "waiting_for_approval":false,"waiting_for_input":false,"failed":false,"unread":false,
-            "fork":"available","agent":{"execution":"finished","delivery":"awaiting_settle",
+            "fork":"available","agent":{"execution":"finished","delivery":"awaiting_settle","report":"reported",
             "run_started_at":1000,"run_completed_at":81000}}},
             "title_generating": [], "archived_counts": {"p": 2},
             "worktree_shared": [], "archived_revision": 7, "sessions": [], "projects": []})

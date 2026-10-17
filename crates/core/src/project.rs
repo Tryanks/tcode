@@ -9,6 +9,7 @@ use agent::{OptionSelection, ProviderKind, ResumeCursor};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{ProjectSort, Settings, acp_color_key};
+use crate::settlement::AgentReport;
 
 /// A project groups sessions (threads) that share a working-directory root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,8 +182,49 @@ pub struct SessionMeta {
     /// Maximum inline result characters for this child's terminal callback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_max_chars: Option<u32>,
+    /// The report this dispatched child owes its lead, opened by the lead's
+    /// latest message. Absent until the first dispatch or `send`, and after
+    /// `cancel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expectation: Option<ChildExpectation>,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+/// One report a dispatched child owes its lead (see [`AgentReport`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildExpectation {
+    pub state: AgentReport,
+    /// Unix seconds when the lead's message opened it.
+    pub opened_at: u64,
+    /// The `report_result` tool-call item whose text was delivered for it, so
+    /// a later report in the same thread is recognised as an update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_item: Option<String>,
+    /// Whether the child was already asked once to report after going quiet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reminded: bool,
+}
+
+impl ChildExpectation {
+    pub fn opened(now_secs: u64) -> Self {
+        Self {
+            state: AgentReport::Expected,
+            opened_at: now_secs,
+            delivered_item: None,
+            reminded: false,
+        }
+    }
+}
+
+impl SessionMeta {
+    /// What this thread owes its lead; `None` for threads that are not
+    /// dispatched children and for children without an open expectation.
+    pub fn report(&self) -> AgentReport {
+        self.expectation
+            .as_ref()
+            .map_or(AgentReport::None, |expectation| expectation.state)
+    }
 }
 
 /// An ephemeral index of the stored and live sessions using each path or branch.
@@ -322,6 +364,7 @@ impl SessionMeta {
             orchestrate_enabled: false,
             cancelled_at: None,
             result_max_chars: None,
+            expectation: None,
             created_at: now,
             updated_at: now,
         }

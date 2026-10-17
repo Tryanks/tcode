@@ -60,6 +60,11 @@ impl AppState {
                 if should_mark_idle {
                     self.mark_resident_idle(session_id, cx);
                 }
+                // Background work ending without a follow-up turn is the
+                // child's last chance to have gone quiet owing a report.
+                if *count == 0 {
+                    self.settle_child_expectation(session_id, TurnStatus::Completed, cx);
+                }
                 return;
             }
             AgentEvent::SessionClosed { reason } => {
@@ -83,7 +88,11 @@ impl AppState {
                             .iter()
                             .any(|meta| meta.id == session_id && meta.parent_session_id.is_some());
                         if is_child && !has_queued {
-                            self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
+                            self.fail_child_expectation(
+                                session_id,
+                                &format!("the provider closed: {reason:?}"),
+                                cx,
+                            );
                         }
                         if !has_queued {
                             self.residents.evict(session_id);
@@ -96,13 +105,11 @@ impl AppState {
                 }
 
                 self.record_event(session_id, &event, cx);
-                if self
-                    .sessions
-                    .iter()
-                    .any(|meta| meta.id == session_id && meta.parent_session_id.is_some())
-                {
-                    self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
-                }
+                self.fail_child_expectation(
+                    session_id,
+                    &format!("the provider closed: {reason:?}"),
+                    cx,
+                );
                 if let Some(active) = self.resident_mut(session_id) {
                     active.mark_dead();
                 }
@@ -547,13 +554,12 @@ impl AppState {
                 .resident(session_id)
                 .and_then(|resident| resident.timeline.last_turn_status)
             {
-                self.deliver_child_callback(session_id, status, cx);
+                self.settle_child_expectation(session_id, status, cx);
             }
             let _ = self.dispatch_next_queued(session_id, cx);
         }
-        if let AgentEvent::TurnCompleted { status, .. } = &event {
+        if matches!(event, AgentEvent::TurnCompleted { .. }) {
             self.cancel_computer_use_feedback(session_id);
-            self.deliver_child_callback(session_id, *status, cx);
         }
         if let AgentEvent::ApprovalRequested(request) = &event {
             self.deliver_child_approval_callback(session_id, &request.id, cx);
@@ -599,6 +605,11 @@ impl AppState {
             if !is_active {
                 self.on_background_turn_completed(session_id, cx);
             }
+        }
+        // After the turn's bookkeeping, so the child's flight state and queue
+        // describe what comes next, not the turn that just ended.
+        if let AgentEvent::TurnCompleted { status, .. } = &event {
+            self.settle_child_expectation(session_id, *status, cx);
         }
 
         if matches!(event, AgentEvent::RewindCompleted { .. })

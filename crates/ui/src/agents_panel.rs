@@ -13,7 +13,7 @@ use gpui::{
 use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::session::EntryContent;
-use tcode_core::settlement::{AgentDelivery, AgentExecution};
+use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
 use tcode_core::ui::RightTab;
 
 use crate::icon::{Icon, IconName};
@@ -53,6 +53,8 @@ struct AgentRow {
     execution: Option<AgentExecution>,
     /// Absent for a provider-native subagent.
     delivery: Option<AgentDelivery>,
+    /// Whether the child's `report_result` reached its lead.
+    report: AgentReport,
     archived: bool,
     preview: Option<String>,
     /// The thread Open selects: the dispatched agent, or a native mirror.
@@ -137,6 +139,7 @@ impl Agents {
                     detail: detail(provider, model.as_deref()),
                     execution: Some(execution),
                     delivery: None,
+                    report: AgentReport::None,
                     archived: false,
                     preview: summary.as_deref().map(compact).filter(|s| !s.is_empty()),
                     open: mirror.map(|meta| meta.id.clone()),
@@ -185,6 +188,7 @@ impl Agents {
                 detail: detail(Some(meta.provider), meta.model.as_deref()),
                 execution,
                 delivery: Some(delivery),
+                report: status.map_or_else(|| meta.report(), |status| status.report),
                 archived,
                 preview: None,
                 open: Some(meta.id.clone()),
@@ -307,6 +311,7 @@ enum BadgeStyle {
     Plain,
     Outline,
     Warning,
+    Danger,
 }
 
 fn execution_color(execution: AgentExecution, cx: &App) -> Hsla {
@@ -534,6 +539,9 @@ impl AgentsPanel {
                 BadgeStyle::Warning => badge
                     .text_color(cx.theme().warning)
                     .bg(cx.theme().warning.opacity(0.1)),
+                BadgeStyle::Danger => badge
+                    .text_color(cx.theme().danger)
+                    .bg(cx.theme().danger.opacity(0.1)),
             })
             .child(label)
     }
@@ -560,6 +568,22 @@ impl AgentsPanel {
                 .into_any_element(),
             ),
             Some(AgentDelivery::Running) | None => {}
+        }
+        match row.report {
+            AgentReport::Reported => badges.push(
+                Self::badge(label("agents.report_reported"), BadgeStyle::Plain, cx)
+                    .child(Icon::new(IconName::Check).size(px(10.)))
+                    .into_any_element(),
+            ),
+            AgentReport::Unreported => badges.push(
+                Self::badge(label("agents.report_unreported"), BadgeStyle::Warning, cx)
+                    .into_any_element(),
+            ),
+            AgentReport::Failed => badges.push(
+                Self::badge(label("agents.report_failed"), BadgeStyle::Danger, cx)
+                    .into_any_element(),
+            ),
+            AgentReport::None | AgentReport::Expected => {}
         }
         if row.archived {
             badges.push(
@@ -1060,7 +1084,7 @@ mod tests {
     #[gpui::test]
     fn settle_all_button_sends_the_lead_command(cx: &mut TestAppContext) {
         use gpui::{px, size};
-        use tcode_core::settlement::{AgentDelivery, AgentExecution};
+        use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
         use tcode_protocol::{
             AgentStatus, ClientPayload, Command, SessionActivity, decode_client_line,
         };
@@ -1096,6 +1120,7 @@ mod tests {
                 agent: Some(AgentStatus {
                     execution: AgentExecution::Finished,
                     delivery: AgentDelivery::AwaitingSettle,
+                    report: AgentReport::Reported,
                     run_started_at: None,
                     run_completed_at: None,
                 }),

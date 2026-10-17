@@ -81,11 +81,15 @@ open every child that can start now in one `dispatch` call, and act on every
 child that is ready in one `send`, `cancel` or `settle` call instead of one
 call per child. Each entry answers for itself, so check every entry of the
 response, not only the first. Override fast mode only when the user explicitly
-requests it. A completion callback carries the child's status and report. Ask
-children to use `report_result` for a self-contained result, then evaluate that
-result under the acceptance responsibility above. Continue useful lead work
-while threads run or end the turn and let callbacks wake it; avoid polling
-loops.
+requests it. Ask children to use `report_result` for a self-contained result,
+then evaluate that result under the acceptance responsibility above. Continue
+useful lead work while threads run or end the turn and let callbacks wake it;
+avoid polling loops.
+
+A child's progress never arrives on its own: its turns, wake-ups and background
+work stay inside the child. You receive one callback per message you sent it —
+its `report_result` text, a labelled fallback when it never reported, or a
+failure. Use `status` to look at a child and `send` to nudge or continue it.
 
 Settle each child whose result you have accepted with `settle`. Settling is the
 delivery: a finished child that is not settled is not delivered, keeps your
