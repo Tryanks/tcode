@@ -1165,13 +1165,12 @@ pub(crate) struct Mapper {
     pending_steers: VecDeque<String>,
     /// Once the CLI exposes request checkpoints, never use the legacy fallback.
     saw_requesting: bool,
-    /// Background Bash tasks still owned by this Claude process. When the list
-    /// becomes empty Claude immediately re-invokes itself with the completion
-    /// notification, so zero is not published until that follow-up result.
+    /// Tasks still owned by this Claude process, whatever their `task_type`:
+    /// a Monitor watch or a backgrounded subagent keeps the process busy
+    /// exactly like a background Bash command. When the list becomes empty
+    /// Claude immediately re-invokes itself with the completion notification,
+    /// so zero is not published until that follow-up result.
     background_tasks: HashSet<String>,
-    /// Bash tasks which were observed in `background_tasks_changed`, retained
-    /// until their final notification so the command card can be completed.
-    background_task_history: HashSet<String>,
     /// Native rewind control requests awaiting Claude's correlated response.
     pending_rewinds: HashMap<String, PendingRewind>,
     native_rewind: bool,
@@ -1232,7 +1231,6 @@ impl Mapper {
             pending_steers: VecDeque::new(),
             saw_requesting: false,
             background_tasks: HashSet::new(),
-            background_task_history: HashSet::new(),
             pending_rewinds: HashMap::new(),
             native_rewind,
             last_served_model: None,
@@ -1728,18 +1726,17 @@ impl Mapper {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter(|task| task.get("task_type").and_then(Value::as_str) == Some("local_bash"))
             .filter_map(|task| task.get("task_id").and_then(Value::as_str))
             .map(str::to_owned)
             .collect::<HashSet<_>>();
-        self.background_task_history.extend(current.iter().cloned());
         let had_background_tasks = !self.background_tasks.is_empty();
         self.background_tasks = current;
         if self.background_tasks.is_empty() && had_background_tasks {
-            // Recorded Claude traces put `background_tasks_changed []` before
-            // task_notification and the provider's self-invoked follow-up turn.
-            // Keep the last non-zero liveness until that turn's result so the
-            // runtime cannot park/restart the process in this handoff window.
+            // `background_tasks_changed []` arrives next to the final
+            // task_notification (recorded traces have it on either side) and
+            // before the provider's self-invoked follow-up turn. Keep the last
+            // non-zero liveness until that turn's result so the runtime cannot
+            // park/restart the process in this handoff window.
             Vec::new()
         } else {
             vec![AgentEvent::BackgroundTasksChanged {
@@ -1783,12 +1780,10 @@ impl Mapper {
         let Some(tool_use_id) = tool_use_id else {
             return Vec::new();
         };
-        let is_background_bash = task_id
-            .as_ref()
-            .is_some_and(|id| self.background_task_history.remove(id));
-        if let Some(task_id) = &task_id {
-            self.background_tasks.remove(task_id);
-        }
+        // The task stays in `background_tasks` until the CLI's own
+        // `background_tasks_changed` drops it: removing it here lets a drain
+        // that follows this notification publish zero before the follow-up
+        // turn (see `on_background_tasks_changed`).
         if let Some(path) = msg.get("output_file").and_then(Value::as_str) {
             self.tail_requests.push(TailRequest::PreferPath {
                 parent_id: tool_use_id.clone(),
@@ -1807,7 +1802,12 @@ impl Mapper {
             .get("summary")
             .and_then(Value::as_str)
             .map(one_line_summary);
-        if is_background_bash {
+        // A Command still held here is a background Bash: foreground ones
+        // leave `tool_items` with their tool_result.
+        if matches!(
+            self.tool_items.get(&tool_use_id),
+            Some(ToolItem::Command { .. })
+        ) {
             self.complete_background_command(&tool_use_id, status, summary)
         } else {
             self.update_subagent(&tool_use_id, status, summary)
@@ -2435,10 +2435,7 @@ impl Mapper {
                 Some(id) => id.to_string(),
                 None => continue,
             };
-            let background_task_id = msg
-                .pointer("/tool_use_result/backgroundTaskId")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+            let launched_in_background = msg.pointer("/tool_use_result/backgroundTaskId").is_some();
             let item = match self.tool_items.remove(&tool_use_id) {
                 Some(i) => i,
                 None => continue,
@@ -2474,7 +2471,7 @@ impl Mapper {
             };
             let mut parent_item_id = None;
             let content = match item {
-                ToolItem::Command { command, .. } if background_task_id.is_some() => {
+                ToolItem::Command { command, .. } if launched_in_background => {
                     self.tool_items.insert(
                         tool_use_id.clone(),
                         ToolItem::Command {
@@ -2482,9 +2479,6 @@ impl Mapper {
                             output: output.clone(),
                         },
                     );
-                    if let Some(task_id) = background_task_id {
-                        self.background_task_history.insert(task_id);
-                    }
                     ItemContent::CommandExecution {
                         command,
                         output,
@@ -5062,6 +5056,66 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false}"#,
         );
         turn_completed_after_count(&second, 0);
+    }
+
+    /// Every task the CLI lists keeps the process busy, not only background
+    /// Bash: a backgrounded Agent (`task_type: local_agent`, as the CLI
+    /// reports it) must hold the count above zero until its notification's
+    /// follow-up result, or the runtime judges the session quiescent while
+    /// the subagent is still running. Shapes recorded from Claude Code 2.1.301.
+    #[test]
+    fn non_bash_background_tasks_count_until_their_follow_up_result() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg-spawn","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"Run sleep and echo command","subagent_type":"general-purpose","run_in_background":true}}]}}"#,
+        );
+        let counted = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"ae5779035aeb8a94d","run_id":"0mvctgbkr-7639c0ca","task_type":"local_agent","subagent_type":"general-purpose","description":"Run sleep and echo command"}]}"#,
+        );
+        assert!(matches!(
+            counted.as_slice(),
+            [AgentEvent::BackgroundTasksChanged { count: 1 }]
+        ));
+        feed(
+            &mut m,
+            r#"{"type":"system","subtype":"task_started","task_id":"ae5779035aeb8a94d","tool_use_id":"toolu_agent","description":"Run sleep and echo command","subagent_type":"general-purpose","is_backgrounded":true,"task_type":"local_agent"}"#,
+        );
+        feed(
+            &mut m,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_agent","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"ae5779035aeb8a94d"}}"#,
+        );
+        let launched = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"launched"}"#,
+        );
+        turn_completed_after_count(&launched, 1);
+
+        let notification = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"task_notification","task_id":"ae5779035aeb8a94d","tool_use_id":"toolu_agent","status":"completed","output_file":"/tmp/ae5779035aeb8a94d.output","summary":"SUB_DONE"}"#,
+        );
+        assert!(
+            !notification
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ItemCompleted(_))),
+            "a subagent task is settled as a Subagent, never as a command card: {notification:?}"
+        );
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+            )
+            .is_empty()
+        );
+        m.start_turn();
+        let done = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"DONE","origin":{"kind":"task-notification","producer":"session-task","runId":"0mvctgbkr-7639c0ca"}}"#,
+        );
+        turn_completed_after_count(&done, 0);
     }
 
     #[test]

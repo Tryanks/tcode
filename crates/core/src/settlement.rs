@@ -132,6 +132,35 @@ impl AgentExecution {
     }
 }
 
+/// What a dispatched child owes its lead. Every message the lead sends a child
+/// (the dispatch brief, each `send`) opens one expectation; the child's
+/// `report_result` call closes it. The child's own turns, wake-ups and
+/// background work never reach the lead on their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentReport {
+    /// Nothing is owed: never dispatched a message, or cancelled.
+    #[default]
+    None,
+    /// The lead's message is out and no report has come back.
+    Expected,
+    /// The child's report reached the lead.
+    Reported,
+    /// The child went quiet twice without reporting; its final message was
+    /// delivered in its place.
+    Unreported,
+    /// The child cannot deliver: its provider failed to start, closed, or
+    /// ended the turn in error.
+    Failed,
+}
+
+impl AgentReport {
+    /// The lead is still waiting for this child's report.
+    pub fn pending(self) -> bool {
+        self == Self::Expected
+    }
+}
+
 /// Whether a dispatched child's result has reached its lead. Settling the
 /// child is the lead's acknowledgement: a finished child is not delivered
 /// until then, and a cancelled or archived one never is.
@@ -150,10 +179,18 @@ impl AgentDelivery {
             Self::Settled
         } else if meta.cancelled_at.is_some() || meta.archived_at.is_some() {
             Self::NotDelivered
-        } else if execution.running() {
-            Self::Running
         } else {
-            Self::AwaitingSettle
+            match meta.report() {
+                // A child owed a report runs until it reports, however many
+                // turns of its own that takes.
+                AgentReport::Expected => Self::Running,
+                AgentReport::Reported | AgentReport::Unreported | AgentReport::Failed => {
+                    Self::AwaitingSettle
+                }
+                // Children dispatched before expectations were recorded.
+                AgentReport::None if execution.running() => Self::Running,
+                AgentReport::None => Self::AwaitingSettle,
+            }
         }
     }
 
