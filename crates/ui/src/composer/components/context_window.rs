@@ -2,7 +2,7 @@ use super::super::*;
 use crate::overlay::DialogActions;
 use crate::store::ComposerState;
 
-const OPTION_ID: &str = "contextWindow";
+use agent::context_window::{self, OPTION_ID};
 
 /// The context-window choice for the active model: its presets, each applied
 /// as it is chosen, and a custom size.
@@ -15,7 +15,7 @@ pub(in super::super) struct ContextWindowDialog {
 
 impl ContextWindowDialog {
     fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let max = agent::claude::format_context_window(largest_window(&store, cx));
+        let max = context_window::format(largest_window(&store, cx));
         let custom = cx.new(|cx| {
             InputState::new(window, cx).placeholder(crate::tr!(
                 "composer.context_window_custom_placeholder",
@@ -42,7 +42,7 @@ impl ContextWindowDialog {
     fn apply_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self.custom.read(cx).value().to_string();
         let max = largest_window(&self.store, cx);
-        match agent::claude::parse_context_window_tokens(&serde_json::Value::String(value))
+        match context_window::parse_tokens(&serde_json::Value::String(value))
             .filter(|tokens| *tokens <= max)
         {
             Some(tokens) => {
@@ -69,14 +69,13 @@ impl Render for ContextWindowDialog {
             .active_option_selections
             .iter()
             .find(|selection| selection.id == OPTION_ID)
-            .and_then(|selection| agent::claude::parse_context_window_tokens(&selection.value))
+            .and_then(|selection| context_window::parse_tokens(&selection.value))
             .or_else(|| {
-                default_value.as_ref().and_then(|value| {
-                    agent::claude::parse_context_window_tokens(&serde_json::json!(value))
-                })
+                default_value
+                    .as_ref()
+                    .and_then(|value| context_window::parse_tokens(&serde_json::json!(value)))
             });
-        let tokens_of =
-            |value: &str| agent::claude::parse_context_window_tokens(&serde_json::json!(value));
+        let tokens_of = |value: &str| context_window::parse_tokens(&serde_json::json!(value));
         let custom_selected = selected.is_some_and(|selected| {
             !options
                 .iter()
@@ -131,10 +130,7 @@ impl Render for ContextWindowDialog {
         }
         let mut custom_label = crate::tr!("composer.context_window_custom").into_owned();
         if let Some(selected) = selected.filter(|_| custom_selected) {
-            custom_label.push_str(&format!(
-                " ({})",
-                agent::claude::format_context_window(selected)
-            ));
+            custom_label.push_str(&format!(" ({})", context_window::format(selected)));
         }
         let custom = self.custom.clone();
         list.child(
@@ -161,10 +157,7 @@ impl Render for ContextWindowDialog {
                             .text_color(cx.theme().danger)
                             .child(crate::tr!(
                                 "composer.context_window_invalid",
-                                max = agent::claude::format_context_window(largest_window(
-                                    &self.store,
-                                    cx
-                                ))
+                                max = context_window::format(largest_window(&self.store, cx))
                             )),
                     )
                 }),
@@ -177,32 +170,21 @@ impl Render for ContextWindowDialog {
 pub(in super::super) fn context_window_descriptor(
     composer: &ComposerState,
 ) -> Option<(Vec<agent::SelectOption>, Option<String>)> {
-    composer
-        .active_option_descriptors
-        .iter()
-        .find_map(|descriptor| match descriptor {
-            OptionDescriptor::Select {
-                id,
-                options,
-                default_value,
-                ..
-            } if id == OPTION_ID => Some((options.clone(), default_value.clone())),
-            _ => None,
-        })
+    match context_window::descriptor(&composer.active_option_descriptors)? {
+        OptionDescriptor::Select {
+            options,
+            default_value,
+            ..
+        } => Some((options.clone(), default_value.clone())),
+        OptionDescriptor::Boolean { .. } => None,
+    }
 }
 
 /// The largest preset of the active model: a custom size cannot exceed the
-/// window the model can launch with.
+/// window the model can launch with. A model whose presets are unknown is
+/// capped at the largest window any provider offers today.
 fn largest_window(store: &Entity<WorkspaceStore>, cx: &App) -> u64 {
-    context_window_descriptor(&store.read(cx).composer_state())
-        .and_then(|(options, _)| {
-            options
-                .iter()
-                .filter_map(|option| {
-                    agent::claude::parse_context_window_tokens(&serde_json::json!(option.value))
-                })
-                .max()
-        })
+    context_window::largest(&store.read(cx).composer_state().active_option_descriptors)
         .unwrap_or(1_000_000)
 }
 

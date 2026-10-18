@@ -24,6 +24,7 @@ use crate::{
 };
 
 mod developer_instructions;
+mod model_windows;
 pub(crate) mod plugins;
 pub use developer_instructions::PREVIEW_BROWSER_INSTRUCTIONS;
 
@@ -229,7 +230,10 @@ pub async fn list_models(
 ) -> Result<Vec<ModelSpec>, AgentError> {
     let (mut child, mut stdin, lines, mut stderr_tail) =
         spawn_server(binary_path.as_deref(), &[], &launch_env)?;
-    let result = collect_models(&mut stdin, &lines).await;
+    let windows = home_dir(&launch_env)
+        .map(|home| model_windows::read(&home))
+        .unwrap_or_default();
+    let result = collect_models(&mut stdin, &lines, &windows).await;
     // The stdout reader can observe EOF a few milliseconds before the process
     // becomes waitable. Give a self-exiting child time to publish its real
     // status so `stop_child` does not replace it with a kill status.
@@ -285,9 +289,18 @@ async fn initialize(
     send_json(stdin, &json!({ "method": "initialized" }))
 }
 
+/// Codex's home: the profile override, else `~/.codex`.
+pub fn home_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
+    launch_env
+        .home
+        .clone()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+}
+
 async fn collect_models(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
+    windows: &HashMap<String, model_windows::ModelWindows>,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     initialize(stdin, lines).await?;
 
@@ -307,7 +320,8 @@ async fn collect_models(
         id += 1;
         if let Some(data) = response.get("data").and_then(Value::as_array) {
             for model in data {
-                if let Some(spec) = map_model(model) {
+                let slug = model.get("model").and_then(Value::as_str);
+                if let Some(spec) = map_model(model, slug.and_then(|slug| windows.get(slug))) {
                     models.push(spec);
                 }
             }
@@ -325,7 +339,7 @@ async fn collect_models(
 }
 
 /// Map one `model/list` entry to a [`ModelSpec`]; `None` for hidden models.
-fn map_model(model: &Value) -> Option<ModelSpec> {
+fn map_model(model: &Value, windows: Option<&model_windows::ModelWindows>) -> Option<ModelSpec> {
     if model
         .get("hidden")
         .and_then(Value::as_bool)
@@ -417,6 +431,7 @@ fn map_model(model: &Value) -> Option<ModelSpec> {
             default_value: Some(default_value),
         });
     }
+    options.push(context_window_descriptor(windows));
 
     Some(ModelSpec {
         id,
@@ -428,6 +443,42 @@ fn map_model(model: &Value) -> Option<ModelSpec> {
 
 /// Derive service-tier options from `serviceTiers` (preferred) or, absent that,
 /// `additionalSpeedTiers`, displaying the `fast` value as `Fast`.
+/// The `contextWindow` selector: the native window (default) and the largest
+/// one Codex accepts for `model_context_window`. Without cached windows the
+/// selector has no presets and the custom size stands alone.
+fn context_window_descriptor(windows: Option<&model_windows::ModelWindows>) -> OptionDescriptor {
+    let preset = |tokens: u64| {
+        let label = crate::context_window::format(tokens);
+        SelectOption {
+            value: label.to_ascii_lowercase(),
+            label,
+            description: None,
+            unavailable: None,
+        }
+    };
+    let (options, default_value) = match windows {
+        Some(windows) => {
+            let mut options = vec![preset(windows.native)];
+            if windows.largest > windows.native {
+                options.push(preset(windows.largest));
+            }
+            let default_value = Some(options[0].value.clone());
+            (options, default_value)
+        }
+        None => (Vec::new(), None),
+    };
+    OptionDescriptor::Select {
+        role: Default::default(),
+        apply: Default::default(),
+        recommended: None,
+        permissive: None,
+        id: crate::context_window::OPTION_ID.into(),
+        label: "Context Window".into(),
+        options,
+        default_value,
+    }
+}
+
 fn service_tiers(model: &Value) -> Vec<SelectOption> {
     if let Some(tiers) = model.get("serviceTiers").and_then(Value::as_array)
         && !tiers.is_empty()
@@ -521,6 +572,15 @@ fn codex_effort(selections: &[OptionSelection]) -> Option<String> {
 /// Selected service tier (option id `serviceTier`).
 fn codex_service_tier(selections: &[OptionSelection]) -> Option<String> {
     selection_str(selections, "serviceTier")
+}
+
+/// Per-thread `config` overrides for `thread/start`, `thread/resume` and
+/// `thread/fork`: nothing is written to the user's `config.toml`. A selected
+/// context window becomes `model_context_window`, which Codex clamps to the
+/// model's largest window and compacts against.
+fn thread_config(selections: &[OptionSelection]) -> Option<Value> {
+    let window = crate::context_window::selected(&[], selections)?;
+    Some(json!({ "model_context_window": window }))
 }
 
 enum PendingRequest {
@@ -1237,6 +1297,9 @@ async fn initialize_and_open_thread(
     }
     if let Some(tier) = codex_service_tier(&opts.option_selections) {
         params["serviceTier"] = json!(tier);
+    }
+    if let Some(config) = thread_config(&opts.option_selections) {
+        params["config"] = config;
     }
     send_json(
         stdin,
@@ -4234,6 +4297,25 @@ mod tests {
     }
 
     #[test]
+    fn selected_context_window_rides_thread_config() {
+        assert_eq!(thread_config(&[]), None);
+        let selections = [
+            OptionSelection {
+                id: "serviceTier".into(),
+                value: json!("flex"),
+            },
+            OptionSelection {
+                id: "contextWindow".into(),
+                value: json!("500k"),
+            },
+        ];
+        assert_eq!(
+            thread_config(&selections),
+            Some(json!({ "model_context_window": 500_000 }))
+        );
+    }
+
+    #[test]
     fn mcp_builder_handles_both_one_and_none() {
         let registrations = [
             crate::McpRegistration {
@@ -4960,25 +5042,31 @@ mod tests {
 
     #[test]
     fn maps_model_list_entry_to_spec() {
-        let spec = map_model(&json!({
-            "model": "gpt-5-codex",
-            "displayName": "gpt-5-codex",
-            "isDefault": true,
-            "supportedReasoningEfforts": [
-                {"reasoningEffort": "low", "description": "fast"},
-                {"reasoningEffort": "medium"},
-                {"reasoningEffort": "xhigh"}
-            ],
-            "defaultReasoningEffort": "medium",
-            "serviceTiers": [{"id": "flex", "name": "Flex", "description": "cheap"}],
-            "defaultServiceTier": "flex"
-        }))
+        let spec = map_model(
+            &json!({
+                "model": "gpt-5-codex",
+                "displayName": "gpt-5-codex",
+                "isDefault": true,
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "fast"},
+                    {"reasoningEffort": "medium"},
+                    {"reasoningEffort": "xhigh"}
+                ],
+                "defaultReasoningEffort": "medium",
+                "serviceTiers": [{"id": "flex", "name": "Flex", "description": "cheap"}],
+                "defaultServiceTier": "flex"
+            }),
+            Some(&model_windows::ModelWindows {
+                native: 272_000,
+                largest: 872_000,
+            }),
+        )
         .expect("visible model maps");
 
         assert_eq!(spec.id, "gpt-5-codex");
         assert_eq!(spec.display_name, "GPT-5-Codex");
         assert!(spec.is_default);
-        assert_eq!(spec.options.len(), 2);
+        assert_eq!(spec.options.len(), 3);
 
         match &spec.options[0] {
             OptionDescriptor::Select {
@@ -5016,25 +5104,53 @@ mod tests {
             }
             other => panic!("expected serviceTier Select, got {other:?}"),
         }
+        // Native window first and default; the largest one Codex clamps to last.
+        match &spec.options[2] {
+            OptionDescriptor::Select {
+                id,
+                options,
+                default_value,
+                ..
+            } => {
+                assert_eq!(id, "contextWindow");
+                assert_eq!(default_value.as_deref(), Some("272k"));
+                assert_eq!(options[0].value, "272k");
+                assert_eq!(options[1].label, "872k");
+                assert_eq!(options.len(), 2);
+            }
+            other => panic!("expected contextWindow Select, got {other:?}"),
+        }
+        assert_eq!(
+            crate::context_window::selected(&spec.options, &[]),
+            Some(272_000)
+        );
+        assert_eq!(crate::context_window::largest(&spec.options), Some(872_000));
     }
 
     #[test]
     fn hidden_model_is_skipped_and_speed_tiers_adapt() {
         assert!(
-            map_model(&json!({"model": "secret", "displayName": "secret", "hidden": true}))
-                .is_none()
+            map_model(
+                &json!({"model": "secret", "displayName": "secret", "hidden": true}),
+                None
+            )
+            .is_none()
         );
 
         // No serviceTiers → adapt additionalSpeedTiers (`fast` → `Fast`).
-        let spec = map_model(&json!({
-            "model": "gpt-x",
-            "displayName": "gpt-x",
-            "supportedReasoningEfforts": [],
-            "additionalSpeedTiers": ["fast", "priority"]
-        }))
+        let spec = map_model(
+            &json!({
+                "model": "gpt-x",
+                "displayName": "gpt-x",
+                "supportedReasoningEfforts": [],
+                "additionalSpeedTiers": ["fast", "priority"]
+            }),
+            None,
+        )
         .unwrap();
-        // Empty reasoning efforts → no reasoning descriptor, only serviceTier.
-        assert_eq!(spec.options.len(), 1);
+        // Empty reasoning efforts → no reasoning descriptor: serviceTier, then
+        // a contextWindow selector without presets (no cached windows).
+        assert_eq!(spec.options.len(), 2);
         match &spec.options[0] {
             OptionDescriptor::Select { id, options, .. } => {
                 assert_eq!(id, "serviceTier");
@@ -5044,6 +5160,19 @@ mod tests {
                 assert_eq!(options[2].label, "priority");
             }
             other => panic!("expected serviceTier Select, got {other:?}"),
+        }
+        match &spec.options[1] {
+            OptionDescriptor::Select {
+                id,
+                options,
+                default_value,
+                ..
+            } => {
+                assert_eq!(id, "contextWindow");
+                assert!(options.is_empty());
+                assert_eq!(default_value, &None);
+            }
+            other => panic!("expected contextWindow Select, got {other:?}"),
         }
     }
 

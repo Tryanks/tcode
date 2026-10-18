@@ -97,10 +97,7 @@ pub async fn probe_provider(
             .as_deref()
             .and_then(parse_claude_auth),
         ProviderKind::Codex => {
-            let home = launch_env
-                .home
-                .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
-            let path = home.map(|home| home.join("auth.json"));
+            let path = agent::codex::home_dir(&launch_env).map(|home| home.join("auth.json"));
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_codex_auth)
         }

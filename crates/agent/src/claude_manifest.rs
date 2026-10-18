@@ -331,7 +331,7 @@ fn descriptor(option: &OptionFile) -> Result<Option<OptionDescriptor>, String> {
 
 /// A `contextWindow` selector whose only preset is the model's fixed window.
 fn fixed_context_window_descriptor(tokens: u64) -> OptionDescriptor {
-    let label = crate::claude_context::format_context_window(tokens);
+    let label = crate::context_window::format(tokens);
     let value = label.to_ascii_lowercase();
     OptionDescriptor::Select {
         id: "contextWindow".into(),
@@ -491,9 +491,7 @@ impl ClaudeCatalog {
         selections
             .iter()
             .find(|selection| selection.id == "contextWindow")
-            .and_then(|selection| {
-                crate::claude_context::parse_context_window_tokens(&selection.value)
-            })
+            .and_then(|selection| crate::context_window::parse_tokens(&selection.value))
             .or_else(|| self.model(model_id)?.default_context_window())
             .unwrap_or(200_000)
     }

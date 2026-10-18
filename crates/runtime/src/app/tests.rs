@@ -5189,11 +5189,25 @@ fn queued_message_stamps_live_context_window_change() {
     });
 
     active.push_queued("queued".into(), Vec::new());
+    active.stamp_context_window_change(None);
     assert_eq!(active.queue[0].context_window_changed, Some(500_000));
+
+    // Choosing the model's default preset while the provider already runs at
+    // it changes nothing.
+    active.live_option_selections.clear();
+    active.meta.option_selections.clear();
+    active.meta.option_selections.push(OptionSelection {
+        id: "contextWindow".into(),
+        value: serde_json::json!("1m"),
+    });
+    active.push_queued("default".into(), Vec::new());
+    active.stamp_context_window_change(Some(1_000_000));
+    assert_eq!(active.queue[1].context_window_changed, None);
 
     active.runtime = Runtime::Idle;
     active.push_scheduled("idle".into(), Vec::new(), SystemTime::now());
-    assert_eq!(active.queue[1].context_window_changed, None);
+    active.stamp_context_window_change(Some(1_000_000));
+    assert_eq!(active.queue[2].context_window_changed, None);
 }
 
 #[test]
