@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-09T23:31:10Z",
+  "updatedAt": "2026-10-18T09:00:00Z",
   "compatibility": [
     {
       "driver": "codex",
@@ -182,6 +182,12 @@
                   }
                 ],
                 "promptInjectedValues": ["ultrathink"]
+              },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [{ "id": "1m", "label": "1M", "isDefault": true }]
               }
             ]
           },
@@ -217,7 +223,13 @@
                 ],
                 "promptInjectedValues": ["ultrathink"]
               },
-              { "id": "fastMode", "label": "Fast Mode", "type": "boolean" }
+              { "id": "fastMode", "label": "Fast Mode", "type": "boolean" },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [{ "id": "1m", "label": "1M", "isDefault": true }]
+              }
             ]
           },
           "adapter": {
@@ -272,6 +284,12 @@
                 "id": "fastMode",
                 "label": "Fast Mode",
                 "type": "boolean"
+              },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [{ "id": "1m", "label": "1M", "isDefault": true }]
               }
             ]
           },
@@ -330,6 +348,12 @@
                 "id": "fastMode",
                 "label": "Fast Mode",
                 "type": "boolean"
+              },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [{ "id": "1m", "label": "1M", "isDefault": true }]
               }
             ]
           },
@@ -383,6 +407,12 @@
                 "id": "fastMode",
                 "label": "Fast Mode",
                 "type": "boolean"
+              },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [{ "id": "1m", "label": "1M", "isDefault": true }]
               }
             ]
           },
@@ -541,6 +571,12 @@
                   }
                 ],
                 "promptInjectedValues": ["ultrathink"]
+              },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [{ "id": "1m", "label": "1M", "isDefault": true }]
               }
             ]
           },
@@ -637,6 +673,12 @@
                   { "id": "ultrathink", "label": "Ultrathink" }
                 ],
                 "promptInjectedValues": ["ultrathink"]
+              },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [{ "id": "1m", "label": "1M", "isDefault": true }]
               }
             ]
           },
