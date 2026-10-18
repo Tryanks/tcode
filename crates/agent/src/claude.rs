@@ -31,10 +31,7 @@ use smol::io::{AsyncWrite, BufReader};
 use smol::prelude::*;
 use smol::process::Stdio;
 
-pub use crate::claude_context::{
-    CONTEXT_WINDOW_SUFFIXES, format_context_window, parse_context_window_tokens,
-    resolved_context_window, strip_context_window_suffix,
-};
+pub use crate::claude_context::{CONTEXT_WINDOW_SUFFIXES, strip_context_window_suffix};
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
@@ -4241,27 +4238,6 @@ mod tests {
         );
         assert_eq!(crate::parse_semver("2.1.169"), Some((2, 1, 169)));
         assert_eq!(crate::parse_semver("nonsense"), None);
-    }
-
-    #[test]
-    fn parse_context_window_values() {
-        assert_eq!(parse_context_window_tokens(&json!("200k")), Some(200_000));
-        assert_eq!(parse_context_window_tokens(&json!("1m")), Some(1_000_000));
-        assert_eq!(parse_context_window_tokens(&json!("1M")), Some(1_000_000));
-        assert_eq!(parse_context_window_tokens(&json!("500k")), Some(500_000));
-        assert_eq!(parse_context_window_tokens(&json!("500000")), Some(500_000));
-        assert_eq!(parse_context_window_tokens(&json!("500")), Some(500_000));
-        assert_eq!(parse_context_window_tokens(&json!(750_000)), Some(750_000));
-        assert_eq!(parse_context_window_tokens(&json!(99_999)), None);
-        assert_eq!(parse_context_window_tokens(&json!(1_000_001)), None);
-        assert_eq!(parse_context_window_tokens(&json!("99k")), None);
-        assert_eq!(parse_context_window_tokens(&json!("1001k")), None);
-        assert_eq!(parse_context_window_tokens(&json!("garbage")), None);
-        assert_eq!(parse_context_window_tokens(&json!(-200_000)), None);
-        assert_eq!(parse_context_window_tokens(&json!(null)), None);
-        assert_eq!(format_context_window(200_000), "200k");
-        assert_eq!(format_context_window(750_000), "750k");
-        assert_eq!(format_context_window(1_000_000), "1M");
     }
 
     #[test]

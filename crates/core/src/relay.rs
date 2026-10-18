@@ -297,10 +297,7 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 &mut body,
                 "context",
                 "provider",
-                &format!(
-                    "window set to {}",
-                    agent::claude::format_context_window(*window)
-                ),
+                &format!("window set to {}", agent::context_window::format(*window)),
             ),
             EntryContent::ModelChanged { .. } => {}
             EntryContent::Item(ItemContent::ImageRead { path, .. }) => activity(

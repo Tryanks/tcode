@@ -344,6 +344,7 @@ impl AppState {
             AgentEvent::UsageLimitReached { resets_at } => {
                 if self.settings.resume_on_limit_reset {
                     let not_before = UNIX_EPOCH + Duration::from_secs(*resets_at);
+                    let default_window = self.default_context_window(session_id);
                     let scheduled = self.resident_mut(session_id).is_some_and(|resident| {
                         if resident
                             .queue
@@ -357,6 +358,7 @@ impl AppState {
                             Vec::new(),
                             not_before,
                         );
+                        resident.stamp_context_window_change(default_window);
                         resident.queue.last_mut().unwrap().origin = MessageOrigin::Server;
                         true
                     });

@@ -18,6 +18,7 @@ mod claude_context;
 mod claude_manifest;
 #[cfg(feature = "process")]
 mod claude_plugins;
+pub mod context_window;
 mod image_reads;
 pub use image_reads::tool_result_images;
 #[cfg(not(feature = "process"))]
