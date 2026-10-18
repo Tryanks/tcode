@@ -15,9 +15,12 @@ pub(in super::super) struct ContextWindowDialog {
 
 impl ContextWindowDialog {
     fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let max = agent::claude::format_context_window(largest_window(&store, cx));
         let custom = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(crate::tr!("composer.context_window_custom_placeholder"))
+            InputState::new(window, cx).placeholder(crate::tr!(
+                "composer.context_window_custom_placeholder",
+                max = max
+            ))
         });
         let custom_events =
             cx.subscribe_in(&custom, window, |this, _, event, window, cx| match event {
@@ -38,7 +41,10 @@ impl ContextWindowDialog {
 
     fn apply_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self.custom.read(cx).value().to_string();
-        match agent::claude::parse_context_window_tokens(&serde_json::Value::String(value)) {
+        let max = largest_window(&self.store, cx);
+        match agent::claude::parse_context_window_tokens(&serde_json::Value::String(value))
+            .filter(|tokens| *tokens <= max)
+        {
             Some(tokens) => {
                 self.store.update(cx, |store, _cx| {
                     store.set_active_option(OPTION_ID.to_string(), Some(serde_json::json!(tokens)));
@@ -153,7 +159,13 @@ impl Render for ContextWindowDialog {
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().danger)
-                            .child(crate::tr!("composer.context_window_invalid")),
+                            .child(crate::tr!(
+                                "composer.context_window_invalid",
+                                max = agent::claude::format_context_window(largest_window(
+                                    &self.store,
+                                    cx
+                                ))
+                            )),
                     )
                 }),
         )
@@ -177,6 +189,21 @@ pub(in super::super) fn context_window_descriptor(
             } if id == OPTION_ID => Some((options.clone(), default_value.clone())),
             _ => None,
         })
+}
+
+/// The largest preset of the active model: a custom size cannot exceed the
+/// window the model can launch with.
+fn largest_window(store: &Entity<WorkspaceStore>, cx: &App) -> u64 {
+    context_window_descriptor(&store.read(cx).composer_state())
+        .and_then(|(options, _)| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    agent::claude::parse_context_window_tokens(&serde_json::json!(option.value))
+                })
+                .max()
+        })
+        .unwrap_or(1_000_000)
 }
 
 /// Open the context-window dialog for the active model.

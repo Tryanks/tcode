@@ -329,6 +329,27 @@ fn descriptor(option: &OptionFile) -> Result<Option<OptionDescriptor>, String> {
     }))
 }
 
+/// A `contextWindow` selector whose only preset is the model's fixed window.
+fn fixed_context_window_descriptor(tokens: u64) -> OptionDescriptor {
+    let label = crate::claude_context::format_context_window(tokens);
+    let value = label.to_ascii_lowercase();
+    OptionDescriptor::Select {
+        id: "contextWindow".into(),
+        label: "Context Window".into(),
+        options: vec![SelectOption {
+            value: value.clone(),
+            label,
+            description: None,
+            unavailable: None,
+        }],
+        default_value: Some(value),
+        role: crate::OptionRole::Model,
+        apply: crate::ApplyTiming::Live,
+        recommended: None,
+        permissive: None,
+    }
+}
+
 impl ClaudeCatalog {
     pub(crate) fn from_json(text: &str) -> Result<Self, String> {
         serde_json::from_str(text)
@@ -388,12 +409,23 @@ impl ClaudeCatalog {
                     "model {slug:?} minVersion is not below maxVersionExclusive"
                 ));
             }
-            let options = profile
+            let mut options = profile
                 .capabilities
                 .option_descriptors
                 .iter()
                 .filter_map(|option| descriptor(option).transpose())
                 .collect::<Result<Vec<_>, _>>()?;
+            // Upstream lists no selector for a fixed window because it only
+            // chooses between slug suffixes. Claude Code's `autoCompactWindow`
+            // runs any of these models at a smaller window, so the window is
+            // still a choice here.
+            if let Some(tokens) = runtime.fixed_context_window_tokens
+                && !options.iter().any(|option| {
+                    matches!(option, OptionDescriptor::Select { id, .. } if id == "contextWindow")
+                })
+            {
+                options.push(fixed_context_window_descriptor(tokens));
+            }
             let aliases = model
                 .aliases
                 .iter()
@@ -899,6 +931,27 @@ mod tests {
                 permissive: None,
             }
         );
+        // A fixed window still gets a selector, defaulting to that window.
+        assert_eq!(
+            catalog.model("test-fixed").unwrap().spec.options[2],
+            OptionDescriptor::Select {
+                id: "contextWindow".into(),
+                label: "Context Window".into(),
+                options: vec![SelectOption {
+                    value: "1m".into(),
+                    label: "1M".into(),
+                    description: None,
+                    unavailable: None,
+                }],
+                default_value: Some("1m".into()),
+                role: crate::OptionRole::Model,
+                apply: crate::ApplyTiming::Live,
+                recommended: None,
+                permissive: None,
+            }
+        );
+        // No window data at all offers no selector.
+        assert_eq!(catalog.model("test-plain").unwrap().spec.options.len(), 1);
         // Lookups tolerate whitespace and a context suffix.
         assert!(catalog.model(" test-plain ").is_some());
         assert!(catalog.model("test-narrow[1m]").is_some());

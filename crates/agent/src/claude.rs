@@ -4312,7 +4312,7 @@ mod tests {
         assert_eq!(launch.model_id.as_deref(), Some("test-narrow[1m]"));
         assert_eq!(auto_compact(&launch), json!(500_000));
 
-        // Fixed window: no selector, no suffix, custom values still compact early.
+        // Fixed window: no suffix, smaller values compact early.
         assert_eq!(
             catalog.resolved_context_window("test-fixed", &[]),
             1_000_000
