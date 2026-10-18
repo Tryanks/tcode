@@ -1189,8 +1189,10 @@ impl AppState {
             self.reactivate_session(thread_id, cx);
         }
         if self.residents.live.contains_key(thread_id) {
+            let default_window = self.default_context_window(thread_id);
             let child = self.resident_mut(thread_id).unwrap();
             child.push_queued(message, Vec::new());
+            child.stamp_context_window_change(default_window);
             child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
             let idle = matches!(child.runtime, Runtime::Idle);
             if self.dispatch_next_queued(thread_id, cx).is_err() {

@@ -159,6 +159,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "base64 0.23.1",
+ "dirs 7.0.0",
  "env_logger",
  "log",
  "serde",

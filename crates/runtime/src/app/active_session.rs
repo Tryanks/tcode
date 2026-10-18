@@ -470,7 +470,6 @@ impl ActiveSession {
         self.next_queue_id += 1;
         let options = self.turn_options();
         let context_len = std::mem::take(&mut self.pending_context_len);
-        let context_window_changed = self.context_window_change();
         self.queue.push(QueuedMessage {
             delivery_key: None,
             author: None,
@@ -482,7 +481,7 @@ impl ActiveSession {
             not_before: None,
             options,
             context_len,
-            context_window_changed,
+            context_window_changed: None,
             kind: QueuedMessageKind::User,
         });
         id
@@ -559,14 +558,22 @@ impl ActiveSession {
         id
     }
 
-    fn context_window_change(&self) -> Option<u64> {
+    /// Stamp the last queued message with the context window it will run at
+    /// when that differs from the live provider's; `default_window` is the
+    /// model's default preset, which an unselected side runs at.
+    pub(super) fn stamp_context_window_change(&mut self, default_window: Option<u64>) {
         if !matches!(self.runtime, Runtime::Live(_)) {
-            return None;
+            return;
         }
-        let model = self.meta.model.as_deref().unwrap_or_default();
-        let selected = agent::claude::resolved_context_window(model, &self.meta.option_selections);
-        let live = agent::claude::resolved_context_window(model, &self.live_option_selections);
-        (selected != live).then_some(selected)
+        let window = |selections: &[OptionSelection]| {
+            agent::context_window::selected(&[], selections).or(default_window)
+        };
+        let selected = window(&self.meta.option_selections);
+        if selected != window(&self.live_option_selections)
+            && let Some(message) = self.queue.last_mut()
+        {
+            message.context_window_changed = selected;
+        }
     }
 
     /// Dispatch at most one eligible queued message as an ordinary turn. FIFO

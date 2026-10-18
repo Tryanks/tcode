@@ -40,10 +40,12 @@ impl AppState {
             self.commit_draft(target_id, cx);
         }
 
+        let default_window = self.default_context_window(target_id);
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         active.push_scheduled(text, attachments, not_before);
+        active.stamp_context_window_change(default_window);
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
@@ -228,6 +230,7 @@ impl AppState {
         self.reactivate_session(target_id, cx);
         self.resume_pull_request_watches(target_id, cx);
 
+        let default_window = self.default_context_window(target_id);
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
@@ -239,6 +242,7 @@ impl AppState {
         // See `on_turn_accepted`, which records the user message only after the
         // adapter confirms provider submission.
         active.push_queued(text, attachments);
+        active.stamp_context_window_change(default_window);
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
@@ -432,10 +436,12 @@ impl AppState {
         self.close_abandoned_turn(&session_id, cx);
         self.record_event(&session_id, &event, cx);
 
+        let default_window = self.default_context_window(target_id);
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         active.push_queued(text, attachments);
+        active.stamp_context_window_change(default_window);
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();

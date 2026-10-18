@@ -1004,6 +1004,36 @@ impl AppState {
         self.session_status_with_activity(session_id, &ActivityProjection::new(self))
     }
 
+    /// The active model's option descriptors: pushed over the wire by the
+    /// provider, or read from the provider's model catalog.
+    pub(super) fn model_option_descriptors(
+        &self,
+        session: &ActiveSession,
+    ) -> Vec<OptionDescriptor> {
+        let meta = &session.meta;
+        if matches!(
+            meta.provider.caps().option_descriptors,
+            OptionDescriptors::Wire
+        ) {
+            return session.provider_options.clone();
+        }
+        meta.model
+            .as_deref()
+            .and_then(|model| {
+                self.models_for(meta.provider)
+                    .iter()
+                    .find(|spec| spec.id == model)
+            })
+            .map(|spec| spec.options.clone())
+            .unwrap_or_default()
+    }
+
+    /// The window a session's model runs at with no `contextWindow` selection.
+    pub(super) fn default_context_window(&self, session_id: &str) -> Option<u64> {
+        let session = self.resident(session_id)?;
+        agent::context_window::selected(&self.model_option_descriptors(session), &[])
+    }
+
     fn session_status_with_activity(
         &self,
         session_id: &str,
@@ -1011,22 +1041,7 @@ impl AppState {
     ) -> Option<SessionStatus> {
         let session = self.resident(session_id)?;
         let meta = &session.meta;
-        let mut provider_option_descriptors = if matches!(
-            meta.provider.caps().option_descriptors,
-            OptionDescriptors::Wire
-        ) {
-            session.provider_options.clone()
-        } else {
-            meta.model
-                .as_deref()
-                .and_then(|model| {
-                    self.models_for(meta.provider)
-                        .iter()
-                        .find(|spec| spec.id == model)
-                })
-                .map(|spec| spec.options.clone())
-                .unwrap_or_default()
-        };
+        let mut provider_option_descriptors = self.model_option_descriptors(session);
         if let Some(descriptor) = permission_control(meta.provider) {
             provider_option_descriptors.push(descriptor);
         }
@@ -1070,22 +1085,17 @@ impl AppState {
         });
         let terminal_preferences = self.terminal_preferences_for(session);
         let (approvals, user_input) = self.open_requests(session_id, session);
+        // The provider reports the window it was launched with; a selection
+        // made since then caps the meter until the restart that applies it.
+        let selected_window = agent::context_window::selected(
+            &provider_option_descriptors,
+            &provider_option_selections,
+        );
         let context_window = session
             .timeline
             .usage
             .and_then(|usage| usage.context_window)
-            .map(|reported| {
-                if meta.provider == ProviderKind::ClaudeCode
-                    && let Some(model) = meta.model.as_deref()
-                {
-                    reported.min(agent::claude::resolved_context_window(
-                        model,
-                        &meta.option_selections,
-                    ))
-                } else {
-                    reported
-                }
-            });
+            .map(|reported| selected_window.map_or(reported, |selected| reported.min(selected)));
         Some(SessionStatus {
             session_id: session_id.to_string(),
             title: meta.title.clone(),
