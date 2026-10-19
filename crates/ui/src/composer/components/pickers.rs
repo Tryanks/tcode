@@ -422,9 +422,13 @@ impl Composer {
         let usage = composer.token_usage;
         let account_usage = composer.usage.clone();
         let provider = composer.provider;
-        let window_editable = !composer.conversation_read_only
-            && self.interactive(cx)
-            && super::context_window::context_window_descriptor(&composer).is_some();
+        let interactive = !composer.conversation_read_only && self.interactive(cx);
+        let window_editable =
+            interactive && super::context_window::context_window_descriptor(&composer).is_some();
+        let can_compact = interactive
+            && !composer.turn_running
+            && !composer.stopping
+            && provider.is_some_and(|provider| provider.caps().manual_compaction);
         let store_entity = self.workspace_store.clone();
         let pct = usage.and_then(|u| context_meter::used_percentage(&u));
         let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
@@ -459,14 +463,18 @@ impl Composer {
             .trigger(trigger)
             .content(move |_, window, cx| {
                 let compact = crate::window_seam::window_is_compact(window, cx);
-                let edit_window = window_editable.then(|| store_entity.clone());
+                let actions = (window_editable || can_compact).then(|| ContextPaneActions {
+                    store: store_entity.clone(),
+                    edit_window: window_editable,
+                    compact_now: can_compact,
+                });
                 render_context_meter_pane(
                     usage,
                     account_usage.clone(),
                     provider,
                     pct,
                     compact,
-                    edit_window,
+                    actions,
                     cx,
                 )
             })
@@ -1855,6 +1863,15 @@ fn render_overflow_pane(
         .into_any_element()
 }
 
+/// What the context pane lets the person do right now.
+struct ContextPaneActions {
+    store: Entity<WorkspaceStore>,
+    /// The active model's context window can be changed here.
+    edit_window: bool,
+    /// The provider can compact its context on request right now.
+    compact_now: bool,
+}
+
 /// Context usage, model capacity and provider rate-limit windows.
 fn render_context_meter_pane(
     usage: Option<TokenUsage>,
@@ -1862,10 +1879,16 @@ fn render_context_meter_pane(
     provider: Option<ProviderKind>,
     pct: Option<f32>,
     compact: bool,
-    // Present when the active model's context window can be changed here.
-    edit_window: Option<Entity<WorkspaceStore>>,
+    actions: Option<ContextPaneActions>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
+    let edit_window = actions
+        .as_ref()
+        .filter(|actions| actions.edit_window)
+        .map(|actions| actions.store.clone());
+    let compact_now = actions
+        .filter(|actions| actions.compact_now)
+        .map(|actions| actions.store);
     let muted = cx.theme().muted_foreground;
     let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
     let bar_color: Hsla = if overloaded {
@@ -1998,6 +2021,22 @@ fn render_context_meter_pane(
                     "composer.compacts_automatically",
                     provider = provider_label(provider)
                 )),
+        );
+    }
+
+    if let Some(store) = compact_now {
+        let popover = cx.entity();
+        pane = pane.child(
+            Button::new("context-compact-now")
+                .debug_selector(|| "context-compact-now".into())
+                .outline()
+                .xsmall()
+                .when(compact, |button| button.min_h(px(44.)))
+                .label(crate::tr!("composer.compact_now"))
+                .on_click(move |_, window, cx| {
+                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                    store.update(cx, |store, _cx| store.compact_context());
+                }),
         );
     }
 

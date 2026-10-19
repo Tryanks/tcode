@@ -459,6 +459,11 @@ pub enum Command {
     Interrupt {
         session_id: String,
     },
+    /// Ask the provider to compact the session's context now; only offered
+    /// where the provider has a native operation (`Caps::manual_compaction`).
+    CompactContext {
+        session_id: String,
+    },
     RespondApproval {
         session_id: String,
         request_id: String,
@@ -585,6 +590,7 @@ impl Command {
             | Self::DropQueued { session_id, .. }
             | Self::RetryTurn { session_id, .. }
             | Self::Interrupt { session_id, .. }
+            | Self::CompactContext { session_id, .. }
             | Self::RespondApproval { session_id, .. }
             | Self::RespondUserInput { session_id, .. }
             | Self::SetActiveModel { session_id, .. }

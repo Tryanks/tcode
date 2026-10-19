@@ -394,6 +394,15 @@ impl SessionActor for OpenCodeActor {
                     .await;
                 Ok(())
             }
+            SessionCommand::Compact => {
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: "OpenCode compaction is not exposed by Tcode's native adapter"
+                            .into(),
+                    })
+                    .await;
+                Ok(())
+            }
             SessionCommand::Rewind { .. } => {
                 self.events
                     .emit(AgentEvent::Warning {

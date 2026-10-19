@@ -6377,6 +6377,55 @@ fn terminal_open_installs_after_executor_pump_in_the_project_cwd() {
 
 /// An `ActiveSession` wired to a fake live provider: commands land on the
 /// returned receiver, nothing real is spawned.
+/// Compaction is a turn of the provider's own, so it is forwarded only to an
+/// idle live provider; over a running turn the command is refused.
+#[test]
+fn compaction_waits_for_the_running_turn() {
+    let cx = &mut TestAppContext::default();
+    let cwd = std::env::temp_dir().join(format!("tcode-compact-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let test_store = TestStore::new("tcode-compact-data");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(TestClientState::new(store));
+    let (session, commands) = fake_live_session(cwd.clone());
+    let id = session.meta.id.clone();
+
+    state.update(cx, |state, cx| {
+        state.store.upsert_meta(&session.meta).unwrap();
+        state.sessions = state.store.load_index().unwrap().into();
+        state.install_selected(session);
+        state.send_turn(&id, "finish this task".into(), Vec::new(), cx);
+        let delivery_id = match commands.try_recv() {
+            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+            other => panic!("expected SendTurn, got {other:?}"),
+        };
+        state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
+        state.on_event(
+            &id,
+            AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            cx,
+        );
+        assert!(state.compact_context(&id).is_err());
+        assert!(commands.try_recv().is_err());
+
+        state.on_event(
+            &id,
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+        state.compact_context(&id).unwrap();
+        assert!(matches!(commands.try_recv(), Ok(SessionCommand::Compact)));
+    });
+
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
 fn fake_live_session(cwd: PathBuf) -> (ActiveSession, smol::channel::Receiver<SessionCommand>) {
     let (commands, receiver) = smol::channel::unbounded();
     let mut session = AppState::build_draft_session(

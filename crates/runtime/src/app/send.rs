@@ -794,6 +794,29 @@ impl AppState {
         Ok(())
     }
 
+    /// Compaction is the provider's own turn: it is not started over one that
+    /// is already running or still being delivered.
+    pub fn compact_context(
+        &mut self,
+        target_id: &str,
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let Some(active) = self.resident(target_id) else {
+            return Err(provider_command_error("The provider is no longer running."));
+        };
+        if active.turn_in_flight
+            || active.delivery_in_flight.is_some()
+            || active.timeline.turn_running
+        {
+            return Err(provider_command_error("A turn is still running."));
+        }
+        let Runtime::Live(commands) = &active.runtime else {
+            return Err(provider_command_error("The provider is no longer running."));
+        };
+        commands
+            .try_send(SessionCommand::Compact)
+            .map_err(provider_command_error)
+    }
+
     pub fn respond_approval(
         &mut self,
         target_id: &str,
