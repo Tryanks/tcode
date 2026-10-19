@@ -53,6 +53,11 @@ public func gpuiHostHideKeyboard() {
     DispatchQueue.main.async { GPUIHostBridge.view?.hideKeyboard() }
 }
 
+@_cdecl("gpui_ios_host_haptic_long_press")
+public func gpuiHostHapticLongPress() {
+    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+}
+
 @_cdecl("gpui_ios_host_configure_text_input")
 public func gpuiHostConfigureTextInput(
     _ autocorrect: UInt8,

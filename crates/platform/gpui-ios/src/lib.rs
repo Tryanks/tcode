@@ -44,6 +44,12 @@ pub fn set_paste_input(owner: u64) {
     ios::ffi::host_set_paste_input(owner);
 }
 
+/// Play the haptic UIKit gives a recognized long press.
+#[cfg(target_os = "ios")]
+pub fn haptic_long_press() {
+    ios::ffi::host_haptic_long_press();
+}
+
 /// Make UIKit's authorized payload available to the editor's synchronous Paste action.
 #[cfg(target_os = "ios")]
 pub fn with_native_paste(item: gpui::ClipboardItem, paste: impl FnOnce()) {

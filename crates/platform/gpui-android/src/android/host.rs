@@ -162,6 +162,10 @@ pub(crate) fn hide_keyboard() {
     with_activity(jni_str!("gpuiHideKeyboard"), jni_sig!("()V"), Vec::new());
 }
 
+pub fn haptic_long_press() {
+    with_activity(jni_str!("gpuiHapticLongPress"), jni_sig!("()V"), Vec::new());
+}
+
 pub(crate) fn configure_input(configuration: TextInputConfiguration) {
     // GPUI has no separate multiline flag; Enter explicitly requests a line break.
     with_activity(

@@ -17,6 +17,7 @@ mod edge_back;
 #[doc(hidden)]
 pub mod gallery_support;
 pub(crate) mod git;
+mod haptics;
 mod highlight;
 mod host_permissions;
 pub mod i18n;

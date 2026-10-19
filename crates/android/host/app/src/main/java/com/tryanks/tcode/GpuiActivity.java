@@ -33,6 +33,7 @@ import android.text.SpannableStringBuilder;
 import android.text.method.TextKeyListener;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
@@ -387,6 +388,10 @@ public final class GpuiActivity extends NativeActivity {
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() { nativeOnBack(true); }
+
+    public void gpuiHapticLongPress() {
+        getWindow().getDecorView().performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+    }
 
     public void gpuiShowKeyboard() {
         keyboardShowPending = true;
