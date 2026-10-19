@@ -375,6 +375,10 @@ impl RenderOnce for Input {
                             // A long press here selects in this field; the
                             // window selection a message holds goes, as it
                             // would on a tap. No tap precedes a long press.
+                            // The editor, which bubbles after this, claims
+                            // every press that reaches it here, but opens the
+                            // menu only once the finger lifts; the haptic
+                            // says now that the press has taken.
                             window.on_mouse_event(
                                 move |event: &LongPressEvent, phase, window, cx| {
                                     if phase.bubble()
@@ -383,6 +387,9 @@ impl RenderOnce for Input {
                                         && bounds.contains(&event.start_position)
                                     {
                                         gpui_base::TextSelection::clear(window, cx);
+                                        if !disabled {
+                                            crate::haptics::long_press();
+                                        }
                                     }
                                 },
                             );
