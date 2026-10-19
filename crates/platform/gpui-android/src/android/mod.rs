@@ -11,7 +11,9 @@ use std::{cell::RefCell, rc::Rc};
 
 pub(crate) use platform::AndroidPlatform;
 
-pub use host::{ScrollCaptureRequest, scroll_capture_bounds, scroll_capture_rendered};
+pub use host::{
+    ScrollCaptureRequest, haptic_long_press, scroll_capture_bounds, scroll_capture_rendered,
+};
 #[doc(hidden)]
 pub use host::{
     commit_text as jni_commit_text, delete_backward as jni_delete_backward,
