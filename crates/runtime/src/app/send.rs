@@ -794,6 +794,35 @@ impl AppState {
         Ok(())
     }
 
+    /// Compaction is the provider's own turn: it is not started over one that
+    /// is already running or still being delivered. An idle provider is started
+    /// first and compacts once it is live.
+    pub fn compact_context(
+        &mut self,
+        target_id: &str,
+        cx: &mut HostCx,
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let Some(active) = self.resident_mut(target_id) else {
+            return Err(provider_command_error("The thread is not open."));
+        };
+        if active.turn_in_flight
+            || active.delivery_in_flight.is_some()
+            || active.timeline.turn_running
+        {
+            return Err(provider_command_error("A turn is still running."));
+        }
+        match &active.runtime {
+            Runtime::Live(commands) => commands
+                .try_send(SessionCommand::Compact)
+                .map_err(provider_command_error),
+            Runtime::Idle | Runtime::Starting { .. } => {
+                active.compact_requested = true;
+                self.ensure_started(target_id, cx);
+                Ok(())
+            }
+        }
+    }
+
     pub fn respond_approval(
         &mut self,
         target_id: &str,

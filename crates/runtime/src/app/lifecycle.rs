@@ -50,6 +50,12 @@ impl AppState {
         }
     }
 
+    /// Whether a compaction was asked for while the provider was starting; clears it.
+    fn take_requested_compaction(&mut self, session_id: &str) -> bool {
+        self.resident_mut(session_id)
+            .is_some_and(|resident| std::mem::take(&mut resident.compact_requested))
+    }
+
     /// Spawn the provider process for the active session if it isn't running.
     pub(super) fn ensure_started(&mut self, target_id: &str, cx: &mut HostCx) {
         let Some(session_id) = self
@@ -228,6 +234,10 @@ impl AppState {
                                     state.pending_native_rewinds.remove(&session_id);
                                     state.report_error(RuntimeError::ProcessGone, cx);
                                 }
+                            } else if state.take_requested_compaction(&session_id) {
+                                if commands.try_send(SessionCommand::Compact).is_err() {
+                                    state.report_error(RuntimeError::ProcessGone, cx);
+                                }
                             } else if state.dispatch_next_queued(&session_id, cx).is_err() {
                                 state.report_error(RuntimeError::ProcessGone, cx);
                             }
@@ -243,6 +253,10 @@ impl AppState {
                                     .is_err()
                                 {
                                     state.pending_native_rewinds.remove(&session_id);
+                                    state.report_error(RuntimeError::ProcessGone, cx);
+                                }
+                            } else if state.take_requested_compaction(&session_id) {
+                                if commands.try_send(SessionCommand::Compact).is_err() {
                                     state.report_error(RuntimeError::ProcessGone, cx);
                                 }
                             } else {

@@ -178,7 +178,8 @@ pub use wire::{
 //
 // Unreleased: AgentStatus gains `report`, what a dispatched child owes its
 // lead (none, expected, reported, unreported, failed), and SessionMeta carries
-// the child's `expectation`.
+// the child's `expectation`; the protocol adds the CompactContext command,
+// which asks a provider with a native compaction operation to compact now.
 pub const PROTOCOL_VERSION: u32 = 14;
 
 #[cfg(test)]

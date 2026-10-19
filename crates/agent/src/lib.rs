@@ -67,6 +67,8 @@ pub struct Caps {
     pub supports_steering: bool,
     pub supports_fork: bool,
     pub native_rewind: bool,
+    /// The harness compacts its context on request ([`SessionCommand::Compact`]).
+    pub manual_compaction: bool,
     pub per_turn_effort: bool,
     pub options_apply_live: bool,
     pub live_option_push: LiveOptionPush,
@@ -146,6 +148,7 @@ impl ProviderKind {
                 supports_steering: true,
                 supports_fork: true,
                 native_rewind: true,
+                manual_compaction: true,
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
@@ -171,6 +174,7 @@ impl ProviderKind {
                 supports_steering: true,
                 supports_fork: true,
                 native_rewind: false,
+                manual_compaction: true,
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
@@ -196,6 +200,7 @@ impl ProviderKind {
                 supports_steering: false,
                 supports_fork: false,
                 native_rewind: false,
+                manual_compaction: false,
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
@@ -214,6 +219,7 @@ impl ProviderKind {
                 supports_steering: true,
                 supports_fork: false,
                 native_rewind: false,
+                manual_compaction: true,
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
@@ -230,6 +236,7 @@ impl ProviderKind {
                 supports_steering: false,
                 supports_fork: false,
                 native_rewind: false,
+                manual_compaction: false,
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
@@ -246,6 +253,7 @@ impl ProviderKind {
                 supports_steering: false,
                 supports_fork: false,
                 native_rewind: false,
+                manual_compaction: false,
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
@@ -262,6 +270,7 @@ impl ProviderKind {
                 supports_steering: true,
                 supports_fork: true,
                 native_rewind: false,
+                manual_compaction: false,
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
@@ -1572,6 +1581,13 @@ pub enum SessionCommand {
         checkpoint_id: String,
         mode: RewindMode,
     },
+    /// Ask the provider to compact its context now, the way its own `/compact`
+    /// does (Codex `thread/compact/start`, pi `compact`, Claude Code's
+    /// `/compact` slash command). The provider reports progress as
+    /// [`AgentEvent::ContextCompacted`]; adapters without a native operation
+    /// warn and ignore it, and the UI offers it only where
+    /// [`Caps::manual_compaction`] is set.
+    Compact,
     Shutdown,
 }
 

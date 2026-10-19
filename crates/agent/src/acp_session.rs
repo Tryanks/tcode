@@ -1176,6 +1176,14 @@ async fn handle_command<D: Dialect>(
                 })
                 .await;
         }
+        SessionCommand::Compact => {
+            let _ = events
+                .send(AgentEvent::Warning {
+                    message: "this ACP agent does not advertise a native compaction operation"
+                        .into(),
+                })
+                .await;
+        }
         SessionCommand::RetryTurn { .. } => {}
         SessionCommand::Shutdown => unreachable!("handled by the caller"),
     }

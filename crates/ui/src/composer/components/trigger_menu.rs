@@ -117,7 +117,9 @@ impl Composer {
                 (rows, String::new(), false)
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
-                let builtins: [(&str, Option<&str>, &str, MenuAccept); 3] = [
+                let composer = self.workspace_store.read(cx).composer_state();
+                let compact_offered = compact_offered(&composer);
+                let mut builtins: Vec<(&str, Option<&str>, &str, MenuAccept)> = vec![
                     (
                         "model",
                         None,
@@ -137,6 +139,14 @@ impl Composer {
                         MenuAccept::InsertLater,
                     ),
                 ];
+                if compact_offered {
+                    builtins.push((
+                        "compact",
+                        None,
+                        "composer.cmd_compact_desc",
+                        MenuAccept::CompactContext,
+                    ));
+                }
                 let mut rows: Vec<MenuRow> = builtins
                     .into_iter()
                     .filter(|(name, _, _, _)| fuzzy_score(&trigger.query, name).is_some())
@@ -155,12 +165,9 @@ impl Composer {
                     .collect();
                 // Provider-native slash commands (Claude `slash_commands`, which
                 // include its skills), shown after the built-in group, fuzzily
-                // filtered without truncation.
-                let commands = self
-                    .workspace_store
-                    .read(cx)
-                    .composer_state()
-                    .provider_commands;
+                // filtered without truncation. The provider's own `compact` is
+                // what the built-in row runs, so it is not listed twice.
+                let commands = composer.provider_commands;
                 rows.extend(
                     filter_provider_commands(
                         &commands,
@@ -168,6 +175,7 @@ impl Composer {
                         &trigger.query,
                     )
                     .into_iter()
+                    .filter(|c| !(compact_offered && c.name == "compact"))
                     .map(|c| MenuRow {
                         primary: format!("/{}", c.name),
                         secondary: c.description.clone().unwrap_or_else(|| {
@@ -225,6 +233,11 @@ impl Composer {
             MenuAccept::OpenModelPicker => {
                 self.replace_trigger("", window, cx);
                 self.model_picker_token = self.model_picker_token.wrapping_add(1);
+            }
+            MenuAccept::CompactContext => {
+                self.replace_trigger("", window, cx);
+                self.workspace_store
+                    .update(cx, |store, _cx| store.compact_context());
             }
         }
         self.active_trigger = None;

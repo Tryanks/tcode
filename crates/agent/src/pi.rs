@@ -452,6 +452,12 @@ impl SessionActor for PiActor {
                     .await;
                 Ok(())
             }
+            // Progress arrives as `compaction_start` / `compaction_end`.
+            SessionCommand::Compact => send_json(
+                &mut self.stdin,
+                &json!({"id":"tcode-compact","type":"compact"}),
+            )
+            .map_err(|err| err.to_string()),
             SessionCommand::RetryTurn { .. }
             | SessionCommand::SetOption { .. }
             | SessionCommand::Shutdown => Ok(()),
