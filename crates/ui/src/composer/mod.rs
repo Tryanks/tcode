@@ -611,6 +611,7 @@ impl Composer {
         }
         let text = input.read(cx).value().trim().to_string();
         let composer_state = self.workspace_store.read(cx).composer_state();
+        let compact_offered = compact_offered(&composer_state);
         let terminal_contexts = composer_state.terminal_contexts;
         if !self.has_sendable_content(cx) {
             return;
@@ -645,12 +646,16 @@ impl Composer {
         }
         // Local mode and picker commands are consumed without sending a turn.
         if terminal_contexts.is_empty()
-            && let Some(command) = slash_command(&text)
+            && let Some(command) = slash_command(&text, compact_offered)
         {
             input.update(cx, |state, cx| state.replace_all("", window, cx));
             match command {
                 SlashIntent::Model => {
                     self.model_picker_token = self.model_picker_token.wrapping_add(1);
+                }
+                SlashIntent::Compact => {
+                    self.workspace_store
+                        .update(cx, |store, _cx| store.compact_context());
                 }
             }
             cx.notify();

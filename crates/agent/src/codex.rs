@@ -601,6 +601,7 @@ enum PendingRequest {
         decision: ApprovalDecision,
     },
     InjectItems,
+    Compact,
 }
 
 struct PendingApproval {
@@ -1088,6 +1089,12 @@ impl SessionActor for Actor {
                     .await;
                 Ok(())
             }
+            // Progress arrives as the `contextCompaction` item, mid-turn or on its own.
+            SessionCommand::Compact => self.request(
+                "thread/compact/start",
+                json!({ "threadId": self.thread_id }),
+                PendingRequest::Compact,
+            ),
             SessionCommand::Shutdown => Ok(()),
         }
     }
@@ -3087,6 +3094,7 @@ fn pending_name(request: Option<&PendingRequest>) -> &'static str {
         Some(PendingRequest::SubagentMetadata { .. }) => "thread/read",
         Some(PendingRequest::GuardianApproval { .. }) => "thread/approveGuardianDeniedAction",
         Some(PendingRequest::InjectItems) => "thread/inject_items",
+        Some(PendingRequest::Compact) => "thread/compact/start",
         None => "unknown",
     }
 }
@@ -4447,9 +4455,10 @@ mod tests {
                         attachments: Vec::new(),
                     },
                     "turn/steer",
-                    "expectedTurnId",
+                    Some("expectedTurnId"),
                 ),
-                (SessionCommand::Interrupt, "turn/interrupt", "turnId"),
+                (SessionCommand::Interrupt, "turn/interrupt", Some("turnId")),
+                (SessionCommand::Compact, "thread/compact/start", None),
             ] {
                 actor.handle_command(command).await.unwrap();
                 let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
@@ -4458,7 +4467,9 @@ mod tests {
                 let request: Value = serde_json::from_str(&request).unwrap();
                 assert_eq!(request["method"], method);
                 assert_eq!(request["params"]["threadId"], "thread-1");
-                assert_eq!(request["params"][field], "T1");
+                if let Some(field) = field {
+                    assert_eq!(request["params"][field], "T1");
+                }
             }
             let _ = actor.child.kill();
             let _ = actor.child.wait();

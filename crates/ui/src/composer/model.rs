@@ -10,6 +10,18 @@ use crate::palette::fuzzy_score;
 
 pub(super) enum SlashIntent {
     Model,
+    Compact,
+}
+
+/// Whether `/compact` is Tcode's to run: the provider compacts on request and
+/// no turn is running. Otherwise the text reaches the provider as typed.
+pub(super) fn compact_offered(state: &crate::store::ComposerState) -> bool {
+    !state.conversation_read_only
+        && !state.turn_running
+        && !state.stopping
+        && state
+            .provider
+            .is_some_and(|provider| provider.caps().manual_compaction)
 }
 
 /// Strip a leading `/orchestrate` command token while rejecting lookalikes
@@ -124,9 +136,10 @@ pub(crate) fn format_countdown(secs: u64) -> String {
     }
 }
 
-pub(super) fn slash_command(text: &str) -> Option<SlashIntent> {
+pub(super) fn slash_command(text: &str, compact_offered: bool) -> Option<SlashIntent> {
     match text.trim() {
         "/model" => Some(SlashIntent::Model),
+        "/compact" if compact_offered => Some(SlashIntent::Compact),
         _ => None,
     }
 }
@@ -171,6 +184,8 @@ pub(super) enum MenuAccept {
     InsertOrchestrate,
     /// Insert the scheduled-message command prefix.
     InsertLater,
+    /// Ask the provider to compact its context now.
+    CompactContext,
     /// Strip the `/model` command and open the model picker.
     OpenModelPicker,
 }

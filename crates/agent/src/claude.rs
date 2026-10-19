@@ -791,6 +791,26 @@ async fn handle_command(
             let _ = write_line(stdin, &msg).await;
             ControlFlow::Continue(())
         }
+        // The CLI runs its `/compact` slash command from a stream-json user
+        // message as a turn of its own: `status: compacting`, then
+        // `compact_boundary` (trigger `manual`) and a `result`.
+        SessionCommand::Compact => {
+            if write_line(stdin, &user_message("/compact", &[]))
+                .await
+                .is_err()
+            {
+                let _ = event_tx
+                    .send(AgentEvent::Error {
+                        message: "failed to write compaction request to provider stdin".into(),
+                        fatal: true,
+                    })
+                    .await;
+                return ControlFlow::Break("provider stdin write failed");
+            }
+            let turn_id = mapper.start_turn();
+            let _ = event_tx.send(AgentEvent::TurnStarted { turn_id }).await;
+            ControlFlow::Continue(())
+        }
         SessionCommand::RespondApproval {
             request_id,
             decision,

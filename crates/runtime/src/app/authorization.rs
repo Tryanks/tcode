@@ -252,6 +252,7 @@ impl AppState {
                 | Command::WatchPullRequest { session_id, .. }
                 | Command::RetryTurn { session_id, .. }
                 | Command::Interrupt { session_id }
+                | Command::CompactContext { session_id }
                 | Command::SetActiveModel { session_id, .. }
                 | Command::SetActiveOption { session_id, .. }
                 | Command::SetActiveAcpAgent { session_id, .. }

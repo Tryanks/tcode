@@ -898,6 +898,7 @@ composer:
   total_processed: "累计处理"
   steer_tooltip: "引导当前轮次"
   compacts_automatically: "%{provider} 会在需要时自动压缩其上下文。"
+  cmd_compact_desc: "立即压缩上下文"
   no_files: "没有匹配的文件或文件夹。"
   searching: "搜索中…"
   cmd_model_desc: "打开模型选择器"
