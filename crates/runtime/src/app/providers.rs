@@ -189,9 +189,23 @@ impl ProviderCatalog {
             return;
         }
         self.usage_checking.remove(&id);
-        if let Some(usage) = usage {
-            self.provider_usage.insert(id, usage);
+        let Some(mut usage) = usage else {
+            return;
+        };
+        // A failed fetch keeps the last successful windows on screen, dated
+        // by that fetch, so a transient CLI error does not blank the numbers.
+        if usage.error.is_some()
+            && usage.windows.is_empty()
+            && let Some(previous) = self.provider_usage.get(&id)
+            && !previous.windows.is_empty()
+        {
+            usage.fetched_at = previous.fetched_at;
+            usage.windows = previous.windows.clone();
+            if usage.plan.is_none() {
+                usage.plan = previous.plan.clone();
+            }
         }
+        self.provider_usage.insert(id, usage);
     }
 
     pub(super) fn status_snapshot(
@@ -1504,5 +1518,48 @@ mod provider_lifecycle_tests {
         catalog.complete_usage("claude".into(), 1, Some(windows.clone()));
         assert_eq!(catalog.provider_usage["claude"], windows);
         assert!(!catalog.usage_checking.contains("claude"));
+    }
+
+    #[test]
+    fn failed_usage_fetch_keeps_the_last_windows_and_their_time() {
+        let mut catalog = ProviderCatalog::new(HashMap::new(), HashMap::new());
+        let windows = tcode_core::usage::ProviderUsage {
+            fetched_at: 1_700_000_000,
+            plan: Some("max".into()),
+            windows: vec![tcode_core::usage::UsageWindow {
+                kind: tcode_core::usage::UsageWindowKind::FiveHour,
+                scope: None,
+                used_percent: 42.,
+                resets_at: Some(1_800_000_000),
+            }],
+            error: None,
+        };
+        catalog.complete_usage("claude".into(), 0, Some(windows.clone()));
+        catalog.complete_usage(
+            "claude".into(),
+            0,
+            Some(tcode_core::usage::ProviderUsage {
+                fetched_at: 1_700_000_500,
+                error: Some("temporarily unreachable".into()),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            catalog.provider_usage["claude"],
+            tcode_core::usage::ProviderUsage {
+                error: Some("temporarily unreachable".into()),
+                ..windows.clone()
+            }
+        );
+        catalog.complete_usage(
+            "claude".into(),
+            0,
+            Some(tcode_core::usage::ProviderUsage {
+                fetched_at: 1_700_001_000,
+                ..windows.clone()
+            }),
+        );
+        assert_eq!(catalog.provider_usage["claude"].error, None);
+        assert_eq!(catalog.provider_usage["claude"].fetched_at, 1_700_001_000);
     }
 }

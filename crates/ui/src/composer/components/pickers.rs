@@ -2029,7 +2029,7 @@ fn render_context_meter_pane(
                 .child(trailing),
         );
         // The raw provider error is Settings-only; at 256px this pane just
-        // says the number is missing.
+        // says the latest number is missing, above whatever was last fetched.
         if account.error.is_some() {
             pane = pane.child(
                 div()
@@ -2037,51 +2037,50 @@ fn render_context_meter_pane(
                     .text_color(muted)
                     .child(crate::tr!("usage.unavailable")),
             );
-        } else {
-            let now = crate::time::now_secs();
-            for window in &account.windows {
-                let fill = crate::usage::bar_color(window.used_percent, cx);
-                pane = pane.child(
-                    v_flex()
-                        .w_full()
-                        .gap(px(3.))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .justify_between()
-                                .items_center()
-                                .gap_2()
-                                .text_size(px(11.))
-                                .child(
-                                    div()
-                                        .text_color(muted)
-                                        .child(crate::usage::window_label(window)),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .text_color(muted)
-                                        .child(crate::usage::percent_label(window.used_percent)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(4.))
-                                .rounded_full()
-                                .bg(cx.theme().muted)
-                                .child(div().h_full().rounded_full().bg(fill).w(gpui::relative(
-                                    window.used_percent.clamp(0.0, 100.0) / 100.0,
-                                ))),
-                        )
-                        .when_some(
-                            crate::usage::resets_label(window.resets_at, now),
-                            |col, label| {
-                                col.child(div().text_size(px(10.5)).text_color(muted).child(label))
-                            },
-                        ),
-                );
-            }
+        }
+        let now = crate::time::now_secs();
+        for window in &account.windows {
+            let fill = crate::usage::bar_color(window.used_percent, cx);
+            pane = pane.child(
+                v_flex()
+                    .w_full()
+                    .gap(px(3.))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(11.))
+                            .child(
+                                div()
+                                    .text_color(muted)
+                                    .child(crate::usage::window_label(window)),
+                            )
+                            .child(
+                                div()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_color(muted)
+                                    .child(crate::usage::percent_label(window.used_percent)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(4.))
+                            .rounded_full()
+                            .bg(cx.theme().muted)
+                            .child(div().h_full().rounded_full().bg(fill).w(gpui::relative(
+                                window.used_percent.clamp(0.0, 100.0) / 100.0,
+                            ))),
+                    )
+                    .when_some(
+                        crate::usage::resets_label(window.resets_at, now),
+                        |col, label| {
+                            col.child(div().text_size(px(10.5)).text_color(muted).child(label))
+                        },
+                    ),
+            );
         }
     }
 

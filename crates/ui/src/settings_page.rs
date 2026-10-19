@@ -1984,12 +1984,14 @@ impl SettingsPage {
                 cx,
             )];
             match &usage {
-                Some(usage) if usage.error.is_some() => card_rows.push(self.usage_note_row(
-                    crate::tr!("usage.unavailable").into_owned(),
-                    usage.error.clone(),
-                    cx,
-                )),
-                Some(usage) if !usage.windows.is_empty() => {
+                Some(usage) if usage.error.is_some() || !usage.windows.is_empty() => {
+                    if let Some(error) = usage.error.clone() {
+                        card_rows.push(self.usage_note_row(
+                            crate::tr!("usage.unavailable").into_owned(),
+                            Some(error),
+                            cx,
+                        ));
+                    }
                     let now = now_secs();
                     card_rows.extend(
                         usage
