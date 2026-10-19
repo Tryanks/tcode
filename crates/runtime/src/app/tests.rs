@@ -6407,7 +6407,7 @@ fn compaction_waits_for_the_running_turn() {
             },
             cx,
         );
-        assert!(state.compact_context(&id).is_err());
+        assert!(state.compact_context(&id, cx).is_err());
         assert!(commands.try_recv().is_err());
 
         state.on_event(
@@ -6419,7 +6419,7 @@ fn compaction_waits_for_the_running_turn() {
             },
             cx,
         );
-        state.compact_context(&id).unwrap();
+        state.compact_context(&id, cx).unwrap();
         assert!(matches!(commands.try_recv(), Ok(SessionCommand::Compact)));
     });
 

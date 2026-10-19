@@ -908,7 +908,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         }
         Command::CompactContext { session_id } => {
             return CommandOutcome::Immediate(
-                app.compact_context(&session_id)
+                app.compact_context(&session_id, cx)
                     .map(|()| CommandResponse::Unit),
             );
         }

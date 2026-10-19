@@ -905,7 +905,7 @@ composer:
   total_processed: "Total processed"
   steer_tooltip: "Steer the current turn"
   compacts_automatically: "%{provider} automatically compacts its context when needed."
-  compact_now: "Compact context now"
+  cmd_compact_desc: "Compact the context now"
   no_files: "No matching files or folders."
   searching: "Searching…"
   cmd_model_desc: "Open the model picker"
