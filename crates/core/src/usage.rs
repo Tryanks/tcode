@@ -51,9 +51,10 @@ pub struct ProviderUsage {
     /// Provider-reported plan / subscription name (e.g. `pro`, `max`).
     pub plan: Option<String>,
     /// Windows in display order: account-wide 5h, account-wide weekly, then
-    /// scoped windows. Empty when `error` is set.
+    /// scoped windows. With `error` set they are the last successful fetch's
+    /// windows, dated by `fetched_at`, or empty when there never was one.
     pub windows: Vec<UsageWindow>,
-    /// Why the fetch produced no windows (provider error, not signed in, …).
-    /// Presentation-free but human-readable; the UI shows it as-is.
+    /// Why the latest fetch produced no windows (provider error, not signed
+    /// in, …). Presentation-free but human-readable; the UI shows it as-is.
     pub error: Option<String>,
 }
