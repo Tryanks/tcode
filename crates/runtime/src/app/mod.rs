@@ -427,6 +427,7 @@ pub struct AppState {
     plugin_catalogs: HashMap<String, plugins::PluginCatalog>,
     mcp: McpWiring,
     callback_approval_requests: HashSet<(String, String)>,
+    callback_user_input_requests: HashSet<(String, String)>,
     /// Live provider approvals for every resident session. This is the sole
     /// host-side authority; persisted timeline approvals remain client state.
     approvals: Revisioned<HashMap<String, Vec<agent::ApprovalRequest>>>,
@@ -622,6 +623,7 @@ impl AppState {
             plugin_catalogs: HashMap::new(),
             mcp: McpWiring::default(),
             callback_approval_requests: HashSet::new(),
+            callback_user_input_requests: HashSet::new(),
             approvals: Default::default(),
             git_status: HashMap::new(),
             git_busy: HashSet::new(),
