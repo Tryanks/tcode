@@ -566,6 +566,9 @@ impl AppState {
         if let AgentEvent::ApprovalRequested(request) = &event {
             self.deliver_child_approval_callback(session_id, &request.id, cx);
         }
+        if let AgentEvent::UserInputRequested { request_id, .. } = &event {
+            self.deliver_child_user_input_callback(session_id, request_id, cx);
+        }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
             if let Some(resident) = self.resident_mut(session_id) {

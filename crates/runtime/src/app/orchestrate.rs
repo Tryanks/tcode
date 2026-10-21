@@ -781,6 +781,45 @@ impl AppState {
                 })();
                 let _ = reply.try_send(result);
             }
+            OrchestrateOp::Answer {
+                parent_id,
+                thread_id,
+                request_id,
+                answers,
+            } => {
+                let result = (|| {
+                    self.require_child(&parent_id, &thread_id)?;
+                    let pending = self
+                        .resident(&thread_id)
+                        .and_then(|child| child.timeline.pending_user_input.clone())
+                        .ok_or_else(|| "no pending question".to_string())?;
+                    if request_id.is_some_and(|request_id| request_id != pending.request_id) {
+                        return Err("no pending question with that request_id".into());
+                    }
+                    let ids = pending
+                        .questions
+                        .iter()
+                        .map(|question| question.id.as_str())
+                        .collect::<Vec<_>>();
+                    if let Some(unknown) = answers.keys().find(|key| !ids.contains(&key.as_str())) {
+                        return Err(format!(
+                            "unknown question id {unknown:?}; the question ids are {ids:?}"
+                        ));
+                    }
+                    let missing = ids
+                        .iter()
+                        .filter(|id| !answers.contains_key(**id))
+                        .copied()
+                        .collect::<Vec<_>>();
+                    if !missing.is_empty() {
+                        return Err(format!("missing answers for question ids {missing:?}"));
+                    }
+                    self.respond_user_input(&thread_id, pending.request_id.clone(), answers, cx)
+                        .map_err(|error| error.message)?;
+                    Ok(serde_json::json!({ "ok": true, "request_id": pending.request_id }))
+                })();
+                let _ = reply.try_send(result);
+            }
         }
     }
 
@@ -1419,6 +1458,57 @@ impl AppState {
             request.id,
             serde_json::to_string(&options).expect("approval options serialize"),
             instruction,
+        );
+        self.deliver_orchestrate_callback_to_parent(parent_id, text, cx);
+    }
+
+    /// A child's question goes to its lead, as an approval does; in Manual
+    /// mode the lead is only told that the user answers it. Delivered once per
+    /// request, whether the child blocks on it or keeps working.
+    pub(super) fn deliver_child_user_input_callback(
+        &mut self,
+        child_id: &str,
+        request_id: &str,
+        cx: &mut HostCx,
+    ) {
+        let Some(child) = self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(pending) = self
+            .resident(child_id)
+            .and_then(|child| child.timeline.pending_user_input.as_ref())
+            .filter(|pending| pending.request_id == request_id)
+            .cloned()
+        else {
+            return;
+        };
+        if !self
+            .callback_user_input_requests
+            .insert((child_id.to_string(), pending.request_id.clone()))
+        {
+            return;
+        }
+        let parent_id = child.parent_session_id.as_deref().unwrap();
+        let delivery = if pending.delivery.is_blocking() {
+            "the child is blocked until it is answered"
+        } else {
+            "the child keeps working and reads the answer when it arrives; the question lapses when its turn ends"
+        };
+        let instruction = if self.settings.orchestrate.child_approval == ChildApprovalMode::Manual {
+            "The user answers in the child thread."
+        } else {
+            "You are the decider: use the answer tool with answers keyed by question id, a string (an option label or free text) for a single-choice question and an array of strings for a multi_select one, deciding from the brief and the user's instructions."
+        };
+        let text = format!(
+            "[orchestrate] thread {child_id} (\"{}\") is asking (request_id: {}; {delivery}). Questions: {}. {instruction}",
+            child.title,
+            pending.request_id,
+            serde_json::to_string(&pending.questions).expect("questions serialize"),
         );
         self.deliver_orchestrate_callback_to_parent(parent_id, text, cx);
     }

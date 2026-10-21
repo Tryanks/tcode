@@ -493,7 +493,8 @@ pub fn orchestrate_efforts(
     efforts
 }
 
-/// Who answers permission requests raised by dispatched child threads.
+/// Who answers the permission requests and questions raised by dispatched
+/// child threads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildApprovalMode {

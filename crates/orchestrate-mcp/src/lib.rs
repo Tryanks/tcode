@@ -64,6 +64,13 @@ pub enum OrchestrateOp {
         option: Option<String>,
         cancel: bool,
     },
+    /// The lead answers a child's pending question, keyed by question id.
+    Answer {
+        parent_id: String,
+        thread_id: String,
+        request_id: Option<String>,
+        answers: serde_json::Map<String, serde_json::Value>,
+    },
     /// A child thread pushing its final RESULT text up to the orchestrator.
     ReportResult {
         child_id: String,
