@@ -1970,11 +1970,7 @@ impl Actor {
         let kind = match method {
             "item/commandExecution/requestApproval" | "execCommandApproval" => {
                 ApprovalKind::ExecCommand {
-                    command: params
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .into(),
+                    command: shell_script(&string_field(params, "command")),
                     cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
                     reason: params
                         .get("reason")
@@ -2927,7 +2923,10 @@ fn approval_choices(
 
 fn auto_review_action_summary(action: &Value) -> String {
     match action.get("type").and_then(Value::as_str) {
-        Some("command") => format!("Command: {}", string_field(action, "command")),
+        Some("command") => format!(
+            "Command: {}",
+            shell_script(&string_field(action, "command"))
+        ),
         Some("execve") => {
             let mut command = vec![string_field(action, "program")];
             command.extend(strings(action.get("argv")));
@@ -3526,7 +3525,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             }
         }
         "commandExecution" => ItemContent::CommandExecution {
-            command: string_field(item, "command"),
+            command: shell_script(&string_field(item, "command")),
             output: string_field(item, "aggregatedOutput"),
             exit_code: item
                 .get("exitCode")
@@ -3669,6 +3668,30 @@ fn item_summary(content: &ItemContent) -> Option<String> {
             .as_deref()
             .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" ")),
         _ => None,
+    }
+}
+
+/// Codex runs every command through the user's login shell and reports the
+/// whole argv, shell-quoted: `/bin/zsh -lc 'sed -n 1,2p hosts'`. Its own TUI
+/// shows the script alone, so that is what Tcode surfaces; anything else is
+/// left as reported.
+fn shell_script(command: &str) -> String {
+    let Ok(argv) = shell_words::split(command) else {
+        return command.to_owned();
+    };
+    match argv.as_slice() {
+        [shell, flag, script]
+            if flag == "-lc"
+                && matches!(
+                    std::path::Path::new(shell)
+                        .file_name()
+                        .and_then(|name| name.to_str()),
+                    Some("bash" | "zsh" | "sh")
+                ) =>
+        {
+            script.clone()
+        }
+        _ => command.to_owned(),
     }
 }
 
@@ -6069,6 +6092,29 @@ mod tests {
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
+    }
+
+    #[test]
+    fn a_login_shell_wrapper_is_stripped_from_commands_as_codex_shows_them() {
+        for (reported, shown) in [
+            (
+                "/bin/zsh -lc 'sed -n 1,2p /etc/hosts'",
+                "sed -n 1,2p /etc/hosts",
+            ),
+            (
+                "bash -lc \"grep -rn 'fn main' src\"",
+                "grep -rn 'fn main' src",
+            ),
+            ("python3 -c 'print(1)'", "python3 -c 'print(1)'"),
+            ("/bin/zsh -lc 'ls' extra", "/bin/zsh -lc 'ls' extra"),
+            ("zsh -lc 'unterminated", "zsh -lc 'unterminated"),
+        ] {
+            assert_eq!(shell_script(reported), shown, "{reported}");
+        }
+        let item = map_item(&json!({"type":"commandExecution","id":"cmd-2","command":"/bin/zsh -lc 'cargo check'","aggregatedOutput":"","status":"inProgress"})).unwrap();
+        assert!(
+            matches!(item.content, ItemContent::CommandExecution { command, .. } if command == "cargo check")
+        );
     }
 
     #[test]
