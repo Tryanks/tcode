@@ -2762,6 +2762,14 @@ fn only_a_loaded_conversation_marks_a_thread_read() {
         state.persist_meta(&parked, cx);
     });
     assert!(unread(&state), "newer than anything the client showed");
+
+    state.update(cx, |state, cx| state.settle_session(&id, cx));
+    assert!(!unread(&state), "a settled thread is never unread");
+    state.update(cx, |state, cx| state.unsettle_session(&id, cx));
+    assert!(
+        unread(&state),
+        "unsettling restores what the client never saw"
+    );
 }
 
 #[test]

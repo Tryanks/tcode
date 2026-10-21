@@ -2625,12 +2625,14 @@ impl WorkspaceStore {
                 .iter()
                 .find(|meta| meta.id == session_id)
                 .is_some_and(|meta| {
-                    self.settings_replica
-                        .last_visited
-                        .get(session_id)
-                        .copied()
-                        .unwrap_or(0)
-                        < meta.updated_at
+                    !meta.is_settled()
+                        && self
+                            .settings_replica
+                            .last_visited
+                            .get(session_id)
+                            .copied()
+                            .unwrap_or(0)
+                            < meta.updated_at
                 });
         }
         self.index_summary

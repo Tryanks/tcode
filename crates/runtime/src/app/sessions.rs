@@ -1632,9 +1632,11 @@ impl AppState {
     }
 
     /// Whether a thread shows an unread dot: it has been visited before, its
-    /// update time is newer than that visit, and it is not the active thread.
+    /// update time is newer than that visit, it is not the active thread, and
+    /// it is not settled.
     pub(crate) fn session_unread(&self, meta: &SessionMeta) -> bool {
-        !self.residents.live.contains_key(&meta.id)
+        !meta.is_settled()
+            && !self.residents.live.contains_key(&meta.id)
             && self
                 .settings
                 .last_visited
