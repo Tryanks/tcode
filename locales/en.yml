@@ -1418,6 +1418,7 @@ mobile:
   offline_message: "Offline — you can send when reconnected"
   offline_action: "Offline — available when reconnected"
   queue: "Queue"
+  steer: "Steer"
   command_requested: "Run command"
   files_requested: "Edit files"
   read_requested: "Read files"

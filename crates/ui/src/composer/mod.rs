@@ -6,6 +6,7 @@ mod components;
 pub(crate) mod model;
 
 use components::images::PendingImage;
+use components::steer_gesture::SteerGesture;
 #[cfg(feature = "voice")]
 use components::voice::Voice;
 use model::*;
@@ -190,6 +191,8 @@ pub struct Composer {
     /// strip contains at least one scheduled row.
     scheduled_countdown_tick: Option<Task<()>>,
     queued_refill: Option<(String, u64, String)>,
+    /// A touch on the compact Queue button that has not lifted yet.
+    steer_gesture: Option<SteerGesture>,
     /// Mic button + live dictation session (see `components::voice`).
     #[cfg(feature = "voice")]
     voice: Voice,
@@ -360,6 +363,7 @@ impl Composer {
             pending_image_loads: 0,
             scheduled_countdown_tick: None,
             queued_refill: None,
+            steer_gesture: None,
             #[cfg(feature = "voice")]
             voice,
             _subscriptions: subscriptions,
@@ -790,7 +794,10 @@ impl Composer {
                 .into_any_element();
         }
         let stopping = (turn_running || self.watching(cx)) && !has_text;
-        let stop_pending = self.workspace_store.read(cx).composer_state().stopping;
+        let composer_state = self.workspace_store.read(cx).composer_state();
+        let stop_pending = composer_state.stopping;
+        let steerable = turn_running && has_text && composer_state.steering_supported;
+        let armed = self.steer_gesture.as_ref().is_some_and(SteerGesture::armed);
         let (label, id): (_, &'static str) = if stopping {
             (self.stop_label(turn_running), "stop-turn")
         } else if turn_running {
@@ -847,7 +854,10 @@ impl Composer {
                 }
                 let input = this.input.clone();
                 this.submit(&input, false, window, cx);
-            }));
+            }))
+            .when(steerable || self.steer_gesture.is_some(), |el| {
+                el.child(self.render_steer_gesture(cx))
+            });
         v_flex()
             .flex_none()
             .items_center()
@@ -858,8 +868,16 @@ impl Composer {
                     div()
                         .text_size(px(10.))
                         .line_height(px(12.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("mobile.queue")),
+                        .text_color(if armed {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(crate::tr!(if armed {
+                            "mobile.steer"
+                        } else {
+                            "mobile.queue"
+                        })),
                 )
             })
             .into_any_element()
@@ -1826,6 +1844,159 @@ mod replica_tests {
                 search.presentation().placeholder().to_string()
             })
         });
+    }
+
+    /// On a phone the Queue button has one touch target but two sends: a
+    /// tap queues behind the running turn, and a hold or a slide up steers it.
+    #[gpui::test]
+    fn a_held_or_lifted_queue_button_steers_while_a_tap_queues(cx: &mut TestAppContext) {
+        use gpui::{TouchEvent, TouchId, TouchPhase, point};
+
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        status.activity.turn_running = true;
+        status.steering_supported = true;
+        // A phone sends only once its screen is current, so every baseline
+        // topic is answered.
+        let session_id = status.session_id.clone();
+        let baseline = [
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: Vec::new(),
+                    projects: Vec::new(),
+                }),
+            ),
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(tcode_core::settings::Settings::default()),
+            ),
+            (
+                Topic::SessionStatus {
+                    session_id: session_id.clone(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
+            ),
+            (
+                Topic::SessionPlan {
+                    session_id: session_id.clone(),
+                },
+                ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
+                    session_id: session_id.clone(),
+                    steps: Vec::new(),
+                }),
+            ),
+            (
+                Topic::SessionEvents { session_id },
+                ServerEvent::SessionSnapshot {
+                    from: 0,
+                    end: 0,
+                    records: Vec::new(),
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                },
+            ),
+        ];
+        for (topic, event) in baseline {
+            replace(&incoming, topic, event);
+        }
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        composer.update(cx, |composer, cx| composer.set_compact(true, cx));
+        cx.simulate_resize(gpui::size(px(393.), px(800.)));
+        let touch = |cx: &mut gpui::VisualTestContext, phase, position| {
+            cx.simulate_event(TouchEvent {
+                id: TouchId(1),
+                phase,
+                position,
+                predicted_position: None,
+                force: None,
+            });
+            cx.update(|window, cx| _ = window.draw(cx));
+        };
+        let sent =
+            |cx: &mut gpui::VisualTestContext| {
+                cx.executor().advance_clock(Duration::from_millis(50));
+                cx.run_until_parked();
+                let mut sent = Vec::new();
+                while let Ok(line) = outgoing.try_recv() {
+                    match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                        tcode_protocol::ClientPayload::Command(
+                            tcode_protocol::Command::Steer { text, .. },
+                        ) => sent.push(("steer", text)),
+                        tcode_protocol::ClientPayload::Command(
+                            tcode_protocol::Command::SendTurn { text, .. },
+                        ) => sent.push(("queue", text)),
+                        _ => {}
+                    }
+                }
+                sent
+            };
+        assert!(sent(cx).is_empty());
+
+        for (gesture, expected) in [("hold", "steer"), ("slide", "steer"), ("tap", "queue")] {
+            composer.update_in(cx, |composer, window, cx| {
+                composer.set_input_text(gesture.into(), window, cx)
+            });
+            cx.update(|window, cx| _ = window.draw(cx));
+            let button = cx
+                .debug_bounds("steer-turn")
+                .expect("the Queue button is shown");
+            let center = button.center();
+            touch(cx, TouchPhase::Started, center);
+            let mut lift = center;
+            match gesture {
+                "hold" => {
+                    cx.executor().advance_clock(
+                        gpui::GestureTuning::default().long_press_duration
+                            + Duration::from_millis(1),
+                    );
+                    cx.run_until_parked();
+                }
+                "slide" => {
+                    lift = point(center.x, center.y - px(40.));
+                    touch(cx, TouchPhase::Moved, lift);
+                }
+                _ => {}
+            }
+            let armed = composer.read_with(cx, |composer, _| {
+                composer
+                    .steer_gesture
+                    .as_ref()
+                    .is_some_and(SteerGesture::armed)
+            });
+            assert_eq!(armed, expected == "steer", "{gesture} arms a steer");
+            assert!(
+                sent(cx).is_empty(),
+                "nothing is sent before the finger lifts"
+            );
+            touch(cx, TouchPhase::Ended, lift);
+            assert_eq!(sent(cx), vec![(expected, gesture.to_string())], "{gesture}");
+            assert!(
+                composer
+                    .read_with(cx, |composer, cx| composer.draft(cx))
+                    .is_empty()
+            );
+        }
+
+        // A finger that slides off the button and lifts there sends nothing.
+        composer.update_in(cx, |composer, window, cx| {
+            composer.set_input_text("kept".into(), window, cx)
+        });
+        cx.update(|window, cx| _ = window.draw(cx));
+        let button = cx.debug_bounds("steer-turn").unwrap();
+        touch(cx, TouchPhase::Started, button.center());
+        let away = point(button.center().x - px(120.), button.center().y);
+        touch(cx, TouchPhase::Moved, away);
+        touch(cx, TouchPhase::Ended, away);
+        assert!(sent(cx).is_empty());
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "kept"
+        );
     }
 
     #[gpui::test]
