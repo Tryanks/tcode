@@ -282,7 +282,7 @@ impl PreviewPanel {
             if let Some(view) = self.lifecycle_entity().read(cx).ready_view(&id) {
                 view.update(cx, |view, _| {
                     if let Err(error) = view.forward() {
-                        log::debug!("preview: failed to navigate forward during teardown: {error}");
+                        log::debug!("preview: failed to navigate forward: {error}");
                     }
                 });
             }

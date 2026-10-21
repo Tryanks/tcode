@@ -8,8 +8,10 @@
 //!
 //! ## Where a backend exists
 //!
-//! macOS, Windows and Android, and only with the `native-preview` feature. Linux is
-//! currently excluded by the backend's platform gates.
+//! macOS, Windows and Android, and only with the `native-preview` feature.
+//! Tcode's Linux client uses GPUI's calloop backend on Wayland or X11, while
+//! `gpui-webview` requires the application to start in X11 windowing mode and
+//! drives GTK from GPUI. Tcode does not opt into that setup, so Linux is excluded.
 //! Android hosts activity-owned WebViews through JNI. iOS and the browser have
 //! no child-view seam. Those clients render
 //! the same panel with open-externally and copy-URL, and answer every automation
@@ -37,9 +39,9 @@
 //!
 //! On macOS, `gpui-webview` uses GPUI Fast composition to put deferred GPUI
 //! overlays above the native page. Its element owns document bounds and clipping.
-//! The live window-zoom check still left GPUI overlays unpainted while the native
-//! page moved, so palette and compact-menu hiding remain on macOS as well as
-//! Windows and Android. Panel close, tab/conversation switch and route changes
+//! GPUI overlays are not reliably painted above the page after a window resize,
+//! so the palette and the compact menu still hide the page on every platform.
+//! Panel close, tab/conversation switch and route changes
 //! hide inactive pages without discarding their loaded documents.
 
 use gpui::{
