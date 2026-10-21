@@ -502,13 +502,19 @@ impl RenderOnce for Textarea {
 #[derive(IntoElement)]
 pub struct NumberInput {
     state: Entity<InputState>,
+    accessibility_label: Option<SharedString>,
 }
 
 impl NumberInput {
     pub fn new(state: &Entity<InputState>) -> Self {
         Self {
             state: state.clone(),
+            accessibility_label: None,
         }
+    }
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
     }
 }
 
@@ -517,6 +523,9 @@ impl RenderOnce for NumberInput {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let focused = self.state.read(cx).focus_handle(cx).is_focused(window);
         gpui_base::NumberInput::new(&self.state)
+            .when_some(self.accessibility_label, |this, label| {
+                this.accessibility_label(label)
+            })
             .controls_right()
             .w(px(material::NUMBER_INPUT_WIDTH))
             .h(px(material::input_height(compact)))
