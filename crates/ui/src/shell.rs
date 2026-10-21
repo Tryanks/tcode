@@ -2361,7 +2361,8 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let shell = cx.entity().downgrade();
-        div().relative().size_full().child(stack).child(
+        // Edge capture must run before ScrollBounce can consume the release packet.
+        div().relative().size_full().children([
             canvas(
                 |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                 move |bounds, hitbox, window, _| {
@@ -2469,8 +2470,10 @@ impl AppShell {
                 },
             )
             .absolute()
-            .inset_0(),
-        )
+            .inset_0()
+            .into_any_element(),
+            stack.into_any_element(),
+        ])
     }
 
     fn render_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
