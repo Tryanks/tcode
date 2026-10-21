@@ -189,6 +189,7 @@ struct ShellAttachment {
     /// appears mid-session, is that minimum. Left alone, the diff panel opens
     /// pinned to its 320px floor.
     split: Entity<ResizableState>,
+    collapsed_split: Entity<ResizableState>,
     /// The width the right panel opens at: the default until the user drags the
     /// panel's own handle, then whatever they chose (for this run). A sidebar
     /// drag never changes it, even when it squeezes the panel.
@@ -201,14 +202,7 @@ struct ShellAttachment {
     /// docks and on every window width change: the group rescales its panels
     /// by ratio and so drifts the panel off the width the user chose.
     right_restore_pending: bool,
-    /// Stable expanded-sidebar width. The resizable component otherwise scales
-    /// every panel proportionally when the window enters or leaves fullscreen —
-    /// and a trip through the compact layout is such a resize, so this is also
-    /// what restores the split when the window widens again.
     sidebar_width: Rc<Cell<Pixels>>,
-    /// Keep restoring the sidebar width until the panel reports it, then stop
-    /// so the restore never fights an in-progress drag.
-    sidebar_restore_pending: bool,
     /// Collapsed-only overlay visibility. Purely transient and never persisted;
     /// expanded/non-workspace renders clear it synchronously.
     sidebar_overlay_visible: bool,
@@ -287,7 +281,7 @@ pub struct AppShell {
     /// open transition.
     palette_was_open: bool,
     /// Viewport width and sidebar collapse last seen by render; a change in
-    /// either re-lays the split out, which arms the sidebar and panel restores.
+    /// either re-lays the split out, which arms the right-panel restores.
     last_split_layout: Option<(Pixels, bool)>,
     /// The title last given to the OS window. The title is in the current
     /// language, and a language switch reaches the shell only as a redraw.
@@ -846,6 +840,7 @@ impl AppShell {
             preview,
             sidebar,
             split: cx.new(|_| ResizableState::default()),
+            collapsed_split: cx.new(|_| ResizableState::default()),
             right_width: Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH))),
             floating_split: cx.new(|_| ResizableState::default()),
             floating_focus: cx.new(|cx| {
@@ -861,7 +856,6 @@ impl AppShell {
             floating_restore_pending: true,
             right_restore_pending: true,
             sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
-            sidebar_restore_pending: false,
             sidebar_overlay_visible: false,
             observed_session_id,
             adopted: false,
@@ -2484,7 +2478,7 @@ impl AppShell {
             self.sync_nav(NavMotion::Immediate, cx);
         }
         let width = window.viewport_size().width;
-        // gpui-base 0.7.3 exposes NavPage::progress read-only and mounts the
+        // gpui-base exposes NavPage::progress read-only and mounts the
         // previous entry only after pop. Bind interactive progress here, at the
         // navigation owner, until base supplies that API. Retain the same views;
         // compact ChatView excludes the terminal, so Thread and Panel never
@@ -2844,43 +2838,19 @@ impl AppShell {
         // The right panel is the last of three panels (sidebar · chat · right),
         // and the sidebar is only a panel when it is expanded.
         let right_ix = if collapsed { 1 } else { 2 };
+        // Panel state is indexed by position; the two group shapes need their
+        // own state so the chat's size never becomes the sidebar's size.
+        let split = if collapsed {
+            attachment.collapsed_split.clone()
+        } else {
+            attachment.split.clone()
+        };
 
-        // gpui-component preserves panel *ratios* when its container changes
-        // width. Fullscreen is a container resize, but the sidebar is a fixed
-        // navigation column: restore its remembered pixel width when the window
-        // width changes. Only then — an every-frame restore would snap the
-        // panel back mid-drag (`on_resize` records the width only on mouse-up).
-        // The rescale lands on the frame where the group measures its new
-        // container, which can trail the viewport change — so keep restoring
-        // until the width matches, then stop. A return from the compact layout
-        // is such a change, which is why the split comes back as it was.
-        // Collapsing or expanding the sidebar changes the group's panel count,
-        // which rescales it the same way.
         let viewport_width = window.viewport_size().width;
         let layout_changed = self.last_split_layout != Some((viewport_width, collapsed));
         if layout_changed {
             self.last_split_layout = Some((viewport_width, collapsed));
-            attachment.sidebar_restore_pending = true;
             attachment.right_restore_pending = true;
-        }
-        if attachment.sidebar_restore_pending && !collapsed {
-            let width = attachment.sidebar_width.get();
-            let restored = attachment
-                .split
-                .update(cx, |state, cx| match state.sizes().first() {
-                    Some(size) if *size != width => {
-                        state.resize_panel(0, width, window, cx);
-                        false
-                    }
-                    Some(_) => true,
-                    None => false,
-                });
-            // The rescale happens while the group lays out, which is after this
-            // runs — so a match on the very frame the layout changed is the
-            // *old* width, not a settled one. Never stop on that frame.
-            if restored && !layout_changed {
-                attachment.sidebar_restore_pending = false;
-            }
         }
 
         // Too narrow for the chat and the panel side by side: the panel floats
@@ -2933,29 +2903,23 @@ impl AppShell {
         // Give the docked right panel its width, as much of it as leaves the
         // chat its minimum, once the group knows about the panel (its count is
         // synced while the group renders, so this lands on the frame after it
-        // docks — the group notifies, so that frame comes) and once the sidebar
-        // has its width back, since the panel's room is what the sidebar leaves.
+        // docks — the group notifies, so that frame comes).
         if !(right_docked && chat_visible) {
             attachment.right_restore_pending = true;
-        } else if attachment.right_restore_pending
-            && (collapsed || !attachment.sidebar_restore_pending)
-        {
+        } else if attachment.right_restore_pending {
             let width = attachment
                 .right_width
                 .get()
                 .min(beside_sidebar - chat_min)
                 .max(px(RIGHT_PANEL_MIN_WIDTH));
-            let restored =
-                attachment
-                    .split
-                    .update(cx, |state, cx| match state.sizes().get(right_ix) {
-                        Some(size) if (f32::from(*size) - f32::from(width)).abs() > 0.5 => {
-                            state.resize_panel(right_ix, width, window, cx);
-                            false
-                        }
-                        Some(_) => true,
-                        None => false,
-                    });
+            let restored = split.update(cx, |state, cx| match state.sizes().get(right_ix) {
+                Some(size) if (f32::from(*size) - f32::from(width)).abs() > 0.5 => {
+                    state.resize_panel(right_ix, width, window, cx);
+                    false
+                }
+                Some(_) => true,
+                None => false,
+            });
             // A match on the frame the layout changed is the old layout, not a
             // settled one.
             if restored && !layout_changed {
@@ -3003,11 +2967,8 @@ impl AppShell {
                     .shadow_sm()
                     .children(docked_panel),
             );
-        // Expanded, the panel's own handle has no chat to trade width with,
-        // and a drag on it would choose the width Restore returns to. gpui-base
-        // cannot switch a single handle off through its API, but a covered
-        // handle stays idle: occlude its band, 4pt either side of the
-        // panel's left edge.
+        // gpui-base has no API to disable one handle in a group; cover the
+        // expanded panel's handle so dragging it cannot change its restored width.
         let handle_cover = (!chat_visible).then(|| {
             div()
                 .absolute()
@@ -3068,7 +3029,6 @@ impl AppShell {
 
         let remembered_right = attachment.right_width.clone();
         let remembered_sidebar = attachment.sidebar_width.clone();
-        let split = attachment.split.clone();
         let sidebar = attachment.sidebar.clone();
         let overlay_width = attachment.sidebar_width.get();
         let overlay_visible = attachment.sidebar_overlay_visible;
@@ -3178,8 +3138,8 @@ impl AppShell {
                     group("workspace-panels")
                         .child(
                             resizable_panel()
-                                .flex_none()
-                                .size(px(SIDEBAR_WIDTH))
+                                .fixed()
+                                .size(overlay_width)
                                 .size_range(px(220.)..px(380.))
                                 .child(sidebar),
                         )
@@ -6236,14 +6196,10 @@ mod tests {
         shell.read_with(cx, |shell, cx| {
             assert!(!shell.compact(cx), "1024px is the wide split");
         });
-        // Stand in for a sidebar drag, so the restore has something to restore.
-        shell.update(cx, |shell, _| {
-            shell
-                .attachment
-                .as_ref()
-                .expect("attached")
-                .sidebar_width
-                .set(px(300.));
+        draw(cx);
+        draw(cx);
+        let sidebar_width = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().unwrap().split.read(cx).sizes()[0]
         });
         let composer = shell.read_with(cx, |shell, cx| {
             shell
@@ -6317,9 +6273,6 @@ mod tests {
         }
 
         resize(cx, 1024.);
-        // The resizable group rescales its panels proportionally when its
-        // container changes, and reports the new width a frame later; the
-        // restore keeps snapping the sidebar back until it takes.
         draw(cx);
         draw(cx);
         shell.read_with(cx, |shell, cx| {
@@ -6334,7 +6287,7 @@ mod tests {
                     .sizes()
                     .first()
                     .copied(),
-                Some(px(300.)),
+                Some(sidebar_width),
                 "the wide split comes back at the width it was left at"
             );
         });

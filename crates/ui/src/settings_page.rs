@@ -1725,9 +1725,10 @@ impl SettingsPage {
                 reset,
                 cx,
             ))
-            .child(crate::widgets::input::NumberInput::new(
-                &self.remote_attachment_limit_input.state,
-            ))
+            .child(
+                crate::widgets::input::NumberInput::new(&self.remote_attachment_limit_input.state)
+                    .accessibility_label(crate::tr!("settings.remote_attachment_limit.title")),
+            )
             .into_any_element()
     }
 

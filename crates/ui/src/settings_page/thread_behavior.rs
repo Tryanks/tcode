@@ -95,9 +95,10 @@ impl SettingsPage {
                         None,
                         cx,
                     ))
-                    .child(crate::widgets::input::NumberInput::new(
-                        &self.auto_settle_input.state,
-                    ))
+                    .child(
+                        crate::widgets::input::NumberInput::new(&self.auto_settle_input.state)
+                            .accessibility_label(crate::tr!("settings.auto_settle.days")),
+                    )
                     .into_any_element(),
             );
         }
@@ -495,7 +496,10 @@ impl Render for ProjectRulesEditor {
                         .text_color(cx.theme().muted_foreground)
                         .child(crate::tr!("settings.auto_settle.days")),
                 )
-                .child(crate::widgets::input::NumberInput::new(&self.days));
+                .child(
+                    crate::widgets::input::NumberInput::new(&self.days)
+                        .accessibility_label(crate::tr!("settings.auto_settle.days")),
+                );
         }
         content = content
             .child(
