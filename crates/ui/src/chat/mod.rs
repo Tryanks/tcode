@@ -4276,19 +4276,16 @@ mod tests {
     /// display spaces them: gpui-base's scrollbar motion reads the wall clock,
     /// and GPUI's animations the test clock.
     fn settle_frames(cx: &mut gpui::VisualTestContext) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        const FRAME_BUDGET: usize = 320;
+        for _ in 0..FRAME_BUDGET {
             cx.run_until_parked();
             if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
                 return;
             }
-            assert!(
-                Instant::now() < deadline,
-                "the window kept asking for frames"
-            );
             std::thread::sleep(Duration::from_millis(16));
             cx.executor().advance_clock(Duration::from_millis(16));
         }
+        panic!("the window kept asking for frames after the {FRAME_BUDGET}-frame budget");
     }
 
     #[test]
