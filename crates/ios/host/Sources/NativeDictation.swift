@@ -9,7 +9,11 @@ private enum DictationFailure: Error {
 
 @MainActor
 private enum Dictation {
-    static var sessions: [UInt64: NativeDictation] = [:]
+    /// A capturing session keeps the screen on: the idle timer would
+    /// otherwise lock the phone mid-dictation, which ends the capture.
+    static var sessions: [UInt64: NativeDictation] = [:] {
+        didSet { UIApplication.shared.isIdleTimerDisabled = !sessions.isEmpty }
+    }
     static var availability: [String: Bool] = [:]
     static var cleanup: Task<Void, Never>?
     static var permissionsAllowed: Bool?
