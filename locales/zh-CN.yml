@@ -1411,6 +1411,7 @@ mobile:
   offline_message: "离线，重连后可发送"
   offline_action: "离线，重连后可操作"
   queue: "排队"
+  steer: "引导"
   command_requested: "执行命令"
   files_requested: "修改文件"
   read_requested: "读取文件"
