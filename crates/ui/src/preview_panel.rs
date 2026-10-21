@@ -3,16 +3,13 @@
 //! The panel itself is shared by every client: the URL field, open-externally,
 //! copy-URL, the per-conversation URL/canvas state and the loading/error copy
 //! are ordinary replicated-store UI. What is native is the embedded browser —
-//! creating a `gpui-wry` child view, driving its history and JS, and snapshotting
+//! creating a `gpui-webview` child view, driving its history and JS, and snapshotting
 //! it — and that lives behind [`PREVIEW_BACKEND`].
 //!
 //! ## Where a backend exists
 //!
 //! macOS, Windows and Android, and only with the `native-preview` feature. Linux is
-//! excluded on purpose: lb-wry's `build_as_child` is X11-only there *and*
-//! requires a GTK main loop (`gtk::init` plus `gtk::main_iteration_do` pumped on
-//! the UI thread), while gpui's Linux backend runs calloop/xcb and never pumps
-//! GTK — the webview would panic at construction and could never be driven.
+//! currently excluded by the backend's platform gates.
 //! Android hosts activity-owned WebViews through JNI. iOS and the browser have
 //! no child-view seam. Those clients render
 //! the same panel with open-externally and copy-URL, and answer every automation
@@ -36,14 +33,14 @@
 //! webview; `preview_status` reports it as `load_error` and `preview_wait_for`
 //! fails with it instead of waiting out its timeout.
 //!
-//! ## Known caveat — native overlay
+//! ## Native overlays
 //!
-//! A `gpui-wry` WebView is a **native child view drawn over** the gpui window,
-//! not composited into gpui's scene. It therefore covers any gpui popover /
-//! dialog that overlaps its bounds. We mitigate the common case by hiding the
-//! WebView whenever its owning Preview panel closes, another right-panel tab or
-//! conversation is selected, the command palette opens, or we leave the chat
-//! route. Other overlapping GPUI popovers can still be covered by the native view.
+//! On macOS, `gpui-webview` uses GPUI Fast composition to put deferred GPUI
+//! overlays above the native page. Its element owns document bounds and clipping.
+//! The live window-zoom check still left GPUI overlays unpainted while the native
+//! page moved, so palette and compact-menu hiding remain on macOS as well as
+//! Windows and Android. Panel close, tab/conversation switch and route changes
+//! hide inactive pages without discarding their loaded documents.
 
 use gpui::{
     AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,

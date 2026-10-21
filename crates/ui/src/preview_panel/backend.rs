@@ -276,7 +276,16 @@ impl PreviewPanel {
 
     fn go_forward(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.active_key(cx) {
+            #[cfg(target_os = "android")]
             self.eval_fire(&id, "history.forward();", cx);
+            #[cfg(not(target_os = "android"))]
+            if let Some(view) = self.lifecycle_entity().read(cx).ready_view(&id) {
+                view.update(cx, |view, _| {
+                    if let Err(error) = view.forward() {
+                        log::debug!("preview: failed to navigate forward during teardown: {error}");
+                    }
+                });
+            }
         }
     }
 

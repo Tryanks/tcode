@@ -624,12 +624,6 @@ impl BrowserLifecycle {
         } else {
             false
         };
-        if let Err(error) = raw.set_bounds(wry::Rect::default()) {
-            log::debug!("preview: failed to reset created webview bounds for {key}: {error}");
-        }
-        if let Err(error) = raw.set_visible(false) {
-            log::debug!("preview: failed to hide created webview for {key}: {error}");
-        }
         let webview = cx.new(|cx| {
             let mut view = WebView::new(raw, window, cx);
             set_webview_visible(&mut view, false);
@@ -644,16 +638,17 @@ impl BrowserLifecycle {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn set_webview_visible(view: &mut WebView, visible: bool) {
-    // gpui-webview keeps its own visibility bit but does not expose the native
-    // result. Repeat the idempotent native operation once so teardown races are
-    // observable instead of silently discarded.
+    if let Err(error) = view.set_visible(visible) {
+        log::debug!("preview: failed to set webview visibility to {visible}: {error}");
+    }
+}
+
+#[cfg(target_os = "android")]
+fn set_webview_visible(view: &mut WebView, visible: bool) {
     if visible {
         view.show();
-        #[cfg(not(target_os = "android"))]
-        if let Err(error) = view.raw().set_visible(true) {
-            log::debug!("preview: failed to show native webview: {error}");
-        }
     } else {
         view.hide();
         if let Err(error) = view.raw().focus_parent() {
@@ -667,8 +662,6 @@ fn set_webview_visible(view: &mut WebView, visible: bool) {
 
 #[cfg(not(any(target_os = "windows", target_os = "android")))]
 mod platform {
-    use raw_window_handle::HasWindowHandle as _;
-
     use super::*;
 
     pub(super) struct Adapter;
@@ -700,27 +693,16 @@ mod platform {
                 return Availability::Unavailable;
             }
         };
-        let built = window
-            .window_handle()
-            .map_err(|error| error.to_string())
-            .and_then(|handle| {
-                builder
-                    .build_as_child(&handle)
-                    .map_err(|error| error.to_string())
-            });
-        let raw = match built {
-            Ok(raw) => raw,
+        let built = WebView::build(builder, window, cx);
+        let webview = match built {
+            Ok(webview) => cx.new(|_| webview),
             Err(error) => {
-                lifecycle.record_unavailable(error, cx);
+                lifecycle.record_unavailable(error.to_string(), cx);
                 return Availability::Unavailable;
             }
         };
-        load_error::install(&raw);
-        let webview = cx.new(|cx| {
-            let mut view = WebView::new(raw, window, cx);
-            set_webview_visible(&mut view, false);
-            view
-        });
+        load_error::install(webview.read(cx).raw());
+        webview.update(cx, |view, _| set_webview_visible(view, false));
         #[cfg(target_os = "macos")]
         let remote = lifecycle
             .endpoint
