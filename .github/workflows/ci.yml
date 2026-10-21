@@ -19,6 +19,8 @@ env:
   # No debug info in CI test builds: smaller target directory, smaller cache.
   CARGO_PROFILE_DEV_DEBUG: 0
   RUST_BACKTRACE: 1
+  # Temporary (Tlens test-timing PR, not for merge): print every test with its duration.
+  NEXTEST_STATUS_LEVEL: pass
 
 jobs:
   desktop:
