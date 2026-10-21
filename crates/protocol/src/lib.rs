@@ -176,11 +176,12 @@ pub use wire::{
 // CommandOutputReplaced event, pushed while a command's output grows, which
 // replace the RenderStoredOutput query and the TerminalFrame query response.
 //
-// Unreleased: AgentStatus gains `report`, what a dispatched child owes its
-// lead (none, expected, reported, unreported, failed), and SessionMeta carries
-// the child's `expectation`; the protocol adds the CompactContext command,
-// which asks a provider with a native compaction operation to compact now.
-pub const PROTOCOL_VERSION: u32 = 14;
+// Version 15 (v0.2.7): AgentStatus gains `report`, what a dispatched child
+// owes its lead (none, expected, reported, unreported, failed), and
+// SessionMeta carries the child's `expectation`; the protocol adds the
+// CompactContext command, which asks a provider with a native compaction
+// operation to compact now.
+pub const PROTOCOL_VERSION: u32 = 15;
 
 #[cfg(test)]
 mod tests;
