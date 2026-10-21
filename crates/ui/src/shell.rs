@@ -3079,7 +3079,11 @@ impl AppShell {
             div()
                 .relative()
                 .size_full()
-                .child(group("chat-diff-panels").child(chat_panel).child(right))
+                .child(
+                    group("chat-diff-panels")
+                        .child(chat_panel)
+                        .when(right_docked, |group| group.child(right)),
+                )
                 .children(handle_cover)
                 .children(floating_right)
                 // This fixed transparent strip only opens the overlay. Its
@@ -3144,7 +3148,7 @@ impl AppShell {
                                 .child(sidebar),
                         )
                         .child(chat_panel)
-                        .child(right),
+                        .when(right_docked, |group| group.child(right)),
                 )
                 .children(handle_cover)
                 .children(floating_right)
@@ -6198,8 +6202,19 @@ mod tests {
         });
         draw(cx);
         draw(cx);
-        let sidebar_width = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().split.read(cx).sizes()[0]
+        let from = gpui::point(px(SIDEBAR_WIDTH), px(400.));
+        let to = gpui::point(px(300.), px(400.));
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        for step in [from + gpui::point(px(5.), px(0.)), to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), gpui::Modifiers::default());
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            let attachment = shell.attachment.as_ref().unwrap();
+            assert_eq!(attachment.split.read(cx).sizes()[0], px(300.));
+            assert_eq!(attachment.sidebar_width.get(), px(300.));
         });
         let composer = shell.read_with(cx, |shell, cx| {
             shell
@@ -6287,7 +6302,7 @@ mod tests {
                     .sizes()
                     .first()
                     .copied(),
-                Some(sidebar_width),
+                Some(px(300.)),
                 "the wide split comes back at the width it was left at"
             );
         });
