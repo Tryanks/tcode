@@ -175,6 +175,21 @@ struct ApproveParams {
     cancel: bool,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AnswerParams {
+    #[schemars(description = "Child thread id from the pending question callback.")]
+    thread_id: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Pending question request id from the callback. May be omitted; a child has at most one pending question."
+    )]
+    request_id: Option<String>,
+    #[schemars(
+        description = "One entry per question, keyed by the question id from the callback: a string (an option label or free text) for a single-choice question, an array of strings for a multi_select one."
+    )]
+    answers: serde_json::Map<String, serde_json::Value>,
+}
+
 #[derive(Clone)]
 pub struct OrchestrateTools {
     broker: Broker,
@@ -355,6 +370,22 @@ impl OrchestrateTools {
                 request_id: p.request_id,
                 option: p.option,
                 cancel: p.cancel,
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Answer a child thread's pending question (its request_user_input, blocking or async) from the question callback. answers has one entry per question keyed by question id: a string for a single-choice question (an option label or free text), an array of strings for a multi_select one. Decide from the brief and the user's instructions."
+    )]
+    async fn answer(&self, Parameters(p): Parameters<AnswerParams>) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::Answer {
+                parent_id: self.parent_id.clone(),
+                thread_id: p.thread_id,
+                request_id: p.request_id,
+                answers: p.answers,
             },
         )
         .await
@@ -611,6 +642,38 @@ mod tests {
                 .await;
             assert_eq!(result.is_error, Some(false));
         }
+        resolver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn question_answers_reach_runtime_keyed_by_question_id() {
+        let (tx, rx) = async_channel::unbounded();
+        let tools = OrchestrateTools::new(
+            broker(tx, std::time::Duration::from_secs(30)),
+            "parent".into(),
+        );
+        let resolver = tokio::spawn(async move {
+            let request = rx.recv().await.unwrap();
+            assert!(matches!(request.op, OrchestrateOp::Answer {
+                parent_id, thread_id, request_id: Some(request_id), answers,
+            } if parent_id == "parent" && thread_id == "child" && request_id == "q-1"
+                && answers == serde_json::json!({"lang": "Rust", "targets": ["ios", "android"]}).as_object().cloned().unwrap()));
+            request
+                .reply
+                .send(Ok(serde_json::json!({"ok":true, "request_id":"q-1"})))
+                .await
+                .unwrap();
+        });
+        let result = tools
+            .answer(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "thread_id":"child", "request_id":"q-1",
+                    "answers": {"lang": "Rust", "targets": ["ios", "android"]}
+                }))
+                .unwrap(),
+            ))
+            .await;
+        assert_eq!(result.is_error, Some(false));
         resolver.await.unwrap();
     }
 

@@ -4209,6 +4209,217 @@ fn child_native_approval_callback_and_approve_tool_preserve_options_and_scope() 
 }
 
 #[test]
+fn child_questions_reach_the_lead_and_the_answer_tool_answers_them() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-child-questions");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
+    let (child_commands, child_receiver) = smol::channel::unbounded();
+    state.update(cx, |state, cx| {
+        let mut parent = live_session(ProviderKind::Codex, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        let mut child = live_session(ProviderKind::Codex, child_commands);
+        child.meta.id = "child".into();
+        child.meta.parent_session_id = Some("parent".into());
+        state
+            .sessions
+            .extend([parent.meta.clone(), child.meta.clone()]);
+        state.residents.parked.insert("parent".into(), parent);
+        state.residents.parked.insert("child".into(), child);
+        let questions = vec![
+            agent::UserInputQuestion {
+                id: "lang".into(),
+                header: "Language".into(),
+                question: "Which language?".into(),
+                options: vec![agent::UserInputOption {
+                    label: "Rust".into(),
+                    description: "Native".into(),
+                }],
+                multi_select: false,
+                prefill: None,
+            },
+            agent::UserInputQuestion {
+                id: "targets".into(),
+                header: "Targets".into(),
+                question: "Which targets?".into(),
+                options: vec![
+                    agent::UserInputOption {
+                        label: "ios".into(),
+                        description: String::new(),
+                    },
+                    agent::UserInputOption {
+                        label: "android".into(),
+                        description: String::new(),
+                    },
+                ],
+                multi_select: true,
+                prefill: None,
+            },
+        ];
+        for (n, mode, delivery) in [
+            (
+                0,
+                ChildApprovalMode::Auto,
+                agent::UserInputDelivery::Blocking,
+            ),
+            (
+                1,
+                ChildApprovalMode::Manual,
+                agent::UserInputDelivery::Async,
+            ),
+        ] {
+            state.settings.orchestrate.child_approval = mode;
+            let request_id = format!("question-{n}");
+            state.on_event(
+                "child",
+                AgentEvent::UserInputRequested {
+                    request_id: request_id.clone(),
+                    questions: questions.clone(),
+                    delivery,
+                },
+                cx,
+            );
+            assert!(
+                child_receiver.try_recv().is_err(),
+                "a question is never answered automatically"
+            );
+            let SessionCommand::Steer { text, .. } = parent_receiver.try_recv().unwrap() else {
+                panic!("question must reach lead")
+            };
+            assert!(text.contains(&request_id), "{text}");
+            let asked = text
+                .split_once("Questions: ")
+                .unwrap()
+                .1
+                .split_once(". ")
+                .unwrap()
+                .0;
+            let asked: Vec<agent::UserInputQuestion> = serde_json::from_str(asked).unwrap();
+            assert_eq!(asked, questions);
+            assert!(
+                text.contains(if delivery.is_blocking() {
+                    "blocked until"
+                } else {
+                    "keeps working"
+                }),
+                "{text}"
+            );
+            assert!(
+                text.contains(if mode == ChildApprovalMode::Manual {
+                    "The user answers in the child thread."
+                } else {
+                    "use the answer tool"
+                }),
+                "{text}"
+            );
+            let answers = |value: serde_json::Value| value.as_object().cloned().unwrap();
+            for (parent, request, answers, error) in [
+                (
+                    "other-parent",
+                    None,
+                    answers(serde_json::json!({"lang": "Rust", "targets": []})),
+                    "not a child",
+                ),
+                (
+                    "parent",
+                    Some("missing"),
+                    answers(serde_json::json!({"lang": "Rust", "targets": []})),
+                    "no pending question with that request_id",
+                ),
+                (
+                    "parent",
+                    None,
+                    answers(serde_json::json!({"lang": "Rust", "colour": "red"})),
+                    "unknown question id",
+                ),
+                (
+                    "parent",
+                    None,
+                    answers(serde_json::json!({"lang": "Rust"})),
+                    "missing answers for question ids [\"targets\"]",
+                ),
+            ] {
+                let (reply, response) = smol::channel::bounded(1);
+                state.handle_orchestrate_op(
+                    orchestrate_mcp::OrchestrateOp::Answer {
+                        parent_id: parent.into(),
+                        thread_id: "child".into(),
+                        request_id: request.map(str::to_string),
+                        answers,
+                    },
+                    reply,
+                    cx,
+                );
+                let refused = response.try_recv().unwrap().unwrap_err();
+                assert!(refused.contains(error), "{refused}");
+                assert!(child_receiver.try_recv().is_err());
+            }
+            let answers =
+                answers(serde_json::json!({"lang": "Rust", "targets": ["ios", "android"]}));
+            let (reply, response) = smol::channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Answer {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    request_id: Some(request_id.clone()),
+                    answers: answers.clone(),
+                },
+                reply,
+                cx,
+            );
+            assert_eq!(
+                response.try_recv().unwrap().unwrap()["request_id"],
+                request_id
+            );
+            let SessionCommand::RespondUserInput {
+                request_id: delivered,
+                answers: sent,
+            } = child_receiver.try_recv().unwrap()
+            else {
+                panic!("missing answer")
+            };
+            assert_eq!(delivered, request_id);
+            assert_eq!(sent, answers);
+            state.on_event(
+                "child",
+                AgentEvent::UserInputResolved {
+                    request_id,
+                    answers,
+                },
+                cx,
+            );
+            assert!(
+                state
+                    .resident("child")
+                    .unwrap()
+                    .timeline
+                    .pending_user_input
+                    .is_none()
+            );
+            let (reply, response) = smol::channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Answer {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    request_id: None,
+                    answers: serde_json::Map::new(),
+                },
+                reply,
+                cx,
+            );
+            assert!(
+                response
+                    .try_recv()
+                    .unwrap()
+                    .unwrap_err()
+                    .contains("no pending question")
+            );
+        }
+    });
+}
+
+#[test]
 fn resident_background_child_result_uses_completed_live_timeline() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-resident-result-test");
