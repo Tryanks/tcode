@@ -3937,7 +3937,7 @@ impl Render for ChatView {
                 .py(timeline_inset(cx))
                 .child(crate::scroll::page_viewport(
                     "timeline-bounce",
-                    crate::wheel_easing::Handle::List(self.list_state.clone()),
+                    &self.list_state,
                     timeline,
                 ))
                 .when(!window.is_inspector_picking(cx), |timeline| {
@@ -5725,6 +5725,7 @@ mod tests {
         assert!(cx.debug_bounds("scroll-to-end").is_none());
     }
 
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
     #[gpui::test]
     fn timeline_bounces_at_its_edges_without_moving_the_list(cx: &mut TestAppContext) {
         use gpui::{
@@ -5737,8 +5738,7 @@ mod tests {
                 self.0.clone()
             }
         }
-        // One turn fits the viewport, so every pan is at an edge.
-        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(1));
+        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
         window_state.update(cx, |state, _| state.compact = true);
         let (root, cx) = cx.add_window_view(|window, cx| {
             TouchChat(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
@@ -5749,51 +5749,71 @@ mod tests {
             let _ = window.draw(cx);
         });
         let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
-        let resting = list.viewport_bounds();
-        assert_eq!(list.max_offset_for_scrollbar().y, px(0.));
-        let row = cx.debug_bounds("timeline-row-0").expect("the only row");
-        let composer = cx.debug_bounds("chat-composer").expect("composer");
-        let touch = |phase, y: gpui::Pixels, cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| {
-                window.dispatch_event(
-                    PlatformInput::Touch(TouchEvent {
-                        id: TouchId(1),
-                        phase,
-                        position: point(resting.center().x, y),
-                        predicted_position: None,
-                        force: None,
-                    }),
-                    cx,
-                );
-                let _ = window.draw(cx);
-            });
-        };
-        let start = resting.top() + px(20.);
-        touch(TouchPhase::Started, start, cx);
-        touch(TouchPhase::Moved, start + px(200.), cx);
-        let stretched = list.viewport_bounds();
-        assert!(
-            stretched.top() > resting.top(),
-            "a pan past the top stretches the timeline: {stretched:?} vs {resting:?}"
-        );
-        assert_eq!(stretched.size, resting.size);
-        assert_eq!(
-            list.scroll_px_offset_for_scrollbar().y,
-            px(0.),
-            "the stretch is a displacement, not a scroll"
-        );
-        let stretched_row = cx.debug_bounds("timeline-row-0").expect("the only row");
-        assert_eq!(
-            stretched_row.top() - row.top(),
-            stretched.top() - resting.top()
-        );
-        assert_eq!(
-            cx.debug_bounds("chat-composer").expect("composer"),
-            composer,
-            "fixed chrome stays outside the stretch"
-        );
-        touch(TouchPhase::Cancelled, start + px(200.), cx);
-        assert_eq!(list.scroll_px_offset_for_scrollbar().y, px(0.));
+        assert!(list.max_offset_for_scrollbar().y > px(0.));
+        for at_end in [false, true] {
+            settle_frames(cx);
+            list.set_follow_mode(gpui::FollowMode::Normal);
+            if at_end {
+                list.scroll_to_end();
+            } else {
+                list.scroll_to(gpui::ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.),
+                });
+            }
+            draw(cx);
+            let resting = list.viewport_bounds();
+            let offset = list.scroll_px_offset_for_scrollbar().y;
+            let row_selector = if at_end {
+                "timeline-row-89"
+            } else {
+                "timeline-row-0"
+            };
+            let row = cx.debug_bounds(row_selector).expect("edge row");
+            let composer = cx.debug_bounds("chat-composer").expect("composer");
+            let touch = |phase, y: gpui::Pixels, cx: &mut gpui::VisualTestContext| {
+                cx.update(|window, cx| {
+                    window.dispatch_event(
+                        PlatformInput::Touch(TouchEvent {
+                            id: TouchId(1),
+                            phase,
+                            position: point(resting.center().x, y),
+                            predicted_position: None,
+                            force: None,
+                        }),
+                        cx,
+                    );
+                    let _ = window.draw(cx);
+                });
+            };
+            let direction = if at_end { -1. } else { 1. };
+            let start = resting.center().y;
+            touch(TouchPhase::Started, start, cx);
+            touch(TouchPhase::Moved, start + px(200. * direction), cx);
+            let stretched = list.viewport_bounds();
+            assert!(
+                (stretched.top() - resting.top()) * direction > px(0.),
+                "an outward pan stretches the timeline: {stretched:?} vs {resting:?}"
+            );
+            assert_eq!(stretched.size, resting.size);
+            assert_eq!(
+                list.scroll_px_offset_for_scrollbar().y,
+                offset,
+                "the stretch is a displacement, not a scroll"
+            );
+            let stretched_row = cx.debug_bounds(row_selector).expect("edge row");
+            assert_eq!(
+                stretched_row.top() - row.top(),
+                stretched.top() - resting.top()
+            );
+            assert_eq!(
+                cx.debug_bounds("chat-composer").expect("composer"),
+                composer,
+                "fixed chrome stays outside the stretch"
+            );
+            touch(TouchPhase::Cancelled, start + px(200. * direction), cx);
+            assert_eq!(list.scroll_px_offset_for_scrollbar().y, offset);
+        }
     }
 
     #[gpui::test]
@@ -6841,8 +6861,9 @@ mod tests {
             store.read_with(cx, |store, _| store.with_active_timeline(Timeline::clone))
         };
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        // One trackpad gesture.
+        // Let the previous edge return before the next gesture catches it.
         let scroll = |distance: gpui::Pixels, cx: &mut VisualTestContext| {
+            settle_frames(cx);
             let position = list.viewport_bounds().center();
             for (touch_phase, distance) in [
                 (gpui::TouchPhase::Started, px(0.)),

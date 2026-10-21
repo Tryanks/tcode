@@ -3295,25 +3295,21 @@ impl Render for AppShell {
             .attachment
             .as_ref()
             .map(|attachment| attachment.palette.read(cx).outside_dismissal.clone());
-        crate::wheel_easing::root(
-            div()
-                .size_full()
-                // gpui-base transfers focus between controls, but leaves it
-                // intact on empty backgrounds. Mobile users need that tap to
-                // dismiss the software keyboard too.
-                .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                    if crate::window_seam::is_mobile(cx) && !window.default_prevented() {
-                        window.blur(cx);
-                    }
-                })
-                // Both layouts must select UI text explicitly: GPUI's default
-                // fallback stack prefers Lilex once the terminal font is loaded.
-                .font_family(cx.theme().font_family.clone())
-                .children(
-                    dismissal.map(|dismissal| dismissal.release_listener().into_any_element()),
-                )
-                .child(self.within_seam(body, window, cx)),
-        )
+        div()
+            .size_full()
+            // gpui-base transfers focus between controls, but leaves it
+            // intact on empty backgrounds. Mobile users need that tap to
+            // dismiss the software keyboard too.
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                if crate::window_seam::is_mobile(cx) && !window.default_prevented() {
+                    window.blur(cx);
+                }
+            })
+            // Both layouts must select UI text explicitly: GPUI's default
+            // fallback stack prefers Lilex once the terminal font is loaded.
+            .font_family(cx.theme().font_family.clone())
+            .children(dismissal.map(|dismissal| dismissal.release_listener().into_any_element()))
+            .child(self.within_seam(body, window, cx))
     }
 }
 

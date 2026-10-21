@@ -153,7 +153,7 @@ impl Render for PlanPanel {
 
         v_flex().size_full().child(crate::scroll::page_viewport(
             "plan-scroll-bounce",
-            crate::wheel_easing::Handle::Scroll(self.vscroll.clone()),
+            &self.vscroll,
             div()
                 .id("plan-scroll")
                 .flex_1()

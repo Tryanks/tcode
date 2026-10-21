@@ -504,10 +504,7 @@ fn render_inline_diff(key: &str, diff: &InlineDiff, cx: &App) -> AnyElement {
             .relative()
             .w_full()
             .min_w_0()
-            .child(crate::wheel_easing::register(
-                lines,
-                crate::wheel_easing::Handle::Scroll(scroll.clone()),
-            ))
+            .child(lines)
             .child(ScrollableMask::new(Axis::Vertical, &scroll).id(id.clone()))
             .child(ScrollableMask::new(Axis::Horizontal, &scroll).id(id)),
         cx,

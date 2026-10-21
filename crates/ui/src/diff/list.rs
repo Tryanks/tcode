@@ -501,7 +501,7 @@ pub(crate) fn render_list<H: DiffListHost>(
         .lock_scroll_axis()
         .child(crate::scroll::page_viewport(
             "diff-body-bounce",
-            crate::wheel_easing::Handle::List(list_state),
+            &list_state,
             rows,
         ))
         // Draws again once the viewport's width or offset settles elsewhere than the headers
