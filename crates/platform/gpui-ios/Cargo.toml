@@ -8,8 +8,8 @@ description = "iOS platform backend for gpui-fast (Metal via gpui_wgpu)"
 
 [dependencies]
 gpui-mobile-pacing = { path = "../frame-pacing" }
-gpui = { package = "gpui-fast", version = "0.1.7", default-features = false }
-gpui_wgpu = { package = "gpui-fast-wgpu", version = "0.1.7" }
+gpui = { package = "gpui-fast", version = "0.1.10", default-features = false }
+gpui_wgpu = { package = "gpui-fast-wgpu", version = "0.1.10" }
 anyhow = "1"
 log = "0.4"
 parking_lot = "0.12"
@@ -18,8 +18,8 @@ raw-window-handle = "0.6"
 smallvec = "1"
 
 [dev-dependencies]
-gpui = { package = "gpui-fast", version = "0.1.7", features = ["test-support"], default-features = false }
-gpui-base = { version = "0.7.3", features = ["gpui-fast"] }
+gpui = { package = "gpui-fast", version = "0.1.10", features = ["test-support"], default-features = false }
+gpui-base = { version = "0.8.0", features = ["gpui-fast"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 core-foundation = "0.10"

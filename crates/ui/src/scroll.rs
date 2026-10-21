@@ -22,8 +22,6 @@ use gpui_base::{
     StyledExt as _,
 };
 
-use crate::wheel_easing::{self, Handle};
-
 pub(crate) trait ScrollableElement:
     InteractiveElement + Styled + ParentElement + Element
 {
@@ -52,24 +50,16 @@ pub(crate) trait ScrollableElement:
     }
 }
 
-/// A page-level vertical viewport: `element` scrolls by its own handler
-/// (`overflow_y_scroll` or a `list`) through `handle`, mouse-wheel notches
-/// over it ease, and on touch platforms its edges stretch and bounce back.
+/// A page-level vertical viewport using gpui-base's wheel and bounce defaults.
+/// `handle` must be the scroll handle of `element`.
 /// Scrollbars and toolbars stay outside; never nest one inside a masked area.
-/// The bounce is also enabled in tests, where GPUI simulates touch phases.
 #[track_caller]
-pub(crate) fn page_viewport<E: IntoElement>(
+pub(crate) fn page_viewport<H: ScrollbarHandle + Clone>(
     id: impl Into<ElementId>,
-    handle: Handle,
-    element: E,
+    handle: &H,
+    element: impl IntoElement,
 ) -> ScrollBounce {
-    let enabled = cfg!(any(target_os = "ios", target_os = "android", test));
-    let registered = wheel_easing::register(element, handle.clone());
-    match handle {
-        Handle::Scroll(handle) => ScrollBounce::new(id, &handle, registered),
-        Handle::List(list) => ScrollBounce::new(id, &list, registered),
-    }
-    .enabled(enabled)
+    ScrollBounce::new(id, handle, element)
 }
 
 #[derive(IntoElement)]
@@ -149,10 +139,7 @@ where
             .size_full()
             .refine_style(&root_style)
             .relative()
-            .child(wheel_easing::register(
-                scroll_area,
-                Handle::Scroll(scroll_handle.clone()),
-            ))
+            .child(scroll_area)
             .child(
                 ScrollableMask::new(Axis::Vertical, &scroll_handle).id((self.id.clone(), "mask")),
             )
@@ -261,13 +248,6 @@ where
                 .when(!bounded, |viewport| viewport.max_h_full())
                 .overflow_y_scroll()
                 .lock_scroll_axis(),
-        };
-        let viewport = match self.axis {
-            Axis::Horizontal => viewport.into_any_element(),
-            Axis::Vertical => {
-                wheel_easing::register(viewport, Handle::Scroll(scroll_handle.clone()))
-                    .into_any_element()
-            }
         };
         div()
             .relative()
@@ -403,7 +383,7 @@ impl RenderOnce for VirtualList {
         let mut width_probe = None;
         // A viewport under a cap it shares with pinned siblings shrinks to
         // what they leave.
-        let (viewport, handle) = match self.rows {
+        let (viewport, mask, scrollbar) = match self.rows {
             Rows::Uniform { render, measure } => {
                 let scroll = window
                     .use_keyed_state((self.id.clone(), "scroll"), cx, |_, _| {
@@ -421,7 +401,8 @@ impl RenderOnce for VirtualList {
                     scroll.scroll_to_item(index, ScrollStrategy::Nearest);
                 }
                 let base = scroll.0.borrow().base_handle.clone();
-                (viewport.into_any_element(), Handle::Scroll(base))
+                let (mask, scrollbar) = overlays(&self.id, &base, self.scrollbar);
+                (viewport.into_any_element(), mask, scrollbar)
             }
             Rows::Measured(mut render) => {
                 let count = self.count;
@@ -465,28 +446,22 @@ impl RenderOnce for VirtualList {
                     .with_sizing_behavior(ListSizingBehavior::Infer)
                     .min_h_0()
                     .refine_style(&self.style);
-                (viewport.into_any_element(), Handle::List(state))
+                let (mask, scrollbar) = overlays(&self.id, &state, self.scrollbar);
+                (viewport.into_any_element(), mask, scrollbar)
             }
         };
         let reveal = self.reveal.or(last_revealed);
         revealed.update(cx, |revealed, _| *revealed = reveal);
-        let (mask, scrollbar) = match &handle {
-            Handle::Scroll(scroll) => overlays(&self.id, scroll, self.scrollbar),
-            Handle::List(state) => overlays(&self.id, state, self.scrollbar),
-        };
-        wheel_easing::register(
-            div()
-                .id((self.id, "area"))
-                .relative()
-                .flex()
-                .flex_col()
-                .refine_style(&root_style)
-                .child(viewport)
-                .children(width_probe)
-                .child(mask)
-                .children(scrollbar),
-            handle,
-        )
+        div()
+            .id((self.id, "area"))
+            .relative()
+            .flex()
+            .flex_col()
+            .refine_style(&root_style)
+            .child(viewport)
+            .children(width_probe)
+            .child(mask)
+            .children(scrollbar)
     }
 }
 

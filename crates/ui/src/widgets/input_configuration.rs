@@ -1,33 +1,23 @@
-//! Adds native keyboard intent to the upstream editor's input handler.
+//! Supplies native selection, UTF-16 length queries, and iOS paste action dispatch.
 #[cfg(target_os = "ios")]
 use gpui::Focusable as _;
 use gpui::{
     App, Bounds, ClipboardItem, ElementInputHandler, Entity, InputHandler, Pixels, Point,
-    TextInputAction, TextInputConfiguration, UTF16Selection, Window,
+    TextInputConfiguration, UTF16Selection, Window,
 };
 use gpui_base::input::{InputBaseState, InputModeKind, RopeExt as _};
 use std::ops::Range;
 
-// Supply the native selection/length hooks and keyboard intent missing upstream.
 pub(super) struct ConfiguredInput<M: InputModeKind> {
     inner: ElementInputHandler<InputBaseState<M>>,
     entity: Entity<InputBaseState<M>>,
-    multi_line: bool,
-    text_assistance: bool,
 }
 
 impl<M: InputModeKind> ConfiguredInput<M> {
-    pub fn new(
-        bounds: Bounds<Pixels>,
-        entity: Entity<InputBaseState<M>>,
-        multi_line: bool,
-        text_assistance: bool,
-    ) -> Self {
+    pub fn new(bounds: Bounds<Pixels>, entity: Entity<InputBaseState<M>>) -> Self {
         Self {
             inner: ElementInputHandler::new(bounds, entity.clone()),
             entity,
-            multi_line,
-            text_assistance,
         }
     }
 }
@@ -158,23 +148,51 @@ impl<M: InputModeKind> InputHandler for ConfiguredInput<M> {
         window: &mut Window,
         cx: &mut App,
     ) -> TextInputConfiguration {
-        let mut configuration = self.inner.text_input_configuration(window, cx);
-        configuration.autocorrect = self.text_assistance;
-        configuration.suggestions = self.text_assistance;
-        configuration.input_action = if self.multi_line {
-            TextInputAction::Enter
-        } else {
-            TextInputAction::Done
-        };
-        configuration
+        self.inner.text_input_configuration(window, cx)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
-    use gpui_base::input::TextareaState;
+    use gpui::{Autocapitalize, TestAppContext, TextInputAction};
+    use gpui_base::input::{InputState, TextareaState};
+
+    #[gpui::test]
+    fn native_keyboard_configuration_comes_from_the_state(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (prose, cx) = cx.add_window_view(|window, cx| {
+            TextareaState::new(window, cx)
+                .submit_on_enter(true)
+                .input_action(TextInputAction::Enter)
+                .autocorrect(true)
+        });
+        cx.update(|window, cx| {
+            let mut handler = ConfiguredInput::new(Bounds::default(), prose);
+            assert_eq!(
+                handler.text_input_configuration(window, cx),
+                TextInputConfiguration {
+                    input_action: TextInputAction::Enter,
+                    autocorrect: true,
+                    suggestions: true,
+                    autocapitalize: Autocapitalize::None,
+                }
+            );
+        });
+        let (structured, cx) = cx.add_window_view(InputState::new);
+        cx.update(|window, cx| {
+            let mut handler = ConfiguredInput::new(Bounds::default(), structured);
+            assert_eq!(
+                handler.text_input_configuration(window, cx),
+                TextInputConfiguration {
+                    input_action: TextInputAction::Done,
+                    autocorrect: false,
+                    suggestions: false,
+                    autocapitalize: Autocapitalize::None,
+                }
+            );
+        });
+    }
 
     #[gpui::test]
     fn native_selection_replaces_the_word_after_an_emoji(cx: &mut TestAppContext) {
@@ -183,7 +201,7 @@ mod tests {
             TextareaState::new(window, cx).default_value("😀 exmple here")
         });
         cx.update(|window, cx| {
-            let mut handler = ConfiguredInput::new(Bounds::default(), input.clone(), true, true);
+            let mut handler = ConfiguredInput::new(Bounds::default(), input.clone());
             assert_eq!(handler.text_length_utf16(window, cx), Some(14));
             handler.set_selected_text_range(3..9, window, cx);
             handler.replace_text_in_range(None, "example", window, cx);

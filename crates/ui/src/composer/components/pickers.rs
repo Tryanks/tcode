@@ -1537,7 +1537,11 @@ fn render_effort_slider(
                     .py(px(2.))
                     .flex()
                     .items_center()
-                    .child(crate::widgets::Slider::new(&state).fill(accent)),
+                    .child(
+                        crate::widgets::Slider::new(&state)
+                            .accessibility_label(crate::tr!("composer.effort"))
+                            .fill(accent),
+                    ),
             )
             .into_any_element(),
     )

@@ -970,7 +970,7 @@ impl RemotePanel {
         let compact = self.window_state.read(cx).compact;
         crate::scroll::page_viewport(
             "hosts-scroll-bounce",
-            crate::wheel_easing::Handle::Scroll(scroll.clone()),
+            scroll,
             div()
                 .id("hosts-scroll")
                 .flex_1()

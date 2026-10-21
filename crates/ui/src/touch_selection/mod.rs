@@ -292,20 +292,17 @@ mod tests {
         }
     }
 
-    /// A textarea taller than its field, under the shell's root wheel-easing
-    /// wrapper, as the composer is.
+    /// A textarea taller than its field, as the composer is.
     struct OverflowingField {
         textarea: Entity<TextareaState>,
     }
 
     impl Render for OverflowingField {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            crate::wheel_easing::root(
-                div()
-                    .size_full()
-                    .p_4()
-                    .child(Textarea::new(&self.textarea).h(px(60.))),
-            )
+            div()
+                .size_full()
+                .p_4()
+                .child(Textarea::new(&self.textarea).h(px(60.)))
         }
     }
 

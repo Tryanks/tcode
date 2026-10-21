@@ -131,7 +131,7 @@ mod tests {
         })
     }
 
-    /// A message above a composer, under the shell's root wheel-easing wrapper.
+    /// A message above a composer.
     struct Page {
         markdown: Entity<MarkdownState>,
         textarea: Entity<TextareaState>,
@@ -139,17 +139,15 @@ mod tests {
 
     impl Render for Page {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            crate::wheel_easing::root(
-                div()
-                    .size_full()
-                    .child(
-                        div()
-                            .h(px(60.))
-                            .child(MarkdownView::new(&self.markdown).selectable(true)),
-                    )
-                    .child(div().h(px(100.)))
-                    .child(div().h(px(60.)).child(Textarea::new(&self.textarea))),
-            )
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .h(px(60.))
+                        .child(MarkdownView::new(&self.markdown).selectable(true)),
+                )
+                .child(div().h(px(100.)))
+                .child(div().h(px(60.)).child(Textarea::new(&self.textarea)))
         }
     }
 

@@ -775,7 +775,7 @@ impl Render for CommandPalette {
         } else {
             crate::scroll::page_viewport(
                 "palette-list-bounce",
-                crate::wheel_easing::Handle::List(self.list_state.clone()),
+                &self.list_state,
                 div()
                     .id("palette-list")
                     .debug_selector(|| "palette-list".into())

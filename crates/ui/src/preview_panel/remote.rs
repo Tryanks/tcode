@@ -6,7 +6,7 @@ use std::{
 };
 
 use gpui::{Context, Entity, Task};
-use gpui_wry::WebView;
+use gpui_webview::WebView;
 use objc2::{
     DefinedClass as _, MainThreadOnly, define_class, msg_send,
     rc::Retained,

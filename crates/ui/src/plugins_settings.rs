@@ -944,7 +944,7 @@ impl PluginsSettingsPanel {
             let profile_id = profile_id.to_string();
             crate::scroll::page_viewport(
                 "plugins-available-bounce",
-                crate::wheel_easing::Handle::List(self.list.clone()),
+                &self.list,
                 list(
                     self.list.clone(),
                     cx.processor(move |this, ix: usize, _, cx| {

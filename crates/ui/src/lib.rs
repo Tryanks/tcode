@@ -69,7 +69,6 @@ pub mod time;
 pub(crate) mod toast;
 mod touch_selection;
 pub(crate) mod usage;
-mod wheel_easing;
 pub mod widgets;
 mod window_caption;
 pub(crate) mod window_seam;

@@ -1136,7 +1136,7 @@ impl SettingsPage {
         }
         crate::scroll::page_viewport(
             "settings-section-bounce",
-            crate::wheel_easing::Handle::Scroll(self.section_scroll.clone()),
+            &self.section_scroll,
             div()
                 .id("settings-section-list")
                 .flex_1()
@@ -1347,7 +1347,7 @@ impl SettingsPage {
     fn render_content_column(&self, column: gpui::Div, scroll: &ScrollHandle) -> AnyElement {
         crate::scroll::page_viewport(
             "settings-scroll-bounce",
-            crate::wheel_easing::Handle::Scroll(scroll.clone()),
+            scroll,
             div()
                 .id("settings-scroll")
                 .flex_1()
@@ -1725,9 +1725,10 @@ impl SettingsPage {
                 reset,
                 cx,
             ))
-            .child(crate::widgets::input::NumberInput::new(
-                &self.remote_attachment_limit_input.state,
-            ))
+            .child(
+                crate::widgets::input::NumberInput::new(&self.remote_attachment_limit_input.state)
+                    .accessibility_label(crate::tr!("settings.remote_attachment_limit.title")),
+            )
             .into_any_element()
     }
 

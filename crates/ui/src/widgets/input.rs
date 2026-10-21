@@ -37,7 +37,7 @@ pub(crate) fn commit_marked_text<M: gpui_base::input::InputModeKind>(
     cx: &mut gpui::Context<gpui_base::input::InputBaseState<M>>,
 ) {
     use gpui::EntityInputHandler as _;
-    // gpui-base 0.7.3 leaves the mark and undo transaction open on blur;
+    // gpui-base leaves the mark and undo transaction open on blur;
     // its unmark_text also omits Change, so commit through replacement.
     if let Some(marked) = state.marked_text_range(window, cx)
         && let Some(text) = state.text_for_range(marked.clone(), &mut None, window, cx)
@@ -68,7 +68,6 @@ pub struct Input {
     state: State,
     style: StyleRefinement,
     height: Option<DefiniteLength>,
-    text_assistance: bool,
     appearance: bool,
     bordered: bool,
     disabled: bool,
@@ -90,7 +89,6 @@ impl Input {
             state,
             style: StyleRefinement::default(),
             height: None,
-            text_assistance: false,
             appearance: true,
             bordered: true,
             disabled: false,
@@ -236,7 +234,6 @@ impl Styled for Input {
 impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let multi_line = matches!(self.state, State::Textarea(_));
-        let text_assistance = self.text_assistance;
         let compact = crate::window_seam::window_is_compact(window, cx);
         dispatch_state!(&self.state, |state| state
             .update(cx, |state, cx| state.prepare(window, cx)));
@@ -399,8 +396,6 @@ impl RenderOnce for Input {
                                 input_configuration::ConfiguredInput::new(
                                     bounds,
                                     input_entity.clone(),
-                                    multi_line,
-                                    text_assistance,
                                 ),
                                 cx,
                             );
@@ -467,11 +462,6 @@ impl Textarea {
             input: Input::from_textarea(state),
         }
     }
-    /// Enable prose correction, predictions and native smart punctuation.
-    pub fn text_assistance(mut self, enabled: bool) -> Self {
-        self.input.text_assistance = enabled;
-        self
-    }
     pub fn appearance(mut self, value: bool) -> Self {
         self.input = self.input.appearance(value);
         self
@@ -512,13 +502,19 @@ impl RenderOnce for Textarea {
 #[derive(IntoElement)]
 pub struct NumberInput {
     state: Entity<InputState>,
+    accessibility_label: Option<SharedString>,
 }
 
 impl NumberInput {
     pub fn new(state: &Entity<InputState>) -> Self {
         Self {
             state: state.clone(),
+            accessibility_label: None,
         }
+    }
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
     }
 }
 
@@ -527,6 +523,9 @@ impl RenderOnce for NumberInput {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let focused = self.state.read(cx).focus_handle(cx).is_focused(window);
         gpui_base::NumberInput::new(&self.state)
+            .when_some(self.accessibility_label, |this, label| {
+                this.accessibility_label(label)
+            })
             .controls_right()
             .w(px(material::NUMBER_INPUT_WIDTH))
             .h(px(material::input_height(compact)))
