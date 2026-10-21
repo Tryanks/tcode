@@ -23,7 +23,7 @@ pub(crate) fn init(cx: &mut App) {
         // the editor's earlier contextual one. Keep the editor's native action.
         KeyBinding::new("secondary-z", gpui_base::input::Undo, Some("Input")),
     ]);
-    // gpui-base 0.7.3 gates Apple's editor bindings to macOS. iOS hardware
+    // gpui-base gates Apple's editor bindings to macOS. iOS hardware
     // keyboards use Command too, while GPUI's secondary modifier is Control.
     #[cfg(target_os = "ios")]
     cx.bind_keys([

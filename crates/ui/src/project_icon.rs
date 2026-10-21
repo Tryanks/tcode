@@ -352,7 +352,7 @@ impl Render for Picker {
                 .size_full()
                 .child(crate::scroll::page_viewport(
                     "icon-file-grid-bounce",
-                    crate::wheel_easing::Handle::Scroll(scroll),
+                    &scroll,
                     list,
                 ))
                 .when(!window.is_inspector_picking(cx), |grid| {

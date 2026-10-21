@@ -3700,7 +3700,7 @@ impl SessionsSidebar {
                 })
                 .child(crate::scroll::page_viewport(
                     "compact-thread-bounce",
-                    crate::wheel_easing::Handle::List(self.compact_list_state.clone()),
+                    &self.compact_list_state,
                     list(
                         self.compact_list_state.clone(),
                         cx.processor(move |this, index: usize, _, cx| {
@@ -4227,7 +4227,7 @@ impl Render for SessionsSidebar {
                         .relative()
                         .child(crate::scroll::page_viewport(
                             "grouped-thread-bounce",
-                            crate::wheel_easing::Handle::List(self.grouped_list_state.clone()),
+                            &self.grouped_list_state,
                             thread_list,
                         ))
                         .when(!window.is_inspector_picking(cx), |list| {
@@ -4450,7 +4450,7 @@ impl Render for SessionsSidebar {
                             ))
                             .child(crate::scroll::page_viewport(
                                 "flat-thread-bounce",
-                                crate::wheel_easing::Handle::List(self.flat_list_state.clone()),
+                                &self.flat_list_state,
                                 thread_list,
                             ))
                             .when(!window.is_inspector_picking(cx), |list| {

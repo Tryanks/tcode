@@ -3,7 +3,7 @@ use std::time::Duration;
 use gpui::{App, Pixels, Window, px};
 use gpui_base::motion::{Spring, spring};
 
-// gpui-base 0.7.3 has no edge gesture or interactive NavStack/Sheet progress API.
+// gpui-base has no edge gesture or interactive NavStack/Sheet progress API.
 // Keep recognition shared here; focus, dismissal and settling remain base primitives.
 #[derive(Default)]
 pub(crate) struct BackProgress {

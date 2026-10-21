@@ -481,7 +481,7 @@ impl AcpPanel {
         } else {
             crate::scroll::page_viewport(
                 "acp-market-bounce",
-                crate::wheel_easing::Handle::List(self.market_list.clone()),
+                &self.market_list,
                 list(
                     self.market_list.clone(),
                     cx.processor(move |this, ix: usize, _, cx| {

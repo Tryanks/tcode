@@ -267,12 +267,18 @@ impl Composer {
         let (min_rows, max_rows) = auto_grow_rows(compact);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
+                .autocorrect(true)
+                .input_action(gpui::TextInputAction::Enter)
                 .auto_grow(min_rows, max_rows)
                 .submit_on_enter(true)
         });
         let model_search = cx.new(|cx| InputState::new(window, cx));
-        let user_input_custom =
-            cx.new(|cx| TextareaState::new(window, cx).rows(1).submit_on_enter(true));
+        let user_input_custom = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .input_action(gpui::TextInputAction::Enter)
+                .rows(1)
+                .submit_on_enter(true)
+        });
         let fallback_review_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6));
 
         let input_subscription = cx.subscribe_in(&input, window, Self::on_input_event);
@@ -416,6 +422,8 @@ impl Composer {
             .unwrap_or_else(|| {
                 cx.new(|cx| {
                     TextareaState::new(window, cx)
+                        .autocorrect(true)
+                        .input_action(gpui::TextInputAction::Enter)
                         .auto_grow(min_rows, max_rows)
                         .submit_on_enter(true)
                 })
@@ -1320,7 +1328,6 @@ impl Render for Composer {
             .when(has_review_comments, |this| this.child(review_chips))
             .child(
                 Textarea::new(&self.input)
-                    .text_assistance(true)
                     .placeholder(desired_placeholder)
                     .disabled(readonly)
                     .appearance(false),
@@ -1590,6 +1597,15 @@ mod replica_tests {
                 store.update(cx, |store, _| {
                     store.select_session(destination.session_id.clone())
                 });
+                replace(
+                    &incoming,
+                    Topic::SessionStatus {
+                        session_id: destination.session_id.clone(),
+                    },
+                    ServerEvent::SessionStatusReplaced(Box::new(destination)),
+                );
+                cx.run_until_parked();
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
                 cx.update(|window, cx| window.draw(cx).clear(cx));
                 assert_eq!(
                     composer.read_with(cx, |composer, cx| composer.draft(cx)),

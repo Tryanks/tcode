@@ -1000,7 +1000,7 @@ impl Render for AgentsPanel {
         }
         root.child(crate::scroll::page_viewport(
             "agents-scroll-bounce",
-            crate::wheel_easing::Handle::Scroll(self.vscroll.clone()),
+            &self.vscroll,
             div()
                 .id("agents-scroll")
                 .flex_1()

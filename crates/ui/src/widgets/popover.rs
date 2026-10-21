@@ -165,8 +165,8 @@ impl RenderOnce for Popover {
             .when_some(self.trigger, |base, trigger| {
                 base.trigger_with(move |open, window, cx| {
                     let parent = window.current_view();
-                    // gpui-base 0.7.3 Popover::trigger installs no activation callback
-                    // on the trigger element. Remove this once gpui-base installs it.
+                    // gpui-base Popover::trigger installs no activation callback
+                    // on the trigger element.
                     let toggle: SheetToggle = Rc::new(move |window, cx| {
                         state.update(cx, |state, cx| state.toggle_open(window, cx));
                         cx.notify(parent);

@@ -1,8 +1,8 @@
 use crate::theme::ActiveTheme as _;
 use gpui::{
     App, BoxShadow, ElementId, Entity, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, StatefulInteractiveElement as _, StyleRefinement, Styled,
-    Window, div, hsla, point, prelude::FluentBuilder as _, px, relative,
+    ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement,
+    Styled, Window, div, hsla, point, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_base::motion::{Transition, transition};
 use gpui_base::slider::SliderState;
@@ -27,6 +27,7 @@ pub struct Slider {
     style: StyleRefinement,
     fill: Option<Hsla>,
     disabled: bool,
+    accessibility_label: Option<SharedString>,
 }
 
 impl Slider {
@@ -36,7 +37,12 @@ impl Slider {
             style: StyleRefinement::default(),
             fill: None,
             disabled: false,
+            accessibility_label: None,
         }
+    }
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
     }
     /// The filled portion's color; the theme's primary by default.
     pub fn fill(mut self, color: impl Into<Hsla>) -> Self {
@@ -119,6 +125,9 @@ impl RenderOnce for Slider {
         };
 
         gpui_base::Slider::new(&self.state)
+            .when_some(self.accessibility_label, |this, label| {
+                this.accessibility_label(label)
+            })
             .disabled(self.disabled)
             .relative()
             .w_full()
