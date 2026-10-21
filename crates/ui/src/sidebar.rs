@@ -2484,10 +2484,9 @@ impl SessionsSidebar {
                 } else {
                     cx.theme().sidebar_foreground
                 })
-                .when(
-                    emphasize_unread && state.show_unread && !meta.is_settled(),
-                    |title| title.font_semibold(),
-                )
+                .when(emphasize_unread && state.show_unread, |title| {
+                    title.font_semibold()
+                })
                 .child(meta.title.clone())
                 .into_any_element()
         };
@@ -3968,9 +3967,7 @@ impl SessionsSidebar {
                                         cx.theme().foreground
                                     })
                                     .when(!meta.is_settled(), |title| title.font_medium())
-                                    .when(state.show_unread && !meta.is_settled(), |title| {
-                                        title.font_semibold()
-                                    })
+                                    .when(state.show_unread, |title| title.font_semibold())
                                     .debug_selector({
                                         let id = session_id.clone();
                                         move || format!("compact-title-{id}")
