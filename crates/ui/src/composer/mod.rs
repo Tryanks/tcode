@@ -1585,6 +1585,15 @@ mod replica_tests {
                 store.update(cx, |store, _| {
                     store.select_session(destination.session_id.clone())
                 });
+                replace(
+                    &incoming,
+                    Topic::SessionStatus {
+                        session_id: destination.session_id.clone(),
+                    },
+                    ServerEvent::SessionStatusReplaced(Box::new(destination)),
+                );
+                cx.run_until_parked();
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
                 cx.update(|window, cx| window.draw(cx).clear(cx));
                 assert_eq!(
                     composer.read_with(cx, |composer, cx| composer.draft(cx)),
