@@ -423,7 +423,7 @@ jobs:
 
       - name: Install wasm tools
         run: |
-          cargo install wasm-bindgen-cli --version 0.2.121 --locked
+          cargo install wasm-bindgen-cli --version 0.2.127 --locked
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binaryen
 

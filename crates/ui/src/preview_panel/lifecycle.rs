@@ -24,7 +24,7 @@ use std::time::Duration;
 use super::android::WebView;
 use gpui::{App, AppContext as _, Context, Entity, Window};
 #[cfg(not(target_os = "android"))]
-use gpui_wry::WebView;
+use gpui_webview::WebView;
 #[cfg(not(target_os = "android"))]
 use preview_mcp::js;
 #[cfg(not(target_os = "android"))]
@@ -645,7 +645,7 @@ impl BrowserLifecycle {
 }
 
 fn set_webview_visible(view: &mut WebView, visible: bool) {
-    // gpui-wry keeps its own visibility bit but does not expose the native
+    // gpui-webview keeps its own visibility bit but does not expose the native
     // result. Repeat the idempotent native operation once so teardown races are
     // observable instead of silently discarded.
     if visible {
