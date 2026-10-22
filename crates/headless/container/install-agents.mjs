@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -67,11 +68,13 @@ for (const name of selected) {
           run('npm', ['install', '--global', '--prefix', staging, '--no-audit', '--no-fund',
             `--allow-scripts=${spec.package}`, '--', `${spec.package}@${spec.version}`]);
         } else {
-          if (!['x64', 'arm64'].includes(process.arch)) throw new Error(`Unsupported Cursor architecture: ${process.arch}`);
-          const archive = path.join(staging, 'cursor.tar.gz');
+          const digest = spec.sha256[process.arch];
+          if (!digest) throw new Error(`Unsupported ${name} architecture: ${process.arch}`);
+          const archive = path.join(staging, 'archive.tar.gz');
           run('curl', ['--fail', '--silent', '--show-error', '--location', '--retry', '3',
-            '--output', archive,
-            `https://downloads.cursor.com/lab/${spec.version}/linux/${process.arch}/agent-cli-package.tar.gz`]);
+            '--output', archive, spec.archive.replace('{version}', spec.version).replace('{arch}', process.arch)]);
+          const actual = createHash('sha256').update(await readFile(archive)).digest('hex');
+          if (actual !== digest) throw new Error(`${name} archive digest ${actual} does not match ${digest}`);
           run('tar', ['--extract', '--gzip', '--file', archive, '--strip-components=1', '--directory', staging]);
           await rm(archive);
         }
