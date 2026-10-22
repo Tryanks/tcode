@@ -33,7 +33,6 @@ use crate::{
         button::{Button, ButtonVariants as _},
         choice::{Choice, ChoiceGroup},
         input::{InputEvent, Textarea, TextareaState},
-        menu::CopyText,
     },
 };
 
@@ -521,8 +520,10 @@ impl PullRequestView {
                                 .tooltip(crate::tr!("pull_requests.conversation.copy_text"))
                                 .on_click({
                                     let text = comment.body.clone();
-                                    move |_, window, cx| {
-                                        window.dispatch_action(Box::new(CopyText(text.clone())), cx)
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            text.clone(),
+                                        ))
                                     }
                                 }),
                         )

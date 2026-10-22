@@ -23,8 +23,7 @@ use crate::{
 const CONTEXT: &str = "TcodePopupMenu";
 
 /// The actions every context menu can offer without its surface wiring a
-/// handler: each [`ContextMenu`] trigger handles them, so a menu item built
-/// anywhere resolves at the nearest trigger above it.
+/// handler: [`PopupMenu`] handles them for both context and dropdown menus.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_menu, no_json)]
 pub struct CopyText(pub String);
@@ -327,6 +326,15 @@ impl Render for PopupMenu {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
+            .on_action(|action: &CopyText, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
+            })
+            .on_action(|action: &OpenUrl, _, cx| cx.open_url(&action.0))
+            .on_action(|action: &OpenPath, _, cx| cx.open_with_system(Path::new(&action.0)))
+            .on_action(|action: &OpenPathInZed, window, cx| {
+                open_in_zed(Path::new(&action.0), window, cx)
+            })
+            .on_action(|action: &RevealPath, _, cx| cx.reveal_path(Path::new(&action.0)))
             .flex()
             .flex_col()
             .min_w(px(160.))
@@ -602,25 +610,14 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                 });
             },
         );
-        let mut trigger = self
-            .trigger
-            .on_mouse_down(MouseButton::Right, {
-                let state = state.clone();
-                let open = open.clone();
-                move |event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    open(event.position, state.clone(), window, cx);
-                }
-            })
-            .on_action(|action: &CopyText, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
-            })
-            .on_action(|action: &OpenUrl, _, cx| cx.open_url(&action.0))
-            .on_action(|action: &OpenPath, _, cx| cx.open_with_system(Path::new(&action.0)))
-            .on_action(|action: &OpenPathInZed, window, cx| {
-                open_in_zed(Path::new(&action.0), window, cx)
-            })
-            .on_action(|action: &RevealPath, _, cx| cx.reveal_path(Path::new(&action.0)));
+        let mut trigger = self.trigger.on_mouse_down(MouseButton::Right, {
+            let state = state.clone();
+            let open = open.clone();
+            move |event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                open(event.position, state.clone(), window, cx);
+            }
+        });
         if touch {
             let state = state.clone();
             trigger = trigger.child(
@@ -779,6 +776,17 @@ mod tests {
         assert_eq!(menu.top(), px(50.));
     }
 
+    fn touch(cx: &mut VisualTestContext, phase: gpui::TouchPhase, position: Point<Pixels>) {
+        cx.simulate_event(gpui::TouchEvent {
+            id: gpui::TouchId(1),
+            phase,
+            position,
+            predicted_position: None,
+            force: None,
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
     type Press = Rc<std::cell::RefCell<Option<Box<dyn FnMut(&mut Window, &mut App)>>>>;
 
     // Capture the registered action at the trigger boundary because GPUI's
@@ -880,7 +888,15 @@ mod tests {
                     .label("More")
                     .debug_selector(|| "more-trigger".into())
                     .dropdown_menu(|menu, _, _| {
-                        menu.menu_with_icon("Copy link", IconName::Copy, Box::new(Cancel))
+                        menu.menu_with_icon(
+                            "Copy link",
+                            IconName::Copy,
+                            Box::new(CopyText("https://example.com/pr/716".into())),
+                        )
+                        .menu(
+                            "Open in browser",
+                            Box::new(OpenUrl("https://example.com/pr/716".into())),
+                        )
                     })
                     .touch(true),
             )
@@ -888,17 +904,37 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_touch_dropdown_menu_has_touch_sized_rows(cx: &mut TestAppContext) {
+    fn a_touch_dropdown_delivers_its_action_from_a_touch_sized_row(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         let (_, cx) = cx.add_window_view(|_, _| MoreMenu);
         cx.simulate_resize(size(px(393.), px(852.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let trigger = cx.debug_bounds("more-trigger").unwrap().center();
-        cx.simulate_click(trigger, Default::default());
+        touch(cx, gpui::TouchPhase::Started, trigger);
+        touch(cx, gpui::TouchPhase::Ended, trigger);
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let row = cx.debug_bounds("menu-item-0").expect("menu opens");
         assert!(row.size.height >= px(44.), "{row:?}");
+        touch(cx, gpui::TouchPhase::Started, row.center());
+        touch(cx, gpui::TouchPhase::Ended, row.center());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tcode-popup-menu").is_none());
+        touch(cx, gpui::TouchPhase::Started, trigger);
+        touch(cx, gpui::TouchPhase::Ended, trigger);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx.debug_bounds("menu-item-1").expect("menu reopens");
+        touch(cx, gpui::TouchPhase::Started, row.center());
+        touch(cx, gpui::TouchPhase::Ended, row.center());
+        cx.run_until_parked();
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(
+            (copied, cx.opened_url()),
+            (
+                Some("https://example.com/pr/716".into()),
+                Some("https://example.com/pr/716".into())
+            )
+        );
     }
 
     /// A menu fed one row per project, like the sidebar's project filter.
