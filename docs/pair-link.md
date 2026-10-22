@@ -29,7 +29,7 @@ routing hints in `crates/traverse/src/host.rs`.
 ## Format
 
 ```
-tcode://pair?v=3&id=<endpoint id>&secret=<secret>[&space=<id>][&traverse=<src>]*[&relay=<url>]&port=<udp port>
+tcode://pair?v=3&id=<endpoint id>&secret=<secret>[&space=<id>|&group=<id>][&traverse=<src>]*[&relay=<url>]&port=<udp port>
 ```
 
 Parameters are form-urlencoded in this order. The parser accepts any order,
@@ -42,6 +42,7 @@ value once and ignores parameters it does not know.
 | `id` | yes | The machine's iroh `EndpointId`, 64 lowercase hex characters. The dial target and the identity the QUIC handshake authenticates. |
 | `secret` | yes | 16 random bytes as unpadded base64url, 22 characters. Sent to the machine over the pairing ALPN; only the machine ever checks it. |
 | `space` | no | A space id (1–64 characters, no control characters). Present only on space links, which are reusable; machine invitations without it are single-use. |
+| `group` | no | The machine's group id, 16 random bytes as unpadded base64url. Present only on group links, which are reusable and never carry `space`; see [Machine groups](remote.md#machine-groups). The `secret` is the machine's own group link secret. A device pairs with it as with an invitation; a machine pastes it into **Join group** to become a member. |
 | `traverse` | repeated, 0..8 | Every Traverse instance the machine currently publishes to, so the device can resolve the machine later. `official` names the official instance; any other value is a self-hosted instance's base URL (`http` or `https` with a host). No `traverse` parameter means the official instance only. The single value `off` means the machine publishes nowhere and is reachable on the LAN only. `off` cannot be combined with other values. |
 | `relay` | no | The machine's current home relay URL (`http` or `https`). A dial hint: the device connects through it immediately instead of waiting for a pkarr lookup. |
 | `port` | yes | The machine's bound UDP port as a canonical decimal (no sign, no leading zero), 1–65535 (47420 by default). Used only for a manually entered address. |
@@ -63,9 +64,11 @@ Everything the link does not carry is learned elsewhere:
    bundled manifest; a self-hosted one is fetched once, 10 s timeout).
 3. Dial the `id` with `relay` as the only transport address; iroh adds
    whatever pkarr and DNS-SD resolve.
-4. Present the `secret` (and `space`) over the pairing ALPN. The machine
-   replies `Paired { host_name }`; the device saves the machine with that
-   name, the `traverse` list, the relay and the addresses it learned.
+4. Present the `secret` (and `space` or `group`) over the pairing ALPN. The
+   machine replies `Paired { host_name }`; the device saves the machine with
+   that name, the `traverse` list, the relay and the addresses it learned.
+   A machine in a group also lists the group's machines, which the device
+   saves beside it.
 
 ### When the first connection does not establish
 
