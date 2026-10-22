@@ -39,15 +39,17 @@ is derived from it. **Process** is how to build, check and submit work.
 5. **Remote access.** iroh, end to end encrypted, is the only transport for
    native clients; the browser client is a direct-access HTTP entry on the
    machine and does not use iroh. There is no automatic discovery: a device's
-   first contact with a machine is always its invitation, scanned or pasted.
-   An official service, **Traverse**, provides lookup and relay fallback: no
-   accounts, on by default, self-hostable, sees only ciphertext, and never
-   required — on a LAN, direct connections give the full product without it.
-   Abuse is limited without accounts: the relay forwards by destination id and
-   the machine rejects every peer it has not paired; lookup and relay
-   bandwidth are rate-limited per node and per IP; an invitation secret dies
-   after five failures on the machine, which is the only place it is ever
-   checked — the service never sees it; and no SLA is promised. Current status
+   first contact with a machine, or with a group of machines, is always an
+   invitation, scanned or pasted; a machine admits only devices it paired or
+   that a machine in its group admitted. An official service, **Traverse**,
+   provides lookup and relay fallback: no accounts, on by default,
+   self-hostable, sees only ciphertext, and never required — on a LAN, direct
+   connections give the full product without it. Abuse is limited without
+   accounts: the relay forwards by destination id and the machine rejects
+   every peer it has not admitted; lookup and relay bandwidth are rate-limited
+   per node and per IP; an invitation secret dies after five failures on the
+   machine, which is the only place it is ever checked — the service never
+   sees it; and no SLA is promised. Current status
    and plan: [#376](https://github.com/Tryanks/tcode/issues/376).
 
 6. **gpui-base is the infrastructure; no house UI principles.** Tcode follows

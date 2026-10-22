@@ -91,6 +91,9 @@ struct HostFile {
     group: Option<GroupRecord>,
 }
 
+/// A machine outside any group writes version 3, which an older build still
+/// reads; version 4 adds the group and each device's origin.
+const VERSION_WITHOUT_GROUP: u32 = 3;
 const VERSION: u32 = 4;
 
 fn enabled() -> bool {
@@ -121,14 +124,8 @@ impl HostIdentity {
                     value["spaces"] = serde_json::json!([]);
                     value["v"] = 3.into();
                 }
-                // Version 4 adds the group and each device's origin, both
-                // absent from a version 3 file.
-                let migrated = migrated || value["v"] == 3;
-                if value["v"] == 3 {
-                    value["v"] = VERSION.into();
-                }
                 let file: HostFile = serde_json::from_value(value).map_err(io::Error::other)?;
-                if file.v != VERSION {
+                if file.v != VERSION && file.v != VERSION_WITHOUT_GROUP {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("{HOST_FILE} has unsupported version {}", file.v),
@@ -180,8 +177,17 @@ impl HostIdentity {
     }
 
     pub fn save(&self) -> io::Result<()> {
+        let grouped = self.group.is_some()
+            || self
+                .devices
+                .iter()
+                .any(|device| device.origin == Origin::Group);
         let file = HostFile {
-            v: VERSION,
+            v: if grouped {
+                VERSION
+            } else {
+                VERSION_WITHOUT_GROUP
+            },
             host_name: self.host_name.clone(),
             secret_key: encode_hex(&self.secret_key.to_bytes()),
             devices: self.devices.clone(),
