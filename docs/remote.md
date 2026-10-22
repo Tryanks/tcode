@@ -323,7 +323,8 @@ commands from the repository root:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.121 --locked
+# The CLI must match the wasm-bindgen version locked in Cargo.lock.
+cargo install wasm-bindgen-cli --locked --version "$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q;}' Cargo.lock)"
 crates/web/build.sh
 cargo build -p tcode-headless --release --features web
 ```

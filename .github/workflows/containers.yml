@@ -46,7 +46,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang cmake pkg-config libssl-dev libzstd-dev binaryen
-          cargo install wasm-bindgen-cli --version 0.2.121 --locked
+          cargo install wasm-bindgen-cli --locked --version "$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q;}' Cargo.lock)"
       - name: Build browser and host binaries
         run: |
           crates/web/build.sh
