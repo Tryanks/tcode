@@ -1847,7 +1847,7 @@ mod replica_tests {
     }
 
     #[gpui::test]
-    fn a_held_or_lifted_queue_button_steers_while_a_tap_queues(cx: &mut TestAppContext) {
+    fn holding_queue_reveals_choices_and_only_sliding_onto_steer_steers(cx: &mut TestAppContext) {
         use gpui::{TouchEvent, TouchId, TouchPhase, point};
 
         let (store, incoming, outgoing, mut status) = attach(cx);
@@ -1937,11 +1937,12 @@ mod replica_tests {
             };
         assert!(sent(cx).is_empty());
 
+        let mut upper_target = None;
         for (gesture, expected) in [
-            ("hold", "steer"),
-            ("hold-jitter", "steer"),
+            ("hold", "queue"),
             ("hold-slide", "steer"),
             ("slide", "steer"),
+            ("direct-slide", "steer"),
             ("lower", "queue"),
             ("tap", "queue"),
         ] {
@@ -1954,44 +1955,62 @@ mod replica_tests {
                 .expect("the Queue button is shown");
             let center = button.center();
             touch(cx, TouchPhase::Started, center);
+            assert!(cx.debug_bounds("steer-gesture-steer").is_none());
+            assert!(cx.debug_bounds("steer-gesture-queue").is_none());
             let mut lift = center;
-            if matches!(gesture, "hold" | "hold-jitter" | "hold-slide" | "lower") {
+            if matches!(gesture, "hold" | "hold-slide" | "lower") {
                 cx.executor()
                     .advance_clock(gpui::GestureTuning::default().long_press_duration);
                 cx.run_until_parked();
                 cx.update(|window, cx| _ = window.draw(cx));
             }
-            let upper = cx
-                .debug_bounds("steer-gesture-steer")
-                .expect("holding reveals the upper Steer button");
-            let lower = cx
-                .debug_bounds("steer-gesture-queue")
-                .expect("holding reveals the lower Queue button");
-            assert_eq!(lower, button, "Queue stays under the finger");
-            assert_eq!(upper.center().x, lower.center().x);
-            assert!(
-                upper.bottom() <= lower.top(),
-                "Steer is directly above Queue"
-            );
-            match gesture {
-                "hold-jitter" => {
-                    touch(cx, TouchPhase::Moved, point(center.x + px(1.), center.y));
-                    lift = point(center.x + px(2.), center.y);
+            if gesture == "slide" {
+                touch(
+                    cx,
+                    TouchPhase::Moved,
+                    point(center.x, button.top() - px(1.)),
+                );
+            }
+            if gesture == "direct-slide" {
+                lift = upper_target.expect("the previous gesture measured Steer");
+                touch(cx, TouchPhase::Moved, lift);
+            }
+            if gesture != "tap" {
+                cx.update(|window, cx| _ = window.draw(cx));
+                let upper = cx
+                    .debug_bounds("steer-gesture-steer")
+                    .expect("holding reveals the upper Steer button");
+                let lower = cx
+                    .debug_bounds("steer-gesture-queue")
+                    .expect("holding reveals the lower Queue button");
+                assert_eq!(lower, button, "Queue stays under the finger");
+                assert_eq!(upper.center().x, lower.center().x);
+                assert!(
+                    upper.bottom() <= lower.top(),
+                    "Steer is directly above Queue"
+                );
+                upper_target = Some(upper.center());
+                if gesture == "direct-slide" {
+                    assert!(cx.debug_bounds("steer-gesture-steer-selected").is_some());
+                } else if gesture != "slide" {
+                    assert!(cx.debug_bounds("steer-gesture-queue-selected").is_some());
                 }
-                "slide" | "hold-slide" | "lower" => {
-                    lift = upper.center();
-                    touch(cx, TouchPhase::Moved, lift);
-                    assert!(
-                        cx.debug_bounds("steer-gesture-steer-selected").is_some(),
-                        "{gesture}: moving onto Steer highlights it"
-                    );
-                    if gesture == "lower" {
-                        lift = lower.center();
+                match gesture {
+                    "slide" | "hold-slide" | "lower" => {
+                        lift = upper.center();
                         touch(cx, TouchPhase::Moved, lift);
-                        assert!(cx.debug_bounds("steer-gesture-queue-selected").is_some());
+                        assert!(
+                            cx.debug_bounds("steer-gesture-steer-selected").is_some(),
+                            "{gesture}: moving onto Steer highlights it"
+                        );
+                        if gesture == "lower" {
+                            lift = lower.center();
+                            touch(cx, TouchPhase::Moved, lift);
+                            assert!(cx.debug_bounds("steer-gesture-queue-selected").is_some());
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
             assert!(
                 sent(cx).is_empty(),
@@ -2021,13 +2040,20 @@ mod replica_tests {
                 cx.run_until_parked();
                 cx.update(|window, cx| _ = window.draw(cx));
             }
-            let upper = cx.debug_bounds("steer-gesture-steer").unwrap();
+            let mut lift = button.center();
             if matches!(gesture, "steer-sideways" | "cancel") {
+                touch(
+                    cx,
+                    TouchPhase::Moved,
+                    point(button.center().x, button.top() - px(1.)),
+                );
+                let upper = cx.debug_bounds("steer-gesture-steer").unwrap();
                 touch(cx, TouchPhase::Moved, upper.center());
+                lift = upper.center();
             }
-            let away = point(button.center().x - px(120.), upper.center().y);
+            let away = point(button.center().x - px(120.), lift.y);
             if gesture == "cancel" {
-                touch(cx, TouchPhase::Cancelled, upper.center());
+                touch(cx, TouchPhase::Cancelled, lift);
             } else {
                 touch(cx, TouchPhase::Moved, away);
                 touch(cx, TouchPhase::Ended, away);
