@@ -32,10 +32,23 @@ pub fn platform() -> Rc<dyn gpui::Platform> {
     panic!("gpui-ios::platform() is only available when target_os = \"ios\"")
 }
 
-/// Place UIKit's trusted paste control over the shared edit menu's Paste item.
+/// UIKit's trusted paste control as the shared edit menu lays it over its
+/// Paste item: where, and in the menu's colours and corners, so the control
+/// reads as one of the menu's items.
 #[cfg(target_os = "ios")]
-pub fn set_paste_control_bounds(bounds: Option<gpui::Bounds<gpui::Pixels>>) {
-    ios::ffi::host_set_paste_control_bounds(bounds);
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PasteControl {
+    pub bounds: gpui::Bounds<gpui::Pixels>,
+    pub foreground: gpui::Hsla,
+    pub background: gpui::Hsla,
+    pub corner_radius: gpui::Pixels,
+}
+
+/// Place UIKit's trusted paste control over the shared edit menu's Paste
+/// item, or hide it.
+#[cfg(target_os = "ios")]
+pub fn set_paste_control(control: Option<PasteControl>) {
+    ios::ffi::host_set_paste_control(control);
 }
 
 /// Keep asynchronous UIKit paste attached to the focused editor's identity.

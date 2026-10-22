@@ -1612,9 +1612,14 @@ impl PullRequestView {
                     .page()
                     .and_then(|page| page.conversation.data.as_ref())
                     .is_some_and(|conversation| conversation.permissions.update);
-            // The nav bar is not inside this view, so its menu's action is caught here.
+            // The nav bar is a sibling of this view, so its menu needs the
+            // view's action handlers on its own dispatch chain.
             actions.push(
                 div()
+                    .on_action(cx.listener(Self::change_link))
+                    .on_action(cx.listener(Self::change_watch))
+                    .on_action(cx.listener(Self::run_lifecycle))
+                    .on_action(cx.listener(Self::choose_merge_method))
                     .on_action(
                         cx.listener(|this, _: &EditTitle, window, cx| this.start_title(window, cx)),
                     )
@@ -2133,6 +2138,105 @@ mod tests {
         incoming: async_channel::Sender<String>,
         _pump: gpui::Task<()>,
         cx: &'a mut VisualTestContext,
+    }
+
+    struct PhonePage(Entity<PullRequestView>);
+    impl Render for PhonePage {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let actions = self.0.update(cx, |view, cx| view.nav_actions(cx));
+            v_flex()
+                .size_full()
+                .child(
+                    h_flex().children(actions.into_iter().enumerate().map(|(index, action)| {
+                        div()
+                            .debug_selector(move || format!("phone-action-{index}"))
+                            .child(action)
+                    })),
+                )
+                .child(div().flex_1().child(self.0.clone()))
+        }
+    }
+
+    #[gpui::test]
+    fn the_phone_navigation_menu_delivers_its_link_action(cx: &mut TestAppContext) {
+        use gpui::VisualContext as _;
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        let store = view.read_with(cx, |view, _| view.store.clone());
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            "/tmp/tcode-pr".into(),
+            None,
+        );
+        meta.id = "session".into();
+        meta.pull_requests = vec![ThreadPullRequestLink {
+            key: PullRequestKey::new("github.com", "octo/repo", 7),
+            url: "https://github.com/octo/repo/pull/7".into(),
+            source: PullRequestSource::Dismissed,
+            linked_at: None,
+            snapshot: None,
+            stack: Default::default(),
+            sync_error: None,
+            watch: None,
+        }];
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(tcode_protocol::EventEnvelope {
+                    request_id: None,
+                    topic: tcode_protocol::Topic::Index,
+                    event: tcode_protocol::ServerEvent::IndexSnapshot(
+                        tcode_protocol::IndexSnapshot {
+                            summary: Default::default(),
+                            sessions: vec![meta],
+                            projects: Vec::new(),
+                        },
+                    ),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        settle(cx);
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        store.update(cx, |store, _| store.select_session("session".into()));
+        view.update(cx, |view, cx| {
+            view.window_state
+                .update(cx, |state, cx| state.set_compact(true, cx))
+        });
+        cx.replace_root_view(|_, _| PhonePage(view.clone()));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        settle(cx);
+        let touch = |cx: &mut VisualTestContext, phase, position| {
+            cx.simulate_event(gpui::TouchEvent {
+                id: gpui::TouchId(1),
+                phase,
+                position,
+                predicted_position: None,
+                force: None,
+            });
+            settle(cx);
+        };
+        let more = cx.debug_bounds("phone-action-1").unwrap().center();
+        touch(cx, gpui::TouchPhase::Started, more);
+        touch(cx, gpui::TouchPhase::Ended, more);
+        let link = cx
+            .debug_bounds("menu-item-3")
+            .expect("link menu item")
+            .center();
+        touch(cx, gpui::TouchPhase::Started, link);
+        touch(cx, gpui::TouchPhase::Ended, link);
+        let commands: Vec<_> = std::iter::from_fn(|| requests.try_recv().ok())
+            .map(|line| decode_client_line(&line).unwrap().payload)
+            .filter_map(|payload| match payload {
+                ClientPayload::Command(command) => Some(command),
+                _ => None,
+            })
+            .collect();
+        assert!(commands.iter().any(|command| matches!(command, Command::LinkPullRequest { session_id, .. } if session_id == "session")), "phone menu must send a link command: {commands:?}");
     }
 
     /// A wide view showing octo/repo#7, its first reads asked for and unanswered.

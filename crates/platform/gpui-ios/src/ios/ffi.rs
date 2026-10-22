@@ -112,7 +112,22 @@ unsafe extern "C" {
     );
     fn gpui_ios_host_open_url(bytes: *const u8, length: usize);
     fn gpui_ios_host_set_paste_input(owner: u64);
-    fn gpui_ios_host_set_paste_control(x: f64, y: f64, width: f64, height: f64);
+    /// Each colour is sRGB red, green, blue and alpha.
+    fn gpui_ios_host_set_paste_control(
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        foreground_red: f64,
+        foreground_green: f64,
+        foreground_blue: f64,
+        foreground_alpha: f64,
+        background_red: f64,
+        background_green: f64,
+        background_blue: f64,
+        background_alpha: f64,
+        corner_radius: f64,
+    );
     fn gpui_ios_host_clipboard_text_length() -> usize;
     fn gpui_ios_host_read_clipboard(bytes: *mut u8, capacity: usize) -> usize;
     fn gpui_ios_host_write_clipboard(bytes: *const u8, length: usize);
@@ -254,15 +269,32 @@ pub(crate) fn host_set_paste_input(owner: u64) {
     unsafe { gpui_ios_host_set_paste_input(owner) };
 }
 
-pub(crate) fn host_set_paste_control_bounds(bounds: Option<gpui::Bounds<gpui::Pixels>>) {
-    let bounds = bounds.unwrap_or_default();
-    // UIKit only updates a subview's geometry; it must not call back into GPUI during paint.
+pub(crate) fn host_set_paste_control(control: Option<crate::PasteControl>) {
+    let control = control.unwrap_or(crate::PasteControl {
+        bounds: gpui::Bounds::default(),
+        foreground: gpui::Hsla::default(),
+        background: gpui::Hsla::default(),
+        corner_radius: gpui::px(0.),
+    });
+    let bounds = control.bounds;
+    let foreground = control.foreground.to_rgb();
+    let background = control.background.to_rgb();
+    // UIKit only updates a subview's geometry and style; it must not call back into GPUI during paint.
     unsafe {
         gpui_ios_host_set_paste_control(
-            f64::from(bounds.origin.x),
-            f64::from(bounds.origin.y),
-            f64::from(bounds.size.width),
-            f64::from(bounds.size.height),
+            bounds.origin.x.into(),
+            bounds.origin.y.into(),
+            bounds.size.width.into(),
+            bounds.size.height.into(),
+            foreground.r.into(),
+            foreground.g.into(),
+            foreground.b.into(),
+            foreground.a.into(),
+            background.r.into(),
+            background.g.into(),
+            background.b.into(),
+            background.a.into(),
+            control.corner_radius.into(),
         )
     };
 }
