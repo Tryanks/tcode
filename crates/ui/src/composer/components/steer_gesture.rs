@@ -1,23 +1,24 @@
-//! The compact Queue button's touch. A tap queues; holding the finger down,
-//! or sliding it up, arms a steer so that lifting steers the running turn.
+//! The compact Queue button's touch chooser.
 
 use super::super::*;
-use gpui::{Bounds, Pixels, Point, TouchDragEvent, TouchPhase};
-
-/// How far above where it landed the finger must travel to arm a steer.
-const SLIDE_UP: Pixels = px(32.);
+use gpui::{Bounds, Pixels, Point, TouchDragEvent, TouchPhase, canvas, deferred};
+use gpui_base::Positioner;
 
 pub(in super::super) struct SteerGesture {
-    start: Point<Pixels>,
+    position: Point<Pixels>,
     bounds: Bounds<Pixels>,
+    upper_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     held: bool,
-    lifted: bool,
-    _hold: Task<()>,
+    hold: Option<Task<()>>,
 }
 
 impl SteerGesture {
     pub(in super::super) fn armed(&self) -> bool {
-        self.held || self.lifted
+        (self.held && self.bounds.contains(&self.position))
+            || self
+                .upper_bounds
+                .get()
+                .is_some_and(|bounds| bounds.contains(&self.position))
     }
 }
 
@@ -29,7 +30,7 @@ impl Composer {
     /// timed here with gpui's long-press duration.
     pub(in super::super) fn render_steer_gesture(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = cx.entity();
-        gpui::canvas(
+        let touch = canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
                 window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
@@ -60,7 +61,142 @@ impl Composer {
             },
         )
         .absolute()
-        .size_full()
+        .inset_0()
+        .into_any_element();
+        div()
+            .absolute()
+            .inset_0()
+            .child(touch)
+            .when_some(self.steer_gesture.as_ref(), |el, gesture| {
+                el.child(self.render_steer_choices(gesture, cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_steer_choices(&self, gesture: &SteerGesture, cx: &App) -> AnyElement {
+        let armed = gesture.armed();
+        let upper_bounds = gesture.upper_bounds.clone();
+        let choices = v_flex().gap(px(8.)).children([true, false].map(|steer| {
+            let id = if steer {
+                "steer-gesture-steer"
+            } else {
+                "steer-gesture-queue"
+            };
+            let selected = if steer {
+                armed
+            } else {
+                !armed && gesture.bounds.contains(&gesture.position)
+            };
+            let label = crate::tr!(if steer {
+                "mobile.steer"
+            } else {
+                "mobile.queue"
+            });
+            let hint = crate::tr!(match (steer, selected) {
+                (true, true) => "mobile.release_to_steer",
+                (false, true) => "mobile.release_to_queue",
+                (true, false) => "mobile.steer",
+                (false, false) => "mobile.queue",
+            });
+            let content = div()
+                .relative()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .when(selected, |el| {
+                            el.debug_selector(move || format!("{id}-selected"))
+                        })
+                        .size(px(40.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if selected {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().border
+                        })
+                        .bg(if selected {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().popover
+                        })
+                        .text_color(if selected {
+                            cx.theme().primary_foreground
+                        } else {
+                            cx.theme().foreground
+                        })
+                        .shadow_lg()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(IconName::ArrowUp).size(px(18.))),
+                )
+                .child(
+                    crate::material::overlay_contour(div(), cx)
+                        .absolute()
+                        .right(px(52.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(crate::material::radius_chip(cx))
+                        .whitespace_nowrap()
+                        .text_size(px(12.))
+                        .text_color(if selected {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().foreground
+                        })
+                        .child(hint),
+                )
+                .into_any_element();
+            let content = if steer {
+                // Base supplies no default popup motion. Use the composer's
+                // existing 150ms entrance with Base's enter easing; GPUI owns
+                // frame scheduling and reduced motion.
+                div()
+                    .size_full()
+                    .child(content)
+                    .with_animation(
+                        "steer-choice-pop-in",
+                        Animation::new(Duration::from_millis(150))
+                            .with_easing(gpui_base::animation::ease_out_cubic),
+                        |el, progress| {
+                            el.relative()
+                                .top(px(52.) * (1. - progress))
+                                .opacity(progress)
+                        },
+                    )
+                    .into_any_element()
+            } else {
+                content
+            };
+            let upper_bounds = upper_bounds.clone();
+            crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
+                .debug_selector(move || id.into())
+                .relative()
+                .w(gesture.bounds.size.width)
+                .h(gesture.bounds.size.height)
+                .occlude()
+                .child(content)
+                .when(steer, |el| {
+                    el.child(
+                        canvas(
+                            move |bounds, _, _| upper_bounds.set(Some(bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                })
+                .into_any_element()
+        }));
+        deferred(
+            Positioner::corner(Anchor::BottomRight, gesture.bounds.bottom_right())
+                .margin(px(0.))
+                .child(choices),
+        )
+        .with_priority(gpui_base::POPUP_PRIORITY)
         .into_any_element()
     }
 
@@ -78,18 +214,24 @@ impl Composer {
             });
         });
         self.steer_gesture = Some(SteerGesture {
-            start: position,
+            position,
             bounds,
+            upper_bounds: Rc::new(Cell::new(None)),
             held: false,
-            lifted: false,
-            _hold: hold,
+            hold: Some(hold),
         });
         cx.notify();
     }
 
     fn move_steer_gesture(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.update_steer_gesture(cx, |gesture| {
-            gesture.lifted = gesture.start.y - position.y > SLIDE_UP;
+            gesture.position = position;
+            // Leaving Queue selects spatially from then on. Jitter within
+            // Queue must not undo the stationary hold shortcut.
+            if !gesture.bounds.contains(&position) {
+                gesture.held = false;
+                gesture.hold.take();
+            }
         });
     }
 
@@ -108,9 +250,7 @@ impl Composer {
         if armed && !was_armed {
             crate::haptics::long_press();
         }
-        if armed != was_armed {
-            cx.notify();
-        }
+        cx.notify();
     }
 
     fn end_steer_gesture(
@@ -120,13 +260,14 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(gesture) = self.steer_gesture.take() else {
+        let Some(mut gesture) = self.steer_gesture.take() else {
             return;
         };
         cx.notify();
         if phase == TouchPhase::Cancelled {
             return;
         }
+        gesture.position = position;
         let steer = gesture.armed();
         if steer || gesture.bounds.contains(&position) {
             let input = self.input.clone();

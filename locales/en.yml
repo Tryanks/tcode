@@ -1419,6 +1419,8 @@ mobile:
   offline_action: "Offline — available when reconnected"
   queue: "Queue"
   steer: "Steer"
+  release_to_steer: "Release to steer"
+  release_to_queue: "Release to queue"
   command_requested: "Run command"
   files_requested: "Edit files"
   read_requested: "Read files"

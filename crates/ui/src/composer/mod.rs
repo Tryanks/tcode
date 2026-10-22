@@ -1846,8 +1846,6 @@ mod replica_tests {
         });
     }
 
-    /// On a phone the Queue button has one touch target but two sends: a
-    /// tap queues behind the running turn, and a hold or a slide up steers it.
     #[gpui::test]
     fn a_held_or_lifted_queue_button_steers_while_a_tap_queues(cx: &mut TestAppContext) {
         use gpui::{TouchEvent, TouchId, TouchPhase, point};
@@ -1855,6 +1853,8 @@ mod replica_tests {
         let (store, incoming, outgoing, mut status) = attach(cx);
         status.activity.turn_running = true;
         status.steering_supported = true;
+        let mut unsupported = status.clone();
+        unsupported.steering_supported = false;
         // A phone sends only once its screen is current, so every baseline
         // topic is answered.
         let session_id = status.session_id.clone();
@@ -1937,7 +1937,14 @@ mod replica_tests {
             };
         assert!(sent(cx).is_empty());
 
-        for (gesture, expected) in [("hold", "steer"), ("slide", "steer"), ("tap", "queue")] {
+        for (gesture, expected) in [
+            ("hold", "steer"),
+            ("hold-jitter", "steer"),
+            ("hold-slide", "steer"),
+            ("slide", "steer"),
+            ("lower", "queue"),
+            ("tap", "queue"),
+        ] {
             composer.update_in(cx, |composer, window, cx| {
                 composer.set_input_text(gesture.into(), window, cx)
             });
@@ -1948,33 +1955,52 @@ mod replica_tests {
             let center = button.center();
             touch(cx, TouchPhase::Started, center);
             let mut lift = center;
+            if matches!(gesture, "hold" | "hold-jitter" | "hold-slide" | "lower") {
+                cx.executor()
+                    .advance_clock(gpui::GestureTuning::default().long_press_duration);
+                cx.run_until_parked();
+                cx.update(|window, cx| _ = window.draw(cx));
+            }
+            let upper = cx
+                .debug_bounds("steer-gesture-steer")
+                .expect("holding reveals the upper Steer button");
+            let lower = cx
+                .debug_bounds("steer-gesture-queue")
+                .expect("holding reveals the lower Queue button");
+            assert_eq!(lower, button, "Queue stays under the finger");
+            assert_eq!(upper.center().x, lower.center().x);
+            assert!(
+                upper.bottom() <= lower.top(),
+                "Steer is directly above Queue"
+            );
             match gesture {
-                "hold" => {
-                    cx.executor().advance_clock(
-                        gpui::GestureTuning::default().long_press_duration
-                            + Duration::from_millis(1),
-                    );
-                    cx.run_until_parked();
+                "hold-jitter" => {
+                    touch(cx, TouchPhase::Moved, point(center.x + px(1.), center.y));
+                    lift = point(center.x + px(2.), center.y);
                 }
-                "slide" => {
-                    lift = point(center.x, center.y - px(40.));
+                "slide" | "hold-slide" | "lower" => {
+                    lift = upper.center();
                     touch(cx, TouchPhase::Moved, lift);
+                    assert!(
+                        cx.debug_bounds("steer-gesture-steer-selected").is_some(),
+                        "{gesture}: moving onto Steer highlights it"
+                    );
+                    if gesture == "lower" {
+                        lift = lower.center();
+                        touch(cx, TouchPhase::Moved, lift);
+                        assert!(cx.debug_bounds("steer-gesture-queue-selected").is_some());
+                    }
                 }
                 _ => {}
             }
-            let armed = composer.read_with(cx, |composer, _| {
-                composer
-                    .steer_gesture
-                    .as_ref()
-                    .is_some_and(SteerGesture::armed)
-            });
-            assert_eq!(armed, expected == "steer", "{gesture} arms a steer");
             assert!(
                 sent(cx).is_empty(),
                 "nothing is sent before the finger lifts"
             );
             touch(cx, TouchPhase::Ended, lift);
             assert_eq!(sent(cx), vec![(expected, gesture.to_string())], "{gesture}");
+            assert!(cx.debug_bounds("steer-gesture-steer").is_none());
+            assert!(cx.debug_bounds("steer-gesture-queue").is_none());
             assert!(
                 composer
                     .read_with(cx, |composer, cx| composer.draft(cx))
@@ -1982,21 +2008,59 @@ mod replica_tests {
             );
         }
 
-        // A finger that slides off the button and lifts there sends nothing.
-        composer.update_in(cx, |composer, window, cx| {
-            composer.set_input_text("kept".into(), window, cx)
-        });
+        for gesture in ["sideways", "hold-sideways", "steer-sideways", "cancel"] {
+            composer.update_in(cx, |composer, window, cx| {
+                composer.set_input_text("kept".into(), window, cx)
+            });
+            cx.update(|window, cx| _ = window.draw(cx));
+            let button = cx.debug_bounds("steer-turn").unwrap();
+            touch(cx, TouchPhase::Started, button.center());
+            if gesture == "hold-sideways" {
+                cx.executor()
+                    .advance_clock(gpui::GestureTuning::default().long_press_duration);
+                cx.run_until_parked();
+                cx.update(|window, cx| _ = window.draw(cx));
+            }
+            let upper = cx.debug_bounds("steer-gesture-steer").unwrap();
+            if matches!(gesture, "steer-sideways" | "cancel") {
+                touch(cx, TouchPhase::Moved, upper.center());
+            }
+            let away = point(button.center().x - px(120.), upper.center().y);
+            if gesture == "cancel" {
+                touch(cx, TouchPhase::Cancelled, upper.center());
+            } else {
+                touch(cx, TouchPhase::Moved, away);
+                touch(cx, TouchPhase::Ended, away);
+            }
+            assert!(sent(cx).is_empty(), "{gesture} sends nothing");
+            assert!(cx.debug_bounds("steer-gesture-steer").is_none());
+            assert!(cx.debug_bounds("steer-gesture-queue").is_none());
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                "kept"
+            );
+        }
+
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: unsupported.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(unsupported)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         cx.update(|window, cx| _ = window.draw(cx));
         let button = cx.debug_bounds("steer-turn").unwrap();
         touch(cx, TouchPhase::Started, button.center());
-        let away = point(button.center().x - px(120.), button.center().y);
-        touch(cx, TouchPhase::Moved, away);
-        touch(cx, TouchPhase::Ended, away);
+        cx.executor()
+            .advance_clock(gpui::GestureTuning::default().long_press_duration);
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("steer-gesture-steer").is_none());
+        assert!(cx.debug_bounds("steer-gesture-queue").is_none());
+        touch(cx, TouchPhase::Cancelled, button.center());
         assert!(sent(cx).is_empty());
-        assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.draft(cx)),
-            "kept"
-        );
     }
 
     #[gpui::test]
