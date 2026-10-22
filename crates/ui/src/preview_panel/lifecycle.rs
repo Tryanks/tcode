@@ -130,6 +130,10 @@ pub struct BrowserLifecycle {
     slots: HashMap<String, WebViewSlot>,
     warm: HashSet<String>,
     active_identity: Option<(String, String)>,
+    /// The size the Preview panel last showed a page at: what a conversation
+    /// nobody is looking at would get on screen.
+    #[cfg(not(target_os = "android"))]
+    panel_size: Option<gpui::Size<gpui::Pixels>>,
     creator: Creator,
     proxy: Option<tcode_traverse::preview::ProxyEntry>,
     endpoint: Option<tcode_traverse::preview::PreviewEndpoint>,
@@ -199,6 +203,8 @@ impl BrowserLifecycle {
             slots: HashMap::new(),
             warm: HashSet::new(),
             active_identity: None,
+            #[cfg(not(target_os = "android"))]
+            panel_size: None,
             creator,
         }
     }
@@ -313,6 +319,44 @@ impl BrowserLifecycle {
             };
             let visible = Some(candidate.as_str()) == key;
             view.update(cx, |view, _| set_webview_visible(view, visible));
+            #[cfg(not(target_os = "android"))]
+            if visible {
+                let size = view.read(cx).bounds().size;
+                if size.width > gpui::px(0.) && size.height > gpui::px(0.) {
+                    self.panel_size = Some(size);
+                }
+            }
+        }
+    }
+
+    /// Give a hidden browser the viewport it would have on screen: `canvas`
+    /// when the conversation fixed one, else the panel's, else `fallback`.
+    /// A browser that was never shown is otherwise laid out at 0×0, which
+    /// leaves an agent driving a background conversation with an empty page.
+    #[cfg(not(target_os = "android"))]
+    pub(super) fn stage_hidden(
+        &self,
+        key: &str,
+        canvas: Option<gpui::Size<gpui::Pixels>>,
+        fallback: gpui::Size<gpui::Pixels>,
+        cx: &App,
+    ) {
+        let Some(view) = self.ready_view(key) else {
+            return;
+        };
+        let view = view.read(cx);
+        if view.visible() {
+            return;
+        }
+        let own = Some(view.bounds().size)
+            .filter(|size| size.width > gpui::px(0.) && size.height > gpui::px(0.));
+        let size = canvas.or(self.panel_size).or(own).unwrap_or(fallback);
+        let rect = wry::Rect {
+            position: wry::dpi::LogicalPosition::new(-20000., -20000.).into(),
+            size: wry::dpi::LogicalSize::new(f64::from(size.width), f64::from(size.height)).into(),
+        };
+        if let Err(error) = view.set_bounds(rect) {
+            log::debug!("preview: failed to size hidden webview {key}: {error}");
         }
     }
 

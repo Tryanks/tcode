@@ -326,7 +326,7 @@ impl PreviewTools {
         self.run(PreviewOp::Snapshot).await
     }
 
-    #[tool(description = "Capture a screenshot of the visible preview browser region as a PNG.")]
+    #[tool(description = "Capture a screenshot of the preview page as a PNG.")]
     async fn preview_screenshot(&self) -> CallToolResult {
         self.run(PreviewOp::Screenshot).await
     }
