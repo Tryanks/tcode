@@ -50,7 +50,7 @@ pub(crate) trait ScrollableElement:
     }
 }
 
-/// A page-level vertical viewport using gpui-base's wheel and bounce defaults.
+/// A page-level vertical viewport with gpui-base's edge bounce.
 /// `handle` must be the scroll handle of `element`.
 /// Scrollbars and toolbars stay outside; never nest one inside a masked area.
 #[track_caller]
@@ -59,7 +59,12 @@ pub(crate) fn page_viewport<H: ScrollbarHandle + Clone>(
     handle: &H,
     element: impl IntoElement,
 ) -> ScrollBounce {
-    ScrollBounce::new(id, handle, element)
+    // gpui-base 0.8's own wheel handling stretches the edge away from both
+    // ends: a drag let go while moving throws it, and f32 rounding of the
+    // delta the content used reads as reaching it. The next drag then moves
+    // that stretch instead of the content. Scrolling itself, the content
+    // stretches only by what is left over at an end.
+    ScrollBounce::new(id, handle, element).scroll_wheel(false)
 }
 
 #[derive(IntoElement)]
