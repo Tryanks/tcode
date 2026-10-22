@@ -160,6 +160,9 @@ docker run -p 80:80 -p 443:443 -p 7842:7842/udp \
   -v tcode-traverse-data:/var/lib/tcode-traverse ghcr.io/tryanks/tcode-traverse:latest
 ```
 
+[`docker-compose.yml`](docker-compose.yml) is the same deployment as a
+Compose project, with a health check on `/healthz`.
+
 For a local source build, run
 `docker build -f crates/traverse-server/Dockerfile -t tcode-traverse .`.
 Release builds pass `--build-arg BINARY_SOURCE=release`, with the binary

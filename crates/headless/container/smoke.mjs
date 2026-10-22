@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -17,6 +17,9 @@ const traverseName = `${id}-traverse`;
 const traverseData = `${id}-traverse-data`;
 const device = await mkdtemp(path.join(os.tmpdir(), 'tcode-container-device-'));
 const password = randomUUID();
+// The invitation names the machine's UDP port, so the host port must match it;
+// 47420 itself is taken wherever a Tcode desktop app is running.
+const udpPort = 47520;
 const commands = ['claude', 'codex', 'pi', 'opencode', 'cursor-agent', 'grok'];
 const protocol = Number((await readFile(new URL('../../protocol/src/lib.rs', import.meta.url), 'utf8'))
   .match(/pub const PROTOCOL_VERSION: u32 = (\d+)/)[1]);
@@ -35,11 +38,11 @@ async function start(image, agents, uid = '1234', gid = '2345', dockerGid) {
   docker('run', '--detach', '--name', id,
     '--group-add', '3456',
     ...(dockerGid === undefined ? [] : ['--env', `DOCKER_GID=${dockerGid}`]),
-    '--env', `PUID=${uid}`, '--env', `PGID=${gid}`, '--env', `TCODE_PASSWORD=${password}`,
+    '--env', `PUID=${uid}`, '--env', `PGID=${gid}`, '--env', `TCODE_PASSWORD=${password}`, '--env', 'TZ=Asia/Shanghai',
     '--env', `TCODE_AGENTS=${agents}`, '--volume', `${data}:/data`,
     '--mount', `type=volume,src=${projects},dst=/projects,volume-nocopy`,
-    '--publish', '127.0.0.1::47420/tcp', '--publish', '127.0.0.1:47420:47420/udp',
-    image, 'serve', '--traverse', 'off', '--browser-listen', '0.0.0.0:47420');
+    '--publish', '127.0.0.1::47420/tcp', '--publish', `127.0.0.1:${udpPort}:${udpPort}/udp`,
+    image, 'serve', '--traverse', 'off', '--browser-listen', '0.0.0.0:47420', '--port', String(udpPort));
   const port = JSON.parse(docker('inspect', id))[0].NetworkSettings.Ports['47420/tcp'][0].HostPort;
   const base = `http://127.0.0.1:${port}`;
   assert.deepEqual(await waitForJson(id, `${base}/auth/state`), { mode: 'password', configured: true });
@@ -59,6 +62,16 @@ async function waitForJson(name, url) {
   throw new Error(`Container did not become ready:\n${docker('logs', name)}`);
 }
 
+async function waitForHealthy() {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const health = JSON.parse(docker('inspect', id))[0].State.Health?.Status;
+    if (health === 'healthy') return;
+    assert.notEqual(health, 'unhealthy', docker('logs', id));
+    await delay(1000);
+  }
+  throw new Error('The image health check never passed');
+}
+
 function stop() {
   docker('stop', '--time', '30', id);
   assert.equal(JSON.parse(docker('inspect', id))[0].State.ExitCode, 0, docker('logs', id));
@@ -69,6 +82,12 @@ async function browser(base) {
   const page = await fetch(base);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /auth\.mjs/);
+  const auth = await fetch(`${base}/auth.mjs`);
+  assert.equal(auth.status, 200);
+  const authFile = path.join(device, 'auth.mjs');
+  await writeFile(authFile, await auth.text());
+  command(process.execPath, ['--check', authFile]);
+  assert.doesNotMatch(await readFile(authFile, 'utf8'), /__AUTH_LOCALES__/, 'The login page embeds its translations');
   const wasm = await fetch(`${base}/tcode_web_bg.wasm`);
   assert.equal(wasm.status, 200);
   assert.deepEqual([...new Uint8Array(await wasm.arrayBuffer()).slice(0, 4)], [0, 97, 115, 109]);
@@ -119,6 +138,8 @@ try {
   let base = await start(full, 'claude,codex,pi,opencode,cursor,grok');
   for (const name of commands) exec(`${name} --version`);
   assert.equal(exec('bash -lc "id -u; command -v codex"'), '1234\n/data/agents/bin/codex');
+  assert.equal(exec('bash -lc "locale charmap; date +%Z"'), 'UTF-8\nCST', 'Terminal panes get UTF-8 and TZ');
+  await waitForHealthy();
   exec('echo owned > /projects/owned');
   assert.equal(exec('stat -c "%u:%g" /projects/owned'), '1234:2345');
   const groups = exec('grep "^Groups:" /proc/$(pgrep -x tcode-headless)/status').split(/\s+/).slice(1).map(Number);
