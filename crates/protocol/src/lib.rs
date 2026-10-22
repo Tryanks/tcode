@@ -48,13 +48,13 @@ pub use event::{
     Topic,
 };
 pub use query::{
-    DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice,
-    HostingAction, HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES,
-    MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query,
-    QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_COLS,
-    STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction, SpaceInfo, TraverseLookupState,
-    TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus,
-    TraverseSourceStatus,
+    DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
+    GroupMachineInfo, HostedDevice, HostingAction, HostingState, IconImageEntry,
+    MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo,
+    PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
+    STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction, SpaceInfo,
+    TraverseLookupState, TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus,
+    TraverseRelayStatus, TraverseSourceStatus,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -181,6 +181,12 @@ pub use wire::{
 // SessionMeta carries the child's `expectation`; the protocol adds the
 // CompactContext command, which asks a provider with a native compaction
 // operation to compact now.
+//
+// Unreleased: machine groups. HostingAction gains Group with GroupAction
+// (create, join, leave, regenerate and pause the group link, remove a
+// machine, admit a declined device); HostingState carries the group with its
+// link, machines and declined devices; HostedDevice marks group members; and
+// RevokeDevice removes a group member from every machine of the group.
 pub const PROTOCOL_VERSION: u32 = 15;
 
 #[cfg(test)]
