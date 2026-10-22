@@ -628,6 +628,7 @@ mod tests {
             relay: None,
             addrs: vec!["192.168.31.5:47420".into()],
             last_connected_unix: None,
+            group_id: None,
         });
         let (locked, received) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel();
