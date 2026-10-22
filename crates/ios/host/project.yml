@@ -22,6 +22,7 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: Sources
+      - path: ../../client/src/speech/apple/Transcription.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.tryanks.tcode

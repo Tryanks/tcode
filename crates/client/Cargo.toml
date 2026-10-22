@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-voice = ["dep:block2", "dep:objc2", "dep:objc2-foundation", "dep:objc2-av-foundation", "dep:objc2-avf-audio", "dep:objc2-speech", "dep:windows", "dep:cpal"]
+voice = ["dep:block2", "dep:objc2", "dep:objc2-foundation", "dep:objc2-av-foundation", "dep:objc2-speech", "dep:windows", "dep:cpal"]
 
 [dependencies]
 tcode-protocol = { path = "../protocol", default-features = false }
@@ -31,10 +31,9 @@ smol = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6", optional = true }
 objc2 = { version = "0.6", optional = true }
-objc2-foundation = { version = "0.3", features = ["NSBundle", "NSError", "NSLocale", "NSString"], optional = true }
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSString"], optional = true }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"], optional = true }
-objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "block2", "AVAudioEngine", "AVAudioTime", "AVAudioNode", "AVAudioIONode", "AVAudioBuffer", "AVAudioFormat", "AVAudioTypes"], optional = true }
-objc2-speech = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognitionMetadata", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognizer", "SFTranscription"], optional = true }
+objc2-speech = { version = "0.3", default-features = false, features = ["std", "block2", "SFSpeechRecognizer"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 cpal = { version = "0.15.3", optional = true }

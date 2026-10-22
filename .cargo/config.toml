@@ -5,3 +5,9 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Swift's concurrency runtime, which macOS dictation links, is part of the
+# system from macOS 12, the oldest release Tcode supports; binaries linked for
+# an older system would look for it on an rpath they do not have.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "12.0"
