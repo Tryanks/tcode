@@ -1368,6 +1368,7 @@ hosts:
   forget: "Remove"
   actions: "Actions for %{name}"
   pair_again: "Pair again"
+  in_group: "In a machine group"
   local:
     unavailable: "Could not start: %{reason}"
     default_settings: "%{reason}. Its settings could not be read, so the default language and theme are in use."
@@ -1530,6 +1531,59 @@ spaces:
     show_qr: "Show QR"
     hide_qr: "Hide QR"
     resume: "Turn on link"
+
+group:
+  section: "MACHINE GROUP"
+  intro: "A group links this machine with your other machines. A device paired with any machine in the group can open every machine in it, and the group carries on when any one machine leaves."
+  risk: "Every machine in the group can let devices into all the others. Join only machines you trust; a group is off until you create or join one."
+  failed: "Could not update the group: %{error}"
+  member_badge: "Group"
+  leave: "Leave group"
+  leave_title: "Leave «%{name}»?"
+  leave_description: "The other machines stop admitting devices through this one. Devices paired here stay paired with this machine directly."
+  summary:
+    machine_one: "1 machine"
+    machines: "%{count} machines"
+  create:
+    action: "Create group"
+    title: "Create a machine group"
+    placeholder: "Group name"
+    confirm: "Create group"
+  join:
+    action: "Join group"
+    title: "Join a machine group"
+    description: "Paste the group link another machine shows in Settings → Remote."
+    placeholder: "tcode://pair?…&group=…"
+    address: "Machine's IP address (optional)"
+    address_placeholder: "Only when nothing finds the machine, e.g. 192.168.1.20"
+    confirm: "Join group"
+    not_a_group_link: "That is not a group link."
+    joined: "Joined «%{name}»"
+  brought:
+    title: "These devices will be admitted by every machine in the group"
+    description: "They are paired with this machine now. Uncheck any that should stay on this machine only."
+    none: "No devices are paired with this machine yet, so none are brought into the group."
+  link:
+    description: "Scan this QR code in Tcode on a phone or another device, or send the link. Whoever pairs with it can open every machine in the group. Another machine joins the group with the same link."
+    copied: "Group link copied"
+    enabled: "Group link enabled"
+    paused: "The group link is paused. Devices already in the group keep their access."
+    dead: "Link disabled after 5 failed attempts — regenerate it."
+    pairing_off: "This machine is not accepting new devices. Turn on Accept new devices to use the link."
+  machines:
+    title: "Machines"
+    this: "This machine"
+    remove: "Remove"
+    remove_title: "Remove %{name} from the group?"
+    remove_description: "The other machines stop syncing with it and stop admitting the devices it brings from now on. Devices it already brought keep their access."
+  declined:
+    title: "Waiting for this machine"
+    description: "Other machines admitted these devices while this machine was not accepting new devices."
+    admit: "Admit"
+  remove_device:
+    title: "Remove %{name} from the group?"
+    description: "The device is disconnected and unpaired from every machine in «%{group}», not only this one. It can come back only by pairing again."
+    action: "Remove everywhere"
 
 member:
   connection: "Space «%{space}» · %{machine}"

@@ -396,13 +396,16 @@ mod tests {
         assert_eq!(pair_url(&off), lan_only);
 
         // A group link names the group, never a space as well.
-        let group_link =
-            format!("tcode://pair?v=3&id={ID}&secret={SECRET}&group={SECRET}&traverse=off&port=47420");
+        let group_link = format!(
+            "tcode://pair?v=3&id={ID}&secret={SECRET}&group={SECRET}&traverse=off&port=47420"
+        );
         let group = parse_pair_url(&group_link).unwrap();
         assert_eq!(group.group.as_deref(), Some(SECRET));
         assert_eq!(pair_url(&group), group_link);
         assert!(parse_pair_url(&group_link.replace("&group=", "&space=shared&group=")).is_none());
-        assert!(parse_pair_url(&group_link.replace(&format!("group={SECRET}"), "group=home")).is_none());
+        assert!(
+            parse_pair_url(&group_link.replace(&format!("group={SECRET}"), "group=home")).is_none()
+        );
 
         let url_safe_secret = "__-_AAAAAAAAAAAAAAAAAA";
         assert_eq!(

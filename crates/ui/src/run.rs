@@ -42,7 +42,7 @@ pub fn last_host_target(host: &dyn ClientHost) -> Option<AttachmentTarget> {
     host.load_hosts()
         .into_iter()
         .find(|saved| saved.host_id == id)
-        .map(AttachmentTarget::Remote)
+        .map(|host| AttachmentTarget::Remote(Box::new(host)))
 }
 
 pub struct ShellOptions {

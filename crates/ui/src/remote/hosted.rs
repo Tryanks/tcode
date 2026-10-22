@@ -23,6 +23,7 @@ pub(crate) struct HostedPanel {
     refreshing: bool,
     generation: u64,
     spaces: Entity<super::spaces::SpacesSection>,
+    group: Entity<super::group::GroupSection>,
     _ticker: Task<()>,
 }
 
@@ -45,6 +46,8 @@ impl HostedPanel {
             spaces: cx.new(|_| {
                 super::spaces::SpacesSection::new(store.clone(), super::spaces::for_store)
             }),
+            group: cx
+                .new(|_| super::group::GroupSection::new(store.clone(), super::spaces::for_store)),
             store,
             state: None,
             error: None,
@@ -190,7 +193,9 @@ impl HostedPanel {
         if state.devices.is_empty() {
             devices = devices.child(div().p_3().child(crate::tr!("remote.devices.empty")));
         }
+        let group_name = state.group.as_ref().map(|group| group.name.clone());
         for device in state.devices {
+            let in_group = group_name.clone().filter(|_| device.group);
             let space = match &device.access {
                 tcode_protocol::DeviceAccess::Space { space_id } => state
                     .spaces
@@ -217,7 +222,8 @@ impl HostedPanel {
                                 &device.name,
                                 device.platform.as_deref(),
                             )))
-                            .children(space.map(|name| super::spaces::member_badge(&name, cx))),
+                            .children(space.map(|name| super::spaces::member_badge(&name, cx)))
+                            .children(in_group.is_some().then(|| super::group::member_badge(cx))),
                     )
                     .child(
                         div()
@@ -231,14 +237,32 @@ impl HostedPanel {
                             .disabled(self.pending)
                             .danger()
                             .label(crate::tr!("remote.devices.revoke"))
-                            .on_click(cx.listener(move |panel, _, _, cx| {
-                                panel.request(HostingAction::RevokeDevice(device.id.clone()), cx)
+                            .on_click(cx.listener(move |panel, _, window, cx| {
+                                let action = HostingAction::RevokeDevice(device.id.clone());
+                                match in_group.clone() {
+                                    Some(group) => {
+                                        let panel = cx.entity().downgrade();
+                                        super::group::confirm_group_removal(
+                                            device.name.clone(),
+                                            group,
+                                            move |_, cx| {
+                                                let _ = panel.update(cx, |panel, cx| {
+                                                    panel.request(action.clone(), cx)
+                                                });
+                                            },
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                    None => panel.request(action, cx),
+                                }
                             })),
                     ),
             );
         }
         column
             .child(devices)
+            .child(self.group.clone())
             .child(self.spaces.clone())
             .into_any_element()
     }
