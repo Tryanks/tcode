@@ -4,8 +4,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DIST_DIR="${SCRIPT_DIR}/dist"
 cd "${REPO_ROOT}"
-if [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.127" ]]; then
-  echo 'Install matching CLI: cargo install wasm-bindgen-cli --version 0.2.127 --locked' >&2
+WASM_BINDGEN="$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q;}' Cargo.lock)"
+if [[ "$(wasm-bindgen --version)" != "wasm-bindgen ${WASM_BINDGEN}" ]]; then
+  echo "Install matching CLI: cargo install wasm-bindgen-cli --version ${WASM_BINDGEN} --locked" >&2
   exit 1
 fi
 cargo build -p tcode-web --target wasm32-unknown-unknown --release --locked
