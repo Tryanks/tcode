@@ -182,12 +182,13 @@ pub use wire::{
 // CompactContext command, which asks a provider with a native compaction
 // operation to compact now.
 //
-// Unreleased: machine groups. HostingAction gains Group with GroupAction
-// (create, join, leave, regenerate and pause the group link, remove a
-// machine, admit a declined device); HostingState carries the group with its
-// link, machines and declined devices; HostedDevice marks group members; and
-// RevokeDevice removes a group member from every machine of the group.
-pub const PROTOCOL_VERSION: u32 = 15;
+// Version 16 (v0.3.0-rc.1) adds machine groups: HostingAction gains Group
+// with GroupAction (create, join, leave, regenerate and pause the group link,
+// remove a machine, admit a declined device); HostingState carries the group
+// with its link, machines and declined devices; HostedDevice marks group
+// members; and RevokeDevice removes a group member from every machine of the
+// group.
+pub const PROTOCOL_VERSION: u32 = 16;
 
 #[cfg(test)]
 mod tests;
