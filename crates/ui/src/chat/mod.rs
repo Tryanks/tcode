@@ -5814,6 +5814,54 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_drag_right_after_a_flick_scrolls_the_timeline(cx: &mut TestAppContext) {
+        use gpui::{point, px};
+        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        draw(cx);
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        settle_frames(cx);
+        list.set_follow_mode(gpui::FollowMode::Normal);
+        list.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        draw(cx);
+        let resting = list.viewport_bounds();
+        // One trackpad packet per displayed frame.
+        let packet = |phase, dy: f32, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: resting.center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(dy))),
+                touch_phase: phase,
+                ..Default::default()
+            });
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+        };
+        packet(gpui::TouchPhase::Started, 0., cx);
+        for _ in 0..6 {
+            packet(gpui::TouchPhase::Moved, -70., cx);
+        }
+        packet(gpui::TouchPhase::Ended, 0., cx);
+        let flicked = list.scroll_px_offset_for_scrollbar().y;
+        assert!(flicked < px(0.) && flicked > -list.max_offset_for_scrollbar().y);
+        packet(gpui::TouchPhase::Started, 0., cx);
+        for _ in 0..4 {
+            packet(gpui::TouchPhase::Moved, -50., cx);
+        }
+        assert_eq!(
+            list.scroll_px_offset_for_scrollbar().y,
+            flicked - px(200.),
+            "the drag scrolls the conversation"
+        );
+        assert_eq!(list.viewport_bounds(), resting, "nothing is displaced");
+    }
+
+    #[gpui::test]
     fn timeline_tail_has_one_composer_gap(cx: &mut TestAppContext) {
         use gpui::{Context, IntoElement, Render, Window, px};
         struct ChatRoot(Entity<ChatView>);
@@ -6858,9 +6906,8 @@ mod tests {
             store.read_with(cx, |store, _| store.with_active_timeline(Timeline::clone))
         };
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        // Let the previous edge return before the next gesture catches it.
+        // One trackpad gesture.
         let scroll = |distance: gpui::Pixels, cx: &mut VisualTestContext| {
-            settle_frames(cx);
             let position = list.viewport_bounds().center();
             for (touch_phase, distance) in [
                 (gpui::TouchPhase::Started, px(0.)),
