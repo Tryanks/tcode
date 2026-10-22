@@ -243,6 +243,10 @@ impl AndroidPlatform {
     }
 
     fn process_host_events(&self) {
+        // Choreographer queues a frame every vsync. When drawing outlasts one,
+        // drawing each queued frame in turn would keep input unread for the
+        // whole backlog, so a drain draws at most once.
+        let mut frame = false;
         for event in host::drain() {
             if let HostEvent::RefreshRate(rate) = event {
                 if self.display.set_refresh_rate(rate) {
@@ -257,7 +261,7 @@ impl AndroidPlatform {
                 continue;
             };
             match event {
-                HostEvent::Frame => window.pump_frame(false),
+                HostEvent::Frame => frame = true,
                 HostEvent::Back => {
                     if !window.handle_back() {
                         self.emit_process_back();
@@ -266,6 +270,9 @@ impl AndroidPlatform {
                 HostEvent::ScrollCapture(request) => self.emit_scroll_capture(request),
                 event => window.handle_host_event(event),
             }
+        }
+        if frame && let Some(window) = self.window() {
+            window.pump_frame(false);
         }
     }
 
