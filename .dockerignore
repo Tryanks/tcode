@@ -3,3 +3,14 @@ target/
 tmp/
 .env
 projects/
+.claude/
+.idea/
+**/.DS_Store
+crates/web/dist/
+crates/ios/host/build/
+crates/ios/host/lib/
+crates/ios/host/*.xcodeproj/
+crates/android/host/.gradle/
+crates/android/host/build/
+crates/android/host/app/build/
+crates/android/host/app/src/main/jniLibs/
