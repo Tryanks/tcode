@@ -111,8 +111,20 @@ public func gpuiHostWriteClipboard(_ bytes: UnsafePointer<UInt8>?, _ length: Int
 }
 
 @_cdecl("gpui_ios_host_set_paste_control")
-public func gpuiHostSetPasteControl(_ x: Double, _ y: Double, _ width: Double, _ height: Double) {
-    GPUIHostBridge.view?.setPasteControl(frame: CGRect(x: x, y: y, width: width, height: height))
+public func gpuiHostSetPasteControl(
+    _ x: Double, _ y: Double, _ width: Double, _ height: Double,
+    _ foregroundRed: Double, _ foregroundGreen: Double, _ foregroundBlue: Double, _ foregroundAlpha: Double,
+    _ backgroundRed: Double, _ backgroundGreen: Double, _ backgroundBlue: Double, _ backgroundAlpha: Double,
+    _ cornerRadius: Double
+) {
+    GPUIHostBridge.view?.setPasteControl(
+        frame: CGRect(x: x, y: y, width: width, height: height),
+        style: PasteControlStyle(
+            foreground: [foregroundRed, foregroundGreen, foregroundBlue, foregroundAlpha],
+            background: [backgroundRed, backgroundGreen, backgroundBlue, backgroundAlpha],
+            cornerRadius: cornerRadius
+        )
+    )
 }
 
 @_cdecl("gpui_ios_host_set_paste_input")

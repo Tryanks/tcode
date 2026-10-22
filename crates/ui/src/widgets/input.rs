@@ -257,7 +257,7 @@ impl RenderOnce for Input {
             gpui_ios::set_paste_input(dispatch_state!(&self.state, |base| base
                 .entity_id()
                 .as_u64()));
-            gpui_ios::set_paste_control_bounds(None);
+            gpui_ios::set_paste_control(None);
         }
         if !focused {
             dispatch_state!(&self.state, |base| base

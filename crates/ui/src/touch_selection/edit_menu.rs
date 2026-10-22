@@ -13,6 +13,7 @@ use gpui_base::{Placement, Positioner, h_flex};
 use super::handle::SurfaceHandler;
 use crate::{
     material,
+    sizing::Sizable as _,
     theme::ActiveTheme as _,
     widgets::button::{Button, ButtonVariants as _},
 };
@@ -96,8 +97,37 @@ impl EditMenu {
     }
 }
 
+/// The gap between the selection's handles and the menu.
+const GAP: Pixels = px(8.);
+
+/// The menu's height: one finger-sized row inside the contour's hairline.
+fn menu_height() -> Pixels {
+    px(material::TOUCH_TARGET) + px(2.)
+}
+
+/// The side of the selection the menu takes: above it when it fits between
+/// the selection and the top of what the window shows, below it when it fits
+/// there instead, otherwise whichever side has more room.
+///
+/// [`Positioner`] makes the same choice against the whole viewport, which on
+/// a phone runs under the status bar and the software keyboard; gpui-base has
+/// no way to give it the window's visible bounds instead. Choosing the side
+/// here, against [`Window::fully_visible_bounds`], keeps the menu out from
+/// under both; the positioner still aligns and clamps it.
+fn side(anchor: Bounds<Pixels>, visible: Bounds<Pixels>) -> Placement {
+    let above = anchor.top() - GAP - visible.top();
+    let below = visible.bottom() - (anchor.bottom() + GAP);
+    if menu_height() <= above {
+        Placement::Top
+    } else if menu_height() <= below || below > above {
+        Placement::Bottom
+    } else {
+        Placement::Top
+    }
+}
+
 impl RenderOnce for EditMenu {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id = self.id;
         let on_paint = self.on_paint;
         // A T3 pill, as iOS draws its edit menu: the overlay contour at the
@@ -107,11 +137,15 @@ impl RenderOnce for EditMenu {
         // the pill's corner.
         let inner_radius = radius - px(1.);
         let hairline = cx.theme().border;
+        #[cfg(target_os = "ios")]
+        let (foreground, background) = (cx.theme().foreground, cx.theme().popover);
         let last = self.items.len().saturating_sub(1);
         let items = self.items.into_iter().enumerate().flat_map(|(ix, item)| {
             let on_click = item.on_click;
             #[cfg(target_os = "ios")]
             let native_paste = item.native_paste;
+            #[cfg(not(target_os = "ios"))]
+            let native_paste = false;
             // Each item's press surface takes the bar's own corners: the
             // first the left pair, the last the right pair, the ones between
             // none.
@@ -123,33 +157,60 @@ impl RenderOnce for EditMenu {
                 bottom_right: corner(ix == last),
             };
             let selector = item.selector;
-            // This is a finger's menu wherever it shows: the compact pill's
-            // 15px text in the button family's 32px medium row. Pressing an
-            // item leaves focus on the text it acts on: an input keeps its
-            // keyboard, and a message keeps answering the menu's actions.
+            // This is a finger's menu wherever it shows: a touch-target row,
+            // its text at the 17px UIKit draws its own Paste item at, which
+            // takes no font. Button's named sizes pin their own 32px height
+            // over the caller's; a custom size leaves the height to the
+            // caller. Pressing an item leaves focus on the text it acts on:
+            // an input keeps its keyboard, and a message keeps answering the
+            // menu's actions.
             let button = Button::new(ix)
                 .ghost()
-                .text_size(px(15.))
+                .with_size(px(material::TOUCH_TARGET))
+                .h(px(material::TOUCH_TARGET))
+                .min_w(px(material::TOUCH_TARGET))
+                .text_size(px(17.))
                 .rounded_corners(corners)
                 .tab_stop(false)
                 .focusable(false)
                 .debug_selector(move || format!("edit-menu-{selector}"))
-                .label(item.label)
                 .on_click(move |_: &ClickEvent, window, cx| on_click(window, cx));
+            let button = if native_paste {
+                // UIKit's control draws this item's label; the cell keeps its
+                // own unseen, for its width.
+                button.aria_label(item.label.clone()).child(
+                    div()
+                        .text_color(gpui::transparent_black())
+                        .child(item.label),
+                )
+            } else {
+                button.label(item.label)
+            };
             let button = button.into_any_element();
             #[cfg(target_os = "ios")]
             let button = if native_paste {
-                // UIPasteControl needs its full intrinsic height; Button's
-                // content canvas excludes its padding and clips the native UI.
+                // UIKit only trusts a paste its own UIPasteControl starts, and
+                // the control draws its own label. It is laid over this cell
+                // in the cell's colours, with the bar's inner corners — the
+                // cell shows the same fill under a middle item's rounding —
+                // so it reads as one more item. Its bounds are read from a
+                // wrapper the size of the cell: Button's content area
+                // excludes its padding.
                 div()
                     .relative()
-                    .h(px(44.))
-                    .min_w(px(88.))
+                    .flex()
                     .child(button)
                     .child(
                         canvas(
                             |_, _, _| (),
-                            |bounds, _, _, _| gpui_ios::set_paste_control_bounds(Some(bounds)),
+                            move |bounds, _, _, _| {
+                                gpui_ios::set_paste_control(Some(gpui_ios::PasteControl {
+                                    bounds,
+                                    foreground,
+                                    background,
+                                    corner_radius: inner_radius,
+                                }))
+                            },
                         )
                         .absolute()
                         .inset_0(),
@@ -173,8 +234,8 @@ impl RenderOnce for EditMenu {
         });
         deferred(
             Positioner::side(self.anchor)
-                .placement(Placement::Top)
-                .offset(px(8.))
+                .placement(side(self.anchor, window.fully_visible_bounds()))
+                .offset(GAP)
                 .occlude()
                 .child(
                     material::overlay_contour(
