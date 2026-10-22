@@ -251,6 +251,11 @@ impl RemoteController {
             .map_err(|error| error.message)
     }
 
+    /// Answers hosting queries off the UI thread while hosting.
+    pub fn hosting_handle(&self) -> Option<tcode_traverse::host::HostingHandle> {
+        self.host.as_ref().map(TraverseHost::hosting_handle)
+    }
+
     /// Remove a device. When the allow list cannot be written the device
     /// stays paired and connected, and the error says so.
     pub fn revoke_device(&self, id: &str) -> Result<(), String> {
@@ -397,6 +402,7 @@ pub struct HostingPanel {
     /// Repaint while hosting, every [`DEVICE_REFRESH`], for the devices' paths.
     ticker: Option<Task<()>>,
     spaces: Entity<SpacesSection>,
+    group: Entity<super::group::GroupSection>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -447,7 +453,8 @@ impl HostingPanel {
             traverse_rows,
             traverse_add_input,
             ticker: None,
-            spaces: cx.new(|_| SpacesSection::new(store, super::spaces::this_machine)),
+            spaces: cx.new(|_| SpacesSection::new(store.clone(), super::spaces::this_machine)),
+            group: cx.new(|_| super::group::GroupSection::new(store, super::spaces::this_machine)),
             _subscriptions: subscriptions,
         }
     }
@@ -790,6 +797,7 @@ impl HostingPanel {
         if hosting {
             column = column
                 .child(self.render_devices(compact, cx))
+                .child(self.group.clone())
                 .child(self.spaces.clone());
         }
         column.into_any_element()
@@ -990,7 +998,9 @@ impl HostingPanel {
             .try_global::<RemoteController>()
             .map(RemoteController::devices)
             .unwrap_or_default();
-        let space_names: HashMap<String, String> = super::spaces::local(cx)
+        let local = super::spaces::local(cx);
+        let space_names: HashMap<String, String> = local
+            .as_ref()
             .map(|spaces| {
                 spaces
                     .read(cx)
@@ -998,6 +1008,23 @@ impl HostingPanel {
                     .iter()
                     .map(|space| (space.id.clone(), space.name.clone()))
                     .collect()
+            })
+            .unwrap_or_default();
+        // The transport's device list does not say which devices belong to
+        // the group; the hosting state does.
+        let (group_name, group_members): (Option<String>, Vec<String>) = local
+            .as_ref()
+            .map(|spaces| {
+                let model = spaces.read(cx);
+                (
+                    model.group().map(|group| group.name.clone()),
+                    model
+                        .devices()
+                        .iter()
+                        .filter(|device| device.group)
+                        .map(|device| device.id.clone())
+                        .collect(),
+                )
             })
             .unwrap_or_default();
         let mut group = crate::material::group(cx);
@@ -1018,6 +1045,11 @@ impl HostingPanel {
                 DeviceAccess::Space { space_id } => space_names.get(space_id),
                 DeviceAccess::Full => None,
             };
+            let in_group = group_name
+                .clone()
+                .filter(|_| group_members.contains(&device.id));
+            let badge = in_group.is_some().then(|| super::group::member_badge(cx));
+            let device_name = device.name.clone();
             group = group.child(
                 row(compact)
                     .child(
@@ -1032,7 +1064,8 @@ impl HostingPanel {
                                 None,
                                 cx,
                             ))
-                            .children(space.map(|name| super::spaces::member_badge(name, cx))),
+                            .children(space.map(|name| super::spaces::member_badge(name, cx)))
+                            .children(badge),
                     )
                     .child(
                         h_flex()
@@ -1053,20 +1086,33 @@ impl HostingPanel {
                                     .label(crate::tr!("remote.devices.revoke"))
                                     .on_click(cx.listener(move |_, _, window, cx| {
                                         let id = id.clone();
-                                        let revoked = cx.update_global::<RemoteController, _>(
-                                            |controller, _| controller.revoke_device(&id),
-                                        );
-                                        if let Err(error) = revoked {
-                                            window.push_notification(
-                                                Notification::error(
-                                                    crate::tr!(
-                                                        "remote.devices.revoke_failed",
-                                                        error = error
-                                                    )
-                                                    .into_owned(),
-                                                ),
-                                                cx,
+                                        let revoke = move |window: &mut Window, cx: &mut App| {
+                                            let revoked = cx.update_global::<RemoteController, _>(
+                                                |controller, _| controller.revoke_device(&id),
                                             );
+                                            if let Err(error) = revoked {
+                                                window.push_notification(
+                                                    Notification::error(
+                                                        crate::tr!(
+                                                            "remote.devices.revoke_failed",
+                                                            error = error
+                                                        )
+                                                        .into_owned(),
+                                                    ),
+                                                    cx,
+                                                );
+                                            }
+                                            window.refresh();
+                                        };
+                                        match in_group.clone() {
+                                            Some(group) => super::group::confirm_group_removal(
+                                                device_name.clone(),
+                                                group,
+                                                revoke,
+                                                window,
+                                                cx,
+                                            ),
+                                            None => revoke(window, cx),
                                         }
                                         cx.notify();
                                     })),

@@ -1239,7 +1239,7 @@ impl Shared {
         HostLine::Paired {
             host_name: state.identity.host_name.clone(),
             space_name: None,
-            group: roster(&state.identity),
+            group: roster(&state.identity, &remote.to_string()),
         }
     }
 
@@ -1295,7 +1295,7 @@ impl Shared {
         HostLine::Paired {
             host_name: state.identity.host_name.clone(),
             space_name: None,
-            group: roster(&state.identity),
+            group: roster(&state.identity, &id),
         }
     }
 
@@ -1477,9 +1477,16 @@ fn connection_hints(connection: &Connection) -> Hints {
     hints
 }
 
-/// The group's machines for a full device, if this machine has a group.
-fn roster(identity: &HostIdentity) -> Option<Roster> {
-    identity.group.as_ref().map(|group| group.state.roster())
+/// The group's machines, for `device` while it is a member of the group:
+/// a full device left out of the group would only learn of machines that
+/// refuse it.
+fn roster(identity: &HostIdentity, device: &str) -> Option<Roster> {
+    let group = identity.group.as_ref()?;
+    group
+        .state
+        .device(device)
+        .is_some_and(|device| device.entry.is_member())
+        .then(|| group.state.roster())
 }
 
 fn member_machines(identity: &HostIdentity) -> Vec<String> {
@@ -1597,8 +1604,8 @@ impl Shared {
         })
     }
 
-    fn roster(&self) -> Option<Roster> {
-        roster(&self.state.lock().unwrap().identity)
+    fn roster(&self, device: EndpointId) -> Option<Roster> {
+        roster(&self.state.lock().unwrap().identity, &device.to_string())
     }
 
     /// The other member machines, to sync with.
@@ -1629,6 +1636,7 @@ impl Shared {
         let addr = self.snapshot();
         let mut state = self.state.lock().unwrap();
         let previous = state.identity.clone();
+        let mut removed = None;
         let no_group = || io::Error::new(io::ErrorKind::NotFound, "this machine is not in a group");
         match action {
             GroupAction::Create { name, devices } => {
@@ -1677,7 +1685,10 @@ impl Shared {
                     .filter(|machine| machine.entry.is_member())
                     .cloned()
                     .ok_or_else(|| missing("machine"))?;
-                group.state.set_machine(machine, Membership::Removed, &by);
+                group
+                    .state
+                    .set_machine(machine.clone(), Membership::Removed, &by);
+                removed = Some(machine);
             }
             GroupAction::Admit(id) => {
                 let group = state.identity.group.as_mut().ok_or_else(no_group)?;
@@ -1701,7 +1712,13 @@ impl Shared {
             }
             GroupAction::Join { .. } | GroupAction::Leave => unreachable!(),
         }
-        self.commit(&mut state, previous)
+        self.commit(&mut state, previous)?;
+        // The members no longer sync with it, so it is told once now; if it
+        // is unreachable it learns from the next member it syncs with.
+        if let Some(machine) = removed {
+            crate::runtime::runtime().spawn(self.clone().sync_with(machine));
+        }
+        Ok(())
     }
 
     /// Bring `ids`, directly paired full devices, and the device sharing
@@ -2156,9 +2173,14 @@ impl Shared {
                     reason: GroupRejection::NotMember,
                 };
             }
+            // Its own removal is all a removed machine is told.
             Some(machine) if !machine.entry.is_member() => {
                 return GroupLine::Sync {
-                    state: group.state.clone(),
+                    state: GroupState {
+                        machines: vec![machine.clone()],
+                        devices: Vec::new(),
+                        ..GroupState::new(group.state.id.clone(), group.state.name.clone())
+                    },
                 };
             }
             Some(_) => {}
@@ -2590,7 +2612,7 @@ impl StreamTask {
                 };
                 *self.principal.lock().unwrap() = Some(principal.clone());
                 let group = matches!(principal, Principal::Full)
-                    .then(|| self.shared.roster())
+                    .then(|| self.shared.roster(self.connection.remote_id()))
                     .flatten();
                 wire::write_line(
                     &mut send,

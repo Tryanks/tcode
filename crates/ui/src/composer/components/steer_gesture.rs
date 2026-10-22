@@ -1,23 +1,29 @@
 //! Holding Queue opens the touch chooser; sliding up reveals it early.
-//! Release over Queue queues, release over the upper Steer target steers,
-//! and release elsewhere cancels. A tap queues without showing the chooser.
+//! Only the finger's height decides the release: above the gap under the
+//! Steer target steers, level with Queue queues, and below Queue cancels,
+//! wherever the finger is horizontally. A tap queues without showing the
+//! chooser.
 
 use super::super::*;
 use gpui::{Bounds, Pixels, Point, TouchDragEvent, TouchPhase, canvas, deferred};
 use gpui_base::Positioner;
 
+const CHOICE_GAP: Pixels = px(8.);
+
 pub(in super::super) struct SteerGesture {
     position: Point<Pixels>,
     bounds: Bounds<Pixels>,
-    upper_bounds: Option<Bounds<Pixels>>,
     revealed: bool,
     _hold: Task<()>,
 }
 
 impl SteerGesture {
     pub(in super::super) fn armed(&self) -> bool {
-        self.upper_bounds
-            .is_some_and(|bounds| bounds.contains(&self.position))
+        self.position.y < self.bounds.top() - CHOICE_GAP
+    }
+
+    fn queues(&self) -> bool {
+        !self.armed() && self.position.y <= self.bounds.bottom()
     }
 }
 
@@ -76,19 +82,18 @@ impl Composer {
     }
 
     fn render_steer_choices(&self, gesture: &SteerGesture, cx: &Context<Self>) -> AnyElement {
-        let armed = gesture.armed();
-        let composer = cx.entity();
-        let choices =
-            v_flex().gap(px(8.)).children([true, false].map(|steer| {
+        let choices = v_flex()
+            .gap(CHOICE_GAP)
+            .children([true, false].map(|steer| {
                 let id = if steer {
                     "steer-gesture-steer"
                 } else {
                     "steer-gesture-queue"
                 };
                 let selected = if steer {
-                    armed
+                    gesture.armed()
                 } else {
-                    !armed && gesture.bounds.contains(&gesture.position)
+                    gesture.queues()
                 };
                 let label = crate::tr!(if steer {
                     "mobile.steer"
@@ -174,7 +179,6 @@ impl Composer {
                 } else {
                     content
                 };
-                let composer = composer.clone();
                 crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
                     .debug_selector(move || id.into())
                     .relative()
@@ -182,26 +186,6 @@ impl Composer {
                     .h(gesture.bounds.size.height)
                     .occlude()
                     .child(content)
-                    .when(steer, |el| {
-                        el.child(
-                            canvas(
-                                move |bounds, _, cx| {
-                                    composer.update(cx, |this, cx| {
-                                        if this.steer_gesture.as_ref().is_some_and(|gesture| {
-                                            gesture.upper_bounds != Some(bounds)
-                                        }) {
-                                            this.update_steer_gesture(cx, |gesture| {
-                                                gesture.upper_bounds = Some(bounds)
-                                            });
-                                        }
-                                    });
-                                },
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .inset_0(),
-                        )
-                    })
                     .into_any_element()
             }));
         deferred(
@@ -229,7 +213,6 @@ impl Composer {
         self.steer_gesture = Some(SteerGesture {
             position,
             bounds,
-            upper_bounds: None,
             revealed: false,
             _hold: hold,
         });
@@ -277,7 +260,7 @@ impl Composer {
         }
         gesture.position = position;
         let steer = gesture.armed();
-        if steer || gesture.bounds.contains(&position) {
+        if steer || gesture.queues() {
             let input = self.input.clone();
             self.submit(&input, steer, window, cx);
         }

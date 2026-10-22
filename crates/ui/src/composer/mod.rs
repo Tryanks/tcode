@@ -1847,7 +1847,9 @@ mod replica_tests {
     }
 
     #[gpui::test]
-    fn holding_queue_reveals_choices_and_only_sliding_onto_steer_steers(cx: &mut TestAppContext) {
+    fn holding_queue_reveals_choices_and_release_height_picks_steer_queue_or_nothing(
+        cx: &mut TestAppContext,
+    ) {
         use gpui::{TouchEvent, TouchId, TouchPhase, point};
 
         let (store, incoming, outgoing, mut status) = attach(cx);
@@ -1945,6 +1947,9 @@ mod replica_tests {
             ("direct-slide", "steer"),
             ("lower", "queue"),
             ("tap", "queue"),
+            ("sideways", "queue"),
+            ("hold-sideways", "queue"),
+            ("steer-sideways", "steer"),
         ] {
             composer.update_in(cx, |composer, window, cx| {
                 composer.set_input_text(gesture.into(), window, cx)
@@ -1958,13 +1963,13 @@ mod replica_tests {
             assert!(cx.debug_bounds("steer-gesture-steer").is_none());
             assert!(cx.debug_bounds("steer-gesture-queue").is_none());
             let mut lift = center;
-            if matches!(gesture, "hold" | "hold-slide" | "lower") {
+            if matches!(gesture, "hold" | "hold-slide" | "lower" | "hold-sideways") {
                 cx.executor()
                     .advance_clock(gpui::GestureTuning::default().long_press_duration);
                 cx.run_until_parked();
                 cx.update(|window, cx| _ = window.draw(cx));
             }
-            if gesture == "slide" {
+            if matches!(gesture, "slide" | "steer-sideways") {
                 touch(
                     cx,
                     TouchPhase::Moved,
@@ -1975,7 +1980,11 @@ mod replica_tests {
                 lift = upper_target.expect("the previous gesture measured Steer");
                 touch(cx, TouchPhase::Moved, lift);
             }
-            if gesture != "tap" {
+            if gesture == "sideways" {
+                lift = point(center.x - px(120.), center.y);
+                touch(cx, TouchPhase::Moved, lift);
+            }
+            if gesture != "tap" && gesture != "sideways" {
                 cx.update(|window, cx| _ = window.draw(cx));
                 let upper = cx
                     .debug_bounds("steer-gesture-steer")
@@ -1992,10 +2001,26 @@ mod replica_tests {
                 upper_target = Some(upper.center());
                 if gesture == "direct-slide" {
                     assert!(cx.debug_bounds("steer-gesture-steer-selected").is_some());
-                } else if gesture != "slide" {
+                } else if !matches!(gesture, "slide" | "steer-sideways") {
                     assert!(cx.debug_bounds("steer-gesture-queue-selected").is_some());
                 }
                 match gesture {
+                    "hold-sideways" => {
+                        lift = point(center.x - px(120.), lower.top() - px(4.));
+                        touch(cx, TouchPhase::Moved, lift);
+                        assert!(
+                            cx.debug_bounds("steer-gesture-queue-selected").is_some(),
+                            "level with Queue queues wherever the finger is horizontally"
+                        );
+                    }
+                    "steer-sideways" => {
+                        lift = point(center.x - px(120.), upper.top() - px(40.));
+                        touch(cx, TouchPhase::Moved, lift);
+                        assert!(
+                            cx.debug_bounds("steer-gesture-steer-selected").is_some(),
+                            "anywhere above the gap under Steer steers"
+                        );
+                    }
                     "slide" | "hold-slide" | "lower" => {
                         lift = upper.center();
                         touch(cx, TouchPhase::Moved, lift);
@@ -2027,21 +2052,21 @@ mod replica_tests {
             );
         }
 
-        for gesture in ["sideways", "hold-sideways", "steer-sideways", "cancel"] {
+        for gesture in ["down", "hold-down", "steer-down", "cancel"] {
             composer.update_in(cx, |composer, window, cx| {
                 composer.set_input_text("kept".into(), window, cx)
             });
             cx.update(|window, cx| _ = window.draw(cx));
             let button = cx.debug_bounds("steer-turn").unwrap();
             touch(cx, TouchPhase::Started, button.center());
-            if gesture == "hold-sideways" {
+            if gesture == "hold-down" {
                 cx.executor()
                     .advance_clock(gpui::GestureTuning::default().long_press_duration);
                 cx.run_until_parked();
                 cx.update(|window, cx| _ = window.draw(cx));
             }
             let mut lift = button.center();
-            if matches!(gesture, "steer-sideways" | "cancel") {
+            if matches!(gesture, "steer-down" | "cancel") {
                 touch(
                     cx,
                     TouchPhase::Moved,
@@ -2051,11 +2076,16 @@ mod replica_tests {
                 touch(cx, TouchPhase::Moved, upper.center());
                 lift = upper.center();
             }
-            let away = point(button.center().x - px(120.), lift.y);
+            let away = point(button.center().x - px(120.), button.bottom() + px(1.));
             if gesture == "cancel" {
                 touch(cx, TouchPhase::Cancelled, lift);
             } else {
                 touch(cx, TouchPhase::Moved, away);
+                if gesture != "down" {
+                    assert!(cx.debug_bounds("steer-gesture-steer").is_some());
+                    assert!(cx.debug_bounds("steer-gesture-steer-selected").is_none());
+                    assert!(cx.debug_bounds("steer-gesture-queue-selected").is_none());
+                }
                 touch(cx, TouchPhase::Ended, away);
             }
             assert!(sent(cx).is_empty(), "{gesture} sends nothing");
