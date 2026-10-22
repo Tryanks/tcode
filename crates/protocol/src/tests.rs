@@ -1209,7 +1209,50 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
             action
         );
     }
+    for (action, wire) in [
+        (
+            GroupAction::Create {
+                name: "Home".into(),
+                devices: vec!["d".into()],
+            },
+            json!({"type":"create","content":{"name":"Home","devices":["d"]}}),
+        ),
+        (
+            GroupAction::Join {
+                link: "tcode://pair?v=3".into(),
+                devices: Vec::new(),
+                address: Some("192.168.1.2".into()),
+            },
+            json!({"type":"join","content":{"link":"tcode://pair?v=3","devices":[],"address":"192.168.1.2"}}),
+        ),
+        (GroupAction::Leave, json!({"type":"leave"})),
+        (
+            GroupAction::RegenerateLink,
+            json!({"type":"regenerate_link"}),
+        ),
+        (
+            GroupAction::SetLinkEnabled(false),
+            json!({"type":"set_link_enabled","content":false}),
+        ),
+        (
+            GroupAction::RemoveMachine("m".into()),
+            json!({"type":"remove_machine","content":"m"}),
+        ),
+        (
+            GroupAction::Admit("d".into()),
+            json!({"type":"admit","content":"d"}),
+        ),
+    ] {
+        let action = HostingAction::Group(action);
+        let wire = json!({"type":"group","content":wire});
+        assert_eq!(serde_json::to_value(&action).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<HostingAction>(wire).unwrap(),
+            action
+        );
+    }
     let mut state = HostingState {
+        group: None,
         created_space_id: None,
         spaces: Vec::new(),
         enabled: true,
@@ -1230,6 +1273,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
                     lan: false,
                     probing_direct: true,
                 }),
+                group: true,
             },
             HostedDevice {
                 access: DeviceAccess::Space {
@@ -1240,6 +1284,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
                 created_unix: 2,
                 platform: None,
                 path: None,
+                group: false,
             },
         ],
         traverse: vec![
@@ -1310,7 +1355,8 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
                     "created_unix": 1,
                     "access": {"type":"full"},
                     "platform": "iOS 26",
-                    "path": {"direct": false, "relay": "https://relay.example/", "probing_direct": true}
+                    "path": {"direct": false, "relay": "https://relay.example/", "probing_direct": true},
+                    "group": true
                 },
                 {"id": "ef".repeat(32), "name": "Laptop", "created_unix": 2, "access":{"type":"space","content":{"space_id":"s"}}}
             ],

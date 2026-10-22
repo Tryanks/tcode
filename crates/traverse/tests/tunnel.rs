@@ -257,6 +257,7 @@ fn a_connect_before_hello_is_refused_and_tunnels_per_connection_are_bounded() {
             &mut send,
             &ClientLine::Pair {
                 space: None,
+                group: None,
                 secret: minted.invite.secret.clone(),
                 device: DeviceClaim {
                     name: "raw".into(),

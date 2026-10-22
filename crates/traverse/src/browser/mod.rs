@@ -718,6 +718,7 @@ impl Shared {
                     invite: None,
                     devices: Vec::new(),
                     traverse: Vec::new(),
+                    group: None,
                 }
             }
         };
@@ -738,6 +739,7 @@ impl Shared {
                     lan: true,
                     probing_direct: false,
                 }),
+                group: false,
             }));
         Ok(state)
     }

@@ -463,7 +463,11 @@ impl std::error::Error for PairError {}
 
 /// Where to dial a machine from what a device knows about it. Discovery
 /// services add addresses for the same id; nothing can change the id.
-fn dial_addr(host_id: &str, relay: Option<&str>, addrs: &[String]) -> Option<EndpointAddr> {
+pub(crate) fn dial_addr(
+    host_id: &str,
+    relay: Option<&str>,
+    addrs: &[String],
+) -> Option<EndpointAddr> {
     let id: EndpointId = host_id.parse().ok()?;
     let mut transport_addrs = Vec::new();
     if let Some(relay) = relay.and_then(|relay| relay.parse::<RelayUrl>().ok()) {
@@ -545,6 +549,7 @@ async fn pair_exchange(
             &ClientLine::Pair {
                 secret: invite.secret.clone(),
                 space: invite.space.clone(),
+                group: invite.group.clone(),
                 device: device.claim(),
             },
         )
@@ -555,17 +560,22 @@ async fn pair_exchange(
         let mut reader = wire::reader(recv);
         // Never resubmit a possibly consumed invitation after losing its
         // response.
-        match wire::read_control::<HostLine>(&mut reader)
+        match wire::read_control_within::<HostLine>(&mut reader, crate::group::MAX_ROSTER_LINE)
             .await
             .map_err(|error| PairError::Protocol(error.to_string()))?
         {
             HostLine::Paired {
                 host_name,
                 space_name,
+                group,
             } => {
                 let mut host = invite.paired(host_name);
                 host.space_name = space_name;
+                host.group_id = group.as_ref().map(|roster| roster.id.clone());
                 learn_addresses(&mut host, &connection);
+                if group.is_some() {
+                    persist_roster(device, &host.host_id, group.as_ref());
+                }
                 Ok(host)
             }
             HostLine::PairRejected { reason } => Err(match reason {
@@ -977,25 +987,35 @@ async fn establish(
         .await
         .map_err(|error| ConnectionFailure::Unreachable(Some(error.to_string())))?;
         let mut reader = wire::reader(recv);
-        let reply = match wire::read_control::<HostLine>(&mut reader).await {
-            Ok(reply) => reply,
-            Err(error) => {
-                return Err(connection
-                    .close_reason()
-                    .map(|reason| close_failure(&reason))
-                    .unwrap_or_else(|| {
-                        if error.kind() == io::ErrorKind::TimedOut {
-                            ConnectionFailure::Timeout
-                        } else {
-                            ConnectionFailure::Unreachable(Some(error.to_string()))
-                        }
-                    }));
-            }
-        };
+        let reply =
+            match wire::read_control_within::<HostLine>(&mut reader, crate::group::MAX_ROSTER_LINE)
+                .await
+            {
+                Ok(reply) => reply,
+                Err(error) => {
+                    return Err(connection
+                        .close_reason()
+                        .map(|reason| close_failure(&reason))
+                        .unwrap_or_else(|| {
+                            if error.kind() == io::ErrorKind::TimedOut {
+                                ConnectionFailure::Timeout
+                            } else {
+                                ConnectionFailure::Unreachable(Some(error.to_string()))
+                            }
+                        }));
+                }
+            };
         match reply {
             HostLine::HelloOk {
-                protocol_version, ..
-            } if protocol_version == tcode_protocol::PROTOCOL_VERSION => Ok((send, reader)),
+                protocol_version,
+                group,
+                ..
+            } if protocol_version == tcode_protocol::PROTOCOL_VERSION => {
+                if group.is_some() || host.group_id.is_some() {
+                    persist_roster(device, &host.host_id, group.as_ref());
+                }
+                Ok((send, reader))
+            }
             HostLine::HelloOk { .. }
             | HostLine::HelloRejected {
                 reason: HelloRejection::Protocol,
@@ -1056,6 +1076,18 @@ fn learn_addresses(host: &mut PairedHost, connection: &Connection) -> bool {
     }
     host.addrs.truncate(MAX_ADDRS);
     (host.addrs.clone(), host.relay.clone()) != before
+}
+
+/// Save the group's machines as a machine of the group told this device.
+fn persist_roster(device: &DeviceIdentity, from: &str, roster: Option<&crate::group::Roster>) {
+    let local = crate::identity::existing_machine_id(device.data_dir()).map(|id| id.to_string());
+    let result = crate::hosts::update_hosts(device.data_dir(), |hosts| {
+        crate::hosts::apply_roster(hosts, from, roster, local.as_deref());
+    });
+    match result {
+        Ok(()) => device.hosts_changed(),
+        Err(error) => log::error!("could not save the group's machines: {error}"),
+    }
 }
 
 fn persist_addresses(device: &DeviceIdentity, host: &PairedHost) {
