@@ -510,6 +510,14 @@ impl PreviewPanel {
             return;
         }
 
+        // The conversation may be one nobody is looking at: size its browser
+        // as the panel would before the op drives the page. A resize only
+        // changes that size, so it creates no browser.
+        if !matches!(&op, PreviewRequest::Resize { .. }) {
+            self.ensure_webview(&key, window, cx);
+        }
+        self.stage_hidden(&key, window, cx);
+
         match op {
             PreviewRequest::Open { url } => {
                 self.store.update(cx, |store, cx| {
@@ -607,6 +615,7 @@ impl PreviewPanel {
                         })
                     }
                 };
+                self.stage_hidden(&key, window, cx);
                 self.sync_visibility(cx);
                 cx.notify();
                 let _ = reply.try_send(Ok(PreviewResponse::Json(payload)));
@@ -885,6 +894,23 @@ impl PreviewPanel {
         .detach();
     }
 
+    fn stage_hidden(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(not(target_os = "android"))]
+        {
+            let canvas = self
+                .store
+                .read(cx)
+                .preview_canvas(key)
+                .map(|(width, height)| gpui::size(px(width as f32), px(height as f32)));
+            let fallback = window.viewport_size();
+            self.lifecycle_entity()
+                .read(cx)
+                .stage_hidden(key, canvas, fallback, cx);
+        }
+        #[cfg(target_os = "android")]
+        let _ = (key, window, cx);
+    }
+
     /// Delegate value-returning evaluation to the lifecycle, which owns the
     /// ready/warm ordering and native callback.
     fn eval_json(
@@ -908,7 +934,7 @@ impl PreviewPanel {
     #[cfg(target_os = "macos")]
     fn screenshot(
         &mut self,
-        session_id: &str,
+        _session_id: &str,
         key: &str,
         reply: ReplyTx,
         _window: &mut Window,
@@ -920,44 +946,19 @@ impl PreviewPanel {
         use objc2_web_kit::WKWebView;
         use wry::WebViewExtMacOS as _;
 
-        let visible = {
-            let window_state = self.window_state.read(cx);
-            if self.store.read(cx).active_session_id().as_deref() != Some(session_id) {
-                let _ = reply.try_send(Err(
-                    "preview is not visible; the user is viewing another conversation".into(),
-                ));
-                return;
-            }
-            visible_preview_key(
-                Some(key),
-                window_state.route(),
-                window_state.palette_open,
-                self.store.read(cx).preview_panel_showing()
-                    && self.store.read(cx).preview_browser_settings().enabled
-                    && (!window_state.compact
-                        || (self.backend.compact_panel_selected
-                            && window_state.destination()
-                                == crate::window_state::Destination::Panel)),
-            ) == Some(key)
-        };
-        if !visible {
-            let _ = reply.try_send(Err(
-                "preview is not visible; open the Preview panel before taking a screenshot".into(),
-            ));
-            return;
-        }
-
         let Some(view) = self.lifecycle_entity().read(cx).ready_view(key) else {
             let _ = reply.try_send(Err("preview browser is not open".into()));
             return;
         };
-        let wv_bounds = view.read(cx).bounds();
-        if wv_bounds.size.width <= px(0.) || wv_bounds.size.height <= px(0.) {
+        let native = view.read(cx).raw().webview();
+        let webview: &WKWebView = &native;
+        // The native frame, not the GPUI bounds: a hidden browser has never
+        // been laid out by GPUI, only staged offscreen.
+        let frame = webview.frame();
+        if frame.size.width <= 0. || frame.size.height <= 0. {
             let _ = reply.try_send(Err("preview browser has no visible area".into()));
             return;
         }
-        let native = view.read(cx).raw().webview();
-        let webview: &WKWebView = &native;
         let callback_reply = reply.clone();
         let handler = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
             let result = if let Some(image) = unsafe { image.as_ref() } {
