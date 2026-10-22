@@ -15,15 +15,15 @@ use std::{
 use windows::{
     Foundation::{
         AsyncActionCompletedHandler, AsyncOperationCompletedHandler, EventRegistrationToken,
-        IAsyncAction, IAsyncOperation, TypedEventHandler,
+        IAsyncAction, IAsyncOperation, TimeSpan, TypedEventHandler,
     },
     Globalization::Language,
     Media::SpeechRecognition::{
         SpeechContinuousRecognitionCompletedEventArgs,
         SpeechContinuousRecognitionResultGeneratedEventArgs, SpeechContinuousRecognitionSession,
-        SpeechRecognitionConfidence, SpeechRecognitionHypothesisGeneratedEventArgs,
-        SpeechRecognitionResult, SpeechRecognitionResultStatus, SpeechRecognitionScenario,
-        SpeechRecognitionTopicConstraint, SpeechRecognizer as WinSpeechRecognizer,
+        SpeechRecognitionHypothesisGeneratedEventArgs, SpeechRecognitionResult,
+        SpeechRecognitionResultStatus, SpeechRecognitionScenario, SpeechRecognitionTopicConstraint,
+        SpeechRecognizer as WinSpeechRecognizer,
     },
     Win32::Foundation::E_ACCESSDENIED,
     core::{HRESULT, HSTRING, RuntimeType},
@@ -37,6 +37,10 @@ type SpeechSink = Sender<SpeechEvent>;
 const PRIVACY_POLICY_NOT_ACCEPTED: HRESULT = HRESULT(0x80045509_u32 as i32);
 /// `MF_E_NO_CAPTURE_DEVICES_AVAILABLE`.
 const NO_CAPTURE_DEVICES: HRESULT = HRESULT(0xC00DABE0_u32 as i32);
+/// Ten minutes, in the 100 ns ticks of a `TimeSpan`.
+const AUTO_STOP_SILENCE: TimeSpan = TimeSpan {
+    Duration: 10 * 60 * 10_000_000,
+};
 
 pub struct SystemRecognizer {
     /// The dictation language, or `None` when the requested one is malformed or
@@ -76,6 +80,11 @@ impl SpeechRecognizer for SystemRecognizer {
         let continuous = recognizer
             .ContinuousRecognitionSession()
             .map_err(speech_error)?;
+        // The user ends dictation; a pause to think must not end it for them
+        // and drop what they say next.
+        if let Err(error) = continuous.SetAutoStopSilenceTimeout(AUTO_STOP_SILENCE) {
+            log::warn!("speech: could not extend the silence timeout: {error}");
+        }
         let (messages, rx) = unbounded();
         let mut session = Session {
             recognizer: recognizer.clone(),
@@ -275,11 +284,11 @@ async fn dictate(
     Ok(())
 }
 
-/// The text of a recognized phrase, unless it was rejected or empty.
+/// The text of a recognized phrase, unless it is empty. A phrase the
+/// recognizer rated `Rejected` is kept: a draft an agent reads is better
+/// rough than missing what was said.
 fn phrase_text(result: &SpeechRecognitionResult) -> Option<HSTRING> {
-    if result.Status().ok()? != SpeechRecognitionResultStatus::Success
-        || result.Confidence().ok()? == SpeechRecognitionConfidence::Rejected
-    {
+    if result.Status().ok()? != SpeechRecognitionResultStatus::Success {
         return None;
     }
     Some(result.Text().ok()?).filter(|text| !text.is_empty())
