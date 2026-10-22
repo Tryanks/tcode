@@ -1264,6 +1264,7 @@ mod tests {
                     relay: None,
                     addrs: Vec::new(),
                     last_connected_unix: None,
+                    group_id: None,
                     space_id: None,
                     space_name: None,
                 }]
@@ -1407,6 +1408,7 @@ mod tests {
             host_id: "ab".repeat(32),
             secret: "AAECAwQFBgcICQoLDA0ODw".into(),
             space: None,
+            group: None,
             traverse: Vec::new(),
             relay: None,
             port: 47420,
@@ -1598,6 +1600,7 @@ mod tests {
             relay: None,
             addrs: vec!["192.168.1.10:47420".into()],
             last_connected_unix: None,
+            group_id: None,
             space_id: None,
             space_name: None,
         };

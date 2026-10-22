@@ -1,6 +1,7 @@
-//! The machine side: one iroh endpoint that pairs devices over `tcode/pair/1`
-//! and serves paired devices over `tcode/1`, bridging each main stream into
-//! the [`HostMux`].
+//! The machine side: one iroh endpoint that pairs devices over `tcode/pair/1`,
+//! serves paired devices over `tcode/1`, bridging each main stream into the
+//! [`HostMux`], and keeps its group in step with the other members over
+//! `tcode/group/1`.
 use std::{
     collections::HashMap,
     io,
@@ -17,14 +18,23 @@ use iroh::{
     endpoint::{Connection, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use tcode_client::pairing::{PairInvite, TRAVERSE_OFF, TRAVERSE_OFFICIAL, encode_secret, pair_url};
+use tcode_client::pairing::{
+    MAX_ADDRS, PairInvite, TRAVERSE_OFF, TRAVERSE_OFFICIAL, encode_secret, pair_url, parse_pair_url,
+};
 use tcode_protocol::{
-    DeviceAccess, HostedDevice, HostingAction, HostingState, PathInfo, Principal, ProtocolError,
-    SpaceAction, SpaceInfo, TraverseRelayStatus, TraverseSourceStatus,
+    DeviceAccess, GroupAction, GroupInfo, GroupMachineInfo, HostedDevice, HostingAction,
+    HostingState, PathInfo, Principal, ProtocolError, SpaceAction, SpaceInfo, TraverseRelayStatus,
+    TraverseSourceStatus,
 };
 
 use crate::{
-    identity::{DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, now_unix},
+    group::{
+        ALPN_GROUP, GroupLine, GroupLink, GroupMachine, GroupRecord, GroupRejection, GroupState,
+        JoiningDevice, JoiningMachine, MAX_GROUP_LINE, MAX_GROUP_MACHINES, Membership, Roster,
+    },
+    identity::{
+        DeviceGrant, DeviceRecord, HostIdentity, Origin, SpaceRecord, existing_device, now_unix,
+    },
     lan,
     manifest::{Manifest, ManifestLoader, ManifestSource, live},
     mux::HostMux,
@@ -138,11 +148,18 @@ struct Shared {
     /// See [`TraverseHost::traverse_events`].
     status_listeners: Mutex<Vec<async_channel::Sender<Vec<TraverseSourceStatus>>>>,
     allow_pairing: bool,
+    /// Where `traverse.json` lives; on a desktop also `device.json` and
+    /// `hosts.json`, which the group keeps current for the window.
+    data_dir: PathBuf,
+    /// Prompts the group sync loop to dial every member now.
+    group_wake: Arc<tokio::sync::Notify>,
 }
 
 pub struct TraverseHost {
     shared: Arc<Shared>,
     router: Router,
+    /// The loop that keeps the group in step with the other members.
+    group_sync: tokio::task::AbortHandle,
     /// The manifest refresh loops, one per source, ended with the host.
     refresh: Vec<tokio::task::AbortHandle>,
     /// The loop behind [`TraverseHost::traverse_events`].
@@ -253,6 +270,8 @@ impl TraverseHost {
                 status_changed,
                 status_listeners: Mutex::new(Vec::new()),
                 allow_pairing: config.pairing_enabled,
+                data_dir: config.data_dir.clone(),
+                group_wake: Arc::new(tokio::sync::Notify::new()),
             });
             // A fetched manifest is applied to the running endpoint, whether
             // it refreshes the one in hand or is the first to arrive. The
@@ -281,10 +300,18 @@ impl TraverseHost {
             let router = Router::builder(endpoint)
                 .accept(wire::ALPN_PAIR, PairHandler(shared.clone()))
                 .accept(wire::ALPN_MAIN, MainHandler(shared.clone()))
+                .accept(ALPN_GROUP, GroupHandler(shared.clone()))
                 .spawn();
+            shared.group_wake.notify_one();
+            let group_sync = tokio::spawn(group_sync_loop(
+                Arc::downgrade(&shared),
+                shared.group_wake.clone(),
+            ))
+            .abort_handle();
             Ok(TraverseHost {
                 shared,
                 router,
+                group_sync,
                 refresh,
                 status,
                 advertisement,
@@ -454,7 +481,22 @@ impl TraverseHost {
         self.shared.hosting(action)
     }
 
+    /// A handle that answers hosting queries from any thread, for a caller
+    /// that must not wait on the UI thread: joining a group dials another
+    /// machine.
+    pub fn hosting_handle(&self) -> HostingHandle {
+        HostingHandle(self.shared.clone())
+    }
+
+    /// This machine's group link while it can admit devices.
+    pub fn group_link(&self) -> Option<String> {
+        let addr = self.shared.snapshot();
+        let state = self.shared.state.lock().unwrap();
+        self.shared.group_info(&state, &addr)?.link
+    }
+
     pub fn shutdown(self) {
+        self.group_sync.abort();
         drop(self.advertisement);
         for refresh in self.refresh {
             refresh.abort();
@@ -653,6 +695,7 @@ impl Shared {
                 host_id: addr.id,
                 secret: encode_secret(&random),
                 space: None,
+                group: None,
                 traverse: self.traverse.clone(),
                 relay: addr.relay,
                 port: addr.port,
@@ -797,6 +840,7 @@ impl Shared {
                             host_id: addr.id.clone(),
                             secret: space.secret.clone(),
                             space: Some(space.id.clone()),
+                            group: None,
                             traverse: self.traverse.clone(),
                             relay: addr.relay.clone(),
                             port: addr.port,
@@ -987,6 +1031,21 @@ impl Shared {
     fn revoke(&self, id: &str) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
         let previous = state.identity.clone();
+        let by = self.endpoint.id().to_string();
+        if let Some(group) = &mut state.identity.group
+            && let Some(device) = group
+                .state
+                .device(id)
+                .filter(|device| device.entry.is_member())
+        {
+            let (name, platform) = (device.name.clone(), device.platform.clone());
+            group
+                .state
+                .set_device(id, &name, platform.as_deref(), Membership::Removed, &by);
+            return self.commit(&mut state, previous).inspect_err(|error| {
+                log::error!("could not persist the revocation: {error}");
+            });
+        }
         if !state.identity.remove(id) {
             return Ok(());
         }
@@ -1022,6 +1081,12 @@ impl Shared {
                 }
             }
             HostingAction::RevokeDevice(id) => self.revoke(&id).map_err(revoke_error)?,
+            HostingAction::Group(action) => {
+                self.group_action(action).map_err(|error| ProtocolError {
+                    code: "group_update_failed".into(),
+                    message: error.to_string(),
+                })?;
+            }
         }
         let addr = self.snapshot();
         let state = self.state.lock().unwrap();
@@ -1035,7 +1100,7 @@ impl Shared {
             spaces: self.spaces(&state, &addr),
             enabled,
             expires_in_secs,
-            host_id: addr.id,
+            host_id: addr.id.clone(),
             host_name: state.identity.host_name.clone(),
             invite,
             devices: state
@@ -1045,6 +1110,7 @@ impl Shared {
                 .map(|device| hosted_device(&state, device))
                 .collect(),
             traverse: self.traverse_status(),
+            group: self.group_info(&state, &addr),
         })
     }
 
@@ -1058,12 +1124,16 @@ impl Shared {
         secret: &str,
         device: &DeviceClaim,
         space: Option<&str>,
+        group: Option<&str>,
     ) -> HostLine {
         let mut state = self.state.lock().unwrap();
         if !self.allow_pairing || !state.identity.pairing_enabled {
             return HostLine::PairRejected {
                 reason: PairRejection::Disabled,
             };
+        }
+        if let Some(group) = group {
+            return self.pair_group(&mut state, remote, secret, device, group);
         }
         if let Some(space_id) = space {
             let Some(index) = state
@@ -1123,6 +1193,7 @@ impl Shared {
             return HostLine::Paired {
                 host_name: state.identity.host_name.clone(),
                 space_name: Some(space_name),
+                group: None,
             };
         }
         let accepted = match state.invitation.as_mut() {
@@ -1158,10 +1229,9 @@ impl Shared {
         let (name, platform) = device.normalized();
         let previous = state.identity.clone();
         state.identity.admit(&remote, name, platform);
-        state.identity.policy_revision += 1;
-        if let Err(error) = state.identity.save() {
+        self.introduce(&mut state.identity, &remote.to_string());
+        if let Err(error) = self.commit(&mut state, previous) {
             log::error!("could not record the paired device: {error}");
-            state.identity = previous;
             return HostLine::PairRejected {
                 reason: PairRejection::Busy,
             };
@@ -1169,6 +1239,147 @@ impl Shared {
         HostLine::Paired {
             host_name: state.identity.host_name.clone(),
             space_name: None,
+            group: roster(&state.identity),
+        }
+    }
+
+    /// Exchange a group link's secret for a place on this machine's allow
+    /// list and in the group. The link is reusable; its failures persist.
+    fn pair_group(
+        &self,
+        state: &mut State,
+        remote: EndpointId,
+        secret: &str,
+        device: &DeviceClaim,
+        group: &str,
+    ) -> HostLine {
+        let rejected = |reason| HostLine::PairRejected { reason };
+        let Some(record) = &state.identity.group else {
+            return rejected(PairRejection::Invalid);
+        };
+        if record.state.id != group
+            || !record.link.enabled
+            || record.link.failures >= MAX_PAIRING_FAILURES
+        {
+            return rejected(PairRejection::Invalid);
+        }
+        let id = remote.to_string();
+        if state
+            .identity
+            .devices
+            .iter()
+            .any(|device| device.id == id && device.access != DeviceGrant::Full)
+        {
+            return rejected(PairRejection::AlreadyMember);
+        }
+        let previous = state.identity.clone();
+        if !constant_time_eq(record.link.secret.as_bytes(), secret.as_bytes()) {
+            if let Some(group) = &mut state.identity.group {
+                group.link.failures += 1;
+            }
+            state.identity.policy_revision += 1;
+            if let Err(error) = state.identity.save() {
+                log::error!("could not record the group link failure: {error}");
+                state.identity = previous;
+                return rejected(PairRejection::Busy);
+            }
+            return rejected(PairRejection::Invalid);
+        }
+        let (name, platform) = device.normalized();
+        state.identity.admit(&remote, name, platform);
+        self.introduce(&mut state.identity, &id);
+        if let Err(error) = self.commit(state, previous) {
+            log::error!("could not record the group member: {error}");
+            return rejected(PairRejection::Busy);
+        }
+        HostLine::Paired {
+            host_name: state.identity.host_name.clone(),
+            space_name: None,
+            group: roster(&state.identity),
+        }
+    }
+
+    /// Record a full device this machine admitted as a member of its group,
+    /// made by this machine.
+    fn introduce(&self, identity: &mut HostIdentity, id: &str) {
+        let by = self.endpoint.id().to_string();
+        let Some(group) = &mut identity.group else {
+            return;
+        };
+        let Some(device) = identity
+            .devices
+            .iter_mut()
+            .find(|device| device.id == id && device.access == DeviceGrant::Full)
+        else {
+            return;
+        };
+        device.origin = Origin::Group;
+        group.state.set_device(
+            id,
+            &device.name,
+            device.platform.as_deref(),
+            Membership::Member,
+            &by,
+        );
+    }
+
+    /// Apply the group to the allow list and write it, or put `previous`
+    /// back and change nothing. Removed devices are disconnected; when the
+    /// group's machines change, full devices reconnect to learn them; and the
+    /// other members hear of any change to the group.
+    fn commit(&self, state: &mut State, previous: HostIdentity) -> io::Result<()> {
+        let local = existing_device(&self.data_dir).map(|(id, _)| id.to_string());
+        let accept = self.allow_pairing && state.identity.pairing_enabled;
+        let removed = state.identity.apply_group(accept, local.as_deref());
+        state.identity.policy_revision += 1;
+        let machines_before = member_machines(&previous);
+        let group_before = previous.group.as_ref().map(|group| group.state.clone());
+        if let Err(error) = state.identity.save() {
+            state.identity = previous;
+            return Err(error);
+        }
+        for id in &removed {
+            close_device(state, id, 3, b"revoked");
+        }
+        if member_machines(&state.identity) != machines_before {
+            let full: Vec<String> = state
+                .identity
+                .devices
+                .iter()
+                .filter(|device| device.access == DeviceGrant::Full)
+                .map(|device| device.id.clone())
+                .collect();
+            for id in full {
+                close_device(state, &id, 4, b"group changed");
+            }
+            self.write_local_hosts(
+                state
+                    .identity
+                    .group
+                    .as_ref()
+                    .map(|group| group.state.roster()),
+            );
+        }
+        if state.identity.group.as_ref().map(|group| &group.state) != group_before.as_ref() {
+            self.group_wake.notify_one();
+        }
+        Ok(())
+    }
+
+    /// Keep the window sharing this data directory current with the group's
+    /// machines, as a device of the group would be after connecting.
+    fn write_local_hosts(&self, roster: Option<Roster>) {
+        let Some(roster) = roster else {
+            return;
+        };
+        if existing_device(&self.data_dir).is_none() {
+            return;
+        }
+        let local = self.endpoint.id().to_string();
+        if let Err(error) = crate::hosts::update_hosts(&self.data_dir, |hosts| {
+            crate::hosts::apply_roster(hosts, &local, Some(&roster), Some(&local));
+        }) {
+            log::error!("could not save the group's machines: {error}");
         }
     }
 
@@ -1230,6 +1441,770 @@ impl Shared {
     }
 }
 
+/// How often the group is synced when nothing prompts it.
+const GROUP_SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Budget for reaching another member and exchanging one line each way.
+const GROUP_DIAL_BUDGET: Duration = Duration::from_secs(20);
+
+/// Answers hosting queries from any thread; see [`TraverseHost::hosting_handle`].
+#[derive(Clone)]
+pub struct HostingHandle(Arc<Shared>);
+
+impl HostingHandle {
+    pub fn hosting(&self, action: HostingAction) -> Result<HostingState, ProtocolError> {
+        self.0.hosting(action)
+    }
+}
+
+/// Where a connection reached its peer: its relay and direct addresses.
+struct Hints {
+    relay: Option<String>,
+    addrs: Vec<String>,
+}
+
+fn connection_hints(connection: &Connection) -> Hints {
+    let mut hints = Hints {
+        relay: None,
+        addrs: Vec::new(),
+    };
+    for path in connection.paths().iter() {
+        match path.remote_addr() {
+            TransportAddr::Ip(addr) => hints.addrs.push(addr.to_string()),
+            TransportAddr::Relay(url) => hints.relay = Some(url.to_string()),
+            _ => {}
+        }
+    }
+    hints
+}
+
+/// The group's machines for a full device, if this machine has a group.
+fn roster(identity: &HostIdentity) -> Option<Roster> {
+    identity.group.as_ref().map(|group| group.state.roster())
+}
+
+fn member_machines(identity: &HostIdentity) -> Vec<String> {
+    identity
+        .group
+        .iter()
+        .flat_map(|group| group.state.member_machines())
+        .map(|machine| machine.id.clone())
+        .collect()
+}
+
+fn new_link() -> GroupLink {
+    GroupLink {
+        secret: new_secret(),
+        enabled: true,
+        failures: 0,
+    }
+}
+
+fn group_name(name: String) -> io::Result<String> {
+    if !crate::group::valid_name(&name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid group name",
+        ));
+    }
+    Ok(name.trim().into())
+}
+
+fn rejection_error(reason: GroupRejection) -> io::Error {
+    let message = match reason {
+        GroupRejection::Invalid => "the group link is wrong, paused or no longer valid",
+        GroupRejection::Disabled => "that machine is not accepting new devices",
+        GroupRejection::Busy => "that machine could not record the change; try again",
+        GroupRejection::NotMember => "that machine is not in this group",
+        GroupRejection::Full => "the group has as many machines as it can hold",
+    };
+    io::Error::new(io::ErrorKind::PermissionDenied, message)
+}
+
+/// Run `future` to completion from a hosting query, which may come from the
+/// UI thread or from a task on the shared runtime.
+fn run_blocking<F: std::future::Future>(future: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
+        Err(_) => block_on(future),
+    }
+}
+
+impl Shared {
+    fn this_machine(&self, identity: &HostIdentity, addr: &EndpointAddrSnapshot) -> GroupMachine {
+        let mut addrs: Vec<String> = self
+            .endpoint
+            .addr()
+            .ip_addrs()
+            .map(ToString::to_string)
+            .collect();
+        addrs.sort();
+        addrs.truncate(MAX_ADDRS);
+        GroupMachine::new(
+            addr.id.clone(),
+            identity.host_name.clone(),
+            self.traverse.clone(),
+            addr.relay.clone(),
+            addrs,
+        )
+    }
+
+    fn group_info(&self, state: &State, addr: &EndpointAddrSnapshot) -> Option<GroupInfo> {
+        let group = state.identity.group.as_ref()?;
+        let link = &group.link;
+        let live = self.allow_pairing
+            && state.identity.pairing_enabled
+            && link.enabled
+            && link.failures < MAX_PAIRING_FAILURES;
+        Some(GroupInfo {
+            id: group.state.id.clone(),
+            name: group.state.name.clone(),
+            link: live.then(|| {
+                pair_url(&PairInvite {
+                    host_id: addr.id.clone(),
+                    secret: link.secret.clone(),
+                    space: None,
+                    group: Some(group.state.id.clone()),
+                    traverse: self.traverse.clone(),
+                    relay: addr.relay.clone(),
+                    port: addr.port,
+                })
+            }),
+            link_enabled: link.enabled,
+            link_dead: link.failures >= MAX_PAIRING_FAILURES,
+            machines: group
+                .state
+                .member_machines()
+                .map(|machine| GroupMachineInfo {
+                    id: machine.id.clone(),
+                    name: machine.name.clone(),
+                    this_machine: machine.id == addr.id,
+                })
+                .collect(),
+            declined: group
+                .declined
+                .iter()
+                .filter_map(|declined| group.state.device(&declined.id))
+                .map(|device| HostedDevice {
+                    access: DeviceAccess::Full,
+                    id: device.id.clone(),
+                    name: device.name.clone(),
+                    created_unix: device.entry.changed_unix,
+                    platform: device.platform.clone(),
+                    path: None,
+                    group: true,
+                })
+                .collect(),
+        })
+    }
+
+    fn roster(&self) -> Option<Roster> {
+        roster(&self.state.lock().unwrap().identity)
+    }
+
+    /// The other member machines, to sync with.
+    fn peers(&self) -> Vec<GroupMachine> {
+        let id = self.endpoint.id().to_string();
+        let state = self.state.lock().unwrap();
+        state
+            .identity
+            .group
+            .iter()
+            .flat_map(|group| group.state.member_machines())
+            .filter(|machine| machine.id != id)
+            .cloned()
+            .collect()
+    }
+
+    fn group_action(self: &Arc<Self>, action: GroupAction) -> io::Result<()> {
+        let action = match action {
+            GroupAction::Join {
+                link,
+                devices,
+                address,
+            } => return self.join_group(&link, &devices, address.as_deref()),
+            GroupAction::Leave => return self.leave_group(),
+            action => action,
+        };
+        let by = self.endpoint.id().to_string();
+        let addr = self.snapshot();
+        let mut state = self.state.lock().unwrap();
+        let previous = state.identity.clone();
+        let no_group = || io::Error::new(io::ErrorKind::NotFound, "this machine is not in a group");
+        match action {
+            GroupAction::Create { name, devices } => {
+                if state.identity.group.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "this machine is already in a group",
+                    ));
+                }
+                let mut group = GroupState::new(new_secret(), group_name(name)?);
+                group.set_machine(
+                    self.this_machine(&state.identity, &addr),
+                    Membership::Member,
+                    &by,
+                );
+                state.identity.group = Some(GroupRecord {
+                    state: group,
+                    link: new_link(),
+                    declined: Vec::new(),
+                });
+                self.bring_devices(&mut state.identity, &devices)?;
+            }
+            GroupAction::RegenerateLink => {
+                state.identity.group.as_mut().ok_or_else(no_group)?.link = new_link();
+            }
+            GroupAction::SetLinkEnabled(enabled) => {
+                state
+                    .identity
+                    .group
+                    .as_mut()
+                    .ok_or_else(no_group)?
+                    .link
+                    .enabled = enabled;
+            }
+            GroupAction::RemoveMachine(id) => {
+                if id == by {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "leave the group to remove this machine",
+                    ));
+                }
+                let group = state.identity.group.as_mut().ok_or_else(no_group)?;
+                let machine = group
+                    .state
+                    .machine(&id)
+                    .filter(|machine| machine.entry.is_member())
+                    .cloned()
+                    .ok_or_else(|| missing("machine"))?;
+                group.state.set_machine(machine, Membership::Removed, &by);
+            }
+            GroupAction::Admit(id) => {
+                let group = state.identity.group.as_mut().ok_or_else(no_group)?;
+                let device = group
+                    .state
+                    .device(&id)
+                    .filter(|device| device.entry.is_member())
+                    .cloned()
+                    .ok_or_else(|| missing("group device"))?;
+                group.declined.retain(|declined| declined.id != id);
+                if !state.identity.devices.iter().any(|record| record.id == id) {
+                    state.identity.devices.push(DeviceRecord {
+                        id,
+                        name: device.name,
+                        platform: device.platform,
+                        created_unix: now_unix(),
+                        access: DeviceGrant::Full,
+                        origin: Origin::Group,
+                    });
+                }
+            }
+            GroupAction::Join { .. } | GroupAction::Leave => unreachable!(),
+        }
+        self.commit(&mut state, previous)
+    }
+
+    /// Bring `ids`, directly paired full devices, and the device sharing
+    /// this data directory into the group just created.
+    fn bring_devices(&self, identity: &mut HostIdentity, ids: &[String]) -> io::Result<()> {
+        for id in ids {
+            if !identity
+                .devices
+                .iter()
+                .any(|device| &device.id == id && device.access == DeviceGrant::Full)
+            {
+                return Err(missing("full-access device"));
+            }
+            self.introduce(identity, id);
+        }
+        if let Some((id, claim)) = existing_device(&self.data_dir)
+            && let Some(group) = &mut identity.group
+        {
+            let (name, platform) = claim.normalized();
+            group.state.set_device(
+                &id.to_string(),
+                &name,
+                platform.as_deref(),
+                Membership::Member,
+                &self.endpoint.id().to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Join the group of another machine's group link: that machine admits
+    /// this one and the devices it brings, and answers with the group.
+    fn join_group(
+        self: &Arc<Self>,
+        link: &str,
+        devices: &[String],
+        address: Option<&str>,
+    ) -> io::Result<()> {
+        let invalid =
+            |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
+        let invite = parse_pair_url(link)
+            .filter(|invite| invite.group.is_some())
+            .ok_or_else(|| invalid("not a group link"))?;
+        let group_id = invite.group.clone().unwrap_or_default();
+        let typed: Vec<String> = match address {
+            Some(address) => vec![
+                std::net::SocketAddr::new(
+                    address
+                        .trim()
+                        .parse()
+                        .map_err(|_| invalid("invalid address"))?,
+                    invite.port,
+                )
+                .to_string(),
+            ],
+            None => Vec::new(),
+        };
+        let id = self.endpoint.id().to_string();
+        if invite.host_id == id {
+            return Err(invalid("that is this machine's own group link"));
+        }
+        let addr = self.snapshot();
+        let joining = {
+            let state = self.state.lock().unwrap();
+            if state.identity.group.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "this machine is already in a group",
+                ));
+            }
+            let mut brought = Vec::new();
+            for device_id in devices {
+                let device = state
+                    .identity
+                    .devices
+                    .iter()
+                    .find(|device| &device.id == device_id && device.access == DeviceGrant::Full)
+                    .ok_or_else(|| missing("full-access device"))?;
+                brought.push(JoiningDevice {
+                    id: device.id.clone(),
+                    name: device.name.clone(),
+                    platform: device.platform.clone(),
+                });
+            }
+            if let Some((device_id, claim)) = existing_device(&self.data_dir) {
+                let (name, platform) = claim.normalized();
+                brought.push(JoiningDevice {
+                    id: device_id.to_string(),
+                    name,
+                    platform,
+                });
+            }
+            let this = self.this_machine(&state.identity, &addr);
+            JoiningMachine {
+                name: this.name,
+                traverse: this.traverse,
+                relay: this.relay,
+                addrs: this.addrs,
+                devices: brought,
+            }
+        };
+        let line = GroupLine::Join {
+            group: group_id.clone(),
+            secret: invite.secret.clone(),
+            machine: joining,
+        };
+        let (reply, _) =
+            run_blocking(self.dial_group(&invite.host_id, invite.relay.as_deref(), &typed, &line))?;
+        let joined = match reply {
+            GroupLine::Joined { state }
+                if state.is_valid() && state.id == group_id && state.is_member_machine(&id) =>
+            {
+                state
+            }
+            GroupLine::Rejected { reason } => return Err(rejection_error(reason)),
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected group reply {other:?}"),
+                ));
+            }
+        };
+        let mut state = self.state.lock().unwrap();
+        if state.identity.group.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "this machine is already in a group",
+            ));
+        }
+        let previous = state.identity.clone();
+        state.identity.group = Some(GroupRecord {
+            state: joined,
+            link: new_link(),
+            declined: Vec::new(),
+        });
+        for device in &mut state.identity.devices {
+            if devices.contains(&device.id) {
+                device.origin = Origin::Group;
+            }
+        }
+        self.commit(&mut state, previous)
+    }
+
+    /// Tell the other members this machine is leaving, then forget the
+    /// group. Every device stays on the allow list, now as directly paired.
+    fn leave_group(self: &Arc<Self>) -> io::Result<()> {
+        let id = self.endpoint.id().to_string();
+        let leaving = {
+            let state = self.state.lock().unwrap();
+            let Some(group) = &state.identity.group else {
+                return Ok(());
+            };
+            let mut leaving = group.state.clone();
+            if let Some(this) = leaving.machine(&id).cloned() {
+                leaving.set_machine(this, Membership::Removed, &id);
+            }
+            leaving
+        };
+        let peers: Vec<GroupMachine> = leaving
+            .member_machines()
+            .filter(|machine| machine.id != id)
+            .cloned()
+            .collect();
+        // A member unreachable now learns of it from the next member it
+        // syncs with.
+        run_blocking(async {
+            let line = GroupLine::Sync { state: leaving };
+            let tells: Vec<_> = peers
+                .into_iter()
+                .map(|peer| {
+                    let shared = self.clone();
+                    let line = line.clone();
+                    tokio::spawn(async move {
+                        let told = shared
+                            .dial_group(&peer.id, peer.relay.as_deref(), &peer.addrs, &line)
+                            .await;
+                        if let Err(error) = told {
+                            log::debug!("could not tell {} this machine left: {error}", peer.id);
+                        }
+                    })
+                })
+                .collect();
+            for tell in tells {
+                let _ = tell.await;
+            }
+        });
+        let mut state = self.state.lock().unwrap();
+        let previous = state.identity.clone();
+        self.forget_group(&mut state.identity);
+        let gone = previous.group.as_ref().map(|group| group.state.roster());
+        self.commit(&mut state, previous)?;
+        self.write_local_hosts(gone.map(|mut roster| {
+            for machine in &mut roster.machines {
+                machine.member = false;
+            }
+            roster
+        }));
+        Ok(())
+    }
+
+    fn forget_group(&self, identity: &mut HostIdentity) {
+        identity.group = None;
+        for device in &mut identity.devices {
+            device.origin = Origin::Direct;
+        }
+    }
+
+    /// Dial `id` on `tcode/group/1`, send `line` and read the answer.
+    async fn dial_group(
+        &self,
+        id: &str,
+        relay: Option<&str>,
+        addrs: &[String],
+        line: &GroupLine,
+    ) -> io::Result<(GroupLine, Hints)> {
+        let addr = crate::client::dial_addr(id, relay, addrs)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid machine id"))?;
+        let exchange = async {
+            let connection = self
+                .endpoint
+                .connect(addr, ALPN_GROUP)
+                .await
+                .map_err(|error| io::Error::other(format!("{error:#}")))?;
+            let (mut send, recv) = connection.open_bi().await.map_err(io::Error::other)?;
+            wire::write_line(&mut send, line).await?;
+            send.finish().map_err(io::Error::other)?;
+            let mut reader = wire::reader(recv);
+            let reply = wire::read_control_within::<GroupLine>(&mut reader, MAX_GROUP_LINE).await;
+            let hints = connection_hints(&connection);
+            connection.close(0_u32.into(), b"done");
+            Ok((reply?, hints))
+        };
+        tokio::time::timeout(GROUP_DIAL_BUDGET, exchange)
+            .await
+            .map_err(|_| timed_out("group exchange"))?
+    }
+
+    /// Exchange states with one member and keep what outranks ours.
+    async fn sync_with(self: Arc<Self>, peer: GroupMachine) {
+        let Some(ours) = self
+            .state
+            .lock()
+            .unwrap()
+            .identity
+            .group
+            .as_ref()
+            .map(|group| group.state.clone())
+        else {
+            return;
+        };
+        let line = GroupLine::Sync { state: ours };
+        match self
+            .dial_group(&peer.id, peer.relay.as_deref(), &peer.addrs, &line)
+            .await
+        {
+            Ok((GroupLine::Sync { state }, hints)) => {
+                let mut guard = self.state.lock().unwrap();
+                if let Err(error) = self.absorb(&mut guard, &peer.id, state, hints) {
+                    log::warn!("could not record the group state from {}: {error}", peer.id);
+                }
+            }
+            Ok((reply, _)) => log::debug!("group member {} answered {reply:?}", peer.id),
+            Err(error) => log::debug!("could not reach group member {}: {error}", peer.id),
+        }
+    }
+
+    /// Merge a member's state and the hints of the connection that carried
+    /// it. A state that removes this machine ends its membership as leaving
+    /// would.
+    fn absorb(
+        &self,
+        state: &mut State,
+        peer: &str,
+        theirs: GroupState,
+        hints: Hints,
+    ) -> io::Result<()> {
+        let id = self.endpoint.id().to_string();
+        let Some(group) = &state.identity.group else {
+            return Ok(());
+        };
+        if theirs.id != group.state.id || !theirs.is_valid() {
+            return Ok(());
+        }
+        let previous = state.identity.clone();
+        let Some(group) = &mut state.identity.group else {
+            return Ok(());
+        };
+        let changed = group.state.merge(theirs);
+        let hinted = group.state.learn_hints(peer, hints.relay, hints.addrs);
+        if !group.state.is_member_machine(&id) {
+            let gone = group.state.roster();
+            self.forget_group(&mut state.identity);
+            self.commit(state, previous)?;
+            self.write_local_hosts(Some(Roster {
+                machines: gone
+                    .machines
+                    .into_iter()
+                    .map(|machine| crate::group::RosterMachine {
+                        member: false,
+                        ..machine
+                    })
+                    .collect(),
+                ..gone
+            }));
+            return Ok(());
+        }
+        if changed {
+            self.commit(state, previous)
+        } else if hinted {
+            state
+                .identity
+                .save()
+                .inspect_err(|_| state.identity = previous)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Bring this machine's own entry up to date with its name and routing
+    /// hints, so members dial it where it is.
+    fn refresh_this_machine(&self) {
+        let addr = self.snapshot();
+        let mut state = self.state.lock().unwrap();
+        let this = self.this_machine(&state.identity, &addr);
+        let Some(group) = &state.identity.group else {
+            return;
+        };
+        let Some(known) = group.state.machine(&this.id) else {
+            return;
+        };
+        if !known.entry.is_member()
+            || (&known.name, &known.traverse, &known.relay, &known.addrs)
+                == (&this.name, &this.traverse, &this.relay, &this.addrs)
+        {
+            return;
+        }
+        let previous = state.identity.clone();
+        let by = this.id.clone();
+        if let Some(group) = &mut state.identity.group {
+            group.state.set_machine(this, Membership::Member, &by);
+        }
+        if let Err(error) = self.commit(&mut state, previous) {
+            log::warn!("could not record this machine's group entry: {error}");
+        }
+    }
+
+    /// Admit a machine presenting this machine's group link, with the
+    /// devices it brings. A device the group removed stays removed.
+    fn accept_join(
+        &self,
+        remote: &str,
+        group_id: &str,
+        secret: &str,
+        machine: JoiningMachine,
+        hints: Hints,
+    ) -> GroupLine {
+        let rejected = |reason| GroupLine::Rejected { reason };
+        let by = self.endpoint.id().to_string();
+        let mut state = self.state.lock().unwrap();
+        let Some(record) = &state.identity.group else {
+            return rejected(GroupRejection::NotMember);
+        };
+        if record.state.id != group_id || remote == by || !machine.is_valid() {
+            return rejected(GroupRejection::NotMember);
+        }
+        if !self.allow_pairing || !state.identity.pairing_enabled {
+            return rejected(GroupRejection::Disabled);
+        }
+        if !record.link.enabled || record.link.failures >= MAX_PAIRING_FAILURES {
+            return rejected(GroupRejection::Invalid);
+        }
+        if !record.state.is_member_machine(remote)
+            && record.state.member_machines().count() >= MAX_GROUP_MACHINES
+        {
+            return rejected(GroupRejection::Full);
+        }
+        let previous = state.identity.clone();
+        if !constant_time_eq(record.link.secret.as_bytes(), secret.as_bytes()) {
+            if let Some(group) = &mut state.identity.group {
+                group.link.failures += 1;
+            }
+            state.identity.policy_revision += 1;
+            if let Err(error) = state.identity.save() {
+                log::error!("could not record the group link failure: {error}");
+                state.identity = previous;
+                return rejected(GroupRejection::Busy);
+            }
+            return rejected(GroupRejection::Invalid);
+        }
+        let Some(group) = &mut state.identity.group else {
+            return rejected(GroupRejection::NotMember);
+        };
+        let mut addrs = machine.addrs.clone();
+        for addr in hints.addrs {
+            if !addrs.contains(&addr) {
+                addrs.insert(0, addr);
+            }
+        }
+        addrs.truncate(MAX_ADDRS);
+        group.state.set_machine(
+            GroupMachine::new(
+                remote.to_owned(),
+                machine.name.trim().to_owned(),
+                machine.traverse.clone(),
+                machine.relay.clone().or(hints.relay),
+                addrs,
+            ),
+            Membership::Member,
+            &by,
+        );
+        for device in &machine.devices {
+            if group.state.device(&device.id).is_some() {
+                continue;
+            }
+            group.state.set_device(
+                &device.id,
+                device.name.trim(),
+                device.platform.as_deref(),
+                Membership::Member,
+                &by,
+            );
+        }
+        if let Err(error) = self.commit(&mut state, previous) {
+            log::error!("could not record the joining machine: {error}");
+            return rejected(GroupRejection::Busy);
+        }
+        match &state.identity.group {
+            Some(group) => GroupLine::Joined {
+                state: group.state.clone(),
+            },
+            None => rejected(GroupRejection::Busy),
+        }
+    }
+
+    /// Answer a member's state with this machine's, merged. A machine the
+    /// group removed is told so and nothing it sends is taken.
+    fn accept_sync(&self, remote: &str, theirs: GroupState, hints: Hints) -> GroupLine {
+        let mut state = self.state.lock().unwrap();
+        let Some(group) = &state.identity.group else {
+            return GroupLine::Rejected {
+                reason: GroupRejection::NotMember,
+            };
+        };
+        if theirs.id != group.state.id {
+            return GroupLine::Rejected {
+                reason: GroupRejection::NotMember,
+            };
+        }
+        match group.state.machine(remote) {
+            None => {
+                return GroupLine::Rejected {
+                    reason: GroupRejection::NotMember,
+                };
+            }
+            Some(machine) if !machine.entry.is_member() => {
+                return GroupLine::Sync {
+                    state: group.state.clone(),
+                };
+            }
+            Some(_) => {}
+        }
+        if let Err(error) = self.absorb(&mut state, remote, theirs, hints) {
+            log::error!("could not record the group state from {remote}: {error}");
+            return GroupLine::Rejected {
+                reason: GroupRejection::Busy,
+            };
+        }
+        match &state.identity.group {
+            Some(group) => GroupLine::Sync {
+                state: group.state.clone(),
+            },
+            None => GroupLine::Rejected {
+                reason: GroupRejection::NotMember,
+            },
+        }
+    }
+}
+
+/// Keep the group in step with the other members: at start, whenever this
+/// machine's group changes, and every [`GROUP_SYNC_INTERVAL`] for members
+/// that were unreachable. Ends with the host.
+async fn group_sync_loop(shared: std::sync::Weak<Shared>, wake: Arc<tokio::sync::Notify>) {
+    loop {
+        tokio::select! {
+            () = wake.notified() => {}
+            () = tokio::time::sleep(GROUP_SYNC_INTERVAL) => {}
+        }
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        shared.refresh_this_machine();
+        let rounds: Vec<_> = shared
+            .peers()
+            .into_iter()
+            .map(|peer| tokio::spawn(shared.clone().sync_with(peer)))
+            .collect();
+        drop(shared);
+        for round in rounds {
+            let _ = round.await;
+        }
+    }
+}
+
 fn new_secret() -> String {
     let mut random = [0_u8; tcode_client::pairing::SECRET_BYTES];
     getrandom::fill(&mut random).expect("the OS random source is available");
@@ -1277,6 +2252,12 @@ fn hosted_device(state: &State, device: &DeviceRecord) -> HostedDevice {
             .and_then(|id| state.live.get(&id))
             .and_then(|connections| connections.first())
             .map(path_info),
+        group: state.identity.group.as_ref().is_some_and(|group| {
+            group
+                .state
+                .device(&device.id)
+                .is_some_and(|device| device.entry.is_member())
+        }),
     }
 }
 
@@ -1375,13 +2356,18 @@ impl ProtocolHandler for PairHandler {
                 secret,
                 device,
                 space,
+                group,
             }) if device.is_valid()
                 && secret.len() <= wire::MAX_CONTROL_LINE
                 && space
                     .as_deref()
-                    .is_none_or(tcode_client::pairing::valid_space_id) =>
+                    .is_none_or(tcode_client::pairing::valid_space_id)
+                && group
+                    .as_deref()
+                    .is_none_or(tcode_client::pairing::valid_invitation_secret) =>
             {
-                self.0.pair(remote, &secret, &device, space.as_deref())
+                self.0
+                    .pair(remote, &secret, &device, space.as_deref(), group.as_deref())
             }
             Ok(_) => HostLine::Refused {
                 reason: "expected a pair line".into(),
@@ -1395,6 +2381,49 @@ impl ProtocolHandler for PairHandler {
         send.finish()?;
         // Let the reply drain before closing; the device closes once it
         // has read it.
+        let _ = tokio::time::timeout(wire::CONTROL_TIMEOUT, connection.closed()).await;
+        connection.close(0_u32.into(), b"done");
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct GroupHandler(Arc<Shared>);
+
+impl std::fmt::Debug for GroupHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GroupHandler")
+    }
+}
+
+impl ProtocolHandler for GroupHandler {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let remote = connection.remote_id().to_string();
+        let (mut send, recv) = tokio::time::timeout(wire::CONTROL_TIMEOUT, connection.accept_bi())
+            .await
+            .map_err(|_| AcceptError::from_err(timed_out("group stream")))??;
+        let mut reader = wire::reader(recv);
+        let line = match wire::read_control_within::<GroupLine>(&mut reader, MAX_GROUP_LINE).await {
+            Ok(line) => line,
+            Err(error) => {
+                connection.close(2_u32.into(), b"protocol");
+                return Err(AcceptError::from_err(error));
+            }
+        };
+        let hints = connection_hints(&connection);
+        let reply = match line {
+            GroupLine::Join {
+                group,
+                secret,
+                machine,
+            } => self.0.accept_join(&remote, &group, &secret, machine, hints),
+            GroupLine::Sync { state } => self.0.accept_sync(&remote, state, hints),
+            _ => GroupLine::Rejected {
+                reason: GroupRejection::NotMember,
+            },
+        };
+        wire::write_line(&mut send, &reply).await?;
+        send.finish()?;
         let _ = tokio::time::timeout(wire::CONTROL_TIMEOUT, connection.closed()).await;
         connection.close(0_u32.into(), b"done");
         Ok(())
@@ -1560,11 +2589,15 @@ impl StreamTask {
                     return Ok(());
                 };
                 *self.principal.lock().unwrap() = Some(principal.clone());
+                let group = matches!(principal, Principal::Full)
+                    .then(|| self.shared.roster())
+                    .flatten();
                 wire::write_line(
                     &mut send,
                     &HostLine::HelloOk {
                         host_name: self.shared.host_name(),
                         protocol_version: tcode_protocol::PROTOCOL_VERSION,
+                        group,
                     },
                 )
                 .await?;
