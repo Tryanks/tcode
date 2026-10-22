@@ -1412,6 +1412,8 @@ mobile:
   offline_action: "离线，重连后可操作"
   queue: "排队"
   steer: "引导"
+  release_to_steer: "松开以引导"
+  release_to_queue: "松开以排队"
   command_requested: "执行命令"
   files_requested: "修改文件"
   read_requested: "读取文件"
