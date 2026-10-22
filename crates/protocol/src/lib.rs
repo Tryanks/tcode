@@ -182,17 +182,18 @@ pub use wire::{
 // CompactContext command, which asks a provider with a native compaction
 // operation to compact now.
 //
+// Version 16 (v0.3.0-rc.1) adds machine groups: HostingAction gains Group
+// with GroupAction (create, join, leave, regenerate and pause the group link,
+// remove a machine, admit a declined device); HostingState carries the group
+// with its link, machines and declined devices; HostedDevice marks group
+// members; and RevokeDevice removes a group member from every machine of the
+// group.
+//
 // Unreleased: ReadImagePreview's crop_to_square becomes cover, and image
 // previews keep the source's shape instead of being cropped to the tile; an
 // original's metadata, the OriginalReady reply and the browser /original
 // response (X-Image-Dimensions) carry the image's displayed size.
-//
-// Unreleased: machine groups. HostingAction gains Group with GroupAction
-// (create, join, leave, regenerate and pause the group link, remove a
-// machine, admit a declined device); HostingState carries the group with its
-// link, machines and declined devices; HostedDevice marks group members; and
-// RevokeDevice removes a group member from every machine of the group.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 #[cfg(test)]
 mod tests;
