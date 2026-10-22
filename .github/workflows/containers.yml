@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Pull requests opened with GITHUB_TOKEN start no pull_request run; the
+  # agent-version workflow dispatches one instead.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -46,7 +49,7 @@ jobs:
           cargo install wasm-bindgen-cli --version 0.2.121 --locked
       - name: Build browser and host binaries
         run: |
-          bash .github/scripts/build-web.sh
+          crates/web/build.sh
           cargo build -p tcode-headless --features web --locked
           cargo build -p tcode-traverse-server --locked
           cargo build -p tcode-traverse --example pair_and_query --locked
@@ -57,8 +60,23 @@ jobs:
         run: |
           set -euo pipefail
           TCODE_PASSWORD=compose-smoke docker compose config --quiet
-          docker buildx build --load --target slim -f crates/headless/Dockerfile -t tcode-headless:slim-test .
-          docker buildx build --load --target full -f crates/headless/Dockerfile -t tcode-headless:full-test .
+          docker buildx build --load --build-arg BINARY_SOURCE=release --target slim -f crates/headless/Dockerfile -t tcode-headless:slim-test .
+          docker buildx build --load --build-arg BINARY_SOURCE=release --target full -f crates/headless/Dockerfile -t tcode-headless:full-test .
           docker buildx build --load --build-arg BINARY_SOURCE=release -f crates/traverse-server/Dockerfile -t tcode-traverse:test .
           node crates/headless/container/smoke.mjs tcode-headless:full-test tcode-headless:slim-test \
             "$PWD/target/debug/examples/pair_and_query" tcode-traverse:test
+
+  source:
+    name: Container source build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build images from a plain checkout
+        run: |
+          set -euo pipefail
+          docker buildx build --load --target slim -f crates/headless/Dockerfile -t tcode-headless:source .
+          docker buildx build --load -f crates/traverse-server/Dockerfile -t tcode-traverse:source .
+          docker run --rm --entrypoint tcode-headless tcode-headless:source --help
+          docker run --rm tcode-traverse:source --help
