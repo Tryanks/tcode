@@ -441,7 +441,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends binaryen
 
       - name: Build browser bundle
-        run: bash .github/scripts/build-web.sh
+        run: crates/web/build.sh
 
       - name: Upload browser bundle
         uses: actions/upload-artifact@v7
@@ -672,6 +672,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -742,6 +744,7 @@ jobs:
           context: .
           file: crates/headless/Dockerfile
           target: slim
+          build-args: BINARY_SOURCE=release
           load: true
           tags: ${{ env.HEADLESS_IMAGE }}:${{ env.VERSION }}-slim-${{ env.ARCH }}
           labels: |
@@ -756,6 +759,7 @@ jobs:
           context: .
           file: crates/headless/Dockerfile
           target: full
+          build-args: BINARY_SOURCE=release
           load: true
           tags: ${{ env.HEADLESS_IMAGE }}:${{ env.VERSION }}-${{ env.ARCH }}
           labels: |
@@ -784,18 +788,66 @@ jobs:
             "$HEADLESS_IMAGE:$VERSION-$ARCH" "$HEADLESS_IMAGE:$VERSION-slim-$ARCH" \
             "$PWD/target/debug/examples/pair_and_query" "$TRAVERSE_IMAGE:$VERSION-$ARCH"
 
+      - uses: anchore/sbom-action/download-syft@v0.24.3
+        id: syft
+
       - name: Push verified architecture images
+        id: push
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
         run: |
-          docker push "$HEADLESS_IMAGE:$VERSION-$ARCH"
-          docker push "$HEADLESS_IMAGE:$VERSION-slim-$ARCH"
-          docker push "$TRAVERSE_IMAGE:$VERSION-$ARCH"
+          set -euo pipefail
+          for entry in "headless=$HEADLESS_IMAGE:$VERSION-$ARCH" \
+                       "slim=$HEADLESS_IMAGE:$VERSION-slim-$ARCH" \
+                       "traverse=$TRAVERSE_IMAGE:$VERSION-$ARCH"; do
+            name="${entry%%=*}"
+            image="${entry#*=}"
+            "$SYFT" scan "docker:$image" --output "spdx-json=$RUNNER_TEMP/$name.spdx.json"
+            docker push "$image"
+            echo "$name=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" | cut -d@ -f2)" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.HEADLESS_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.headless }}
+          sbom-path: ${{ runner.temp }}/headless.spdx.json
+          push-to-registry: true
+
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.HEADLESS_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.slim }}
+          sbom-path: ${{ runner.temp }}/slim.spdx.json
+          push-to-registry: true
+
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.TRAVERSE_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.traverse }}
+          sbom-path: ${{ runner.temp }}/traverse.spdx.json
+          push-to-registry: true
 
   publish-containers:
-    name: Publish multi-architecture containers
+    name: Publish ${{ matrix.image }}${{ matrix.suffix }}
     needs: [setup, container-images]
     runs-on: ubuntu-24.04
     permissions:
       packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      matrix:
+        include:
+          - image: headless
+            suffix: ''
+            alias: latest
+          - image: headless
+            suffix: -slim
+            alias: slim
+          - image: traverse
+            suffix: ''
+            alias: latest
     steps:
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
@@ -803,29 +855,30 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish version tags and stable aliases
+      - name: Publish the version tag and stable alias
+        id: manifest
         env:
           REPOSITORY: ${{ github.repository }}
           VERSION: ${{ needs.setup.outputs.version }}
           PRERELEASE: ${{ needs.setup.outputs.prerelease }}
+          SUFFIX: ${{ matrix.suffix }}
+          ALIAS: ${{ matrix.alias }}
         run: |
           set -euo pipefail
-          for variant in headless headless-slim traverse; do
-            suffix=''
-            alias=latest
-            if [[ "$variant" == headless-slim ]]; then
-              variant=headless
-              suffix=-slim
-              alias=slim
-            fi
-            image="ghcr.io/${REPOSITORY,,}-$variant"
-            tags=(--tag "$image:$VERSION$suffix")
-            if [[ "$PRERELEASE" == false ]]; then
-              tags+=(--tag "$image:$alias")
-            fi
-            docker buildx imagetools create "${tags[@]}" \
-              "$image:$VERSION$suffix-amd64" "$image:$VERSION$suffix-arm64"
-          done
+          image="ghcr.io/${REPOSITORY,,}-${{ matrix.image }}"
+          tags=(--tag "$image:$VERSION$SUFFIX")
+          if [[ "$PRERELEASE" == false ]]; then
+            tags+=(--tag "$image:$ALIAS")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "$image:$VERSION$SUFFIX-amd64" "$image:$VERSION$SUFFIX-arm64"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$(docker buildx imagetools inspect "$image:$VERSION$SUFFIX" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
 
   package-android:
     name: Android arm64

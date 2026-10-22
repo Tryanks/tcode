@@ -7,6 +7,13 @@ and the system tools needed to install selected agents on first start. Version
 tags are `<version>` and `<version>-slim`, without the leading `v`. Prereleases
 have version tags only and do not replace `latest` or `slim`.
 
+Each published image carries a build provenance attestation, and each
+architecture an SPDX SBOM, signed by this repository's release workflow:
+
+```sh
+gh attestation verify oci://ghcr.io/tryanks/tcode-headless:latest --repo Tryanks/tcode
+```
+
 ## Start a machine
 
 Download [docker-compose.yml](../docker-compose.yml) into a directory on the
@@ -17,6 +24,8 @@ TCODE_PASSWORD=replace-with-a-long-unique-password
 PUID=1000
 PGID=1000
 TCODE_PROJECTS=/srv/projects
+TZ=Europe/Berlin
+TCODE_NAME=NAS
 # TCODE_VERSION=slim
 # TCODE_AGENTS=codex,pi
 ```
@@ -31,7 +40,8 @@ docker compose up -d
 docker compose logs -f tcode
 ```
 
-Startup prints the machine id and invitation link/QR. Scan or paste the
+`TCODE_NAME` is the name devices show for this machine; `TZ` sets the
+time zone of agents and terminal panes. Startup prints the machine id and invitation link/QR. Scan or paste the
 invitation in a phone or desktop Tcode client. Open `http://<nas-ip>:47420/`
 for the browser app and sign in with `TCODE_PASSWORD`. The invitation expires;
 use the browser's **Settings → Remote → New invitation** for another device,
@@ -45,6 +55,17 @@ discovery. Under bridge networking, Traverse works normally; if a device cannot
 find the direct LAN path, enter the NAS's IP address on the device. Allow inbound
 UDP 47420 in the host firewall. HTTP is for trusted networks; use an HTTPS
 reverse proxy for browser access over an untrusted network.
+
+The image's health check requests `/auth/state` on the browser listener at
+`127.0.0.1:47420`, so NAS dashboards and `docker compose ps` show whether the
+machine is serving. It allows ten minutes for a slim first start. If `command`
+moves the listener to another port, override `healthcheck` in Compose to match.
+Stopping waits up to 30 seconds (`stop_grace_period`) while running agent
+sessions are flushed.
+
+To use a self-hosted [Traverse](../crates/traverse-server/README.md) instance,
+add `--traverse https://traverse.example.org` to `command`; `--traverse off`
+keeps the machine to the LAN and addresses typed on a device.
 
 ## Data and projects
 
@@ -80,7 +101,14 @@ Only selected CLI commands are added to the managed `PATH` directory. On the
 full image they point to bundled installations; on slim, missing installations
 are downloaded into `/data/agents` and reused offline on later starts. The
 [agent manifest](../crates/headless/container/agents.json) pins the versions for
-both images. Cache entries include the architecture and version, so a migrated
+both images; the Cursor archive is also pinned by SHA-256 per architecture and
+checked before it is unpacked. A weekly
+[workflow](../.github/workflows/container-agents.yml) runs
+[`update-agents.mjs`](../crates/headless/container/update-agents.mjs) and opens a
+pull request when any CLI has a newer release, so each Tcode release ships the
+CLIs current at its cut after the container smoke check has installed them.
+The CLIs' own self-updaters are disabled in the image (`DISABLE_AUTOUPDATER`,
+`OPENCODE_DISABLE_AUTOUPDATE`). Cache entries include the architecture and version, so a migrated
 volume cannot reuse an executable for the wrong CPU. Changing the selection
 removes command links without deleting cached packages or credentials.
 
@@ -146,6 +174,66 @@ and also preserves other non-root groups supplied with Docker's `group_add`.
 Bind mounts requested by sibling containers refer to **host paths**, so use
 the host's `/srv/projects/...` path when constructing their mounts.
 
+## NAS platforms
+
+Every platform below runs the same image; only where the Compose file, `.env`
+and the data live differs. Use a host path that the platform backs up for
+`/data`, or keep the named volume and back it up with Docker.
+
+### Synology DSM (Container Manager)
+
+1. In **File Station**, create `docker/tcode` for the project and a shared
+   folder for projects, e.g. `/volume1/projects`.
+2. Put `docker-compose.yml` and `.env` in `docker/tcode`. Set
+   `TCODE_PROJECTS=/volume1/projects`, and `PUID`/`PGID` to the DSM user
+   that owns that folder: `id <user>` over SSH (DSM users usually start at
+   uid 1026 in group `users`, gid 100).
+3. **Container Manager → Project → Create**, choose that folder as the path;
+   it uses the existing `docker-compose.yml`. Build and start the project.
+4. The invitation is in the container's **Log** tab. Allow TCP and UDP 47420
+   in **Control Panel → Security → Firewall** if the firewall is enabled.
+
+### Unraid
+
+The [Unraid template](../crates/headless/container/unraid.xml) maps `/data` to
+`/mnt/user/appdata/tcode`, `/projects` to `/mnt/user/projects`, and runs as
+Unraid's usual `99:100` (`nobody:users`). Save it as
+`/boot/config/plugins/dockerMan/templates-user/my-tcode.xml`, then **Docker →
+Add Container → Template: tcode**, set the password and apply. The container's
+log shows the invitation; **WebUI** opens the browser app. Change the
+repository to `ghcr.io/tryanks/tcode-headless:slim` for the slim image.
+With the Compose Manager plugin, the Compose file above works as it is.
+
+### TrueNAS SCALE
+
+TrueNAS SCALE 24.10 and later run Compose files under **Apps → Discover Apps
+→ ⋮ → Install via YAML**. That dialog reads no `.env`, so replace each
+`${...}` in `docker-compose.yml` with its value, mount datasets for `/data`
+and `/projects` instead of the named volume, and set `PUID`/`PGID` to the
+dataset owner (the built-in `apps` user is 568:568).
+
+### Other hosts
+
+Any Linux host with Docker Engine 24 or later and Compose v2 runs the template
+as it is. Without Compose, the equivalent command is:
+
+```sh
+docker run -d --name tcode --restart unless-stopped --stop-timeout 30 \
+  -e PUID=1000 -e PGID=1000 -e TZ=UTC -e TCODE_PASSWORD=... \
+  -p 47420:47420/tcp -p 47420:47420/udp \
+  -v tcode-data:/data -v /srv/projects:/projects \
+  ghcr.io/tryanks/tcode-headless:latest serve --name NAS --browser-listen 0.0.0.0:47420
+```
+
+## Self-host Traverse
+
+[`crates/traverse-server/docker-compose.yml`](../crates/traverse-server/docker-compose.yml)
+runs the published `tcode-traverse` image on a public host with a domain:
+write `traverse.toml` beside it as its header describes, then
+`docker compose up -d`. Point machines at it with `--traverse`, as above. The
+[Traverse server documentation](../crates/traverse-server/README.md) covers TLS
+modes, ports and limits.
+
 ## Upgrade or build locally
 
 Back up `/data`, change `TCODE_VERSION` if pinned, then run
@@ -154,28 +242,39 @@ update them by upgrading the image. Slim downloads the new manifest versions
 once, retaining existing login data. Old cache versions can be removed while
 the service is stopped to reclaim space.
 
-The release workflow builds each architecture natively, consumes the same
-`--features web` binaries as the archives, tests the images, and publishes
-multi-architecture manifests to GHCR. It also publishes
-`ghcr.io/tryanks/tcode-traverse`; see the
-[Traverse server documentation](../crates/traverse-server/README.md#docker).
-
-For maintainers enabling publishing for the first time: make both GHCR packages
-public in their package settings after their first upload, and retain this
-repository's Actions access. GHCR creates new packages as private; repository
-linking grants workflow access but does not make anonymous pulls available.
-See [GitHub's registry setup](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#pushing-container-images).
-
-To reproduce a headless image build, stage the matching Linux release binary
-as `dist/amd64/tcode-headless` or `dist/arm64/tcode-headless`, then run from the
-repository root (Docker selects `TARGETARCH`):
+To build the image from a checkout instead, run from the repository root:
 
 ```sh
 docker build --target full -f crates/headless/Dockerfile -t tcode-headless:local .
 # Or: --target slim
 ```
 
-The [container CI](../.github/workflows/containers.yml) builds from source and
-runs the same [smoke check](../crates/headless/container/smoke.mjs) on native
-amd64 and arm64 runners. Release publishing repeats it against the actual
-release binaries before pushing either architecture.
+This compiles the browser app and the headless binary inside Docker, so the
+host needs nothing but Docker; Cargo's registry and target directory persist
+in BuildKit cache mounts between builds. Then set `TCODE_IMAGE=tcode-headless`
+and `TCODE_VERSION=local` in `.env` and run `docker compose up -d`.
+`docker build -f crates/traverse-server/Dockerfile -t tcode-traverse .` builds
+Traverse the same way.
+
+The release workflow builds each architecture natively from the same
+`--features web` binaries as the archives (`--build-arg BINARY_SOURCE=release`,
+with the binary staged as `dist/<amd64|arm64>/tcode-headless`), tests the
+images, and publishes multi-architecture manifests to GHCR with their
+attestations. It also publishes `ghcr.io/tryanks/tcode-traverse`.
+
+For maintainers enabling publishing for the first time: make both GHCR packages
+public in their package settings after their first upload, and retain this
+repository's Actions access. GHCR creates new packages as private; repository
+linking grants workflow access but does not make anonymous pulls available.
+See [GitHub's registry setup](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#pushing-container-images).
+The agent-version workflow needs **Settings → Actions → General → Allow GitHub
+Actions to create and approve pull requests**; it dispatches CI and Containers
+on its branch itself, because pull requests opened with `GITHUB_TOKEN` start
+no `pull_request` runs.
+
+The [container CI](../.github/workflows/containers.yml) runs the
+[smoke check](../crates/headless/container/smoke.mjs) on native amd64 and
+arm64 runners against images built from that commit's binaries, and builds the
+images from a plain checkout to keep the source path working. Release
+publishing repeats the smoke check against the actual release binaries before
+pushing either architecture.

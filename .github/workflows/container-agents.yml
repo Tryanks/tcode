@@ -1,0 +1,61 @@
+name: Container agent versions
+
+on:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: container-agents
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update pinned agent CLIs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Resolve current CLI releases
+        run: node crates/headless/container/update-agents.mjs | tee "$RUNNER_TEMP/versions.txt"
+
+      - name: Open or update the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: automation/container-agents
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- crates/headless/container/agents.json; then
+            echo 'Pinned agent CLIs are current.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch --create "$BRANCH"
+          git commit --quiet --message 'container: update pinned agent CLIs' -- crates/headless/container/agents.json
+          git push --force origin "$BRANCH"
+          {
+            echo 'Updates `crates/headless/container/agents.json` to the current release of each agent CLI:'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/versions.txt"
+            echo '```'
+            echo
+            echo 'The Containers workflow installs each version in the full and slim images and runs the container smoke check. Merge once every check on the final commit passes.'
+          } > "$RUNNER_TEMP/body.md"
+          if [[ "$(gh pr view "$BRANCH" --json state --jq .state 2>/dev/null || true)" == OPEN ]]; then
+            gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --head "$BRANCH" --title 'container: update pinned agent CLIs' --body-file "$RUNNER_TEMP/body.md"
+          fi
+          gh workflow run ci.yml --ref "$BRANCH"
+          gh workflow run containers.yml --ref "$BRANCH"
