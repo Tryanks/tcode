@@ -17,6 +17,7 @@ The plan behind this model is [#376](https://github.com/Tryanks/tcode/issues/376
 | Device | A desktop, phone or tablet running the Tcode app that opens a machine. A device also has its own key, kept in `device.json` in its data directory. The machine keeps an allow list of device ids; every connection is authenticated by that key, so a device that is not on the list is refused before any application data flows. |
 | Invitation | A `tcode://pair?…` link, shown as a QR code and copyable as text. It carries the machine id, a random 16-byte secret, the Traverse instances the machine publishes to, its current relay and its UDP port — never an IP address or the machine's name; the format is [The invitation link](pair-link.md). Scanning or pasting the link is the whole pairing: an invitation lasts five minutes, admits one device, is replaced by the next one and is invalidated after five wrong secrets. The machine enforces all of this; Traverse never sees an invitation. |
 | Space | A named set of projects on one machine, with a reusable pairing link. A device paired through that link becomes a member and sees only the space's projects and threads. The owner manages the projects and members. |
+| Group | Machines that admit the devices any of them admits, so a device paired with one member reaches every member. Off until a machine creates one; see [Machine groups](#machine-groups). |
 | Traverse | The relay and lookup services a machine publishes to so devices off its network can find and reach it. A machine keeps a list of sources, each switched on or off: **Official** (always first, on by default) uses the relays and lookup service listed in the manifest bundled with Tcode; each **Self-hosted** source is your own `tcode-traverse` instance. With every source off the machine uses no service at all. Traverse sees only encrypted traffic; the machine authenticates devices itself. |
 | Direct / Relay | How one live connection is carried. Direct means the two ends exchange UDP packets with each other; Relay means the packets go through a Traverse relay because no direct path was found. The connection banner and the machine's device list show which one is in use, and it can change while connected. |
 
@@ -84,10 +85,71 @@ joins. Existing members keep access until the owner removes them, deletes the
 space or revokes their device. A removed member can join again with the old
 link if it remains enabled and valid.
 
-`traverse.json` uses version 3 to store spaces and device access. Loading a
-version 2 file migrates existing paired devices to explicit full access and
-starts with no spaces. Existing devices do not become space members as part of
-the migration.
+`traverse.json` uses version 3 to store spaces and device access, and version
+4 once the machine is in a group, which adds the group and whether each device
+came through it; an older build reads only version 3. Loading a version 2 file
+migrates existing paired devices to explicit full access and starts with no
+spaces. Existing devices do not become space members as part of the migration.
+
+## Machine groups
+
+A group is for one person's machines: a headless machine on a NAS, a desktop,
+a laptop. Pair a phone with any of them and it reaches all of them; remove a
+lost phone on any of them and every one refuses it. No machine is in charge.
+The machine that started the group can stop or leave, and the others carry on.
+
+**The risk is yours to take.** Every member can admit devices into every
+other member, so a compromised member, or a leaked group link, reaches the
+whole group. Groups are off until you create one; leave them off if you do
+not need them.
+
+### Create or join
+
+1. On the first machine, open **Settings → Remote → Machine group** (on a
+   headless machine, in its logged-in browser) and create a group.
+2. Before the group exists, Tcode lists this machine's directly paired
+   full-access devices. All are selected: every member of the group will
+   admit them. Clear any device that should reach only this machine.
+3. Copy the group link from that section. On each other machine, with hosting
+   on, use **Join group** there and paste it; it shows the same list of its
+   own devices first. If the join finds no path to the first machine, type
+   that machine's IP address, as when pairing a device.
+4. A desktop joins together with its own window, so the window reaches every
+   member from **Machines**.
+
+Every member has its own group link: reusable, paused or regenerated like a
+space link, dead after five wrong secrets, and checked only on that machine.
+A headless `serve` prints its group link at startup.
+
+### Pair a device
+
+Scan or paste any member's group link, or a one-time invitation from any
+member: the device is paired with that machine, and the machine tells the
+others. The device saves every member under **Your machines**. A space link
+never brings a device into the group; spaces stay on their machine and group
+membership is full access only.
+
+**Accept new devices** governs the group too. While it is off on a machine,
+a device another member admits is not admitted there; it is listed in that
+machine's group section, with **Admit**, and stays out until you admit it.
+
+### Remove and leave
+
+**Remove** under **Connected devices** removes a group member from every
+member: each closes its connections and refuses it from the moment it hears
+of the removal. A member that is offline hears it when it next reaches
+another member, and admits the device until then. Only a new pairing, with a
+group link or an invitation, brings the device back.
+
+**Leave group** on a machine tells the members and forgets the group. The
+machine keeps every device it admitted, now as directly paired, and the other
+members keep theirs. A member can also remove another machine from the
+group; that machine leaves the same way the next time it hears of it.
+
+Members reach each other over `tcode/group/1` on their own UDP port: at the
+relay and addresses each reports for itself and the ones a connection last
+used, and through the lookups of the Traverse instances the dialling machine
+publishes to. They exchange the group when it changes and every five minutes.
 
 ## Use the desktop app as the machine
 
@@ -688,31 +750,33 @@ a trusted LAN.
 ### Keys and files
 
 The machine's `traverse.json` holds its secret key, its name, the allow list
-(device id, name, operating system, first-connection time) and the **Allow
-other devices** switch. `remote.json` holds the browser side: the id and name
-browsers record this machine under, the password hash (randomly salted
-PBKDF2-HMAC-SHA256, 600,000 iterations) and one record per logged-in browser
-with its token hash. The password and the raw tokens are never stored, and
-nothing in `remote.json` is part of the machine's identity. A headless
-machine upgraded from the previous transport therefore gets a new machine id
-the first time it starts — the old `remote.json` seed is not adopted — and
-every device pairs again with a new invitation; the browser password and
-browser logins are kept.
+(device id, name, operating system, first-connection time, and whether the
+device came through the group), the **Allow other devices** switch and, in a
+group, the group's machines and devices with this machine's own group link.
+`remote.json` holds the browser side: the id and name browsers record this
+machine under, the password hash (randomly salted PBKDF2-HMAC-SHA256, 600,000
+iterations) and one record per logged-in browser with its token hash. The
+password and the raw tokens are never stored, and nothing in `remote.json` is
+part of the machine's identity. A headless machine upgraded from the previous
+transport therefore gets a new machine id the first time it starts — the old
+`remote.json` seed is not adopted — and every device pairs again with a new
+invitation; the browser password and browser logins are kept.
 
 A device's `device.json` holds its secret key, name and platform. `hosts.json`
 holds the machines it paired with: id, name, Traverse URL, relay, direct
-addresses and last connection time — routing hints, not credentials. Pending
-writes are in `outbox-<hex of machine id>.json`. Phone records are in the
-app's private data directory; Android uses its `filesDir`.
+addresses, last connection time and group — routing hints, not credentials.
+Pending writes are in `outbox-<hex of machine id>.json`. Phone records are in
+the app's private data directory; Android uses its `filesDir`.
 
 On Unix, Tcode writes these files with mode `0600`. That is a filesystem
 permission, not encryption. **A stolen `device.json` is that device's
 access:** whoever holds the key can connect to every machine that lists the
-device until the device is removed on each machine. **A stolen
-`traverse.json` is the machine's identity:** its holder can run a machine that
-paired devices would trust. There are no per-device project permissions or
-read-only device roles; a paired device has the same access as the machine's
-own window, including Preview tunnels to the machine's loopback and network.
+device until the device is removed on each machine, or once on any member of a
+group. **A stolen `traverse.json` is the machine's identity:** its holder can
+run a machine that paired devices would trust and, in a group, admit devices
+into every member. There are no per-device project permissions or read-only
+device roles; a paired device has the same access as the machine's own window,
+including Preview tunnels to the machine's loopback and network.
 
 ### Revocation
 
@@ -721,7 +785,8 @@ On the machine, use **Settings → Remote → Connected devices → Remove**
 taken off the allow list and saved, its live connections are closed at once,
 and a new connection from it is refused from that moment. The device shows
 **Access rejected · Pair again** and stops retrying. Pairing it again needs a
-new invitation.
+new invitation. A member of the machine's group is removed from every member
+of the group; see [Remove and leave](#remove-and-leave).
 
 A browser logged in to a headless machine is listed after the native devices
 in the logged-in browser's **Settings → Remote**; **Remove** there

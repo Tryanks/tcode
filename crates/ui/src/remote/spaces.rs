@@ -1,12 +1,13 @@
 //! Shared spaces: named sets of projects this machine shares with
 //! collaborators, each behind a reusable link.
 //!
-//! [`Spaces`] is the one owner of a machine's spaces on this client: the
-//! window's own machine through [`RemoteController`] while it hosts, or a
-//! machine this window is attached to as a full device through
-//! `Query::Hosting`. Every surface — Settings → Remote, the Machines page and
-//! the sidebar's share items — reads and changes spaces through it, so a
-//! change made on one repaints the others.
+//! [`Spaces`] is the one owner of a machine's hosting state on this client —
+//! its spaces, its paired devices and its machine group: the window's own
+//! machine through [`RemoteController`] while it hosts, or a machine this
+//! window is attached to as a full device through `Query::Hosting`. Every
+//! surface — Settings → Remote, the Machines page and the sidebar's share
+//! items — reads and changes that state through it, so a change made on one
+//! repaints the others.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -21,6 +22,8 @@ use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
 use tcode_core::project::Project;
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+use tcode_protocol::{GroupAction, GroupInfo, HostedDevice};
 use tcode_protocol::{HostingAction, HostingState, SpaceAction, SpaceInfo};
 
 use crate::icon::Icon;
@@ -115,6 +118,21 @@ impl Spaces {
         self.spaces().iter().find(|space| space.id == id)
     }
 
+    /// The machine's group, when it is in one.
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    pub(crate) fn group(&self) -> Option<&GroupInfo> {
+        self.state.as_ref()?.group.as_ref()
+    }
+
+    /// The devices paired with the machine, as it last reported them.
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    pub(crate) fn devices(&self) -> &[HostedDevice] {
+        self.state
+            .as_ref()
+            .map(|state| state.devices.as_slice())
+            .unwrap_or_default()
+    }
+
     /// Whether the machine accepts new devices at all; a space's link works
     /// only while it does.
     pub(crate) fn accepting(&self) -> bool {
@@ -204,9 +222,14 @@ impl Spaces {
         // The invitation countdown changes every read; only what spaces show
         // is worth a repaint.
         let shown = |state: &Option<HostingState>| {
-            state
-                .as_ref()
-                .map(|state| (state.enabled, state.spaces.clone(), state.devices.clone()))
+            state.as_ref().map(|state| {
+                (
+                    state.enabled,
+                    state.spaces.clone(),
+                    state.devices.clone(),
+                    state.group.clone(),
+                )
+            })
         };
         let changed = shown(&self.state) != shown(&state);
         self.state = state;
@@ -222,14 +245,58 @@ impl Spaces {
         actions: Vec<SpaceAction>,
         cx: &mut Context<Self>,
     ) -> Task<Result<HostingState, String>> {
+        self.run(actions.into_iter().map(HostingAction::Spaces).collect(), cx)
+    }
+
+    /// Change the machine's group.
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    pub(crate) fn act_group(
+        &mut self,
+        action: GroupAction,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<HostingState, String>> {
+        self.run(vec![HostingAction::Group(action)], cx)
+    }
+
+    fn run(
+        &mut self,
+        actions: Vec<HostingAction>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<HostingState, String>> {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         match &self.host {
             #[cfg(feature = "remote-hosting")]
+            SpacesHost::Local if actions.iter().any(dials_out) => {
+                // Joining or leaving a group waits on other machines, so it
+                // runs off the UI thread.
+                let Some(handle) = cx
+                    .try_global::<RemoteController>()
+                    .and_then(RemoteController::hosting_handle)
+                else {
+                    return Task::ready(Err(crate::tr!("spaces.not_hosting").into_owned()));
+                };
+                let run = cx.background_spawn(async move {
+                    let mut result = Err(String::new());
+                    for action in actions {
+                        result = handle.hosting(action).map_err(|error| error.message);
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    result
+                });
+                cx.spawn(async move |this, cx| {
+                    let result = run.await;
+                    let _ = this.update(cx, |spaces, cx| spaces.settle(generation, &result, cx));
+                    result
+                })
+            }
+            #[cfg(feature = "remote-hosting")]
             SpacesHost::Local => {
                 let mut result = Err(String::new());
                 for action in actions {
-                    result = local_hosting(HostingAction::Spaces(action), cx);
+                    result = local_hosting(action, cx);
                     if result.is_err() {
                         break;
                     }
@@ -248,9 +315,7 @@ impl Spaces {
                 cx.spawn(async move |this, cx| {
                     let mut result = Err(String::new());
                     for action in actions {
-                        result = match store.update(cx, |store, cx| {
-                            store.hosting(HostingAction::Spaces(action), cx)
-                        }) {
+                        result = match store.update(cx, |store, cx| store.hosting(action, cx)) {
                             Ok(task) => task.await,
                             Err(_) => Err(crate::tr!("spaces.detached").into_owned()),
                         };
@@ -357,6 +422,15 @@ impl Spaces {
             cx,
         )
     }
+}
+
+/// Whether an action waits on another machine.
+#[cfg(feature = "remote-hosting")]
+fn dials_out(action: &HostingAction) -> bool {
+    matches!(
+        action,
+        HostingAction::Group(GroupAction::Join { .. } | GroupAction::Leave)
+    )
 }
 
 #[cfg(feature = "remote-hosting")]

@@ -63,6 +63,11 @@ moves the listener to another port, override `healthcheck` in Compose to match.
 Stopping waits up to 30 seconds (`stop_grace_period`) while running agent
 sessions are flushed.
 
+To pair a phone once and reach both the NAS and your desktop, create a group
+on the NAS in the browser's **Settings → Remote → Machine group** and join it
+from the desktop; see [Machine groups](remote.md#machine-groups). Startup then
+also prints the NAS's group link.
+
 To use a self-hosted [Traverse](../crates/traverse-server/README.md) instance,
 add `--traverse https://traverse.example.org` to `command`; `--traverse off`
 keeps the machine to the LAN and addresses typed on a device.
