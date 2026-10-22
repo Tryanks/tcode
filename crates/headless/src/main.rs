@@ -248,6 +248,9 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             println!("Space {}: {link}", space.name);
         }
     }
+    if let Some(link) = traverse_host.group_link() {
+        println!("Group link: {link}");
+    }
     println!("Browser: http://{}/", server.local_addr());
     println!("Press Ctrl-C to stop");
     wait_for_interrupt();

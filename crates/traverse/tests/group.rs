@@ -315,6 +315,18 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
     assert!(admitted.group.unwrap().declined.is_empty());
     assert!(admits(&first, &late));
 
+    // A machine another member removes leaves as if it had left itself, and
+    // keeps its devices as directly paired.
+    group(
+        &first,
+        GroupAction::RemoveMachine(second.host.endpoint_id()),
+    );
+    assert_eq!(state(&first).group.unwrap().machines.len(), 1);
+    eventually("the removed machine leave the group", || {
+        state(&second).group.is_none()
+    });
+    assert!(admits(&second, &late));
+
     first.host.shutdown();
     second.host.shutdown();
 }

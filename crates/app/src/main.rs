@@ -549,7 +549,7 @@ fn main() {
                     );
                     std::process::exit(1);
                 };
-                AttachmentTarget::Remote(host)
+                AttachmentTarget::Remote(Box::new(host))
             }
             None => AttachmentTarget::Local,
         }
