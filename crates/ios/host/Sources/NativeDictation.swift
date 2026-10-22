@@ -38,9 +38,8 @@ private enum Dictation {
         if availability[language] == nil {
             availability[language] = false
             Task {
-                if let locale = await DictationTranscriber.supportedLocale(equivalentTo: Locale(identifier: language)) {
-                    let module = DictationTranscriber(locale: locale, preset: .progressiveLongDictation)
-                    availability[language] = await AssetInventory.status(forModules: [module]) != .unsupported
+                if let transcription = await Transcription.make(language) {
+                    availability[language] = await AssetInventory.status(forModules: [transcription.module]) != .unsupported
                 }
                 tcode_ios_speech_availability_changed()
             }
@@ -123,9 +122,11 @@ private final class NativeDictation {
                 tcode_ios_speech_availability_changed()
                 try Task.checkCancellation()
                 guard microphone else { throw DictationFailure.permissionDenied }
-                guard let locale = await DictationTranscriber.supportedLocale(equivalentTo: Locale(identifier: language)) else {
+                guard let transcription = await Transcription.make(language) else {
                     throw DictationFailure.unsupported
                 }
+                let locale = transcription.locale
+                let module = transcription.module
                 try Task.checkCancellation()
                 try await AssetInventory.reserve(locale: locale)
                 if Task.isCancelled {
@@ -133,7 +134,6 @@ private final class NativeDictation {
                     throw CancellationError()
                 }
                 reservedLocale = locale
-                let module = DictationTranscriber(locale: locale, preset: .progressiveLongDictation)
                 if let installation = try await AssetInventory.assetInstallationRequest(supporting: [module]) {
                     try Task.checkCancellation()
                     try await installation.downloadAndInstall()
@@ -160,9 +160,8 @@ private final class NativeDictation {
                     throw DictationFailure.unsupported
                 }
                 results = Task { [self] in
-                    for try await result in module.results {
-                        try Task.checkCancellation()
-                        emit(result.isFinal ? 2 : 1, String(result.text.characters))
+                    try await transcription.results { text, isFinal in
+                        if !Task.isCancelled { self.emit(isFinal ? 2 : 1, text) }
                     }
                 }
                 try await analyzer.start(inputSequence: input)
