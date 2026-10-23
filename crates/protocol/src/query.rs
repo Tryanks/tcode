@@ -40,10 +40,12 @@ pub enum Query {
     ReadIconImage {
         path: PathBuf,
     },
+    /// A preview in the source's own shape: inside a `pixels` square, or with `cover` reaching
+    /// both of its edges for the client to clip.
     ReadImagePreview {
         path: PathBuf,
         pixels: u32,
-        crop_to_square: bool,
+        cover: bool,
     },
     ReadProjectIcon {
         project_id: String,
@@ -96,6 +98,7 @@ pub enum Query {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_bytes: Option<u64>,
     },
+    /// A preview covering a `width`×`height` tile, in the image's own shape.
     ReadItemImagePreview {
         session_id: String,
         item_id: String,

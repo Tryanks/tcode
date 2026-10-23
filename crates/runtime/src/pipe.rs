@@ -1043,8 +1043,8 @@ fn dispatch_query(
         Query::ReadImagePreview {
             path,
             pixels,
-            crop_to_square,
-        } => app.image_preview(path, pixels, crop_to_square, cx),
+            cover,
+        } => app.image_preview(path, pixels, cover, cx),
         Query::ReadProjectIcon { project_id, pixels } => {
             let project = app.projects.iter().find(|p| p.id == project_id).cloned();
             let task = cx.unblock(move || {
