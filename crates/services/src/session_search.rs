@@ -1,18 +1,23 @@
-//! Lazy full-text search over persisted session event logs.
+//! Full-text search over persisted session event logs.
 //!
-//! The index is deliberately in-memory: each session is parsed again only after
-//! the store reports a committed change to its event log
-//! ([`SessionStore::event_generation`]). The store stays authoritative and the
-//! cache dies with it.
+//! Each thread's searchable entries are extracted from its folded log once and
+//! kept in the store with the identity of that log: a search folds only the
+//! threads whose log changed since, and reads stored text for the rest.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use agent::ItemContent;
 use tcode_core::project::SessionMeta;
 use tcode_core::session::{EntryContent, StoredEvent, Timeline};
 use tcode_protocol::SessionSearchHit;
 
-use crate::store::SessionStore;
+use crate::store::{IndexedEntry, SessionStore};
+
+/// The rules entries are extracted by. A change to them, or to what the fold
+/// settles an entry to show, must change this so every thread is extracted
+/// again.
+const EXTRACTION_VERSION: u32 = 1;
 
 /// One final, folded timeline entry that contributes to content search.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,30 +27,27 @@ pub struct SearchableEntry {
     pub text: String,
 }
 
-#[derive(Debug, Clone)]
-struct CachedSession {
-    generation: u64,
-    entries: Vec<SearchableEntry>,
-}
-
-/// Incremental content index for one [`SessionStore`].
+/// Content search over one [`SessionStore`].
 pub struct SessionSearch {
     store: SessionStore,
-    cache: HashMap<String, CachedSession>,
+    /// The store's event generation of each thread whose entries were last
+    /// found current, so a search compares a log's stored identity once per
+    /// change to it in this process rather than on every query.
+    verified: Mutex<HashMap<String, u64>>,
 }
 
 impl SessionSearch {
     pub fn new(store: SessionStore) -> Self {
         Self {
             store,
-            cache: HashMap::new(),
+            verified: Mutex::default(),
         }
     }
 
     /// Search sessions in the supplied order, returning at most `limit` hits.
     /// Empty and whitespace-only queries intentionally return no content hits.
     pub fn search(
-        &mut self,
+        &self,
         sessions: &[SessionMeta],
         query: &str,
         limit: usize,
@@ -54,62 +56,114 @@ impl SessionSearch {
         if query.is_empty() || limit == 0 {
             return Vec::new();
         }
-
-        let live_ids: HashSet<&str> = sessions.iter().map(|meta| meta.id.as_str()).collect();
-        self.cache.retain(|id, _| live_ids.contains(id.as_str()));
-
+        let folded = query.to_lowercase();
         let mut hits = Vec::new();
         for meta in sessions {
-            self.refresh(meta);
-            let Some(cached) = self.cache.get(&meta.id) else {
+            if let Err(error) = self.refresh(&meta.id) {
+                log::warn!("cannot search session {}: {error}", meta.id);
                 continue;
-            };
-            for entry in &cached.entries {
-                let Some(snippet) = match_snippet(&entry.text, query, 140) else {
-                    continue;
-                };
-                hits.push(SessionSearchHit {
-                    session_id: meta.id.clone(),
-                    session_title: meta.title.clone(),
-                    entry_id: entry.entry_id.clone(),
-                    turn: entry.turn,
-                    snippet,
-                });
-                if hits.len() == limit {
-                    return hits;
-                }
+            }
+            let visited =
+                self.store
+                    .visit_search_matches(&meta.id, &folded, |entry_id, turn, text| {
+                        if let Some(snippet) = match_snippet(text, query, 140) {
+                            hits.push(SessionSearchHit {
+                                session_id: meta.id.clone(),
+                                session_title: meta.title.clone(),
+                                entry_id: entry_id.to_owned(),
+                                turn,
+                                snippet,
+                            });
+                        }
+                        hits.len() < limit
+                    });
+            if let Err(error) = visited {
+                log::warn!("cannot search session {}: {error}", meta.id);
+            }
+            if hits.len() == limit {
+                break;
             }
         }
         hits
     }
 
-    fn refresh(&mut self, meta: &SessionMeta) {
-        // Read before the events: a write that commits during the read moves
-        // the generation on, so the next search parses again.
-        let generation = self.store.event_generation(&meta.id);
-        if self
-            .cache
-            .get(&meta.id)
-            .is_some_and(|cached| cached.generation == generation)
-        {
-            return;
-        }
-        let events = match self.store.read_events(&meta.id) {
-            Ok(events) => events,
-            Err(error) => {
-                log::warn!("cannot search session {}: {error}", meta.id);
-                self.cache.remove(&meta.id);
-                return;
+    /// Extract the entries of each thread in `ids` whose log changed since,
+    /// stopping at the first store failure, which a search meets again.
+    pub fn index(&self, ids: &[String]) {
+        let started = std::time::Instant::now();
+        let mut extracted = 0;
+        for id in ids {
+            match self.refresh(id) {
+                Ok(fresh) => extracted += usize::from(fresh),
+                Err(error) => {
+                    log::warn!("search index of {id}: {error}");
+                    return;
+                }
             }
-        };
-        self.cache.insert(
-            meta.id.clone(),
-            CachedSession {
-                generation,
-                entries: extract_searchable_entries(&events),
-            },
-        );
+        }
+        if extracted > 0 {
+            log::info!(
+                "search index: extracted {extracted} of {} threads in {} ms",
+                ids.len(),
+                started.elapsed().as_millis()
+            );
+        }
     }
+
+    /// Extract `id`'s entries again unless they came from its log as it is,
+    /// telling whether it did.
+    fn refresh(&self, id: &str) -> std::io::Result<bool> {
+        let generation = self.store.event_generation(id);
+        let verified = |search: &Self| {
+            search
+                .verified
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(id.to_owned(), generation);
+        };
+        if self
+            .verified
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            == Some(&generation)
+        {
+            return Ok(false);
+        }
+        if self.store.search_entries_current(id, EXTRACTION_VERSION)? {
+            verified(self);
+            return Ok(false);
+        }
+        let source = self.store.search_source(id)?;
+        let events = self.store.read_log_until(id, source.end)?.records;
+        let entries = extract_searchable_entries(&events);
+        let folded: Vec<String> = entries.iter().map(|entry| fold(&entry.text)).collect();
+        self.store.replace_search_entries(
+            id,
+            EXTRACTION_VERSION,
+            &source,
+            entries
+                .iter()
+                .zip(&folded)
+                .map(|(entry, folded)| IndexedEntry {
+                    entry_id: &entry.entry_id,
+                    turn: entry.turn,
+                    text: &entry.text,
+                    folded,
+                }),
+        )?;
+        verified(self);
+        Ok(true)
+    }
+}
+
+/// The text a query is matched against: whitespace collapsed as in a
+/// snippet, then lowercased as the query is.
+fn fold(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// Fold persisted events and extract the final searchable representation.
@@ -251,13 +305,50 @@ mod tests {
         .into()
     }
 
+    /// What a search extracts is kept in the store: a later search, after the
+    /// host restarts included, reads it instead of folding the log again,
+    /// until the log changes.
+    #[test]
+    fn extracted_entries_outlive_the_host_that_made_them() {
+        let root = std::env::temp_dir().join(format!("tcode-search-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
+        let reply = |id: &str, text: &str| {
+            completed(id, ItemContent::AssistantMessage { text: text.into() }).event
+        };
+        store
+            .append_event(&meta.id, 1, &reply("first", "the auth.rs fix"))
+            .unwrap();
+        let sessions = std::slice::from_ref(&meta);
+        assert_eq!(
+            SessionSearch::new(store.clone())
+                .search(sessions, "auth.rs", 10)
+                .len(),
+            1
+        );
+        store.close().unwrap();
+        drop(store);
+
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let search = SessionSearch::new(store.clone());
+        assert_eq!(search.search(sessions, "AUTH.RS", 10)[0].entry_id, "first");
+        assert_eq!(store.event_reads(), 0, "the restarted host read no log");
+        store
+            .append_event(&meta.id, 2, &reply("second", "auth.rs again"))
+            .unwrap();
+        assert_eq!(search.search(sessions, "auth.rs", 10).len(), 2);
+        assert_eq!(store.event_reads(), 1, "the changed log was folded again");
+        store.close().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn search_indexes_final_visible_content_and_refreshes_after_append_or_removal() {
         let root = std::env::temp_dir().join(format!("tcode-search-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
         meta.title = "Authentication cleanup".into();
-        let mut search = SessionSearch::new(store.clone());
+        let search = SessionSearch::new(store.clone());
         let sessions = std::slice::from_ref(&meta);
         assert!(search.search(sessions, "auth.rs", 10).is_empty());
 

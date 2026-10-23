@@ -48,7 +48,7 @@ fn session_parent(db: &Db, connection: &Connection, id: &str) -> io::Result<Opti
     Ok(parent)
 }
 
-fn log_end(db: &Db, connection: &Connection, id: &str) -> io::Result<i64> {
+pub(super) fn log_end(db: &Db, connection: &Connection, id: &str) -> io::Result<i64> {
     let mut end = 0;
     db.query(
         connection,
