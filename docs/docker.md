@@ -65,8 +65,8 @@ sessions are flushed.
 
 To pair a phone once and reach both the NAS and your desktop, create a group
 on the NAS in the browser's **Settings → Remote → Machine group** and join it
-from the desktop; see [Machine groups](remote.md#machine-groups). Startup then
-also prints the NAS's group link.
+from the desktop with an invitation from the NAS; see
+[Machine groups](remote.md#machine-groups).
 
 To use a self-hosted [Traverse](../crates/traverse-server/README.md) instance,
 add `--traverse https://traverse.example.org` to `command`; `--traverse off`

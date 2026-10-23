@@ -549,7 +549,6 @@ async fn pair_exchange(
             &ClientLine::Pair {
                 secret: invite.secret.clone(),
                 space: invite.space.clone(),
-                group: invite.group.clone(),
                 device: device.claim(),
             },
         )

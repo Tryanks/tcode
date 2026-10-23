@@ -86,10 +86,10 @@ space or revokes their device. A removed member can join again with the old
 link if it remains enabled and valid.
 
 `traverse.json` uses version 3 to store spaces and device access, and version
-4 once the machine is in a group, which adds the group and whether each device
-came through it; an older build reads only version 3. Loading a version 2 file
-migrates existing paired devices to explicit full access and starts with no
-spaces. Existing devices do not become space members as part of the migration.
+4 once the machine is in a group, which adds the group; an older build reads
+only version 3. Loading a version 2 file migrates existing paired devices to
+explicit full access and starts with no spaces. Existing devices do not become
+space members as part of the migration.
 
 ## Machine groups
 
@@ -99,35 +99,38 @@ lost phone on any of them and every one refuses it. No machine is in charge.
 The machine that started the group can stop or leave, and the others carry on.
 
 **The risk is yours to take.** Every member can admit devices into every
-other member, so a compromised member, or a leaked group link, reaches the
+other member, so a compromised member, or a leaked invitation, reaches the
 whole group. Groups are off until you create one; leave them off if you do
 not need them.
+
+Inside a group there is one way in: a member's invitation. A device that
+pairs with it joins the group, and another machine joins with the same kind
+of invitation. Every full-access device of a member is a member; only space
+members stay with their own machine.
 
 ### Create or join
 
 1. On the first machine, open **Settings → Remote → Machine group** (on a
-   headless machine, in its logged-in browser) and create a group.
-2. Before the group exists, Tcode lists this machine's directly paired
-   full-access devices. All are selected: every member of the group will
-   admit them. Clear any device that should reach only this machine.
-3. Copy the group link from that section. On each other machine, with hosting
-   on, use **Join group** there and paste it; it shows the same list of its
-   own devices first. If the join finds no path to the first machine, type
-   that machine's IP address, as when pairing a device.
-4. A desktop joins together with its own window, so the window reaches every
+   headless machine, in its logged-in browser) and create a group. Tcode
+   first lists the full-access devices paired with this machine: every
+   member of the group will admit them.
+2. On each other machine, with hosting on, choose **Join group** in the same
+   section and paste an invitation from a machine already in the group (its
+   **Machines** page, or **Settings → Remote** in a headless machine's
+   browser). The join spends that invitation, as a device's pairing would,
+   and lists the devices this machine brings first. If the join finds no
+   path to that machine, type its IP address, as when pairing a device.
+3. A desktop joins together with its own window, so the window reaches every
    member from **Machines**.
 
-Every member has its own group link: reusable, paused or regenerated like a
-space link, dead after five wrong secrets, and checked only on that machine.
-A headless `serve` prints its group link at startup.
+While a machine is in a group, its invitation says so and names the group;
+the link carries the group's id.
 
 ### Pair a device
 
-Scan or paste any member's group link, or a one-time invitation from any
-member: the device is paired with that machine, and the machine tells the
-others. The device saves every member under **Your machines**. A space link
-never brings a device into the group; spaces stay on their machine and group
-membership is full access only.
+Scan or paste any member's invitation: the device is paired with that
+machine, and the machine tells the others. The device saves every member
+under **Your machines**. A space link never brings a device into the group.
 
 **Accept new devices** governs the group too. While it is off on a machine,
 a device another member admits is not admitted there; it is listed in that
@@ -135,16 +138,16 @@ machine's group section, with **Admit**, and stays out until you admit it.
 
 ### Remove and leave
 
-**Remove** under **Connected devices** removes a group member from every
-member: each closes its connections and refuses it from the moment it hears
-of the removal. A member that is offline hears it when it next reaches
-another member, and admits the device until then. Only a new pairing, with a
-group link or an invitation, brings the device back.
+**Remove** under **Connected devices** removes a full-access device from
+every member: each closes its connections and refuses it from the moment it
+hears of the removal. A member that is offline hears it when it next reaches
+another member, and admits the device until then. Only a new pairing brings
+the device back.
 
 **Leave group** on a machine tells the members and forgets the group. The
-machine keeps every device it admitted, now as directly paired, and the other
-members keep theirs. A member can also remove another machine from the
-group; that machine leaves the same way the next time it hears of it.
+machine keeps every device on its allow list, and the other members keep
+theirs. A member can also remove another machine from the group; that
+machine leaves the same way the next time it hears of it.
 
 Members reach each other over `tcode/group/1` on their own UDP port: at the
 relay and addresses each reports for itself and the ones a connection last
@@ -750,9 +753,8 @@ a trusted LAN.
 ### Keys and files
 
 The machine's `traverse.json` holds its secret key, its name, the allow list
-(device id, name, operating system, first-connection time, and whether the
-device came through the group), the **Allow other devices** switch and, in a
-group, the group's machines and devices with this machine's own group link.
+(device id, name, operating system, first-connection time), the **Allow other
+devices** switch and, in a group, the group's machines and devices.
 `remote.json` holds the browser side: the id and name browsers record this
 machine under, the password hash (randomly salted PBKDF2-HMAC-SHA256, 600,000
 iterations) and one record per logged-in browser with its token hash. The
