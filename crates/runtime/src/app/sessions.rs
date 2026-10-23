@@ -680,8 +680,8 @@ impl AppState {
         }));
     }
 
-    /// Search this host's own stored sessions in index order. Both the file
-    /// reads and the cache lock stay on the blocking executor.
+    /// Search this host's own stored sessions in index order, on the blocking
+    /// executor.
     pub fn search_session_content(
         &self,
         query: String,
@@ -702,12 +702,19 @@ impl AppState {
             .cloned()
             .collect::<Vec<_>>();
         let search = self.session_search.clone();
-        executor.unblock(move || {
-            search
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .search(&sessions, &query, limit)
-        })
+        executor.unblock(move || search.search(&sessions, &query, limit))
+    }
+
+    /// Bring every thread's search entries up to date in the background, so
+    /// the first search after an upgrade reads text instead of folding every
+    /// log.
+    pub(crate) fn index_session_search(&self, cx: &mut HostCx) {
+        let search = self.session_search.clone();
+        let ids: Vec<_> = self.sessions.iter().map(|meta| meta.id.clone()).collect();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            host_cx.unblock(move || search.index(&ids)).await;
+        });
     }
 
     /// List one replicated session cwd on the background executor.

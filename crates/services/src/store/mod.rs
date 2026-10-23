@@ -26,6 +26,7 @@ mod log_read;
 mod migrate;
 mod projection;
 mod relocate;
+mod search;
 mod superseded;
 #[cfg(test)]
 mod tests;
@@ -34,6 +35,7 @@ mod turn_index;
 pub use log_read::LogRead;
 pub use migrate::{Migration, MigrationPhase, MigrationProgress};
 pub use projection::ProjectionPublication;
+pub use search::{IndexedEntry, SearchSource};
 pub use superseded::DiffPass;
 pub use turn_index::TurnIndex;
 
@@ -1123,6 +1125,7 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
         db.execute(connection, KEPT_WORKTREES, ())?;
         db.execute(connection, superseded::DIFF_PASS_TABLE, ())?;
         turn_index::create_tables(db, connection)?;
+        search::create_tables(db, connection)?;
         activity::create_table(db, connection)?;
         projection::create_cache(db, connection)
     })?;
@@ -1408,6 +1411,7 @@ fn apply_op(
             )?;
             superseded::forget_pass(db, connection, id)?;
             turn_index::forget(db, connection, id)?;
+            search::forget(db, connection, id)?;
         }
         Op::RemoveProject(id) => {
             if let Some(previous) = stored_project(db, connection, id)? {

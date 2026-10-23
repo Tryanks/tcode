@@ -21,7 +21,8 @@ use crate::host::{HostCx, HostFn};
 #[derive(Default)]
 pub struct HostServices {
     pub user_directories: tcode_services::user_files::UserDirectories,
-    /// Run provider catalog, version, and status probes during host startup.
+    /// Run provider catalog, version, and status probes, and bring the search
+    /// index up to date, during host startup.
     pub background_startup_probes: bool,
     /// Generate AI-authored titles for new threads and explicit regeneration.
     pub ai_title_generation: bool,
@@ -227,6 +228,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 }
                 state.refresh_provider_usage(&mut cx);
                 state.refresh_provider_status(&mut cx);
+                state.index_session_search(&mut cx);
             }
             state.start_diff_pass(&mut cx);
             state.sync_terminal_handles();
