@@ -95,6 +95,16 @@ jobs:
             libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev \
             libvulkan-dev xvfb
 
+      - name: Set nextest test concurrency
+        if: matrix.task == 'tests'
+        shell: python
+        run: |
+          import os
+          test_threads = 2 * os.cpu_count()
+          print(f"nextest test threads: {test_threads}")
+          with open(os.environ["GITHUB_ENV"], "a") as env_file:
+              env_file.write(f"NEXTEST_TEST_THREADS={test_threads}\n")
+
       - name: Check formatting
         if: matrix.task == 'clippy'
         run: cargo fmt --all --check
