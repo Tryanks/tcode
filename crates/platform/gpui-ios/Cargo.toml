@@ -29,6 +29,6 @@ core-text = "22"
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
 # libc 0.2.190 gates dyld bindings and in6_ifreq to macOS; backtrace 0.3.76
 # and netdev 0.46.3 require them on iOS (#668).
-libc = ">=0.2, <0.2.190"
+libc = ">=0.2, <0.2.192"
 pathfinder_geometry = "0.5"
 uuid = { version = "1", features = ["v5"] }
