@@ -68,6 +68,39 @@ pub fn read_bytes(bytes: &[u8], width: u32, height: u32, data_dir: &Path) -> io:
     })
 }
 
+/// How much of an image [`dimensions`] reads: its header and any orientation tag come first in
+/// the still formats a viewer shows.
+const HEADER_BYTES: u64 = 256 * 1024;
+
+/// The displayed width and height of the image `source` begins with, orientation applied, read
+/// from its header alone.
+pub fn dimensions(source: impl Read) -> Option<(u32, u32)> {
+    let mut head = Vec::new();
+    source.take(HEADER_BYTES).read_to_end(&mut head).ok()?;
+    let mut decoder = image::ImageReader::new(Cursor::new(head))
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let (width, height) = decoder.dimensions();
+    Some(if turns(decoder.orientation().ok()?) {
+        (height, width)
+    } else {
+        (width, height)
+    })
+}
+
+/// Whether `orientation` swaps the stored width and height on display.
+fn turns(orientation: Orientation) -> bool {
+    matches!(
+        orientation,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    )
+}
+
 const MAX_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 2048;
 static GENERATING: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
@@ -181,13 +214,7 @@ fn preview(
     }
     let (width, height) = decoder.dimensions();
     let orientation = decoder.orientation().map_err(io::Error::other)?;
-    let turned = matches!(
-        orientation,
-        Orientation::Rotate90
-            | Orientation::Rotate270
-            | Orientation::Rotate90FlipH
-            | Orientation::Rotate270FlipH
-    );
+    let turned = turns(orientation);
     let shown = if turned {
         (height, width)
     } else {
@@ -453,6 +480,21 @@ mod tests {
         // An extreme shape stops at the longest side a preview may have.
         let banner = encoded(image::RgbImage::new(8000, 200), ImageFormat::Png);
         assert_eq!(size(attachment_preview(&banner, 240, true)), (1024, 26));
+    }
+
+    /// A viewer learns an original's size from the first bytes of a source too large to buffer.
+    #[test]
+    fn dimensions_come_from_the_header() {
+        let noise = image::RgbImage::from_fn(1200, 900, |x, y| {
+            let value = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503);
+            image::Rgb([value as u8, (value >> 8) as u8, (value >> 16) as u8])
+        });
+        for format in [ImageFormat::Png, ImageFormat::Jpeg] {
+            let source = encoded(noise.clone(), format);
+            assert!(source.len() as u64 > HEADER_BYTES, "{format:?}");
+            assert_eq!(dimensions(&source[..]), Some((1200, 900)), "{format:?}");
+        }
+        assert_eq!(dimensions(&b"not an image"[..]), None);
     }
 
     /// An opaque photo crosses the link as a JPEG, smaller than the PNG previews it replaces.

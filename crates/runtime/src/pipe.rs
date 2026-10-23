@@ -1477,7 +1477,8 @@ mod tests {
 
     /// A recorded image opened from a thread a client is reading streams from
     /// the thread's history already in memory: neither its bytes nor the check
-    /// that they are still current read the stored log again.
+    /// that they are still current read the stored log again. Its size is
+    /// known before its bytes, for the viewer to lay out its preview.
     #[test]
     fn originals_of_a_subscribed_session_reuse_its_history() {
         use base64::Engine as _;
@@ -1492,7 +1493,7 @@ mod tests {
         );
         meta.id = "pictured".into();
         store.upsert_meta(&meta).expect("write meta");
-        let bytes: Vec<u8> = (0..300_000).map(|index| (index % 251) as u8).collect();
+        let bytes = include_bytes!("../../../assets/icons/app/tcode.png").to_vec();
         store
             .append_event(
                 &meta.id,
@@ -1541,6 +1542,7 @@ mod tests {
         ))
         .expect("open the original");
         assert_eq!(source.metadata.len, bytes.len() as u64);
+        assert_eq!(source.metadata.dimensions, Some((1024, 1024)));
         let mut received = Vec::new();
         loop {
             let block = source

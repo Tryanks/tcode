@@ -41,7 +41,7 @@ pub(crate) async fn serve(
                 }
             };
             let source = &admitted.source;
-            timed(wire::write_line(&mut send, &OriginalReply::OriginalReady { len: source.metadata.len, mime: source.metadata.mime.clone() })).await??;
+            timed(wire::write_line(&mut send, &OriginalReply::OriginalReady { len: source.metadata.len, mime: source.metadata.mime.clone(), dimensions: source.metadata.dimensions })).await??;
             write_progress(&mut send, &source.metadata.len.to_be_bytes()).await?;
             let mut sent = 0_u64;
             loop {
@@ -131,7 +131,15 @@ pub(crate) async fn open(
         .map_err(error)?
         .ok_or_else(|| error("original ended before metadata"))?;
     let metadata = match serde_json::from_str(&line).map_err(error)? {
-        OriginalReply::OriginalReady { len, mime } => OriginalMetadata { len, mime },
+        OriginalReply::OriginalReady {
+            len,
+            mime,
+            dimensions,
+        } => OriginalMetadata {
+            len,
+            mime,
+            dimensions,
+        },
         OriginalReply::OriginalFailed { error } => return Err(error),
         _ => return Err(error("unexpected original reply")),
     };

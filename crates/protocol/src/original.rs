@@ -42,6 +42,9 @@ impl OriginalTarget {
 pub struct OriginalMetadata {
     pub len: u64,
     pub mime: Option<String>,
+    /// The image's displayed width and height in pixels, orientation applied, when its header
+    /// names them; known before its bytes arrive.
+    pub dimensions: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,7 +56,14 @@ pub enum OriginalRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OriginalReply {
-    OriginalReady { len: u64, mime: Option<String> },
-    OriginalFailed { error: ProtocolError },
+    OriginalReady {
+        len: u64,
+        mime: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dimensions: Option<(u32, u32)>,
+    },
+    OriginalFailed {
+        error: ProtocolError,
+    },
     OriginalComplete,
 }

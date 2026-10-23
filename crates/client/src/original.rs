@@ -189,6 +189,7 @@ impl OriginalOpener for LocalOriginal {
                 metadata: OriginalMetadata {
                     len: bytes.len() as u64,
                     mime: None,
+                    dimensions: None,
                 },
                 reader: Box::new(MemoryOriginal(std::io::Cursor::new(bytes))),
             })

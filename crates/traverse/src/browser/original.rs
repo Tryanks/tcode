@@ -93,6 +93,9 @@ pub(super) async fn serve<S: AsyncWrite + Unpin>(
             end - 1
         ));
     }
+    if let Some((width, height)) = source.metadata.dimensions {
+        head.push_str(&format!("X-Image-Dimensions: {width}x{height}\r\n"));
+    }
     head.push_str("\r\n");
     if len == 0 {
         let complete = tokio::time::timeout(IDLE, source.blocks.recv()).await;

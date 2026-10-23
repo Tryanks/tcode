@@ -227,6 +227,14 @@ impl tcode_client::original::OriginalOpener for BrowserOriginal {
                 .parse::<u64>()
                 .map_err(error)?;
             let mime = response.headers().get("Content-Type").map_err(js_error)?;
+            let dimensions = response
+                .headers()
+                .get("X-Image-Dimensions")
+                .map_err(js_error)?
+                .and_then(|value| {
+                    let (width, height) = value.split_once('x')?;
+                    Some((width.parse().ok()?, height.parse().ok()?))
+                });
             let reader: web_sys::ReadableStreamDefaultReader = response
                 .body()
                 .ok_or_else(|| error("original has no body"))?
@@ -234,7 +242,11 @@ impl tcode_client::original::OriginalOpener for BrowserOriginal {
                 .dyn_into()
                 .map_err(js_error)?;
             Ok(OpenedOriginal {
-                metadata: tcode_protocol::OriginalMetadata { len, mime },
+                metadata: tcode_protocol::OriginalMetadata {
+                    len,
+                    mime,
+                    dimensions,
+                },
                 reader: Box::new(BrowserOriginalReader {
                     reader,
                     abort,
