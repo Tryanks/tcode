@@ -323,24 +323,20 @@ pub enum HostingAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum GroupAction {
-    /// Start a group with this machine, bringing `devices` (directly paired,
-    /// full-access devices) into it.
+    /// Start a group with this machine and every full-access device paired
+    /// with it.
     Create {
         name: String,
-        devices: Vec<String>,
     },
-    /// Join the group of another machine's group link, bringing `devices`.
-    /// `address` is one the user typed for that machine after an attempt
-    /// found no path.
+    /// Join the group of another member with that machine's invitation,
+    /// bringing every full-access device. `address` is one the user typed
+    /// for that machine after an attempt found no path.
     Join {
         link: String,
-        devices: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         address: Option<String>,
     },
     Leave,
-    RegenerateLink,
-    SetLinkEnabled(bool),
     RemoveMachine(String),
     /// Admit here a group member declined while new devices were refused.
     Admit(String),
@@ -350,11 +346,6 @@ pub enum GroupAction {
 pub struct GroupInfo {
     pub id: String,
     pub name: String,
-    /// This machine's group link while it is enabled, alive and pairing is on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link: Option<String>,
-    pub link_enabled: bool,
-    pub link_dead: bool,
     /// Every member machine, this one included.
     pub machines: Vec<GroupMachineInfo>,
     /// Group members this machine has not admitted because new devices were
@@ -545,9 +536,6 @@ pub struct HostedDevice {
     /// How the device reaches the machine while connected; `None` offline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathInfo>,
-    /// A member of this machine's group: removing it removes it everywhere.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub group: bool,
 }
 
 /// How one live connection between a device and a machine is carried.

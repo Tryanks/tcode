@@ -1010,23 +1010,11 @@ impl HostingPanel {
                     .collect()
             })
             .unwrap_or_default();
-        // The transport's device list does not say which devices belong to
-        // the group; the hosting state does.
-        let (group_name, group_members): (Option<String>, Vec<String>) = local
+        // In a group every full-access device is a member, so removing one
+        // removes it from every machine of the group.
+        let group_name = local
             .as_ref()
-            .map(|spaces| {
-                let model = spaces.read(cx);
-                (
-                    model.group().map(|group| group.name.clone()),
-                    model
-                        .devices()
-                        .iter()
-                        .filter(|device| device.group)
-                        .map(|device| device.id.clone())
-                        .collect(),
-                )
-            })
-            .unwrap_or_default();
+            .and_then(|spaces| spaces.read(cx).group().map(|group| group.name.clone()));
         let mut group = crate::material::group(cx);
         if devices.is_empty() {
             group = group.child(note(
@@ -1047,8 +1035,7 @@ impl HostingPanel {
             };
             let in_group = group_name
                 .clone()
-                .filter(|_| group_members.contains(&device.id));
-            let badge = in_group.is_some().then(|| super::group::member_badge(cx));
+                .filter(|_| device.access == DeviceAccess::Full);
             let device_name = device.name.clone();
             group = group.child(
                 row(compact)
@@ -1064,8 +1051,7 @@ impl HostingPanel {
                                 None,
                                 cx,
                             ))
-                            .children(space.map(|name| super::spaces::member_badge(name, cx)))
-                            .children(badge),
+                            .children(space.map(|name| super::spaces::member_badge(name, cx))),
                     )
                     .child(
                         h_flex()
@@ -1392,6 +1378,7 @@ fn new_invitation_button<V: 'static>(id: &'static str, cx: &mut Context<V>) -> B
 pub(super) fn invitation_card<V: 'static>(
     invitation: &Invitation,
     remaining: u64,
+    group: Option<String>,
     compact: bool,
     inset: f32,
     cx: &mut Context<V>,
@@ -1407,6 +1394,7 @@ pub(super) fn invitation_card<V: 'static>(
                 .line_height(px(20.))
                 .child(crate::tr!("hosts.invite.description")),
         )
+        .children(group.map(|name| super::group::invitation_note(&name, cx)))
         .child(
             div()
                 .text_size(px(13.))

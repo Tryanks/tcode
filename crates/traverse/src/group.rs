@@ -8,6 +8,11 @@
 //! `(counter, removed, by)` wins, so at an equal counter a removal beats an
 //! admission, and a removed device returns only through a new pairing, which
 //! writes the next counter.
+//!
+//! Inside a group there is one way in: a member's one-time invitation, which
+//! then names the group. A device pairing with it joins the group, and so
+//! does a machine presenting it over `tcode/group/1`. Every full-access
+//! device of a member is a member; only space members stay on their machine.
 use serde::{Deserialize, Serialize};
 use tcode_client::pairing::{MAX_ADDRS, MAX_TRAVERSE, valid_host_id, valid_invitation_secret};
 
@@ -106,14 +111,6 @@ pub struct GroupState {
     pub devices: Vec<GroupDevice>,
 }
 
-/// This machine's reusable group link; its secret is checked only here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupLink {
-    pub secret: String,
-    pub enabled: bool,
-    pub failures: u8,
-}
-
 /// A device admission this machine declined while **Accept new devices**
 /// was off. It stays declined until the user admits it here or a newer
 /// pairing elsewhere writes a later counter.
@@ -128,7 +125,6 @@ pub struct Declined {
 pub struct GroupRecord {
     #[serde(flatten)]
     pub state: GroupState,
-    pub link: GroupLink,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declined: Vec<Declined>,
 }
@@ -182,7 +178,7 @@ pub struct JoiningDevice {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GroupLine {
-    /// Present a group link's secret to join as a machine.
+    /// Present the secret of a member's invitation to join as a machine.
     Join {
         group: String,
         secret: String,
@@ -203,7 +199,7 @@ pub enum GroupLine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupRejection {
-    /// Wrong secret, or a link that is paused or dead.
+    /// Wrong, expired or already used invitation.
     Invalid,
     /// The machine is not accepting new devices.
     Disabled,
