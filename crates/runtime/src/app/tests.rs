@@ -10511,7 +10511,7 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     let mut open = |state: &TestEntity, cx: &mut TestAppContext, after: Option<u64>| {
         id += 1;
         let browsing = id == 1;
-        let page_before = store.next_row("long").unwrap().saturating_sub(400);
+        let page_before = store.read_log("long").unwrap().next_row.saturating_sub(400);
         // Delay the full read's completion, not the bounded requests' mailbox.
         let held_hydration = store.turn_index("long").unwrap().map(|_| {
             let (mailbox, completions) = smol::channel::unbounded();
