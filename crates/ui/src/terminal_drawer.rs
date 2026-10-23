@@ -734,6 +734,10 @@ impl TerminalDrawer {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
                 }
+                // Left unhandled, the key makes the browser fire its paste
+                // event, the only way a page receives the clipboard; it
+                // arrives through `TerminalInputHandler::paste`.
+                ClipboardShortcut::Paste if cfg!(target_family = "wasm") => return,
                 ClipboardShortcut::Paste => {
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
                         && let Some(terminal_id) = self
@@ -1401,10 +1405,14 @@ impl TerminalDrawer {
                         Box::new(TerminalCopy(terminal_id)),
                         has_selection,
                     )
-                    .menu(
-                        crate::tr!("terminal.paste").into_owned(),
-                        Box::new(TerminalPaste(terminal_id)),
-                    )
+                    // A browser hands the clipboard only to its own paste
+                    // event, never to a menu the page draws.
+                    .when(!cfg!(target_family = "wasm"), |menu| {
+                        menu.menu(
+                            crate::tr!("terminal.paste").into_owned(),
+                            Box::new(TerminalPaste(terminal_id)),
+                        )
+                    })
                     .menu(
                         crate::tr!("terminal.select_all").into_owned(),
                         Box::new(TerminalSelectAll(terminal_id)),
@@ -2316,6 +2324,15 @@ struct TerminalInputHandler {
 }
 
 impl InputHandler for TerminalInputHandler {
+    fn paste(&mut self, item: ClipboardItem, _window: &mut Window, cx: &mut App) {
+        if let Some(text) = item.text() {
+            let terminal_id = self.terminal_id;
+            self.drawer.update(cx, |drawer, cx| {
+                drawer.paste_to_terminal(terminal_id, &text, cx)
+            });
+        }
+    }
+
     fn selected_text_range(
         &mut self,
         _ignore_disabled_input: bool,

@@ -21,7 +21,9 @@ use std::time::Duration;
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
-use crate::widgets::input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState};
+use crate::widgets::input::{
+    BrowserPaste, Input, InputEvent, InputState, Paste, Textarea, TextareaState,
+};
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::widgets::spinner::Spinner;
 use crate::{
@@ -1286,6 +1288,12 @@ impl Render for Composer {
             // clipboard held an image; text paste propagates to the editor.
             .capture_action(cx.listener(|this, _: &Paste, window, cx| {
                 if this.interactive(cx) && !this.compact && this.paste_clipboard_image(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, paste: &BrowserPaste, window, cx| {
+                if this.interactive(cx) && !this.compact && this.paste_images(&paste.0, window, cx)
+                {
                     cx.stop_propagation();
                 }
             }))
