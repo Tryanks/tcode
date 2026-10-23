@@ -1,11 +1,12 @@
 use std::fs::File;
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Seek as _};
 use std::time::SystemTime;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::read::DecoderReader;
 use tcode_client::original::{OriginalSource, error};
 use tcode_protocol::{ClientPayload, OriginalMetadata, OriginalTarget, Principal, ProtocolError};
+use tcode_services::image_previews;
 
 use super::{AppState, HostCx, HostTask, history::SessionLog};
 
@@ -44,22 +45,35 @@ impl AppState {
                         let requested_path = path.clone();
                         host.unblock(move || {
                             let path = requested_path.canonicalize().map_err(io_error)?;
-                            let file = File::open(&path).map_err(io_error)?;
+                            let mut file = File::open(&path).map_err(io_error)?;
                             let metadata = file.metadata().map_err(io_error)?;
                             if !metadata.is_file() {
                                 return Err(error("original is not a regular file"));
                             }
                             let identity = (metadata.len(), metadata.modified().map_err(io_error)?);
+                            let dimensions = image_previews::dimensions(&mut file);
+                            file.rewind().map_err(io_error)?;
                             Ok(Source::File {
                                 file,
                                 path,
                                 requested_path,
                                 identity,
+                                dimensions,
                             })
                         })
                         .await?
                     }
-                    OriginalTarget::Item { .. } => Source::Item(item.unwrap().await?),
+                    OriginalTarget::Item { .. } => {
+                        let mut image = item.unwrap().await?;
+                        host.unblock(move || {
+                            image.dimensions = image_previews::dimensions(DecoderReader::new(
+                                image.data_base64.as_bytes(),
+                                &STANDARD,
+                            ));
+                            Source::Item(image)
+                        })
+                        .await
+                    }
                 };
                 let checked = match &source {
                     Source::File { path, .. } => OriginalTarget::File { path: path.clone() },
@@ -172,6 +186,7 @@ impl AppState {
                     } else {
                         String::new()
                     },
+                    dimensions: None,
                 })
             },
             cx,
@@ -197,6 +212,7 @@ enum Source {
         path: std::path::PathBuf,
         requested_path: std::path::PathBuf,
         identity: (u64, SystemTime),
+        dimensions: Option<(u32, u32)>,
     },
     Item(ItemImage),
 }
@@ -206,18 +222,26 @@ struct ItemImage {
     identity: (u64, u64),
     mime: String,
     data_base64: String,
+    dimensions: Option<(u32, u32)>,
 }
 
 impl Source {
     fn metadata(&self) -> OriginalMetadata {
         match self {
-            Self::File { path, identity, .. } => OriginalMetadata {
+            Self::File {
+                path,
+                identity,
+                dimensions,
+                ..
+            } => OriginalMetadata {
                 len: identity.0,
                 mime: Some(tcode_core::attachments::mime_from_path(path)),
+                dimensions: *dimensions,
             },
             Self::Item(image) => OriginalMetadata {
                 len: image.identity.1,
                 mime: Some(image.mime.clone()),
+                dimensions: image.dimensions,
             },
         }
     }

@@ -183,7 +183,9 @@ pub use wire::{
 // operation to compact now.
 //
 // Unreleased: ReadImagePreview's crop_to_square becomes cover, and image
-// previews keep the source's shape instead of being cropped to the tile.
+// previews keep the source's shape instead of being cropped to the tile; an
+// original's metadata, the OriginalReady reply and the browser /original
+// response (X-Image-Dimensions) carry the image's displayed size.
 pub const PROTOCOL_VERSION: u32 = 15;
 
 #[cfg(test)]
