@@ -195,9 +195,10 @@ pub use wire::{
 // device is brought), GroupInfo loses its link fields and HostedDevice its
 // group mark.
 //
-// Unreleased: ReadImagePreview's crop_to_square becomes cover, and image
-// previews keep the source's shape instead of being cropped to the tile.
-pub const PROTOCOL_VERSION: u32 = 17;
+// Version 18 (v0.3.0-rc.3): ReadImagePreview's crop_to_square becomes cover,
+// and image previews keep the source's shape instead of being cropped to the
+// tile.
+pub const PROTOCOL_VERSION: u32 = 18;
 
 #[cfg(test)]
 mod tests;
