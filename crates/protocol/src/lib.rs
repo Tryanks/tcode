@@ -181,6 +181,9 @@ pub use wire::{
 // SessionMeta carries the child's `expectation`; the protocol adds the
 // CompactContext command, which asks a provider with a native compaction
 // operation to compact now.
+//
+// Unreleased: ReadImagePreview's crop_to_square becomes cover, and image
+// previews keep the source's shape instead of being cropped to the tile.
 pub const PROTOCOL_VERSION: u32 = 15;
 
 #[cfg(test)]

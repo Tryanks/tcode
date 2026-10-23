@@ -19,7 +19,7 @@ enum ImageRequest {
     Preview {
         path: PathBuf,
         pixels: u32,
-        crop_to_square: bool,
+        cover: bool,
     },
     ItemPreview {
         session_id: String,
@@ -74,11 +74,11 @@ impl Asset for HostImage {
                 ImageRequest::Preview {
                     path,
                     pixels,
-                    crop_to_square,
+                    cover,
                 } => Query::ReadImagePreview {
                     path,
                     pixels,
-                    crop_to_square,
+                    cover,
                 },
                 ImageRequest::ItemPreview {
                     session_id,
@@ -144,17 +144,14 @@ fn source(request: impl Fn(&gpui::Window) -> ImageRequest + 'static) -> ImageSou
     })
 }
 
-/// The host's preview of `path` at `logical_pixels` square. It never falls back to the
-/// original: without a preview, the tile draws its fallback and opening it reads the original.
-pub(crate) fn image_preview(
-    path: PathBuf,
-    logical_pixels: f32,
-    crop_to_square: bool,
-) -> ImageSource {
+/// The host's preview of `path` for a `logical_pixels` square, covering it when `cover` is set.
+/// It never falls back to the original: without a preview, the tile draws its fallback and
+/// opening it reads the original.
+pub(crate) fn image_preview(path: PathBuf, logical_pixels: f32, cover: bool) -> ImageSource {
     source(move |window| ImageRequest::Preview {
         path: path.clone(),
         pixels: preview_pixels(logical_pixels, window),
-        crop_to_square,
+        cover,
     })
 }
 
@@ -755,7 +752,7 @@ mod tests {
                     ClientPayload::Query(Query::ReadImagePreview {
                         path: expected_path,
                         pixels: MAX_PREVIEW_PIXELS,
-                        crop_to_square: false,
+                        cover: false,
                     }),
                     "{markdown}",
                 );
@@ -892,7 +889,7 @@ mod tests {
             if let ClientPayload::Query(Query::ReadImagePreview {
                 path,
                 pixels,
-                crop_to_square,
+                cover,
             }) = request.payload
             {
                 assert!(
@@ -902,7 +899,7 @@ mod tests {
                 preview_requested = true;
                 assert_eq!(path, cwd.join("preview.png"));
                 assert_eq!(pixels, MAX_PREVIEW_PIXELS);
-                assert!(!crop_to_square);
+                assert!(!cover);
                 replies
                     .send_blocking(
                         encode_line(&HostMessage::QueryResult {
