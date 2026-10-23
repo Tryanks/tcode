@@ -2,6 +2,7 @@
 #![cfg(target_family = "wasm")]
 
 mod host;
+mod keyboard;
 mod transport;
 
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
@@ -138,6 +139,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
             }
         });
     APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
+    keyboard::install();
     Ok(())
 }
 
