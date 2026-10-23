@@ -88,12 +88,13 @@ fn state(machine: &Machine) -> HostingState {
     machine.host.hosting(HostingAction::State).unwrap()
 }
 
-fn link(machine: &Machine) -> String {
-    state(machine).group.unwrap().link.unwrap()
+/// A fresh one-time invitation, as Settings → Remote shows it.
+fn invitation(machine: &Machine) -> String {
+    machine.host.new_invitation().url()
 }
 
-/// Pair with a group link at the address typed for it, and save the machine
-/// as the pairing screen does.
+/// Pair with an invitation at the address typed for it, and save the
+/// machine as the pairing screen does.
 fn pair(link: &str, device: &DeviceIdentity) -> PairedHost {
     let invite: PairInvite = parse_pair_url(link).unwrap();
     let paired =
@@ -160,10 +161,12 @@ fn rejected(state: &ConnectionState) -> bool {
         }
 }
 
-/// #935's scenario: the headless machine starts a group, the desktop joins
-/// it with its window, a phone pairs with the desktop and reaches the
-/// headless machine too; once the headless machine has left, the phone
-/// still reaches the desktop, and a new phone pairs with the desktop alone.
+/// #935's scenario: the headless machine starts a group with the device
+/// already paired to it, the desktop joins with the headless machine's
+/// invitation and brings its window, a phone pairs with the desktop's
+/// invitation and reaches the headless machine too; once the headless
+/// machine has left, the phone still reaches the desktop, and a new phone
+/// pairs with the desktop alone.
 #[test]
 fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first() {
     let headless_dir = TestDir::new("headless");
@@ -171,22 +174,25 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
     let desktop_dir = TestDir::new("desktop");
     let window = device(&desktop_dir, "Desktop window");
     let desktop = machine(&desktop_dir, "Desktop");
+    let early_dir = TestDir::new("early");
+    let early = device(&early_dir, "Early phone");
+    pair(&invitation(&headless), &early);
 
     let created = group(
         &headless,
         GroupAction::Create {
             name: "Home".into(),
-            devices: Vec::new(),
         },
     );
     let home = created.group.unwrap();
     assert_eq!(home.machines.len(), 1);
     assert!(home.machines[0].this_machine);
+    let link = invitation(&headless);
+    assert_eq!(parse_pair_url(&link).unwrap().group, Some(home.id.clone()));
     let joined = group(
         &desktop,
         GroupAction::Join {
-            link: home.link.unwrap(),
-            devices: Vec::new(),
+            link,
             address: Some("127.0.0.1".into()),
         },
     );
@@ -200,6 +206,10 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
         !admits(&desktop, &window),
         "the window reaches its own machine without the network"
     );
+    assert!(
+        admits(&desktop, &early),
+        "a device paired before the group was created is a member"
+    );
     let from_window = saved(&window, &headless);
     assert_eq!(from_window.group_id.as_deref(), Some(home.id.as_str()));
     let client = tcode_traverse::connect(&from_window, &window);
@@ -208,7 +218,7 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
 
     let phone_dir = TestDir::new("phone");
     let phone = device(&phone_dir, "Phone");
-    let paired = pair(&link(&desktop), &phone);
+    let paired = pair(&invitation(&desktop), &phone);
     assert_eq!(paired.name, "Desktop");
     assert_eq!(paired.group_id.as_deref(), Some(home.id.as_str()));
     assert!(admits(&desktop, &phone));
@@ -235,7 +245,7 @@ fn a_device_paired_with_one_member_reaches_every_member_and_outlives_the_first()
 
     let second_dir = TestDir::new("second-phone");
     let second = device(&second_dir, "Second phone");
-    pair(&link(&desktop), &second);
+    pair(&invitation(&desktop), &second);
     assert!(admits(&desktop, &second));
     desktop.host.shutdown();
 }
@@ -254,7 +264,6 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
         &first,
         GroupAction::Create {
             name: "Home".into(),
-            devices: Vec::new(),
         },
     )
     .group
@@ -262,15 +271,15 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
     group(
         &second,
         GroupAction::Join {
-            link: home.link.unwrap(),
-            devices: Vec::new(),
+            link: invitation(&first),
             address: Some("127.0.0.1".into()),
         },
     );
+    assert_eq!(state(&second).group.unwrap().id, home.id);
 
     let phone_dir = TestDir::new("removed-phone");
     let phone = device(&phone_dir, "Phone");
-    pair(&link(&second), &phone);
+    pair(&invitation(&second), &phone);
     eventually("the first machine admit the phone", || {
         admits(&first, &phone)
     });
@@ -287,7 +296,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
     assert!(!admits(&first, &phone));
     client.to_host.close();
 
-    pair(&link(&first), &phone);
+    pair(&invitation(&first), &phone);
     eventually("the second machine admit the phone again", || {
         admits(&second, &phone)
     });
@@ -295,7 +304,7 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
     first.host.set_pairing_enabled(false);
     let late_dir = TestDir::new("late-phone");
     let late = device(&late_dir, "Late phone");
-    pair(&link(&second), &late);
+    pair(&invitation(&second), &late);
     let late_id = late.endpoint_id().to_string();
     eventually("the first machine decline the late phone", || {
         state(&first)
@@ -307,9 +316,10 @@ fn removal_is_group_wide_and_accept_new_devices_governs_introductions() {
     });
     assert!(!admits(&first, &late));
     first.host.set_pairing_enabled(true);
-    // Applying the group with the switch back on does not admit what was
-    // declined.
-    group(&first, GroupAction::RegenerateLink);
+    // Applying the group with the switch back on, as pairing another device
+    // does, does not admit what was declined.
+    let other_dir = TestDir::new("other-phone");
+    pair(&invitation(&first), &device(&other_dir, "Other phone"));
     assert!(!admits(&first, &late));
     let admitted = group(&first, GroupAction::Admit(late_id.clone()));
     assert!(admitted.group.unwrap().declined.is_empty());

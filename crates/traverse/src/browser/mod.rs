@@ -739,7 +739,6 @@ impl Shared {
                     lan: true,
                     probing_direct: false,
                 }),
-                group: false,
             }));
         Ok(state)
     }

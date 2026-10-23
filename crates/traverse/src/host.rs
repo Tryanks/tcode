@@ -29,12 +29,10 @@ use tcode_protocol::{
 
 use crate::{
     group::{
-        ALPN_GROUP, GroupLine, GroupLink, GroupMachine, GroupRecord, GroupRejection, GroupState,
+        ALPN_GROUP, GroupLine, GroupMachine, GroupRecord, GroupRejection, GroupState,
         JoiningDevice, JoiningMachine, MAX_GROUP_LINE, MAX_GROUP_MACHINES, Membership, Roster,
     },
-    identity::{
-        DeviceGrant, DeviceRecord, HostIdentity, Origin, SpaceRecord, existing_device, now_unix,
-    },
+    identity::{DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, existing_device, now_unix},
     lan,
     manifest::{Manifest, ManifestLoader, ManifestSource, live},
     mux::HostMux,
@@ -488,13 +486,6 @@ impl TraverseHost {
         HostingHandle(self.shared.clone())
     }
 
-    /// This machine's group link while it can admit devices.
-    pub fn group_link(&self) -> Option<String> {
-        let addr = self.shared.snapshot();
-        let state = self.shared.state.lock().unwrap();
-        self.shared.group_info(&state, &addr)?.link
-    }
-
     pub fn shutdown(self) {
         self.group_sync.abort();
         drop(self.advertisement);
@@ -695,7 +686,7 @@ impl Shared {
                 host_id: addr.id,
                 secret: encode_secret(&random),
                 space: None,
-                group: None,
+                group: group_id(&state.identity),
                 traverse: self.traverse.clone(),
                 relay: addr.relay,
                 port: addr.port,
@@ -761,9 +752,11 @@ impl Shared {
             return None;
         }
         let invitation = Invitation {
+            // The group can change while an invitation is live.
             invite: PairInvite {
                 relay: addr.relay.clone(),
                 port: addr.port,
+                group: group_id(&state.identity),
                 ..active.invitation.invite.clone()
             },
             expires_at: active.invitation.expires_at,
@@ -1124,16 +1117,12 @@ impl Shared {
         secret: &str,
         device: &DeviceClaim,
         space: Option<&str>,
-        group: Option<&str>,
     ) -> HostLine {
         let mut state = self.state.lock().unwrap();
         if !self.allow_pairing || !state.identity.pairing_enabled {
             return HostLine::PairRejected {
                 reason: PairRejection::Disabled,
             };
-        }
-        if let Some(group) = group {
-            return self.pair_group(&mut state, remote, secret, device, group);
         }
         if let Some(space_id) = space {
             let Some(index) = state
@@ -1196,7 +1185,33 @@ impl Shared {
                 group: None,
             };
         }
-        let accepted = match state.invitation.as_mut() {
+        if !self.take_invitation(&mut state, secret) {
+            return HostLine::PairRejected {
+                reason: PairRejection::Invalid,
+            };
+        }
+        let (name, platform) = device.normalized();
+        let previous = state.identity.clone();
+        state.identity.admit(&remote, name, platform);
+        self.introduce(&mut state.identity, &remote.to_string());
+        if let Err(error) = self.commit(&mut state, previous) {
+            log::error!("could not record the paired device: {error}");
+            return HostLine::PairRejected {
+                reason: PairRejection::Busy,
+            };
+        }
+        HostLine::Paired {
+            host_name: state.identity.host_name.clone(),
+            space_name: None,
+            group: roster(&state.identity, &remote.to_string()),
+        }
+    }
+
+    /// Spend the active invitation on `secret`: single use, unexpired, and
+    /// dropped after [`MAX_PAIRING_FAILURES`] wrong secrets. Devices and
+    /// joining machines share it.
+    fn take_invitation(&self, state: &mut State, secret: &str) -> bool {
+        match state.invitation.as_mut() {
             None => false,
             Some(active) if active.invitation.remaining().is_zero() => {
                 state.invitation = None;
@@ -1220,82 +1235,6 @@ impl Shared {
                     false
                 }
             }
-        };
-        if !accepted {
-            return HostLine::PairRejected {
-                reason: PairRejection::Invalid,
-            };
-        }
-        let (name, platform) = device.normalized();
-        let previous = state.identity.clone();
-        state.identity.admit(&remote, name, platform);
-        self.introduce(&mut state.identity, &remote.to_string());
-        if let Err(error) = self.commit(&mut state, previous) {
-            log::error!("could not record the paired device: {error}");
-            return HostLine::PairRejected {
-                reason: PairRejection::Busy,
-            };
-        }
-        HostLine::Paired {
-            host_name: state.identity.host_name.clone(),
-            space_name: None,
-            group: roster(&state.identity, &remote.to_string()),
-        }
-    }
-
-    /// Exchange a group link's secret for a place on this machine's allow
-    /// list and in the group. The link is reusable; its failures persist.
-    fn pair_group(
-        &self,
-        state: &mut State,
-        remote: EndpointId,
-        secret: &str,
-        device: &DeviceClaim,
-        group: &str,
-    ) -> HostLine {
-        let rejected = |reason| HostLine::PairRejected { reason };
-        let Some(record) = &state.identity.group else {
-            return rejected(PairRejection::Invalid);
-        };
-        if record.state.id != group
-            || !record.link.enabled
-            || record.link.failures >= MAX_PAIRING_FAILURES
-        {
-            return rejected(PairRejection::Invalid);
-        }
-        let id = remote.to_string();
-        if state
-            .identity
-            .devices
-            .iter()
-            .any(|device| device.id == id && device.access != DeviceGrant::Full)
-        {
-            return rejected(PairRejection::AlreadyMember);
-        }
-        let previous = state.identity.clone();
-        if !constant_time_eq(record.link.secret.as_bytes(), secret.as_bytes()) {
-            if let Some(group) = &mut state.identity.group {
-                group.link.failures += 1;
-            }
-            state.identity.policy_revision += 1;
-            if let Err(error) = state.identity.save() {
-                log::error!("could not record the group link failure: {error}");
-                state.identity = previous;
-                return rejected(PairRejection::Busy);
-            }
-            return rejected(PairRejection::Invalid);
-        }
-        let (name, platform) = device.normalized();
-        state.identity.admit(&remote, name, platform);
-        self.introduce(&mut state.identity, &id);
-        if let Err(error) = self.commit(state, previous) {
-            log::error!("could not record the group member: {error}");
-            return rejected(PairRejection::Busy);
-        }
-        HostLine::Paired {
-            host_name: state.identity.host_name.clone(),
-            space_name: None,
-            group: roster(&state.identity, &id),
         }
     }
 
@@ -1308,12 +1247,11 @@ impl Shared {
         };
         let Some(device) = identity
             .devices
-            .iter_mut()
+            .iter()
             .find(|device| device.id == id && device.access == DeviceGrant::Full)
         else {
             return;
         };
-        device.origin = Origin::Group;
         group.state.set_device(
             id,
             &device.name,
@@ -1477,6 +1415,11 @@ fn connection_hints(connection: &Connection) -> Hints {
     hints
 }
 
+/// What a machine's invitation names while the machine is in a group.
+fn group_id(identity: &HostIdentity) -> Option<String> {
+    identity.group.as_ref().map(|group| group.state.id.clone())
+}
+
 /// The group's machines, for `device` while it is a member of the group:
 /// a full device left out of the group would only learn of machines that
 /// refuse it.
@@ -1498,14 +1441,6 @@ fn member_machines(identity: &HostIdentity) -> Vec<String> {
         .collect()
 }
 
-fn new_link() -> GroupLink {
-    GroupLink {
-        secret: new_secret(),
-        enabled: true,
-        failures: 0,
-    }
-}
-
 fn group_name(name: String) -> io::Result<String> {
     if !crate::group::valid_name(&name) {
         return Err(io::Error::new(
@@ -1518,7 +1453,7 @@ fn group_name(name: String) -> io::Result<String> {
 
 fn rejection_error(reason: GroupRejection) -> io::Error {
     let message = match reason {
-        GroupRejection::Invalid => "the group link is wrong, paused or no longer valid",
+        GroupRejection::Invalid => "the invitation is wrong, expired or already used",
         GroupRejection::Disabled => "that machine is not accepting new devices",
         GroupRejection::Busy => "that machine could not record the change; try again",
         GroupRejection::NotMember => "that machine is not in this group",
@@ -1557,27 +1492,9 @@ impl Shared {
 
     fn group_info(&self, state: &State, addr: &EndpointAddrSnapshot) -> Option<GroupInfo> {
         let group = state.identity.group.as_ref()?;
-        let link = &group.link;
-        let live = self.allow_pairing
-            && state.identity.pairing_enabled
-            && link.enabled
-            && link.failures < MAX_PAIRING_FAILURES;
         Some(GroupInfo {
             id: group.state.id.clone(),
             name: group.state.name.clone(),
-            link: live.then(|| {
-                pair_url(&PairInvite {
-                    host_id: addr.id.clone(),
-                    secret: link.secret.clone(),
-                    space: None,
-                    group: Some(group.state.id.clone()),
-                    traverse: self.traverse.clone(),
-                    relay: addr.relay.clone(),
-                    port: addr.port,
-                })
-            }),
-            link_enabled: link.enabled,
-            link_dead: link.failures >= MAX_PAIRING_FAILURES,
             machines: group
                 .state
                 .member_machines()
@@ -1598,7 +1515,6 @@ impl Shared {
                     created_unix: device.entry.changed_unix,
                     platform: device.platform.clone(),
                     path: None,
-                    group: true,
                 })
                 .collect(),
         })
@@ -1624,11 +1540,9 @@ impl Shared {
 
     fn group_action(self: &Arc<Self>, action: GroupAction) -> io::Result<()> {
         let action = match action {
-            GroupAction::Join {
-                link,
-                devices,
-                address,
-            } => return self.join_group(&link, &devices, address.as_deref()),
+            GroupAction::Join { link, address } => {
+                return self.join_group(&link, address.as_deref());
+            }
             GroupAction::Leave => return self.leave_group(),
             action => action,
         };
@@ -1639,7 +1553,7 @@ impl Shared {
         let mut removed = None;
         let no_group = || io::Error::new(io::ErrorKind::NotFound, "this machine is not in a group");
         match action {
-            GroupAction::Create { name, devices } => {
+            GroupAction::Create { name } => {
                 if state.identity.group.is_some() {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -1654,22 +1568,9 @@ impl Shared {
                 );
                 state.identity.group = Some(GroupRecord {
                     state: group,
-                    link: new_link(),
                     declined: Vec::new(),
                 });
-                self.bring_devices(&mut state.identity, &devices)?;
-            }
-            GroupAction::RegenerateLink => {
-                state.identity.group.as_mut().ok_or_else(no_group)?.link = new_link();
-            }
-            GroupAction::SetLinkEnabled(enabled) => {
-                state
-                    .identity
-                    .group
-                    .as_mut()
-                    .ok_or_else(no_group)?
-                    .link
-                    .enabled = enabled;
+                self.bring_devices(&mut state.identity);
             }
             GroupAction::RemoveMachine(id) => {
                 if id == by {
@@ -1706,7 +1607,6 @@ impl Shared {
                         platform: device.platform,
                         created_unix: now_unix(),
                         access: DeviceGrant::Full,
-                        origin: Origin::Group,
                     });
                 }
             }
@@ -1721,18 +1621,17 @@ impl Shared {
         Ok(())
     }
 
-    /// Bring `ids`, directly paired full devices, and the device sharing
-    /// this data directory into the group just created.
-    fn bring_devices(&self, identity: &mut HostIdentity, ids: &[String]) -> io::Result<()> {
-        for id in ids {
-            if !identity
-                .devices
-                .iter()
-                .any(|device| &device.id == id && device.access == DeviceGrant::Full)
-            {
-                return Err(missing("full-access device"));
-            }
-            self.introduce(identity, id);
+    /// Bring every full-access device and the device sharing this data
+    /// directory into the group just created.
+    fn bring_devices(&self, identity: &mut HostIdentity) {
+        let full: Vec<String> = identity
+            .devices
+            .iter()
+            .filter(|device| device.access == DeviceGrant::Full)
+            .map(|device| device.id.clone())
+            .collect();
+        for id in full {
+            self.introduce(identity, &id);
         }
         if let Some((id, claim)) = existing_device(&self.data_dir)
             && let Some(group) = &mut identity.group
@@ -1746,22 +1645,17 @@ impl Shared {
                 &self.endpoint.id().to_string(),
             );
         }
-        Ok(())
     }
 
-    /// Join the group of another machine's group link: that machine admits
-    /// this one and the devices it brings, and answers with the group.
-    fn join_group(
-        self: &Arc<Self>,
-        link: &str,
-        devices: &[String],
-        address: Option<&str>,
-    ) -> io::Result<()> {
+    /// Join the group of another member with its invitation: that machine
+    /// admits this one and every full-access device it brings, and answers
+    /// with the group.
+    fn join_group(self: &Arc<Self>, link: &str, address: Option<&str>) -> io::Result<()> {
         let invalid =
             |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
         let invite = parse_pair_url(link)
             .filter(|invite| invite.group.is_some())
-            .ok_or_else(|| invalid("not a group link"))?;
+            .ok_or_else(|| invalid("not the invitation of a machine in a group"))?;
         let group_id = invite.group.clone().unwrap_or_default();
         let typed: Vec<String> = match address {
             Some(address) => vec![
@@ -1778,7 +1672,7 @@ impl Shared {
         };
         let id = self.endpoint.id().to_string();
         if invite.host_id == id {
-            return Err(invalid("that is this machine's own group link"));
+            return Err(invalid("that is this machine's own invitation"));
         }
         let addr = self.snapshot();
         let joining = {
@@ -1789,20 +1683,17 @@ impl Shared {
                     "this machine is already in a group",
                 ));
             }
-            let mut brought = Vec::new();
-            for device_id in devices {
-                let device = state
-                    .identity
-                    .devices
-                    .iter()
-                    .find(|device| &device.id == device_id && device.access == DeviceGrant::Full)
-                    .ok_or_else(|| missing("full-access device"))?;
-                brought.push(JoiningDevice {
+            let mut brought: Vec<JoiningDevice> = state
+                .identity
+                .devices
+                .iter()
+                .filter(|device| device.access == DeviceGrant::Full)
+                .map(|device| JoiningDevice {
                     id: device.id.clone(),
                     name: device.name.clone(),
                     platform: device.platform.clone(),
-                });
-            }
+                })
+                .collect();
             if let Some((device_id, claim)) = existing_device(&self.data_dir) {
                 let (name, platform) = claim.normalized();
                 brought.push(JoiningDevice {
@@ -1851,14 +1742,8 @@ impl Shared {
         let previous = state.identity.clone();
         state.identity.group = Some(GroupRecord {
             state: joined,
-            link: new_link(),
             declined: Vec::new(),
         });
-        for device in &mut state.identity.devices {
-            if devices.contains(&device.id) {
-                device.origin = Origin::Group;
-            }
-        }
         self.commit(&mut state, previous)
     }
 
@@ -1921,9 +1806,6 @@ impl Shared {
 
     fn forget_group(&self, identity: &mut HostIdentity) {
         identity.group = None;
-        for device in &mut identity.devices {
-            device.origin = Origin::Direct;
-        }
     }
 
     /// Dial `id` on `tcode/group/1`, send `line` and read the answer.
@@ -2065,8 +1947,8 @@ impl Shared {
         }
     }
 
-    /// Admit a machine presenting this machine's group link, with the
-    /// devices it brings. A device the group removed stays removed.
+    /// Admit a machine presenting this machine's invitation, with the devices
+    /// it brings. A device the group removed stays removed.
     fn accept_join(
         &self,
         remote: &str,
@@ -2087,27 +1969,15 @@ impl Shared {
         if !self.allow_pairing || !state.identity.pairing_enabled {
             return rejected(GroupRejection::Disabled);
         }
-        if !record.link.enabled || record.link.failures >= MAX_PAIRING_FAILURES {
-            return rejected(GroupRejection::Invalid);
-        }
         if !record.state.is_member_machine(remote)
             && record.state.member_machines().count() >= MAX_GROUP_MACHINES
         {
             return rejected(GroupRejection::Full);
         }
-        let previous = state.identity.clone();
-        if !constant_time_eq(record.link.secret.as_bytes(), secret.as_bytes()) {
-            if let Some(group) = &mut state.identity.group {
-                group.link.failures += 1;
-            }
-            state.identity.policy_revision += 1;
-            if let Err(error) = state.identity.save() {
-                log::error!("could not record the group link failure: {error}");
-                state.identity = previous;
-                return rejected(GroupRejection::Busy);
-            }
+        if !self.take_invitation(&mut state, secret) {
             return rejected(GroupRejection::Invalid);
         }
+        let previous = state.identity.clone();
         let Some(group) = &mut state.identity.group else {
             return rejected(GroupRejection::NotMember);
         };
@@ -2274,12 +2144,6 @@ fn hosted_device(state: &State, device: &DeviceRecord) -> HostedDevice {
             .and_then(|id| state.live.get(&id))
             .and_then(|connections| connections.first())
             .map(path_info),
-        group: state.identity.group.as_ref().is_some_and(|group| {
-            group
-                .state
-                .device(&device.id)
-                .is_some_and(|device| device.entry.is_member())
-        }),
     }
 }
 
@@ -2378,18 +2242,13 @@ impl ProtocolHandler for PairHandler {
                 secret,
                 device,
                 space,
-                group,
             }) if device.is_valid()
                 && secret.len() <= wire::MAX_CONTROL_LINE
                 && space
                     .as_deref()
-                    .is_none_or(tcode_client::pairing::valid_space_id)
-                && group
-                    .as_deref()
-                    .is_none_or(tcode_client::pairing::valid_invitation_secret) =>
+                    .is_none_or(tcode_client::pairing::valid_space_id) =>
             {
-                self.0
-                    .pair(remote, &secret, &device, space.as_deref(), group.as_deref())
+                self.0.pair(remote, &secret, &device, space.as_deref())
             }
             Ok(_) => HostLine::Refused {
                 reason: "expected a pair line".into(),

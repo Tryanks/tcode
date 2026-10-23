@@ -650,7 +650,11 @@ impl RemotePanel {
             InvitationOffer::Live {
                 invitation,
                 remaining,
-            } => hosting::invitation_card(&invitation, remaining, compact, PAGE_PADDING, cx),
+            } => {
+                let group = spaces::local(cx)
+                    .and_then(|spaces| spaces.read(cx).group().map(|group| group.name.clone()));
+                hosting::invitation_card(&invitation, remaining, group, compact, PAGE_PADDING, cx)
+            }
             InvitationOffer::Expired => hosting::expired_invitation_row(PAGE_PADDING, cx),
             InvitationOffer::NotHosting | InvitationOffer::PairingOff => {
                 let note = if offer == InvitationOffer::PairingOff {
