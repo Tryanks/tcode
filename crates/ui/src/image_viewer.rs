@@ -268,10 +268,13 @@ pub(crate) struct ImageViewer {
     animate: bool,
     /// The last frame's geometry, so pointer input resolves against what was
     /// drawn: the stage is the whole dialog host, the frame is the area a
-    /// fitted image fills, and `natural` is the decoded image's own size.
+    /// fitted image fills, and `natural` is the decoded image's own size, or
+    /// the original's while a preview stands in for it.
     stage: Bounds<Pixels>,
     frame: Size<Pixels>,
     natural: Option<Size<Pixels>>,
+    /// The original's size as its metadata names it, before its bytes arrive.
+    original_size: Option<Size<Pixels>>,
     failed: bool,
     target: Option<tcode_protocol::OriginalTarget>,
     remote_progress: bool,
@@ -294,6 +297,7 @@ impl ImageViewer {
             stage: Bounds::default(),
             frame: Size::default(),
             natural: None,
+            original_size: None,
             failed: false,
             target: None,
             remote_progress: false,
@@ -337,16 +341,20 @@ impl ImageViewer {
         self.transfer = Some(cx.spawn(async move |this, cx| {
             let mut transfer = host.read_original(target);
             let result = async {
-                let total = transfer.metadata().await?.len;
-                if remote {
-                    let _ = this.update(cx, |this, cx| {
+                let metadata = transfer.metadata().await?;
+                let total = metadata.len;
+                let dimensions = metadata.dimensions;
+                let _ = this.update(cx, |this, cx| {
+                    this.original_size =
+                        dimensions.map(|(width, height)| size(px(width as f32), px(height as f32)));
+                    if remote {
                         this.original_state = Some(OriginalState::Loading {
                             received: 0,
                             total: Some(total),
                         });
-                        cx.notify();
-                    });
-                }
+                    }
+                    cx.notify();
+                });
                 let mut bytes = Vec::new();
                 while let Some(block) = transfer.read().await? {
                     bytes
@@ -391,7 +399,8 @@ impl ImageViewer {
     }
 
     /// The scale at which the image fits the frame. A smaller image is shown
-    /// at its own size rather than enlarged.
+    /// at its own size rather than enlarged, except a preview of an original
+    /// whose size is not known yet, which stands in at the frame's size.
     fn fit_scale(&self) -> Option<f32> {
         let natural = self.natural?;
         if natural.width <= Pixels::ZERO
@@ -403,7 +412,9 @@ impl ImageViewer {
         }
         let fit = (self.frame.width / natural.width).min(self.frame.height / natural.height);
         Some(
-            if matches!(self.original_state, Some(OriginalState::Loading { .. })) {
+            if self.original_size.is_none()
+                && matches!(self.original_state, Some(OriginalState::Loading { .. }))
+            {
                 fit
             } else {
                 fit.min(1.)
@@ -614,9 +625,13 @@ impl ImageViewer {
                 .filter(|size| size.width.0 > 0 && size.height.0 > 0)
         });
         self.failed = matches!(natural, Some(None));
-        self.natural = natural
+        let decoded = natural
             .flatten()
             .map(|size| gpui::size(px(size.width.0 as f32), px(size.height.0 as f32)));
+        self.natural = match self.original_state {
+            Some(OriginalState::Complete) => decoded,
+            _ => decoded.and(self.original_size).or(decoded),
+        };
     }
 }
 
@@ -932,6 +947,71 @@ mod tests {
         .map(|value| (f32::from(value) * 10.).round() / 10.)
     }
 
+    /// A preview stands in for a pending original at the size and place the
+    /// original will have, so the original replaces it without a jump; here
+    /// an original smaller than the frame, which is shown at its own size.
+    #[gpui::test]
+    fn a_pending_original_is_laid_out_at_its_own_size(cx: &mut TestAppContext) {
+        use tcode_client::original::{
+            OpenedOriginal, OriginalFuture, OriginalOpener, OriginalReader,
+        };
+        struct Pending;
+        impl OriginalReader for Pending {
+            fn read(&mut self) -> OriginalFuture<'_, Option<Vec<u8>>> {
+                Box::pin(std::future::pending())
+            }
+            fn cancel(&mut self) {}
+        }
+        struct Sized;
+        impl OriginalOpener for Sized {
+            fn open(
+                &self,
+                _: tcode_protocol::OriginalTarget,
+            ) -> OriginalFuture<'static, OpenedOriginal> {
+                Box::pin(async {
+                    Ok(OpenedOriginal {
+                        metadata: tcode_protocol::OriginalMetadata {
+                            len: 1024,
+                            mime: Some("image/png".into()),
+                            dimensions: Some((400, 300)),
+                        },
+                        reader: Box::new(Pending),
+                    })
+                })
+            }
+        }
+        let cx = open_viewer(cx, 10, 10);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        let (to_host, _control) = async_channel::unbounded();
+        let (_replies, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new_local(to_host, from_host, Some(Arc::new(Sized)));
+        cx.update(|window, cx| {
+            cx.set_global(crate::store::images::HostImages {
+                link: Some(link),
+                namespace: 1,
+            });
+            let preview = Arc::new(RenderImage::new(vec![Frame::new(ImageBuffer::from_pixel(
+                120,
+                90,
+                Rgba([255, 0, 0, 255]),
+            ))]));
+            open(
+                ViewerSource::original(
+                    tcode_protocol::OriginalTarget::File {
+                        path: "/host/small.png".into(),
+                    },
+                    ImageSource::Render(preview),
+                ),
+                "small.png",
+                window,
+                cx,
+            );
+        });
+        draw(cx);
+        assert_eq!(image(cx).size, size(px(400.), px(300.)));
+    }
+
     #[gpui::test]
     fn pointer_gestures_zoom_about_the_pointer_pan_within_the_stage_and_close(
         cx: &mut TestAppContext,
@@ -1129,6 +1209,7 @@ mod tests {
                         metadata: tcode_protocol::OriginalMetadata {
                             len: 1024,
                             mime: Some("image/png".into()),
+                            dimensions: None,
                         },
                         reader: Box::new(PendingReader(source)),
                     })
