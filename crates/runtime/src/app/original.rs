@@ -7,7 +7,7 @@ use base64::read::DecoderReader;
 use tcode_client::original::{OriginalSource, error};
 use tcode_protocol::{ClientPayload, OriginalMetadata, OriginalTarget, Principal, ProtocolError};
 
-use super::{AppState, HostCx, StoreWrite, history::SessionLog};
+use super::{AppState, HostCx, HostTask, history::SessionLog};
 
 const BLOCK: usize = 64 * 1024;
 type Answer = async_channel::Sender<Result<OriginalSource, ProtocolError>>;
@@ -25,11 +25,14 @@ impl AppState {
             let _ = answer.try_send(Err(error));
             return;
         }
-        let snapshot = match &target {
-            OriginalTarget::Item { session_id, .. } => Some(self.original_snapshot(session_id, cx)),
-            _ => None,
+        let item = match &target {
+            OriginalTarget::Item {
+                session_id,
+                item_id,
+                image_index,
+            } => Some(self.recorded_image(session_id, item_id.clone(), *image_index, true, cx)),
+            OriginalTarget::File { .. } => None,
         };
-        let store = self.store.clone();
         let host = cx.clone();
         cx.spawn_background(async move {
             let result = async {
@@ -56,37 +59,7 @@ impl AppState {
                         })
                         .await?
                     }
-                    OriginalTarget::Item {
-                        session_id,
-                        item_id,
-                        image_index,
-                    } => {
-                        let end = snapshot
-                            .unwrap()
-                            .recv()
-                            .await
-                            .map_err(error)?
-                            .map_err(error)?;
-                        let (session_id, item_id, image_index) =
-                            (session_id.clone(), item_id.clone(), *image_index);
-                        host.unblock(move || {
-                            let log = SessionLog::new(
-                                store.read_log_until(&session_id, end).map_err(io_error)?,
-                            );
-                            let (row, image) = log.original_image(&item_id, image_index)?;
-                            let len = tcode_services::image_bytes::decoded_len(&image.data_base64)
-                                .map_err(io_error)?;
-                            let mime = image.media_type.clone();
-                            Ok(Source::Item {
-                                log: Box::new(log),
-                                item_id,
-                                image_index,
-                                identity: (row, len),
-                                mime,
-                            })
-                        })
-                        .await?
-                    }
+                    OriginalTarget::Item { .. } => Source::Item(item.unwrap().await?),
                 };
                 let checked = match &source {
                     Source::File { path, .. } => OriginalTarget::File { path: path.clone() },
@@ -108,18 +81,10 @@ impl AppState {
                     .unblock(move || {
                         let read: Box<dyn io::Read + '_> = match &mut source {
                             Source::File { file, .. } => Box::new(file),
-                            Source::Item {
-                                log,
-                                item_id,
-                                image_index,
-                                ..
-                            } => {
-                                let (_, image) = log.original_image(item_id, *image_index)?;
-                                Box::new(DecoderReader::new(
-                                    image.data_base64.as_bytes(),
-                                    &STANDARD,
-                                ))
-                            }
+                            Source::Item(image) => Box::new(DecoderReader::new(
+                                image.data_base64.as_bytes(),
+                                &STANDARD,
+                            )),
                         };
                         let tail = stream_blocks(read, &output)?;
                         if let Source::File {
@@ -141,42 +106,25 @@ impl AppState {
                 let finish = async {
                     let (source, tail) = tail?;
                     check(&host, principal, target.clone()).await?;
-                    if let Source::Item {
-                        identity,
-                        item_id,
-                        image_index,
-                        ..
-                    } = source
+                    if let (
+                        Source::Item(sent),
+                        OriginalTarget::Item {
+                            session_id,
+                            item_id,
+                            image_index,
+                        },
+                    ) = (source, target)
                     {
-                        let OriginalTarget::Item { session_id, .. } = target else {
-                            unreachable!()
-                        };
-                        let snapshot_id = session_id.clone();
-                        let (store, snapshot) = host
+                        let current = host
                             .enqueue_and_wait(move |state, cx| {
-                                (
-                                    state.store.clone(),
-                                    state.original_snapshot(&snapshot_id, cx),
-                                )
+                                state.recorded_image(&session_id, item_id, image_index, false, cx)
                             })
                             .await
-                            .map_err(|_| error("host stopped"))?;
-                        let end = snapshot.recv().await.map_err(error)?.map_err(error)?;
-                        host.unblock(move || {
-                            let log = SessionLog::new(
-                                store.read_log_until(&session_id, end).map_err(io_error)?,
-                            );
-                            let (row, image) = log
-                                .original_image(&item_id, image_index)
-                                .map_err(|_| changed())?;
-                            let len = tcode_services::image_bytes::decoded_len(&image.data_base64)
-                                .map_err(io_error)?;
-                            if identity != (row, len) {
-                                return Err(changed());
-                            }
-                            Ok(())
-                        })
-                        .await?;
+                            .map_err(|_| error("host stopped"))?
+                            .await;
+                        if current.map(|image| image.identity).ok() != Some(sent.identity) {
+                            return Err(changed());
+                        }
                     }
                     if !tail.is_empty() {
                         blocks.send(Ok(tail)).await.map_err(error)?;
@@ -198,14 +146,36 @@ impl AppState {
         .detach();
     }
 
-    fn original_snapshot(
+    /// A recorded image as the session's history holds it now, with its bytes only when `bytes`
+    /// is set.
+    fn recorded_image(
         &mut self,
-        id: &str,
+        session_id: &str,
+        item_id: String,
+        image_index: usize,
+        bytes: bool,
         cx: &mut HostCx,
-    ) -> async_channel::Receiver<Result<u64, String>> {
-        let (end, snapshot) = async_channel::bounded(1);
-        self.enqueue_store_write(StoreWrite::LogEnd { id: id.into(), end }, cx);
-        snapshot
+    ) -> HostTask<Result<ItemImage, ProtocolError>> {
+        let address = item_id.clone();
+        self.query_item(
+            session_id,
+            item_id,
+            move |log: &SessionLog| {
+                let (row, image) = log.original_image(&address, image_index)?;
+                let len = tcode_services::image_bytes::decoded_len(&image.data_base64)
+                    .map_err(io_error)?;
+                Ok(ItemImage {
+                    identity: (row, len),
+                    mime: image.media_type.clone(),
+                    data_base64: if bytes {
+                        image.data_base64.clone()
+                    } else {
+                        String::new()
+                    },
+                })
+            },
+            cx,
+        )
     }
 }
 
@@ -228,13 +198,14 @@ enum Source {
         requested_path: std::path::PathBuf,
         identity: (u64, SystemTime),
     },
-    Item {
-        log: Box<SessionLog>,
-        item_id: String,
-        image_index: usize,
-        identity: (u64, u64),
-        mime: String,
-    },
+    Item(ItemImage),
+}
+
+struct ItemImage {
+    /// The last row that recorded the item, and the image's decoded length.
+    identity: (u64, u64),
+    mime: String,
+    data_base64: String,
 }
 
 impl Source {
@@ -244,9 +215,9 @@ impl Source {
                 len: identity.0,
                 mime: Some(tcode_core::attachments::mime_from_path(path)),
             },
-            Self::Item { identity, mime, .. } => OriginalMetadata {
-                len: identity.1,
-                mime: Some(mime.clone()),
+            Self::Item(image) => OriginalMetadata {
+                len: image.identity.1,
+                mime: Some(image.mime.clone()),
             },
         }
     }

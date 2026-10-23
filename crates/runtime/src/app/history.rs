@@ -1222,7 +1222,7 @@ impl AppState {
         task
     }
 
-    fn query_item<T: Send + 'static>(
+    pub(super) fn query_item<T: Send + 'static>(
         &mut self,
         session_id: &str,
         item_id: String,
