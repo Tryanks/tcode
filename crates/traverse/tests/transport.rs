@@ -1367,27 +1367,16 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
         }
         assert_eq!(received, bytes);
         drop(item);
-        let mut first = link.read_original(target.clone());
+        let mut first = admitted_original(&link, &target).await;
         first.read().await.unwrap().unwrap();
-        let mut second = link.read_original(target.clone());
+        let mut second = admitted_original(&link, &target).await;
         second.read().await.unwrap().unwrap();
         let mut refused = link.read_original(target.clone());
         assert_eq!(refused.metadata().await.unwrap_err().code, "busy");
         first.cancel();
         assert!(first.read().await.is_err());
         assert_eq!(link.query(Query::Ping).await.unwrap(), QueryResponse::Pong);
-        let mut replacement = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let mut next = link.read_original(target.clone());
-                match next.metadata().await {
-                    Ok(_) => break next,
-                    Err(error) if error.code == "busy" => tokio::task::yield_now().await,
-                    Err(error) => panic!("replacement original: {error:?}"),
-                }
-            }
-        })
-        .await
-        .expect("cancelled admission must be released");
+        let mut replacement = admitted_original(&link, &target).await;
         let mut received = Vec::new();
         while let Some(block) = replacement.read().await.unwrap() {
             received.extend(block);
@@ -1399,6 +1388,27 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
     });
     host.shutdown();
     original_fixture::stop(runtime, &mux);
+}
+
+/// Opens `target` once the host admits it. A read gives its slot back when the
+/// host sees the client stop the stream, which can trail the client reading
+/// the end or cancelling.
+async fn admitted_original(
+    link: &tcode_client::HostLink,
+    target: &tcode_protocol::OriginalTarget,
+) -> tcode_client::OriginalTransfer {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut next = link.read_original(target.clone());
+            match next.metadata().await {
+                Ok(_) => break next,
+                Err(error) if error.code == "busy" => tokio::task::yield_now().await,
+                Err(error) => panic!("original: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("a finished or cancelled read must release its admission")
 }
 
 /// Contract: revoking a project grant prevents a blocked original from completing.
