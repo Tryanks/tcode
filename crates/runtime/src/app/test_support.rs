@@ -86,7 +86,7 @@ impl TestAppContext {
             .and_then(Weak::upgrade)
             .expect("test state must outlive its context");
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut idle_passes = 0_u32;
+        let mut idle_since = Instant::now();
         let mut saw_work = false;
         let mut store_flushed = false;
 
@@ -104,23 +104,24 @@ impl TestAppContext {
                 had_work = true;
             }
             if had_work {
-                idle_passes = 0;
+                idle_since = Instant::now();
                 saw_work = true;
                 store_flushed = false;
             } else {
-                idle_passes += 1;
                 // Loaded CI runners (notably Windows) can take well past 50ms
                 // to schedule a background completion; calls that processed
                 // work get a wider idle window before declaring parked.
-                let threshold = if saw_work && !store_flushed { 250 } else { 50 };
-                if idle_passes >= threshold {
+                // Count elapsed time: a 1ms sleep can take much longer on a VM.
+                let idle_window =
+                    Duration::from_millis(if saw_work && !store_flushed { 250 } else { 50 });
+                if idle_since.elapsed() >= idle_window {
                     if !store_flushed {
                         // Barrier the store-writer task so persisted state is
                         // visible before callers assert on it. Its failure
                         // path can enqueue more work, so keep draining.
                         store_flushed = true;
                         if self.flush_store_writer(&state, deadline) {
-                            idle_passes = 0;
+                            idle_since = Instant::now();
                             continue;
                         }
                     }
