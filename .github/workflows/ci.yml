@@ -100,7 +100,9 @@ jobs:
         shell: python
         run: |
           import os
-          test_threads = 2 * os.cpu_count()
+          test_threads = os.cpu_count()
+          if os.environ["RUNNER_OS"] != "Windows":
+              test_threads *= 2
           print(f"nextest test threads: {test_threads}")
           with open(os.environ["GITHUB_ENV"], "a") as env_file:
               env_file.write(f"NEXTEST_TEST_THREADS={test_threads}\n")
@@ -114,21 +116,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run tests
-        if: matrix.task == 'tests' && runner.os == 'macOS'
-        run: cargo nextest run --workspace --locked
-
-      - name: Diagnose Windows test concurrency
-        if: matrix.task == 'tests' && runner.os == 'Windows'
-        shell: pwsh
-        run: ./.github/scripts/diagnose-nextest-windows.ps1
-
-      - name: Upload Windows concurrency evidence
-        if: always() && matrix.task == 'tests' && runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-nextest-concurrency
-          path: ${{ runner.temp }}/nextest-concurrency
-          retention-days: 7
+        if: matrix.task == 'tests' && runner.os != 'Linux'
+        run: cargo nextest run --workspace --locked --profile ci
 
       - name: Test iOS text input on the host
         if: matrix.task == 'tests' && runner.os == 'macOS'
@@ -136,7 +125,7 @@ jobs:
 
       - name: Run tests under Xvfb
         if: matrix.task == 'tests' && runner.os == 'Linux'
-        run: xvfb-run -a cargo nextest run --workspace --locked
+        run: xvfb-run -a cargo nextest run --workspace --locked --profile ci
 
   # Preserve the existing required check names. A skipped or cancelled worker
   # must not let any desktop gate pass.
