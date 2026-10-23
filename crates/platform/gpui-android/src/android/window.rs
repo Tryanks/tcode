@@ -9,6 +9,7 @@ use gpui::{
     point, px, size,
 };
 use gpui_mobile_pacing::FramePacer;
+use gpui_mobile_touch::TwoFingerGestures;
 use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
 use ndk::native_window::NativeWindow;
 use raw_window_handle::{
@@ -112,6 +113,7 @@ pub(crate) struct AndroidWindowInner {
     after_frame: RefCell<Vec<Box<dyn FnOnce()>>>,
     reported_visibility: Cell<Option<WindowVisibility>>,
     keyboard_tap: Cell<Option<Point<Pixels>>>,
+    touch_gestures: RefCell<TwoFingerGestures>,
     input_sync: RefCell<crate::text_input::InputSync>,
 }
 
@@ -169,6 +171,7 @@ impl AndroidWindow {
             after_frame: RefCell::new(Vec::new()),
             reported_visibility: Cell::new(None),
             keyboard_tap: Cell::new(None),
+            touch_gestures: RefCell::default(),
             input_sync: RefCell::new(Default::default()),
         })))
     }
@@ -510,7 +513,13 @@ impl AndroidWindow {
             .min(event.pointer_count().saturating_sub(1));
         let scale = self.scale_factor();
         let down_time = u64::try_from(event.down_time()).unwrap_or_default();
+        // ACTION_DOWN begins every gesture, so no finger of an earlier one is
+        // still down even if its release never arrived.
+        if action == MotionAction::Down {
+            self.0.touch_gestures.take();
+        }
 
+        let mut touches = Vec::with_capacity(event.pointer_count());
         for pointer in event.pointers() {
             let phase = match action {
                 MotionAction::Down | MotionAction::PointerDown
@@ -542,13 +551,17 @@ impl AndroidWindow {
             let pointer_id = u64::try_from(pointer.pointer_id()).unwrap_or_default() & 0x3f;
             let id = TouchId(down_time.wrapping_mul(64).wrapping_add(pointer_id));
             let pressure = pointer.pressure();
-            self.dispatch_input(PlatformInput::Touch(TouchEvent {
+            touches.push(TouchEvent {
                 id,
                 phase,
                 position,
                 predicted_position: None,
                 force: pressure.is_finite().then(|| pressure.clamp(0.0, 1.0)),
-            }));
+            });
+        }
+        let inputs = self.0.touch_gestures.borrow_mut().handle(touches);
+        for input in inputs {
+            self.dispatch_input(input);
         }
         true
     }

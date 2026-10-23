@@ -3857,6 +3857,7 @@ dependencies = [
  "gpui-fast",
  "gpui-fast-wgpu",
  "gpui-mobile-pacing",
+ "gpui-mobile-touch",
  "jni 0.22.4",
  "log",
  "ndk 0.9.0",
@@ -4293,6 +4294,7 @@ dependencies = [
  "gpui-fast",
  "gpui-fast-wgpu",
  "gpui-mobile-pacing",
+ "gpui-mobile-touch",
  "libc",
  "log",
  "parking_lot",
@@ -4340,6 +4342,13 @@ dependencies = [
 [[package]]
 name = "gpui-mobile-pacing"
 version = "0.1.0"
+
+[[package]]
+name = "gpui-mobile-touch"
+version = "0.1.0"
+dependencies = [
+ "gpui-fast",
+]
 
 [[package]]
 name = "gpui-pre"
