@@ -5,15 +5,19 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 
 use gpui::{
     App, AppContext as _, Bounds, ClickEvent, Context, FocusHandle, ImageCacheError, ImageSource,
     InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
     ParentElement as _, PinchEvent, Pixels, Point, Render, RenderImage, ScrollDelta,
-    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _, Styled as _, Window,
-    actions, div, img, point, prelude::FluentBuilder as _, px, size,
+    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _, Styled as _, TouchPhase,
+    Window, actions, div, img, point, prelude::FluentBuilder as _, px, size,
 };
 use gpui_base::motion::{Interpolate, Transition, transition};
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use crate::icon::IconName;
 use crate::overlay::OverlayExt as _;
@@ -26,11 +30,18 @@ const CONTEXT: &str = "ImageViewer";
 
 /// Zoom gained by one wheel notch, one key press or one toolbar press.
 const ZOOM_STEP: f32 = 1.25;
+/// What one wheel notch reports when a wheel reports pixels, as browsers do.
+const WHEEL_NOTCH: Pixels = px(100.);
+/// The pixel delta that zooms by a factor of e when a pinch arrives as a
+/// Control-wheel, the encoding browsers give trackpad pinches.
+const PINCH_PIXELS: Pixels = px(100.);
+/// A pan's momentum carries no touch phase; scrolls arriving closer together
+/// than this after the pan's fingers lifted still belong to it.
+const MOMENTUM_GAP: Duration = Duration::from_millis(100);
 /// Zoom relative to the fitted size past which zooming stops. The image's
 /// own size stays reachable even when that lies further out.
 const MAX_ZOOM: f32 = 8.;
-/// What one wheel line is worth, so pixel-precise trackpad deltas zoom at
-/// the same rate as notched wheels.
+/// What one wheel line is worth when a line delta pans.
 const WHEEL_LINE: Pixels = px(20.);
 /// Pointer travel before a press is a drag rather than the click it began as.
 const DRAG_SLOP: Pixels = px(4.);
@@ -228,6 +239,15 @@ impl Interpolate for Placement {
     }
 }
 
+/// A scroll gesture delimited by touch phases: a trackpad, or fingers on a
+/// touch screen.
+#[derive(Clone, Copy)]
+enum Pan {
+    Touching,
+    /// The fingers lifted at this instant, or the momentum after it last moved.
+    Coasting(Instant),
+}
+
 /// A primary press on the stage, kept until the click it completes reads it
 /// or a release elsewhere ends it.
 struct Drag {
@@ -242,6 +262,7 @@ pub(crate) struct ImageViewer {
     focus_handle: FocusHandle,
     placement: Placement,
     drag: Option<Drag>,
+    pan: Option<Pan>,
     /// Keys, buttons and double-clicks glide to their placement; wheel,
     /// pinch and drag track the pointer.
     animate: bool,
@@ -268,6 +289,7 @@ impl ImageViewer {
             focus_handle: cx.focus_handle(),
             placement: Placement::FIT,
             drag: None,
+            pan: None,
             animate: false,
             stage: Bounds::default(),
             frame: Size::default(),
@@ -526,21 +548,34 @@ impl ImageViewer {
         }
     }
 
-    /// A notched wheel zooms; a trackpad or touch pan moves the image, or
-    /// zooms when Control or the platform modifier is held, as browsers do.
+    /// A trackpad or touch pan moves the image; any other scroll is a wheel,
+    /// and zooms about the pointer, as does a scroll with Control or the
+    /// platform modifier held, as browsers do.
     fn scrolled(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let delta = event.delta.pixel_delta(WHEEL_LINE);
-        let zooms = event.modifiers.control
-            || event.modifiers.platform
-            || matches!(event.delta, ScrollDelta::Lines(_));
-        if zooms {
-            let notches = delta.y / WHEEL_LINE;
-            if notches != 0. {
-                let zoom = self.placement.zoom * ZOOM_STEP.powf(notches);
-                self.zoom_to(zoom, event.position, false, cx);
+        let now = cx.background_executor().now();
+        self.pan = match (event.touch_phase, self.pan) {
+            (TouchPhase::Started, _) => Some(Pan::Touching),
+            (TouchPhase::Ended | TouchPhase::Cancelled, Some(_)) => Some(Pan::Coasting(now)),
+            (TouchPhase::Moved, Some(Pan::Touching)) => Some(Pan::Touching),
+            (TouchPhase::Moved, Some(Pan::Coasting(last)))
+                if now.saturating_duration_since(last) <= MOMENTUM_GAP =>
+            {
+                Some(Pan::Coasting(now))
             }
-        } else {
-            self.pan_by(delta, cx);
+            _ => None,
+        };
+        let modified = event.modifiers.control || event.modifiers.platform;
+        if self.pan.is_some() && !modified {
+            self.pan_by(event.delta.pixel_delta(WHEEL_LINE), cx);
+            return;
+        }
+        let factor = match event.delta {
+            ScrollDelta::Lines(lines) => ZOOM_STEP.powf(lines.y),
+            ScrollDelta::Pixels(pixels) if modified => (pixels.y / PINCH_PIXELS).exp(),
+            ScrollDelta::Pixels(pixels) => ZOOM_STEP.powf(pixels.y / WHEEL_NOTCH),
+        };
+        if factor != 1. {
+            self.zoom_to(self.placement.zoom * factor, event.position, false, cx);
         }
     }
 
@@ -874,6 +909,29 @@ mod tests {
             .expect("the viewer shows its image")
     }
 
+    fn scroll(cx: &mut VisualTestContext, delta: ScrollDelta, touch_phase: TouchPhase) {
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(400.), px(300.)),
+            delta,
+            modifiers: Modifiers::default(),
+            touch_phase,
+        });
+        draw(cx);
+    }
+
+    /// The image's bounds to a tenth of a pixel, past float noise in zooms
+    /// built from exponentials.
+    fn rounded(cx: &mut VisualTestContext) -> [f32; 4] {
+        let bounds = image(cx);
+        [
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width,
+            bounds.size.height,
+        ]
+        .map(|value| (f32::from(value) * 10.).round() / 10.)
+    }
+
     #[gpui::test]
     fn pointer_gestures_zoom_about_the_pointer_pan_within_the_stage_and_close(
         cx: &mut TestAppContext,
@@ -932,20 +990,81 @@ mod tests {
         draw(cx);
         assert_eq!(image(cx).origin, point(px(-100.), px(50.)));
 
-        // A trackpad or touch pan moves the image too.
-        cx.simulate_event(ScrollWheelEvent {
-            position: point(px(400.), px(300.)),
-            delta: ScrollDelta::Pixels(point(px(-50.), px(0.))),
-            modifiers: Modifiers::default(),
-            touch_phase: TouchPhase::Moved,
-        });
-        draw(cx);
+        // A trackpad or touch pan, which opens with a touch phase, moves the
+        // image too.
+        scroll(
+            cx,
+            ScrollDelta::Pixels(Point::default()),
+            TouchPhase::Started,
+        );
+        scroll(
+            cx,
+            ScrollDelta::Pixels(point(px(-50.), px(0.))),
+            TouchPhase::Moved,
+        );
         assert_eq!(image(cx).origin, point(px(-150.), px(50.)));
 
         // A click beside the image closes the viewer.
         cx.simulate_click(point(px(400.), px(580.)), Modifiers::default());
         draw(cx);
         assert!(cx.debug_bounds("image-viewer-image").is_none());
+    }
+
+    #[gpui::test]
+    fn pixel_scrolls_zoom_unless_a_touch_phased_pan_or_its_momentum_owns_them(
+        cx: &mut TestAppContext,
+    ) {
+        // 400×200 fits the 800×600 window untouched, centred on (400, 300).
+        let cx = open_viewer(cx, 400, 200);
+
+        // A wheel reporting pixels, as browsers and smooth-scrolling mice do,
+        // zooms a step per notch even while the image cannot pan.
+        scroll(
+            cx,
+            ScrollDelta::Pixels(point(px(0.), WHEEL_NOTCH)),
+            TouchPhase::Moved,
+        );
+        assert_eq!(rounded(cx), [150., 175., 500., 250.]);
+
+        // A browser's trackpad pinch arrives as a Control-wheel and scales by
+        // e per 100 pixels: ln 2 of them double the image.
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(400.), px(300.)),
+            delta: ScrollDelta::Pixels(point(px(0.), PINCH_PIXELS * std::f32::consts::LN_2)),
+            modifiers: Modifiers::control(),
+            touch_phase: TouchPhase::Moved,
+        });
+        draw(cx);
+        assert_eq!(rounded(cx), [-100., 50., 1000., 500.]);
+
+        // A pan's momentum carries no phase yet keeps panning.
+        scroll(
+            cx,
+            ScrollDelta::Pixels(Point::default()),
+            TouchPhase::Started,
+        );
+        scroll(
+            cx,
+            ScrollDelta::Pixels(point(px(-50.), px(0.))),
+            TouchPhase::Moved,
+        );
+        scroll(cx, ScrollDelta::Pixels(Point::default()), TouchPhase::Ended);
+        scroll(
+            cx,
+            ScrollDelta::Pixels(point(px(-20.), px(0.))),
+            TouchPhase::Moved,
+        );
+        assert_eq!(rounded(cx), [-170., 50., 1000., 500.]);
+
+        // Once it has died away, the next pixel scroll is a wheel again and
+        // zooms about the pointer.
+        cx.executor().advance_clock(MOMENTUM_GAP * 2);
+        scroll(
+            cx,
+            ScrollDelta::Pixels(point(px(0.), WHEEL_NOTCH)),
+            TouchPhase::Moved,
+        );
+        assert_eq!(rounded(cx), [-312.5, -12.5, 1250., 625.]);
     }
 
     #[gpui::test]
