@@ -75,11 +75,7 @@ pub trait Forge: Send + Sync {
     /// The key and canonical URL of a pull request's web URL, or `None` for any other URL.
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)>;
     /// The repository a checkout's remote names on the host.
-    fn checkout_repository(&self, cwd: &Path) -> Option<Repository> {
-        self.resolve_checkout(&Checkout::new(cwd))
-    }
-    /// Resolve against the same remotes when routing a lookup through multiple hosts.
-    fn resolve_checkout(&self, checkout: &Checkout<'_>) -> Option<Repository>;
+    fn checkout_repository(&self, checkout: &Checkout<'_>) -> Option<Repository>;
     /// A repository named as the host writes it, on `host`.
     fn repository(&self, name: &str, host: &str) -> Option<Repository>;
     /// The web URL of a pull request.
@@ -90,7 +86,7 @@ pub trait Forge: Send + Sync {
     fn discover(
         &self,
         cwd: &Path,
-        root: &Path,
+        root: &Checkout<'_>,
         refresh: bool,
     ) -> Result<Option<Discovered>, ForgeError>;
 
@@ -516,10 +512,10 @@ impl Forge for Hosts {
         })
     }
 
-    fn resolve_checkout(&self, checkout: &Checkout<'_>) -> Option<Repository> {
+    fn checkout_repository(&self, checkout: &Checkout<'_>) -> Option<Repository> {
         self.all().into_iter().find_map(|forge| {
             forge
-                .resolve_checkout(checkout)
+                .checkout_repository(checkout)
                 .filter(|repository| self.serves(forge, &repository.host))
         })
     }
@@ -535,7 +531,7 @@ impl Forge for Hosts {
     fn discover(
         &self,
         cwd: &Path,
-        root: &Path,
+        root: &Checkout<'_>,
         refresh: bool,
     ) -> Result<Option<Discovered>, ForgeError> {
         let Some(repository) = self.checkout_repository(root) else {
@@ -690,19 +686,13 @@ mod tests {
         let cwd = root.join("checkout");
         std::fs::create_dir_all(&cwd).unwrap();
         let forge = connect(SettingsStore::new(root.clone()), []);
-        let git = |args: &[&str]| {
-            let output = crate::process::command("git")
-                .current_dir(&cwd)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "git {args:?}: {output:?}");
-        };
-        assert!(forge.checkout_repository(&cwd).is_none());
+        let git = |args: &[&str]| crate::git::run_git(&cwd, args).unwrap();
+        let repository = || forge.checkout_repository(&Checkout::new(&cwd));
+        assert!(repository().is_none());
         git(&["init", "-b", "main"]);
-        assert!(forge.checkout_repository(&cwd).is_none());
+        assert!(repository().is_none());
         git(&["remote", "add", "origin", "https://github.com/team/app.git"]);
-        for (url, host, repository) in [
+        for (url, host, name) in [
             ("https://github.com/team/app.git", "github.com", "team/app"),
             (
                 "https://codeberg.org/team/app.git",
@@ -723,15 +713,13 @@ mod tests {
         ] {
             git(&["remote", "set-url", "origin", url]);
             assert_eq!(
-                forge
-                    .checkout_repository(&cwd)
-                    .map(|repository| repository.key(1)),
-                Some(PullRequestKey::new(host, repository, 1)),
+                repository().map(|repository| repository.key(1)),
+                Some(PullRequestKey::new(host, name, 1)),
                 "{url}"
             );
         }
         git(&["remote", "remove", "origin"]);
-        assert!(forge.checkout_repository(&cwd).is_none());
+        assert!(repository().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

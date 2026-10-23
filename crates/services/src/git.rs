@@ -473,9 +473,8 @@ pub fn read_status(cwd: &Path) -> GitStatus {
     }
     let porcelain = run_git(cwd, &["status", "--porcelain=2", "--branch"]).unwrap_or_default();
     let numstat = read_numstat(cwd);
-    let has_origin_remote = run_git(cwd, &["remote"])
-        .map(|out| out.lines().any(|line| line.trim() == "origin"))
-        .unwrap_or(false);
+    let checkout = crate::forge::Checkout::new(cwd);
+    let has_origin_remote = checkout.remotes().iter().any(|(name, _)| name == "origin");
     let default_branch = run_git(cwd, &["symbolic-ref", "refs/remotes/origin/HEAD"])
         .ok()
         .map(|value| {
@@ -491,9 +490,8 @@ pub fn read_status(cwd: &Path) -> GitStatus {
         default_branch.as_deref(),
         has_origin_remote,
     );
-    status.github_repository =
-        crate::github::repository::resolve(&crate::forge::Checkout::new(cwd))
-            .map(|repository| format!("{}/{}", repository.owner, repository.name));
+    status.github_repository = crate::github::repository::resolve(&checkout)
+        .map(|repository| format!("{}/{}", repository.owner, repository.name));
     status
 }
 

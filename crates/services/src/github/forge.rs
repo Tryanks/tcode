@@ -99,7 +99,7 @@ impl Forge for GitHub {
         repository::pull_request_url(url)
     }
 
-    fn resolve_checkout(&self, checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
+    fn checkout_repository(&self, checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
         repository::resolve(checkout).map(neutral)
     }
 
@@ -114,14 +114,13 @@ impl Forge for GitHub {
     fn discover(
         &self,
         cwd: &Path,
-        root: &Path,
+        root: &crate::forge::Checkout<'_>,
         refresh: bool,
     ) -> Result<Option<Discovered>, ForgeError> {
-        let cwd = if cwd.exists() { cwd } else { root };
-        let (Some(head), Some(project_repository)) = (
-            repository::branch_head(cwd),
-            repository::resolve(&crate::forge::Checkout::new(root)),
-        ) else {
+        let cwd = if cwd.exists() { cwd } else { root.cwd() };
+        let (Some(head), Some(project_repository)) =
+            (repository::branch_head(cwd), repository::resolve(root))
+        else {
             return Ok(None);
         };
         if head.repository != project_repository {
@@ -135,7 +134,7 @@ impl Forge for GitHub {
         if result.key.host != project_repository.host
             || result.key.repository != project_repository.key(result.key.number).repository
             || repository::branch_head(cwd).as_ref() != Some(&head)
-            || repository::resolve(&crate::forge::Checkout::new(root)).as_ref()
+            || repository::resolve(&crate::forge::Checkout::new(root.cwd())).as_ref()
                 != Some(&project_repository)
         {
             return Err(ForgeError {

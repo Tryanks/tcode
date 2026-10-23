@@ -146,8 +146,12 @@ pub(super) fn resolve(
 
 /// The checked-out branch and the project and branch a merge request from it names as its
 /// source.
-pub(super) fn branch(known: &[String], cwd: &Path) -> Option<crate::forge::checkout::Branch> {
-    crate::forge::checkout::branch(cwd, |url| remote(known, url))
+pub(super) fn branch(
+    known: &[String],
+    root: &crate::forge::Checkout<'_>,
+    cwd: &Path,
+) -> Option<crate::forge::checkout::Branch> {
+    crate::forge::checkout::branch(root, cwd, |url| remote(known, url))
 }
 
 #[cfg(test)]

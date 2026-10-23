@@ -115,12 +115,8 @@ pub fn git_read(cwd: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn remotes(cwd: &Path) -> Vec<(String, Repository)> {
-    crate::forge::Checkout::new(cwd)
-        .remotes()
-        .iter()
-        .filter_map(|(name, url)| Some((name.clone(), remote(url)?.0)))
-        .collect()
+fn remotes(checkout: &crate::forge::Checkout<'_>) -> Vec<(String, Repository)> {
+    crate::forge::checkout::remotes(checkout, |url| Some(remote(url)?.0))
 }
 
 pub fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
@@ -131,10 +127,7 @@ pub fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
         return Some(repository);
     }
     let fetch = checkout.remotes();
-    let remotes: Vec<_> = fetch
-        .iter()
-        .filter_map(|(name, url)| Some((name.clone(), remote(url)?.0)))
-        .collect();
+    let remotes = remotes(checkout);
     if remotes.is_empty() {
         return None;
     }
@@ -196,7 +189,8 @@ pub struct BranchHead {
 pub fn branch_head(cwd: &Path) -> Option<BranchHead> {
     let cwd = cwd.canonicalize().ok()?;
     let branch = git_read(&cwd, &["symbolic-ref", "--short", "HEAD"])?;
-    let repository = resolve(&crate::forge::Checkout::new(&cwd))?;
+    let checkout = crate::forge::Checkout::new(&cwd);
+    let repository = resolve(&checkout)?;
     let refs = git_read(
         &cwd,
         &[
@@ -209,7 +203,7 @@ pub fn branch_head(cwd: &Path) -> Option<BranchHead> {
         .lines()
         .find(|line| line.split('\0').next() == Some(format!("refs/heads/{branch}").as_str()))?;
     let parts: Vec<_> = line.split('\0').collect();
-    let remotes = remotes(&cwd);
+    let remotes = remotes(&checkout);
     let saved = parts.get(1).copied().unwrap_or_default();
     let saved_ref = parts.get(2).copied().unwrap_or_default();
     if !saved.is_empty() && saved_ref.is_empty() {

@@ -167,8 +167,12 @@ pub(super) struct Branch {
     pub(super) head_branch: String,
 }
 
-pub(super) fn branch(known: &[String], cwd: &Path) -> Option<Branch> {
-    let found = crate::forge::checkout::branch(cwd, |url| remote(known, url))?;
+pub(super) fn branch(
+    known: &[String],
+    root: &crate::forge::Checkout<'_>,
+    cwd: &Path,
+) -> Option<Branch> {
+    let found = crate::forge::checkout::branch(root, cwd, |url| remote(known, url))?;
     Some(Branch {
         head_owner: found.source.locator.split('/').next()?.to_owned(),
         head_branch: found.source_branch,

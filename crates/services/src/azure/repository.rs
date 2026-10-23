@@ -145,8 +145,11 @@ pub(super) fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repositor
     crate::forge::checkout::resolve(checkout, remote)
 }
 
-pub(super) fn branch(cwd: &Path) -> Option<crate::forge::checkout::Branch> {
-    crate::forge::checkout::branch(cwd, remote)
+pub(super) fn branch(
+    root: &crate::forge::Checkout<'_>,
+    cwd: &Path,
+) -> Option<crate::forge::checkout::Branch> {
+    crate::forge::checkout::branch(root, cwd, remote)
 }
 
 #[cfg(test)]

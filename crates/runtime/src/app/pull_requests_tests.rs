@@ -2324,7 +2324,10 @@ fn a_partly_posted_review_keeps_only_unposted_drafts_for_the_next_submission() {
         fn pull_request_url(&self, _: &str) -> Option<(PullRequestKey, String)> {
             unreachable!()
         }
-        fn resolve_checkout(&self, _: &tcode_services::forge::Checkout<'_>) -> Option<Repository> {
+        fn checkout_repository(
+            &self,
+            _: &tcode_services::forge::Checkout<'_>,
+        ) -> Option<Repository> {
             unreachable!()
         }
         fn repository(&self, _: &str, _: &str) -> Option<Repository> {
@@ -2333,7 +2336,12 @@ fn a_partly_posted_review_keeps_only_unposted_drafts_for_the_next_submission() {
         fn url(&self, _: &PullRequestKey) -> Option<String> {
             unreachable!()
         }
-        fn discover(&self, _: &Path, _: &Path, _: bool) -> Result<Option<Discovered>, ForgeError> {
+        fn discover(
+            &self,
+            _: &Path,
+            _: &tcode_services::forge::Checkout<'_>,
+            _: bool,
+        ) -> Result<Option<Discovered>, ForgeError> {
             unreachable!()
         }
         fn summary(&self, _: &PullRequestKey) -> Result<Summary, ForgeError> {

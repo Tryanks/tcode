@@ -45,10 +45,10 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// The fetch remotes of the checkout that `remote` reads as a repository, by remote name.
-fn remotes(
+pub(crate) fn remotes<T>(
     checkout: &Checkout<'_>,
-    remote: impl Fn(&str) -> Option<Repository>,
-) -> Vec<(String, Repository)> {
+    remote: impl Fn(&str) -> Option<T>,
+) -> Vec<(String, T)> {
     checkout
         .remotes()
         .iter()
@@ -77,11 +77,23 @@ pub(crate) struct Branch {
     pub(crate) source_branch: String,
 }
 
-pub(crate) fn branch(cwd: &Path, remote: impl Fn(&str) -> Option<Repository>) -> Option<Branch> {
+/// The branch checked out at `cwd`; `root`'s remote listing serves when that is the root itself.
+pub(crate) fn branch(
+    root: &Checkout<'_>,
+    cwd: &Path,
+    remote: impl Fn(&str) -> Option<Repository>,
+) -> Option<Branch> {
+    let elsewhere;
+    let checkout = if cwd == root.cwd() {
+        root
+    } else {
+        elsewhere = Checkout::new(cwd);
+        &elsewhere
+    };
     let branch = git(cwd, &["symbolic-ref", "--short", "HEAD"])?;
     let pushed_to = git(cwd, &["config", &format!("branch.{branch}.remote")])?;
     let merge = git(cwd, &["config", &format!("branch.{branch}.merge")])?;
-    let source = remotes(&Checkout::new(cwd), remote)
+    let source = remotes(checkout, remote)
         .into_iter()
         .find(|(name, _)| *name == pushed_to)?
         .1;
