@@ -33,4 +33,5 @@ web-sys = { version = "=0.3.104", features = [
     "Blob", "BlobPropertyBag", "Url",
     "AbortController", "AbortSignal", "Request", "RequestInit", "Response", "Headers",
     "ReadableStream", "ReadableStreamDefaultReader",
+    "PointerEvent", "MouseEvent", "UiEvent", "HtmlElement", "HtmlTextAreaElement", "VisualViewport",
 ] }
