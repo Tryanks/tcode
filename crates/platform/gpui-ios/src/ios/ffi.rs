@@ -7,9 +7,8 @@ use super::IosWindow;
 use crate::text_input::{self, NOT_FOUND, TextRange};
 use anyhow::{Result, anyhow};
 use gpui::{
-    AppLifecyclePhase, Autocapitalize, Edges, Modifiers, PlatformInput, TextInputAction,
-    TextInputConfiguration, TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowInsets, point,
-    px,
+    AppLifecyclePhase, Autocapitalize, Edges, Modifiers, TextInputAction, TextInputConfiguration,
+    TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowInsets, point, px,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -339,20 +338,20 @@ fn dispatch_touches(touches: *const GpuiIosTouch, count: usize, phase: TouchPhas
     let touches = unsafe { slice::from_raw_parts(touches, count) };
     with_window(|window| {
         window.touch_activity(count, phase);
-        for touch in touches {
+        window.dispatch_touches(touches.iter().map(|touch| {
             let position = point(px(touch.x as f32), px(touch.y as f32));
             window.set_mouse_position(position);
             let predicted_position = (touch.has_prediction != 0)
                 .then(|| point(px(touch.predicted_x as f32), px(touch.predicted_y as f32)));
             let force = (touch.has_force != 0).then(|| touch.force.clamp(0.0, 1.0));
-            window.dispatch_input(PlatformInput::Touch(TouchEvent {
+            TouchEvent {
                 id: TouchId(touch.identifier),
                 phase,
                 position,
                 predicted_position,
                 force,
-            }));
-        }
+            }
+        }));
     });
 }
 
