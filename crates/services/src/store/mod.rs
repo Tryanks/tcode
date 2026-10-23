@@ -978,28 +978,6 @@ impl SessionStore {
         })
     }
 
-    /// The position the next row appended to a session's log takes.
-    pub fn next_row(&self, id: &str) -> io::Result<u64> {
-        self.run("read the end of an event log", |db| {
-            db.read(|db, connection| {
-                let mut last = None;
-                db.query(
-                    connection,
-                    "SELECT max(position) FROM events WHERE session_id = ?1",
-                    (id,),
-                    |row| {
-                        last = match row.get_value(0) {
-                            Ok(turso::Value::Integer(position)) => Some(position as u64),
-                            _ => None,
-                        };
-                        Ok(())
-                    },
-                )?;
-                Ok(last.map_or(0, |last| last + 1))
-            })
-        })
-    }
-
     /// Remove a session from the index and delete its event log.
     pub fn remove_session(&self, id: &str) -> io::Result<()> {
         self.apply(&[Mutation::remove_session(id)])

@@ -69,11 +69,6 @@ pub(super) enum StoreWrite {
         id: String,
         end: smol::channel::Sender<Result<tcode_services::store::LogRead, String>>,
     },
-    /// The committed end after all earlier queued writes have been attempted.
-    LogEnd {
-        id: String,
-        end: smol::channel::Sender<Result<u64, String>>,
-    },
     /// Answered once every write queued before it has committed, or with the
     /// first store failure since the writer started: a write that failed is
     /// never certified by a later flush.
@@ -177,9 +172,9 @@ impl StoreWrite {
                 |error| RuntimeError::PersistEvent { error },
                 Some(completion),
             ),
-            StoreWrite::DropSupersededDiffs { .. }
-            | StoreWrite::SnapshotLog { .. }
-            | StoreWrite::LogEnd { .. } => (|error| RuntimeError::PersistEvent { error }, None),
+            StoreWrite::DropSupersededDiffs { .. } | StoreWrite::SnapshotLog { .. } => {
+                (|error| RuntimeError::PersistEvent { error }, None)
+            }
             StoreWrite::SaveCommands { .. }
             | StoreWrite::InvalidateCommands(_)
             | StoreWrite::WriteTerminalUi(_)
@@ -203,10 +198,6 @@ impl StoreWrite {
                 return None;
             }
             StoreWrite::SnapshotLog { end, .. } => {
-                let _ = end.try_send(Err(reason.to_owned()));
-                return None;
-            }
-            StoreWrite::LogEnd { end, .. } => {
                 let _ = end.try_send(Err(reason.to_owned()));
                 return None;
             }
@@ -426,10 +417,6 @@ impl StoreWriter {
                         .snapshot_log(&id)
                         .map_err(|error| error.to_string()),
                 );
-                None
-            }
-            StoreWrite::LogEnd { id, end } => {
-                let _ = end.try_send(self.store.next_row(&id).map_err(|error| error.to_string()));
                 None
             }
             StoreWrite::Flush(completion) => {

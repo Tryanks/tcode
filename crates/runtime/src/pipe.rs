@@ -1475,6 +1475,98 @@ mod tests {
         std::fs::remove_dir_all(data_root).expect("remove test data");
     }
 
+    /// A recorded image opened from a thread a client is reading streams from
+    /// the thread's history already in memory: neither its bytes nor the check
+    /// that they are still current read the stored log again.
+    #[test]
+    fn originals_of_a_subscribed_session_reuse_its_history() {
+        use base64::Engine as _;
+        use tcode_client::original::OriginalBackend as _;
+        let data_root =
+            std::env::temp_dir().join(format!("tcode-original-pipe-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data_root.clone()).expect("open session store");
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            data_root.join("workspace"),
+            None,
+        );
+        meta.id = "pictured".into();
+        store.upsert_meta(&meta).expect("write meta");
+        let bytes: Vec<u8> = (0..300_000).map(|index| (index % 251) as u8).collect();
+        store
+            .append_event(
+                &meta.id,
+                1,
+                &agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: "recorded-image".into(),
+                    parent_item_id: None,
+                    content: agent::ItemContent::ImageRead {
+                        path: "screen.png".into(),
+                        image: Some(agent::Attachment {
+                            media_type: "image/png".into(),
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                            source_path: None,
+                        }),
+                    },
+                }),
+            )
+            .expect("append image");
+        let reader = store.clone();
+        let host = spawn_host(store, HostServices::default()).expect("spawn host");
+        let link = host.link();
+        link.subscribe(Subscription {
+            known_index: None,
+            after: None,
+            topic: Topic::SessionEvents {
+                session_id: meta.id.clone(),
+            },
+        })
+        .expect("subscribe to the thread");
+        // Answered from the thread's history once it is in memory.
+        smol::block_on(link.query(Query::SessionHistoryPage {
+            session_id: meta.id.clone(),
+            before: 1,
+            limit: 1,
+        }))
+        .expect("history page");
+        let reads = reader.event_reads();
+
+        let source = smol::block_on(host.open(
+            tcode_protocol::Principal::Full,
+            tcode_protocol::OriginalTarget::Item {
+                session_id: meta.id.clone(),
+                item_id: "recorded-image".into(),
+                image_index: 0,
+            },
+        ))
+        .expect("open the original");
+        assert_eq!(source.metadata.len, bytes.len() as u64);
+        let mut received = Vec::new();
+        loop {
+            let block = source
+                .blocks
+                .recv_blocking()
+                .expect("original stream")
+                .expect("original block");
+            if block.is_empty() {
+                break;
+            }
+            received.extend(block);
+        }
+        assert_eq!(received, bytes);
+        assert_eq!(
+            reader.event_reads(),
+            reads,
+            "the original was served from the thread's history"
+        );
+
+        drop(source);
+        link.shutdown_blocking().expect("stop host");
+        host.stopped.recv_blocking().expect("host thread stopped");
+        drop(host);
+        std::fs::remove_dir_all(data_root).expect("remove test data");
+    }
+
     /// Command output is rendered by the host at the width a subscriber asked
     /// for: a finished command is answered once per width, and a running one
     /// is pushed again, coalesced, while its output grows, until the
