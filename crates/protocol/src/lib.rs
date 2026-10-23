@@ -189,12 +189,12 @@ pub use wire::{
 // members; and RevokeDevice removes a group member from every machine of the
 // group.
 //
-// Unreleased: a machine in a group pairs devices and machines with its
-// one-time invitation alone, so GroupAction loses RegenerateLink and
+// Version 17 (v0.3.0-rc.2): a machine in a group pairs devices and machines
+// with its one-time invitation alone, so GroupAction loses RegenerateLink and
 // SetLinkEnabled, Create and Join lose their device lists (every full-access
 // device is brought), GroupInfo loses its link fields and HostedDevice its
 // group mark.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 #[cfg(test)]
 mod tests;
