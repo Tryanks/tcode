@@ -116,32 +116,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run tests
-        if: matrix.task == 'tests' && runner.os == 'macOS'
+        if: matrix.task == 'tests' && runner.os != 'Linux'
         run: cargo nextest run --workspace --locked --profile ci
-
-      - name: Trace Windows test Git processes
-        if: matrix.task == 'tests' && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $trace = Join-Path $env:RUNNER_TEMP 'nextest-git-trace'
-          New-Item -ItemType Directory -Force $trace | Out-Null
-          (Get-Command git).Source | Set-Content (Join-Path $trace 'git-install.txt')
-          git version --build-options | Add-Content (Join-Path $trace 'git-install.txt')
-          git --exec-path | Add-Content (Join-Path $trace 'git-install.txt')
-          $env:GIT_TRACE2_EVENT = $trace
-          $env:GIT_TRACE2_ENV_VARS = 'NEXTEST_TEST_NAME,NEXTEST_BINARY_ID,NEXTEST_ATTEMPT_ID'
-          $env:GIT_TRACE2_CONFIG_PARAMS = 'core.fsmonitor,maintenance.auto'
-          cargo nextest run --workspace --locked --profile ci --no-fail-fast
-
-      - name: Upload Windows process trace
-        if: always() && matrix.task == 'tests' && runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-git-trace
-          path: |
-            ${{ runner.temp }}/nextest-git-trace
-            target/nextest/ci/junit.xml
-          retention-days: 7
 
       - name: Test iOS text input on the host
         if: matrix.task == 'tests' && runner.os == 'macOS'

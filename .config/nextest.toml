@@ -6,6 +6,3 @@ priority = 100
 [profile.ci]
 # Keep nextest's 200 ms threshold, but do not accept leaked output handles as a pass.
 leak-timeout = { period = "200ms", result = "fail" }
-
-[profile.ci.junit]
-path = "junit.xml"
