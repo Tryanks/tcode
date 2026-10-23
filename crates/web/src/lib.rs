@@ -111,6 +111,9 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                     ],
                     theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                     activate: true,
+                    // `sys_locale` reads nothing in a browser; the browser's
+                    // own language is the system one.
+                    system_locale: window().navigator().language(),
                     setup: tcode_ui::ShellSetup {
                         initial,
                         initial_pairing_error: None,
