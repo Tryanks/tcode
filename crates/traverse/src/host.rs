@@ -1400,6 +1400,9 @@ struct Hints {
     addrs: Vec<String>,
 }
 
+/// Only the selected direct path is kept: the other paths are candidates
+/// that may never have answered, and see [`Shared::this_machine`] for what
+/// a wrong candidate costs.
 fn connection_hints(connection: &Connection) -> Hints {
     let mut hints = Hints {
         relay: None,
@@ -1407,7 +1410,7 @@ fn connection_hints(connection: &Connection) -> Hints {
     };
     for path in connection.paths().iter() {
         match path.remote_addr() {
-            TransportAddr::Ip(addr) => hints.addrs.push(addr.to_string()),
+            TransportAddr::Ip(addr) if path.is_selected() => hints.addrs.push(addr.to_string()),
             TransportAddr::Relay(url) => hints.relay = Some(url.to_string()),
             _ => {}
         }
@@ -1472,21 +1475,20 @@ fn run_blocking<F: std::future::Future>(future: F) -> F::Output {
 }
 
 impl Shared {
+    /// This machine as it reports itself to the group: no direct addresses.
+    /// An interface address is only meaningful on its own network (every
+    /// Docker host's bridge is 172.17.0.1), and iroh 1.3 fails a whole dial,
+    /// relay included, when any candidate address is answered by a different
+    /// endpoint, then keeps failing for that id until the dialling endpoint
+    /// restarts. Members and devices get only addresses a connection to this
+    /// machine actually selected.
     fn this_machine(&self, identity: &HostIdentity, addr: &EndpointAddrSnapshot) -> GroupMachine {
-        let mut addrs: Vec<String> = self
-            .endpoint
-            .addr()
-            .ip_addrs()
-            .map(ToString::to_string)
-            .collect();
-        addrs.sort();
-        addrs.truncate(MAX_ADDRS);
         GroupMachine::new(
             addr.id.clone(),
             identity.host_name.clone(),
             self.traverse.clone(),
             addr.relay.clone(),
-            addrs,
+            Vec::new(),
         )
     }
 
@@ -1716,7 +1718,7 @@ impl Shared {
             secret: invite.secret.clone(),
             machine: joining,
         };
-        let (reply, _) =
+        let (reply, hints) =
             run_blocking(self.dial_group(&invite.host_id, invite.relay.as_deref(), &typed, &line))?;
         let joined = match reply {
             GroupLine::Joined { state }
@@ -1740,6 +1742,8 @@ impl Shared {
             ));
         }
         let previous = state.identity.clone();
+        let mut joined = joined;
+        joined.learn_hints(&invite.host_id, hints.relay, hints.addrs);
         state.identity.group = Some(GroupRecord {
             state: joined,
             declined: Vec::new(),
