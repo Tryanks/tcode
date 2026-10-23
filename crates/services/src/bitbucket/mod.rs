@@ -609,8 +609,8 @@ impl Forge for Bitbucket {
         repository::pull_request_url(url)
     }
 
-    fn checkout_repository(&self, cwd: &Path) -> Option<Repository> {
-        repository::resolve(cwd)
+    fn resolve_checkout(&self, checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
+        repository::resolve(checkout)
     }
 
     fn repository(&self, name: &str, _: &str) -> Option<Repository> {
@@ -630,7 +630,7 @@ impl Forge for Bitbucket {
         refresh: bool,
     ) -> Result<Option<Discovered>, ForgeError> {
         let cwd = if cwd.exists() { cwd } else { root };
-        let Some(target) = repository::resolve(root) else {
+        let Some(target) = repository::resolve(&crate::forge::Checkout::new(root)) else {
             return Ok(None);
         };
         let Some(branch) = repository::branch(cwd) else {

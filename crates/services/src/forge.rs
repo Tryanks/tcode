@@ -5,6 +5,7 @@
 
 pub(crate) mod anchors;
 pub(crate) mod checkout;
+pub use checkout::Checkout;
 mod http;
 mod rate_limit;
 #[cfg(test)]
@@ -74,7 +75,11 @@ pub trait Forge: Send + Sync {
     /// The key and canonical URL of a pull request's web URL, or `None` for any other URL.
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)>;
     /// The repository a checkout's remote names on the host.
-    fn checkout_repository(&self, cwd: &Path) -> Option<Repository>;
+    fn checkout_repository(&self, cwd: &Path) -> Option<Repository> {
+        self.resolve_checkout(&Checkout::new(cwd))
+    }
+    /// Resolve against the same remotes when routing a lookup through multiple hosts.
+    fn resolve_checkout(&self, checkout: &Checkout<'_>) -> Option<Repository>;
     /// A repository named as the host writes it, on `host`.
     fn repository(&self, name: &str, host: &str) -> Option<Repository>;
     /// The web URL of a pull request.
@@ -511,10 +516,10 @@ impl Forge for Hosts {
         })
     }
 
-    fn checkout_repository(&self, cwd: &Path) -> Option<Repository> {
+    fn resolve_checkout(&self, checkout: &Checkout<'_>) -> Option<Repository> {
         self.all().into_iter().find_map(|forge| {
             forge
-                .checkout_repository(cwd)
+                .resolve_checkout(checkout)
                 .filter(|repository| self.serves(forge, &repository.host))
         })
     }
@@ -678,6 +683,57 @@ impl Forge for Hosts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkout_routing_follows_git_init_and_remote_changes() {
+        let root = std::env::temp_dir().join(format!("tcode-checkout-{}", uuid::Uuid::new_v4()));
+        let cwd = root.join("checkout");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let forge = connect(SettingsStore::new(root.clone()), []);
+        let git = |args: &[&str]| {
+            let output = crate::process::command("git")
+                .current_dir(&cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        assert!(forge.checkout_repository(&cwd).is_none());
+        git(&["init", "-b", "main"]);
+        assert!(forge.checkout_repository(&cwd).is_none());
+        git(&["remote", "add", "origin", "https://github.com/team/app.git"]);
+        for (url, host, repository) in [
+            ("https://github.com/team/app.git", "github.com", "team/app"),
+            (
+                "https://codeberg.org/team/app.git",
+                "codeberg.org",
+                "team/app",
+            ),
+            ("https://gitlab.com/team/app.git", "gitlab.com", "team/app"),
+            (
+                "https://bitbucket.org/team/app.git",
+                "bitbucket.org",
+                "team/app",
+            ),
+            (
+                "https://dev.azure.com/team/project/_git/app",
+                "dev.azure.com/team",
+                "project/app",
+            ),
+        ] {
+            git(&["remote", "set-url", "origin", url]);
+            assert_eq!(
+                forge
+                    .checkout_repository(&cwd)
+                    .map(|repository| repository.key(1)),
+                Some(PullRequestKey::new(host, repository, 1)),
+                "{url}"
+            );
+        }
+        git(&["remote", "remove", "origin"]);
+        assert!(forge.checkout_repository(&cwd).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// A host that only rebases refuses a merge-style branch update before any request; a
     /// rebase passes the gate and reaches the host, here one turned off in settings.

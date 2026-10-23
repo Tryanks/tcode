@@ -2316,7 +2316,7 @@ fn a_partly_posted_review_keeps_only_unposted_drafts_for_the_next_submission() {
         fn pull_request_url(&self, _: &str) -> Option<(PullRequestKey, String)> {
             unreachable!()
         }
-        fn checkout_repository(&self, _: &Path) -> Option<Repository> {
+        fn resolve_checkout(&self, _: &tcode_services::forge::Checkout<'_>) -> Option<Repository> {
             unreachable!()
         }
         fn repository(&self, _: &str, _: &str) -> Option<Repository> {

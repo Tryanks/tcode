@@ -491,8 +491,9 @@ pub fn read_status(cwd: &Path) -> GitStatus {
         default_branch.as_deref(),
         has_origin_remote,
     );
-    status.github_repository = crate::github::repository::resolve(cwd)
-        .map(|repository| format!("{}/{}", repository.owner, repository.name));
+    status.github_repository =
+        crate::github::repository::resolve(&crate::forge::Checkout::new(cwd))
+            .map(|repository| format!("{}/{}", repository.owner, repository.name));
     status
 }
 

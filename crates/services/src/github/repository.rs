@@ -115,43 +115,31 @@ pub fn git_read(cwd: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn fetch_remotes(cwd: &Path) -> Vec<(String, String)> {
-    git_read(cwd, &["remote", "-v"])
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let name = parts.next()?;
-            let url = parts.next()?;
-            if parts.next()? != "(fetch)" {
-                return None;
-            }
-            Some((name.to_owned(), url.to_owned()))
-        })
-        .collect()
-}
-
 fn remotes(cwd: &Path) -> Vec<(String, Repository)> {
-    fetch_remotes(cwd)
-        .into_iter()
-        .filter_map(|(name, url)| Some((name, remote(&url)?.0)))
+    crate::forge::Checkout::new(cwd)
+        .remotes()
+        .iter()
+        .filter_map(|(name, url)| Some((name.clone(), remote(url)?.0)))
         .collect()
 }
 
-pub fn resolve(cwd: &Path) -> Option<Repository> {
+pub fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
     let default_host = std::env::var("GH_HOST").unwrap_or_else(|_| "github.com".into());
     if let Ok(value) = std::env::var("GH_REPO")
         && let Some(repository) = selector(&value, &default_host)
     {
         return Some(repository);
     }
-    let fetch = fetch_remotes(cwd);
+    let fetch = checkout.remotes();
     let remotes: Vec<_> = fetch
         .iter()
         .filter_map(|(name, url)| Some((name.clone(), remote(url)?.0)))
         .collect();
+    if remotes.is_empty() {
+        return None;
+    }
     let marks = git_read(
-        cwd,
+        checkout.cwd(),
         &["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
     )
     .unwrap_or_default();
@@ -208,7 +196,7 @@ pub struct BranchHead {
 pub fn branch_head(cwd: &Path) -> Option<BranchHead> {
     let cwd = cwd.canonicalize().ok()?;
     let branch = git_read(&cwd, &["symbolic-ref", "--short", "HEAD"])?;
-    let repository = resolve(&cwd)?;
+    let repository = resolve(&crate::forge::Checkout::new(&cwd))?;
     let refs = git_read(
         &cwd,
         &[

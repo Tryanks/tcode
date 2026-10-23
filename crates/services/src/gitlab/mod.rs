@@ -594,8 +594,8 @@ impl Forge for GitLab {
         repository::pull_request_url(&self.known(), url)
     }
 
-    fn checkout_repository(&self, cwd: &Path) -> Option<Repository> {
-        repository::resolve(&self.known(), cwd)
+    fn resolve_checkout(&self, checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
+        repository::resolve(&self.known(), checkout)
     }
 
     fn repository(&self, name: &str, host: &str) -> Option<Repository> {
@@ -616,7 +616,7 @@ impl Forge for GitLab {
     ) -> Result<Option<Discovered>, ForgeError> {
         let known = self.known();
         let cwd = if cwd.exists() { cwd } else { root };
-        let Some(target) = repository::resolve(&known, root) else {
+        let Some(target) = repository::resolve(&known, &crate::forge::Checkout::new(root)) else {
             return Ok(None);
         };
         let Some(branch) = repository::branch(&known, cwd) else {

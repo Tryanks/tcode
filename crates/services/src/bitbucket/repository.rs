@@ -91,8 +91,8 @@ pub(super) fn remote(value: &str) -> Option<Repository> {
     repository(&segments)
 }
 
-pub(super) fn resolve(cwd: &Path) -> Option<Repository> {
-    crate::forge::checkout::resolve(cwd, remote)
+pub(super) fn resolve(checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
+    crate::forge::checkout::resolve(checkout, remote)
 }
 
 pub(super) fn branch(cwd: &Path) -> Option<crate::forge::checkout::Branch> {
