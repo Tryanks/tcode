@@ -65,8 +65,10 @@ foreach ($threads in @(4, 8, 8, 4)) {
                 name = $process.ProcessName; exit_status = $process.ExitStatus
             }
         }) | ConvertTo-Json | Set-Content (Join-Path $out "$label-process-events.json")
-        foreach ($event in $events) { Remove-Event -EventIdentifier $event.EventIdentifier }
         $runs | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'results.json')
+        # Queue entries may already be gone; cleanup must not discard recorded results.
+        Remove-Event -SourceIdentifier $startId -ErrorAction SilentlyContinue
+        Remove-Event -SourceIdentifier $stopId -ErrorAction SilentlyContinue
         Write-Host '::endgroup::'
     }
 }
