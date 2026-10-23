@@ -21,19 +21,24 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  desktop:
-    name: ${{ matrix.name }}
+  desktop-work:
+    name: ${{ matrix.name }} / ${{ matrix.task }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        task: [clippy, tests]
+        platform: [linux, macos, windows]
         include:
-          - name: Linux x64
+          - platform: linux
+            name: Linux x64
             os: ubuntu-24.04
-          - name: macOS arm64
+          - platform: macos
+            name: macOS arm64
             os: macos-26
-          - name: Windows x64
+          - platform: windows
+            name: Windows x64
             os: windows-2022
     steps:
       - uses: actions/checkout@v7
@@ -49,23 +54,23 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Only main writes the cache so pull requests share one warm copy per
-      # platform instead of evicting each other from the repository quota.
+      # Check-mode artifacts differ from test builds. Keep each main job's
+      # cache separate so parallel saves cannot discard the other mode.
       - name: Cache Cargo build data
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-${{ runner.os }}-${{ runner.arch }}
+          shared-key: ci-${{ runner.os }}-${{ runner.arch }}${{ matrix.task == 'clippy' && '-clippy' || '' }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-nextest
-        if: runner.os != 'Windows'
+        if: matrix.task == 'tests' && runner.os != 'Windows'
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
 
       # Work around install-action's Windows bash startup failure (actions/partner-runner-images#169).
       - name: Install cargo-nextest on Windows
-        if: runner.os == 'Windows'
+        if: matrix.task == 'tests' && runner.os == 'Windows'
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'nextest.zip'
@@ -91,22 +96,41 @@ jobs:
             libvulkan-dev xvfb
 
       - name: Check formatting
+        if: matrix.task == 'clippy'
         run: cargo fmt --all --check
 
       - name: Run Clippy
+        if: matrix.task == 'clippy'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run tests
-        if: runner.os != 'Linux'
+        if: matrix.task == 'tests' && runner.os != 'Linux'
         run: cargo nextest run --workspace --locked
 
       - name: Test iOS text input on the host
-        if: runner.os == 'macOS'
+        if: matrix.task == 'tests' && runner.os == 'macOS'
         run: cargo test -p gpui-ios --lib --locked
 
       - name: Run tests under Xvfb
-        if: runner.os == 'Linux'
+        if: matrix.task == 'tests' && runner.os == 'Linux'
         run: xvfb-run -a cargo nextest run --workspace --locked
+
+  # Preserve the existing required check names. A skipped or cancelled worker
+  # must not let any desktop gate pass.
+  desktop:
+    name: ${{ matrix.name }}
+    needs: desktop-work
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        name: [Linux x64, macOS arm64, Windows x64]
+    steps:
+      - name: Require all desktop checks
+        env:
+          RESULT: ${{ needs.desktop-work.result }}
+        run: test "$RESULT" = success
 
   dependencies:
     name: Dependency hygiene

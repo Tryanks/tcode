@@ -581,8 +581,11 @@ mod tests {
             syntect::dumps::from_uncompressed_data(include_bytes!("../assets/syntaxes.bin"))
                 .expect("load shipped dump");
         let mut failures = Vec::new();
+        // Compilation depends only on the pattern, which many syntaxes share.
+        let mut checked = HashSet::new();
         for syntax in set.into_builder().syntaxes() {
             if let Some(first_line) = &syntax.first_line_match
+                && checked.insert(first_line.clone())
                 && let Some(err) = Regex::try_compile(first_line)
             {
                 failures.push(format!("{}: first_line_match: {err}", syntax.name));
@@ -597,7 +600,9 @@ mod tests {
                     } else {
                         pattern.regex.regex_str().to_string()
                     };
-                    if let Some(err) = Regex::try_compile(&probe) {
+                    if checked.insert(probe.clone())
+                        && let Some(err) = Regex::try_compile(&probe)
+                    {
                         failures.push(format!("{}: {err}", syntax.name));
                     }
                 }
