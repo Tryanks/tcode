@@ -1,4 +1,4 @@
-use tcode_client::host::{ClientHost, Transport, persistent_device_id};
+use tcode_client::host::{ClientHost, ClientPreferences, Transport, persistent_device_id};
 use tcode_client::pairing::PairedHost;
 use wasm_bindgen::{JsCast as _, JsValue};
 
@@ -103,6 +103,19 @@ impl ClientHost for WebHost {
 
     fn device_platform(&self) -> Option<String> {
         browser_platform(&user_agent()).map(str::to_owned)
+    }
+
+    fn load_preferences(&self) -> ClientPreferences {
+        storage()
+            .and_then(|storage| storage.get_item("tcode.preferences").ok().flatten())
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_preferences(&self, preferences: &ClientPreferences) {
+        if let (Some(storage), Ok(json)) = (storage(), serde_json::to_string(preferences)) {
+            let _ = storage.set_item("tcode.preferences", &json);
+        }
     }
 
     fn outbox_storage(
