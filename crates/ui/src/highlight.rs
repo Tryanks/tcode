@@ -543,9 +543,10 @@ mod tests {
         assert!(SYNTAX_SET.find_syntax_by_name("Plain Text").is_some());
     }
 
-    /// Mirror of syntect's private `substitute_backrefs_in_regex` with the
-    /// placeholder substituter its YAML loader validates patterns with; kept
-    /// in sync with `examples/sanitize_syntaxes.rs`.
+    /// syntect keeps `substitute_backrefs_in_regex` private, so the probe
+    /// substitutes back-references with the placeholder its YAML loader
+    /// validates patterns with, as `examples/sanitize_syntaxes.rs` does when it
+    /// regenerates the dump.
     fn substitute_backrefs(regex_str: &str) -> String {
         let mut result = String::with_capacity(regex_str.len());
         let mut last_was_escape = false;
