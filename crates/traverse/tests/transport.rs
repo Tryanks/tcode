@@ -1286,8 +1286,7 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     // Outside a group the file stays version 3, which older builds read.
     assert_eq!(persisted["v"], 3);
     assert_eq!(identity.policy_revision, 0);
-    // A version 3 file that had no policy revision yet: no group, every
-    // device paired directly.
+    // A version 3 file that had no policy revision yet loads with no group.
     let mut older_v3 = persisted.clone();
     older_v3.as_object_mut().unwrap().remove("policy_revision");
     std::fs::write(
@@ -1298,10 +1297,6 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     let v3 = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
     assert_eq!(v3.policy_revision, 0);
     assert!(v3.group.is_none());
-    assert_eq!(
-        v3.devices[0].origin,
-        tcode_traverse::identity::Origin::Direct
-    );
     v3.save().unwrap();
     let rewritten: Value =
         serde_json::from_slice(&std::fs::read(dir.0.join(HOST_FILE)).unwrap()).unwrap();

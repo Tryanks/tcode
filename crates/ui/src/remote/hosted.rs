@@ -145,7 +145,14 @@ impl HostedPanel {
                             ),
                             None => crate::tr!("remote.invite.expired"),
                         },
-                    ));
+                    ))
+                    .children(
+                        state
+                            .group
+                            .as_ref()
+                            .filter(|_| state.invite.is_some())
+                            .map(|group| super::group::invitation_note(&group.name, cx)),
+                    );
             let mut actions = h_flex().gap_2();
             if let Some(link) = state.invite.clone() {
                 actions = actions.child(
@@ -195,7 +202,12 @@ impl HostedPanel {
         }
         let group_name = state.group.as_ref().map(|group| group.name.clone());
         for device in state.devices {
-            let in_group = group_name.clone().filter(|_| device.group);
+            // In a group every full-access device is a member; a browser is
+            // listed under a UUID and never is.
+            let in_group = group_name.clone().filter(|_| {
+                device.access == tcode_protocol::DeviceAccess::Full
+                    && tcode_client::pairing::valid_host_id(&device.id)
+            });
             let space = match &device.access {
                 tcode_protocol::DeviceAccess::Space { space_id } => state
                     .spaces
@@ -222,8 +234,7 @@ impl HostedPanel {
                                 &device.name,
                                 device.platform.as_deref(),
                             )))
-                            .children(space.map(|name| super::spaces::member_badge(&name, cx)))
-                            .children(in_group.is_some().then(|| super::group::member_badge(cx))),
+                            .children(space.map(|name| super::spaces::member_badge(&name, cx))),
                     )
                     .child(
                         div()
