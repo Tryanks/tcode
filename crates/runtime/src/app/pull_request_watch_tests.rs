@@ -323,6 +323,10 @@ impl Harness {
         ] {
             self.events.try_send(event).unwrap();
         }
+        // The host's event pump queues each event for the host as it takes it,
+        // whether or not the host still acts on it.
+        let events = self.events.clone();
+        self.cx.run_until(|_| events.is_empty());
         self.cx.run_until_parked();
     }
 
@@ -837,7 +841,11 @@ fn a_wake_steers_into_a_running_turn_and_is_not_repeated() {
         .events
         .try_send(AgentEvent::TurnAccepted { delivery_id })
         .unwrap();
-    harness.cx.run_until_parked();
+    harness.cx.run_until(|state| {
+        state
+            .resident("thread")
+            .is_some_and(|session| session.delivery_in_flight.is_none() && session.turn_in_flight)
+    });
 
     harness.pass();
     let commands = harness.commands.clone();

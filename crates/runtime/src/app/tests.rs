@@ -340,13 +340,28 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
             state.load_background_session(meta, cx);
         }
     });
+    // The turn's end can show before its last reply is folded in.
+    let replies = |mirror: &ActiveSession| {
+        mirror
+            .timeline
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.content,
+                    EntryContent::Item(ItemContent::AssistantMessage { .. })
+                )
+            })
+            .count()
+    };
     cx.run_until(|state| {
         state.resident(&mirror_id).is_some_and(|mirror| {
-            mirror
-                .timeline
-                .turns
-                .first()
-                .is_some_and(|turn| turn.end_ts.is_some())
+            replies(mirror) == expected_items
+                && mirror
+                    .timeline
+                    .turns
+                    .first()
+                    .is_some_and(|turn| turn.end_ts.is_some())
         })
     });
     state.update(cx, |state, _| {
@@ -364,18 +379,6 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
                 .unwrap()
                 .activity
                 .working
-        );
-        assert_eq!(
-            mirror
-                .timeline
-                .entries
-                .iter()
-                .filter(|entry| matches!(
-                    entry.content,
-                    EntryContent::Item(ItemContent::AssistantMessage { .. })
-                ))
-                .count(),
-            expected_items
         );
     });
 }
@@ -9355,6 +9358,8 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
             &through_pipe(&state, cx, 1, subscribe_events("thread", None)),
             1,
         );
+        // The window can be served before the whole log is read and kept.
+        cx.run_until(|state| state.event_records.contains_key("thread"));
         let snapshot = |diff: &str| AgentEvent::TurnChangesUpdated {
             turn_id: "t".into(),
             changes: vec![agent::FileChange {
@@ -10279,9 +10284,10 @@ fn pages_and_outputs_of_a_thread_nobody_opened_are_read_and_not_kept() {
         query_reply(&through_pipe(&state, cx, 2, read_output), 2),
         QueryResponse::ItemOutput(output)
     );
+    // The bounded read answers first; the whole log's read finishes after.
+    cx.run_until(|state| state.log_hydrations.is_empty());
     state.read(|state| {
         assert!(state.resident("cold").is_none());
-        assert!(state.log_hydrations.is_empty());
         assert!(state.event_records.is_empty());
     });
 }
@@ -11511,7 +11517,7 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
     let op = |state: &TestEntity, cx: &mut TestAppContext, op| {
         let (reply, response) = smol::channel::bounded(1);
         state.update(cx, |state, cx| state.handle_orchestrate_op(op, reply, cx));
-        cx.run_until_parked();
+        cx.run_until(|_| !response.is_empty());
         response.try_recv().unwrap()
     };
     // Every run here started and ended at `stamp`.
