@@ -22,25 +22,6 @@ pub struct DeviceRecord {
     pub platform: Option<String>,
     pub created_unix: u64,
     pub access: DeviceGrant,
-    #[serde(default, skip_serializing_if = "Origin::is_direct")]
-    pub origin: Origin,
-}
-
-/// How a device came onto the allow list.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Origin {
-    /// Paired with this machine, or kept after the machine left its group.
-    #[default]
-    Direct,
-    /// Admitted because a member of this machine's group admitted it.
-    Group,
-}
-
-impl Origin {
-    fn is_direct(&self) -> bool {
-        *self == Origin::Direct
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +73,7 @@ struct HostFile {
 }
 
 /// A machine outside any group writes version 3, which an older build still
-/// reads; version 4 adds the group and each device's origin.
+/// reads; version 4 adds the group.
 const VERSION_WITHOUT_GROUP: u32 = 3;
 const VERSION: u32 = 4;
 
@@ -177,13 +158,8 @@ impl HostIdentity {
     }
 
     pub fn save(&self) -> io::Result<()> {
-        let grouped = self.group.is_some()
-            || self
-                .devices
-                .iter()
-                .any(|device| device.origin == Origin::Group);
         let file = HostFile {
-            v: if grouped {
+            v: if self.group.is_some() {
                 VERSION
             } else {
                 VERSION_WITHOUT_GROUP
@@ -218,14 +194,13 @@ impl HostIdentity {
                 platform,
                 created_unix: now_unix(),
                 access: DeviceGrant::Full,
-                origin: Origin::Direct,
             }),
         }
     }
 
     /// Bring the allow list in line with the group: admit its member
     /// devices (or, while `accept_new` is off, record them as declined) and
-    /// remove its removed ones, whatever their origin. A space member is
+    /// remove its removed ones, however they were paired. A space member is
     /// left as it is, and so is `local`, the device sharing this machine's
     /// data directory, which reaches it without the network. Returns the
     /// devices removed, whose connections the caller closes.
@@ -268,7 +243,6 @@ impl HostIdentity {
                         platform: device.platform.clone(),
                         created_unix: now_unix(),
                         access: DeviceGrant::Full,
-                        origin: Origin::Group,
                     });
                 }
                 _ => {}

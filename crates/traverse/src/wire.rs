@@ -104,9 +104,6 @@ pub enum ClientLine {
         device: DeviceClaim,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space: Option<String>,
-        /// Present with a group link's secret.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        group: Option<String>,
     },
     Hello {
         protocol_version: u32,
@@ -399,7 +396,6 @@ mod tests {
     fn control_lines_use_the_documented_shapes() {
         let pair = ClientLine::Pair {
             space: None,
-            group: None,
             secret: "AAECAwQFBgcICQoLDA0ODw".into(),
             device: DeviceClaim {
                 name: "Phone".into(),
