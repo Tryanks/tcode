@@ -35,6 +35,29 @@
   <script type="module">
     import init, { start } from './tcode_web.js';
     import { authorizeBrowser } from './auth.mjs';
+    // gpui-fast-web copies through navigator.clipboard without checking for
+    // it, and outside a secure context (http on a LAN address) there is none:
+    // the exception aborts the shell mid-event and freezes it. The copy
+    // command still works there inside the click that asks for it.
+    if (!navigator.clipboard) {
+      const refused = message => Promise.reject(new DOMException(message, 'NotAllowedError'));
+      Object.defineProperty(navigator, 'clipboard', { value: {
+        writeText(text) {
+          const copy = event => {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+            event.clipboardData.setData('text/plain', text);
+          };
+          document.addEventListener('copy', copy, { capture: true });
+          try {
+            return document.execCommand('copy') ? Promise.resolve() : refused('The browser refused to copy');
+          } finally {
+            document.removeEventListener('copy', copy, { capture: true });
+          }
+        },
+        read: () => refused('Reading the clipboard needs a secure context'),
+      } });
+    }
     try {
       await authorizeBrowser();
       await init();

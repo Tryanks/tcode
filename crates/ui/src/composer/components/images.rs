@@ -408,35 +408,42 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let mut accepted_image = false;
-        if let Some(item) = cx.read_from_clipboard() {
-            for entry in &item.entries {
-                match entry {
-                    ClipboardEntry::Image(image) => {
-                        let mime = image.format().mime_type().to_string();
-                        let bytes = image.bytes().to_vec();
-                        accepted_image |= self.add_image_bytes(
-                            "pasted-image".to_string(),
-                            mime,
-                            bytes,
-                            window,
-                            cx,
-                        );
-                    }
-                    ClipboardEntry::ExternalPaths(paths) => {
-                        for path in paths.paths() {
-                            if mime_from_path(path).starts_with("image/") {
-                                accepted_image |= self.add_image_path(path.clone(), window, cx);
-                            }
-                        }
-                    }
-                    ClipboardEntry::String(_) => {}
-                }
-            }
-        }
+        let mut accepted_image = cx
+            .read_from_clipboard()
+            .is_some_and(|item| self.paste_images(&item, window, cx));
         if !accepted_image && let Some((mime, bytes)) = crate::pasteboard::read_pasteboard_image() {
             accepted_image =
                 self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
+        }
+        accepted_image
+    }
+
+    /// Attach the images of a pasted clipboard item. Returns whether an image
+    /// was accepted.
+    pub(in super::super) fn paste_images(
+        &mut self,
+        item: &gpui::ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut accepted_image = false;
+        for entry in &item.entries {
+            match entry {
+                ClipboardEntry::Image(image) => {
+                    let mime = image.format().mime_type().to_string();
+                    let bytes = image.bytes().to_vec();
+                    accepted_image |=
+                        self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
+                }
+                ClipboardEntry::ExternalPaths(paths) => {
+                    for path in paths.paths() {
+                        if mime_from_path(path).starts_with("image/") {
+                            accepted_image |= self.add_image_path(path.clone(), window, cx);
+                        }
+                    }
+                }
+                ClipboardEntry::String(_) => {}
+            }
         }
         accepted_image
     }

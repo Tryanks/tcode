@@ -1,5 +1,5 @@
 //! Supplies native selection, UTF-16 length queries, and iOS paste action dispatch.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_family = "wasm"))]
 use gpui::Focusable as _;
 use gpui::{
     App, Bounds, ClipboardItem, ElementInputHandler, Entity, InputHandler, Pixels, Point,
@@ -87,7 +87,12 @@ impl<M: InputModeKind> InputHandler for ConfiguredInput<M> {
                 focus.dispatch_action(&gpui_base::input::Paste, window, cx);
             });
         }
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(target_family = "wasm")]
+        {
+            let focus = self.entity.read(cx).focus_handle(cx);
+            focus.dispatch_action(&super::BrowserPaste(item), window, cx);
+        }
+        #[cfg(not(any(target_os = "ios", target_family = "wasm")))]
         self.inner.paste(item, window, cx)
     }
     fn bounds_for_range(
