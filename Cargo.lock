@@ -11339,7 +11339,7 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "web-time",
- "windows 0.58.0",
+ "windows 0.62.2",
 ]
 
 [[package]]
