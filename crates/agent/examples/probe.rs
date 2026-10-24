@@ -38,6 +38,8 @@ enum ProbeMode {
     Interrupt(Duration),
     Steer(String),
     Image(Attachment),
+    /// The prompt is the objective of a goal rather than a turn.
+    Goal,
 }
 
 fn usage() -> ! {
@@ -164,7 +166,7 @@ fn parse_provider(arg: Option<&str>) -> ProviderKind {
 
 fn set_mode(mode: &mut ProbeMode, replacement: ProbeMode) {
     if !matches!(mode, ProbeMode::Standard) {
-        eprintln!("use only one of --interrupt-after, --steer, and --image");
+        eprintln!("use only one of --interrupt-after, --steer, --image and --goal");
         std::process::exit(2);
     }
     *mode = replacement;
@@ -264,6 +266,7 @@ fn main() {
                 )));
             }
             "--fork" => fork = true,
+            "--goal" => set_mode(&mut probe_mode, ProbeMode::Goal),
             "--leave-questions" => leave_questions = true,
             "--linger" => {
                 let seconds = args.next().and_then(|value| value.parse().ok());
@@ -424,14 +427,22 @@ async fn run_probe(
         ProbeMode::Image(attachment) => vec![attachment.clone()],
         _ => Vec::new(),
     };
-    handle
-        .commands
-        .send(SessionCommand::SendTurn {
+    let first = if matches!(probe_mode, ProbeMode::Goal) {
+        SessionCommand::SetGoal {
+            objective: Some(prompt),
+            status: None,
+        }
+    } else {
+        SessionCommand::SendTurn {
             delivery_id: 0,
             text: prompt,
             options: Some(TurnOptions { effort }),
             attachments,
-        })
+        }
+    };
+    handle
+        .commands
+        .send(first)
         .await
         .expect("session command channel closed before first turn");
 
@@ -668,7 +679,7 @@ async fn run_probe(
             println!("session closed");
             i32::from(first_status != Some(TurnStatus::Completed))
         }
-        ProbeMode::Standard => i32::from(first_status.is_none()),
+        ProbeMode::Standard | ProbeMode::Goal => i32::from(first_status.is_none()),
         ProbeMode::Interrupt(_) => match first_status {
             Some(TurnStatus::Interrupted) => {
                 eprintln!("OK: turn was interrupted");

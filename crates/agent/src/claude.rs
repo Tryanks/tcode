@@ -32,11 +32,12 @@ use smol::prelude::*;
 use smol::process::Stdio;
 
 pub use crate::claude_context::{CONTEXT_WINDOW_SUFFIXES, strip_context_window_suffix};
+use crate::claude_goal::GoalTranscript;
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
     ApprovalRequest, Attachment, CatalogRefresh, ClassifierCategory, DeltaKind, FileChange,
-    FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
+    FileChangeKind, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
     ResumeCursor, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
     TokenUsage, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion, selection_bool,
@@ -240,6 +241,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
             })
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .map(|home| home.join(".claude")),
+        resumed: opts.resume.is_some(),
     };
     smol::spawn(actor_loop(
         child,
@@ -467,7 +469,14 @@ impl ClaudeLaunchOptions {
 /// Per-session config threaded into the actor loop / mapper.
 struct SessionConfig {
     claude_dir: Option<PathBuf>,
+    /// The transcript already holds history this process did not write.
+    resumed: bool,
 }
+
+/// The CLI appends transcript records shortly after the stdout lines they
+/// accompany, so goal records are polled for a while after each line.
+const GOAL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+const GOAL_POLL_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
 fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
     let Some(session_id) = resume
@@ -502,6 +511,9 @@ async fn actor_loop(
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
     let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
+    let mut goal: Option<GoalTranscript> = None;
+    // (next read, last read) while goal records may still be arriving.
+    let mut goal_poll: Option<(std::time::Instant, std::time::Instant)> = None;
 
     // Set when the child died on its own (stdout EOF): only then do its exit
     // status and stderr tail belong in the close reason.
@@ -509,15 +521,48 @@ async fn actor_loop(
     let closed_reason: Option<String> = loop {
         // Race a UI command against the next stdout line. `or` biases toward the
         // command channel, which is fine: both channels make independent progress.
+        let next_goal_read = goal_poll.map(|(next, _)| next);
         let sel = smol::future::or(
             async { Sel::Cmd(cmd_rx.recv().await.ok()) },
-            smol::future::or(async { Sel::Line(line_rx.recv().await.ok()) }, async {
-                Sel::Tail(tail_rx.recv().await.ok())
-            }),
+            smol::future::or(
+                async { Sel::Line(line_rx.recv().await.ok()) },
+                smol::future::or(async { Sel::Tail(tail_rx.recv().await.ok()) }, async {
+                    match next_goal_read {
+                        Some(at) => {
+                            smol::Timer::at(at).await;
+                            Sel::GoalRead
+                        }
+                        None => std::future::pending().await,
+                    }
+                }),
+            ),
         )
         .await;
 
         match sel {
+            Sel::GoalRead => {
+                if let Some(mut reader) = goal.take() {
+                    let (reader, changed) = crate::process::unblock(move || {
+                        let changed = reader.read_appended();
+                        (reader, changed)
+                    })
+                    .await;
+                    goal = Some(reader);
+                    if let Some(goal) = changed
+                        && event_tx
+                            .send(AgentEvent::GoalUpdated { goal })
+                            .await
+                            .is_err()
+                    {
+                        let _ = child.kill();
+                        return;
+                    }
+                }
+                let now = std::time::Instant::now();
+                goal_poll = goal_poll
+                    .filter(|(_, until)| now < *until)
+                    .map(|(_, until)| (now + GOAL_POLL_INTERVAL, until));
+            }
             Sel::Tail(notice) => {
                 // The sender side is owned by this loop, so it can't close.
                 let Some(notice) = notice else { continue };
@@ -532,8 +577,15 @@ async fn actor_loop(
                 }
             }
             Sel::Cmd(Some(command)) => {
-                if let ControlFlow::Break(reason) =
-                    handle_command(command, &mut mapper, &mut stdin, &event_tx, &mut child).await
+                if let ControlFlow::Break(reason) = handle_command(
+                    command,
+                    &mut mapper,
+                    goal.as_mut(),
+                    &mut stdin,
+                    &event_tx,
+                    &mut child,
+                )
+                .await
                 {
                     break Some(reason.into());
                 }
@@ -560,6 +612,22 @@ async fn actor_loop(
                 }
                 for write in mapper.take_outgoing() {
                     let _ = write_line(&mut stdin, &write).await;
+                }
+                if let (Some(root), Some(session_id)) = (&claude_dir, mapper.session_id.as_deref())
+                {
+                    if goal
+                        .as_ref()
+                        .is_none_or(|reader| reader.session_id() != session_id)
+                    {
+                        goal = Some(GoalTranscript::new(
+                            root.clone(),
+                            session_id.to_owned(),
+                            config.resumed,
+                        ));
+                    }
+                    let now = std::time::Instant::now();
+                    let next = goal_poll.map_or(now, |(next, _)| next);
+                    goal_poll = Some((next, now + GOAL_POLL_WINDOW));
                 }
                 process_tail_requests(
                     mapper.take_tail_requests(),
@@ -614,6 +682,7 @@ async fn actor_loop(
 }
 
 enum Sel {
+    GoalRead,
     Cmd(Option<SessionCommand>),
     Line(Option<String>),
     Tail(Option<SubagentTailNotice>),
@@ -755,9 +824,35 @@ pub(crate) async fn run_subagent_tail(
     }
 }
 
+/// Run one of the CLI's slash commands the way stream-json input does: as a
+/// user message that opens a turn.
+async fn slash_command_turn(
+    command: &str,
+    mapper: &mut Mapper,
+    stdin: &mut smol::process::ChildStdin,
+    event_tx: &smol::channel::Sender<AgentEvent>,
+) -> ControlFlow<&'static str> {
+    if write_line(stdin, &user_message(command, &[]))
+        .await
+        .is_err()
+    {
+        let _ = event_tx
+            .send(AgentEvent::Error {
+                message: format!("failed to write {command} to provider stdin"),
+                fatal: true,
+            })
+            .await;
+        return ControlFlow::Break("provider stdin write failed");
+    }
+    let turn_id = mapper.start_turn();
+    let _ = event_tx.send(AgentEvent::TurnStarted { turn_id }).await;
+    ControlFlow::Continue(())
+}
+
 async fn handle_command(
     command: SessionCommand,
     mapper: &mut Mapper,
+    goal: Option<&mut GoalTranscript>,
     stdin: &mut smol::process::ChildStdin,
     event_tx: &smol::channel::Sender<AgentEvent>,
     child: &mut smol::process::Child,
@@ -794,22 +889,33 @@ async fn handle_command(
         // The CLI runs its `/compact` slash command from a stream-json user
         // message as a turn of its own: `status: compacting`, then
         // `compact_boundary` (trigger `manual`) and a `result`.
-        SessionCommand::Compact => {
-            if write_line(stdin, &user_message("/compact", &[]))
-                .await
-                .is_err()
-            {
-                let _ = event_tx
-                    .send(AgentEvent::Error {
-                        message: "failed to write compaction request to provider stdin".into(),
-                        fatal: true,
-                    })
-                    .await;
-                return ControlFlow::Break("provider stdin write failed");
+        SessionCommand::Compact => slash_command_turn("/compact", mapper, stdin, event_tx).await,
+        // `/goal` runs as a turn of its own too; with a new goal the CLI asks
+        // the model to start on it in that turn.
+        SessionCommand::SetGoal {
+            objective: Some(objective),
+            status: None | Some(GoalStatus::Active),
+        } => slash_command_turn(&format!("/goal {objective}"), mapper, stdin, event_tx).await,
+        // Pausing is not offered: `Caps::goals` has no pause for Claude Code.
+        SessionCommand::SetGoal { .. } => ControlFlow::Continue(()),
+        // A met or impossible goal is already gone from the CLI; only the
+        // record of it is left to dismiss.
+        SessionCommand::ClearGoal
+            if goal
+                .as_ref()
+                .and_then(|reader| reader.goal())
+                .is_some_and(|goal| {
+                    matches!(goal.status, GoalStatus::Complete | GoalStatus::Blocked)
+                }) =>
+        {
+            if let Some(reader) = goal {
+                reader.dismiss();
             }
-            let turn_id = mapper.start_turn();
-            let _ = event_tx.send(AgentEvent::TurnStarted { turn_id }).await;
+            let _ = event_tx.send(AgentEvent::GoalUpdated { goal: None }).await;
             ControlFlow::Continue(())
+        }
+        SessionCommand::ClearGoal => {
+            slash_command_turn("/goal clear", mapper, stdin, event_tx).await
         }
         SessionCommand::RespondApproval {
             request_id,

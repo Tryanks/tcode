@@ -6697,6 +6697,7 @@ mod tests {
             },
             stopping: false,
             turn_retry: None,
+            goal: None,
             native_rewind_blocked: false,
             checkout_blocked: false,
             conversation_read_only: false,

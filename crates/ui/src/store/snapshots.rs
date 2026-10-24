@@ -54,6 +54,7 @@ pub struct ComposerState {
     pub options_pending_restart: bool,
 
     pub token_usage: Option<agent::TokenUsage>,
+    pub goal: Option<agent::Goal>,
     /// Account rate-limit windows for the profile driving this session.
     pub usage: Option<tcode_core::usage::ProviderUsage>,
     pub provider: Option<agent::ProviderKind>,
@@ -159,6 +160,7 @@ pub(crate) fn composer_state(
             .unwrap_or_default(),
         options_pending_restart: status.is_some_and(|status| status.options_pending_restart),
         token_usage,
+        goal: status.and_then(|status| status.goal.clone()),
         usage,
         provider,
         queue: status.map(|status| ComposerQueue {
@@ -241,6 +243,7 @@ mod tests {
             },
             stopping: false,
             turn_retry: None,
+            goal: None,
             native_rewind_blocked: false,
             checkout_blocked: false,
             conversation_read_only: false,

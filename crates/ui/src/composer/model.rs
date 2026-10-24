@@ -11,6 +11,43 @@ use crate::palette::fuzzy_score;
 pub(super) enum SlashIntent {
     Model,
     Compact,
+    Goal(GoalIntent),
+}
+
+/// What a `/goal` the composer runs itself asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum GoalIntent {
+    Set(String),
+    Clear,
+    Pause,
+    Resume,
+    /// Bare `/goal` or `/goal edit`: put the current objective up for editing.
+    Edit,
+}
+
+/// The harness's goal control when `/goal` is Tcode's to run. A harness whose
+/// goal change is a turn of its own takes it only between turns; otherwise the
+/// text reaches the provider as typed.
+pub(super) fn goal_offered(state: &crate::store::ComposerState) -> Option<agent::GoalControl> {
+    let control = state.provider?.caps().goals?;
+    (!state.conversation_read_only && (control.live || !state.turn_running && !state.stopping))
+        .then_some(control)
+}
+
+/// `pause` and `resume` are subcommands only where the goal can be paused;
+/// elsewhere they are an objective like any other, as the harness reads them.
+pub(super) fn parse_goal(text: &str, control: agent::GoalControl) -> Option<GoalIntent> {
+    let rest = text.trim().strip_prefix("/goal")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(match rest.trim() {
+        "" | "edit" => GoalIntent::Edit,
+        "clear" => GoalIntent::Clear,
+        "pause" if control.pause => GoalIntent::Pause,
+        "resume" if control.pause => GoalIntent::Resume,
+        objective => GoalIntent::Set(objective.to_owned()),
+    })
 }
 
 /// Whether `/compact` is Tcode's to run: the provider compacts on request and
@@ -136,11 +173,17 @@ pub(crate) fn format_countdown(secs: u64) -> String {
     }
 }
 
-pub(super) fn slash_command(text: &str, compact_offered: bool) -> Option<SlashIntent> {
+pub(super) fn slash_command(
+    text: &str,
+    compact_offered: bool,
+    goal_offered: Option<agent::GoalControl>,
+) -> Option<SlashIntent> {
     match text.trim() {
         "/model" => Some(SlashIntent::Model),
         "/compact" if compact_offered => Some(SlashIntent::Compact),
-        _ => None,
+        text => goal_offered
+            .and_then(|control| parse_goal(text, control))
+            .map(SlashIntent::Goal),
     }
 }
 
@@ -186,6 +229,8 @@ pub(super) enum MenuAccept {
     InsertLater,
     /// Ask the provider to compact its context now.
     CompactContext,
+    /// Insert the goal command prefix.
+    InsertGoal,
     /// Strip the `/model` command and open the model picker.
     OpenModelPicker,
 }
@@ -523,6 +568,29 @@ mod tests {
             assert_eq!(parse_later(command, now), Some(Err(error)), "{command}");
         }
         assert_eq!(parse_later("/laters 5min x", now), None);
+    }
+
+    /// Codex's `/goal` takes `pause` and `resume`; Claude Code's reads any
+    /// word as the condition, so there they are sent on as one.
+    #[test]
+    fn goal_subcommands_follow_what_the_harness_can_do() {
+        let [claude, codex] = [agent::ProviderKind::ClaudeCode, agent::ProviderKind::Codex]
+            .map(|provider| provider.caps().goals.unwrap());
+        let goal = |text, control| parse_goal(text, control);
+        assert_eq!(
+            goal("/goal  ship the strip ", codex),
+            Some(GoalIntent::Set("ship the strip".into()))
+        );
+        assert_eq!(goal("/goal clear", claude), Some(GoalIntent::Clear));
+        assert_eq!(goal("/goal", claude), Some(GoalIntent::Edit));
+        assert_eq!(goal("/goal pause", codex), Some(GoalIntent::Pause));
+        assert_eq!(goal("/goal resume", codex), Some(GoalIntent::Resume));
+        assert_eq!(
+            goal("/goal pause", claude),
+            Some(GoalIntent::Set("pause".into()))
+        );
+        assert_eq!(goal("/goals", codex), None);
+        assert_eq!(goal("ship /goal", codex), None);
     }
 
     #[test]

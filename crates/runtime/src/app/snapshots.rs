@@ -1149,6 +1149,7 @@ impl AppState {
             turn_retry: matches!(session.runtime, Runtime::Live(_))
                 .then(|| session.timeline.turn_retry.clone())
                 .flatten(),
+            goal: session.timeline.goal.clone(),
             native_rewind_blocked: self.native_rewind_blocked(session),
             checkout_blocked: Self::checkout_blocked(session),
             conversation_read_only: Self::conversation_read_only(meta),

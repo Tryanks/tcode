@@ -50,10 +50,9 @@ impl AppState {
         }
     }
 
-    /// Whether a compaction was asked for while the provider was starting; clears it.
-    fn take_requested_compaction(&mut self, session_id: &str) -> bool {
-        self.resident_mut(session_id)
-            .is_some_and(|resident| std::mem::take(&mut resident.compact_requested))
+    /// The command asked for while the provider was starting; clears it.
+    fn take_requested_command(&mut self, session_id: &str) -> Option<SessionCommand> {
+        self.resident_mut(session_id)?.requested_command.take()
     }
 
     /// Spawn the provider process for the active session if it isn't running.
@@ -234,8 +233,8 @@ impl AppState {
                                     state.pending_native_rewinds.remove(&session_id);
                                     state.report_error(RuntimeError::ProcessGone, cx);
                                 }
-                            } else if state.take_requested_compaction(&session_id) {
-                                if commands.try_send(SessionCommand::Compact).is_err() {
+                            } else if let Some(command) = state.take_requested_command(&session_id) {
+                                if commands.try_send(command).is_err() {
                                     state.report_error(RuntimeError::ProcessGone, cx);
                                 }
                             } else if state.dispatch_next_queued(&session_id, cx).is_err() {
@@ -255,8 +254,8 @@ impl AppState {
                                     state.pending_native_rewinds.remove(&session_id);
                                     state.report_error(RuntimeError::ProcessGone, cx);
                                 }
-                            } else if state.take_requested_compaction(&session_id) {
-                                if commands.try_send(SessionCommand::Compact).is_err() {
+                            } else if let Some(command) = state.take_requested_command(&session_id) {
+                                if commands.try_send(command).is_err() {
                                     state.report_error(RuntimeError::ProcessGone, cx);
                                 }
                             } else {

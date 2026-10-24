@@ -15,6 +15,8 @@ mod actor;
 #[cfg(feature = "process")]
 pub mod claude;
 mod claude_context;
+#[cfg(feature = "process")]
+mod claude_goal;
 mod claude_manifest;
 #[cfg(feature = "process")]
 mod claude_plugins;
@@ -71,6 +73,9 @@ pub struct Caps {
     pub native_rewind: bool,
     /// The harness compacts its context on request ([`SessionCommand::Compact`]).
     pub manual_compaction: bool,
+    /// How the harness's standing goal is driven ([`SessionCommand::SetGoal`]),
+    /// when it has one.
+    pub goals: Option<GoalControl>,
     pub per_turn_effort: bool,
     pub options_apply_live: bool,
     pub live_option_push: LiveOptionPush,
@@ -87,6 +92,16 @@ pub struct Caps {
     pub plugin_management: PluginManagement,
     /// Where [`SessionOptions::instructions`] reach the model.
     pub instruction_channel: InstructionChannel,
+}
+
+/// What a harness lets a client do with its standing goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoalControl {
+    /// The goal can be paused and resumed without clearing it.
+    pub pause: bool,
+    /// A change applies out of band, even while a turn runs. Otherwise the
+    /// change is a turn of its own, as Claude Code's `/goal` slash command is.
+    pub live: bool,
 }
 
 /// The provider's own channel for instructions a host gives the model alongside the conversation.
@@ -151,6 +166,10 @@ impl ProviderKind {
                 supports_fork: true,
                 native_rewind: true,
                 manual_compaction: true,
+                goals: Some(GoalControl {
+                    pause: false,
+                    live: false,
+                }),
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
@@ -177,6 +196,10 @@ impl ProviderKind {
                 supports_fork: true,
                 native_rewind: false,
                 manual_compaction: true,
+                goals: Some(GoalControl {
+                    pause: true,
+                    live: true,
+                }),
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
@@ -203,6 +226,7 @@ impl ProviderKind {
                 supports_fork: false,
                 native_rewind: false,
                 manual_compaction: false,
+                goals: None,
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
@@ -222,6 +246,7 @@ impl ProviderKind {
                 supports_fork: false,
                 native_rewind: false,
                 manual_compaction: true,
+                goals: None,
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
@@ -239,6 +264,7 @@ impl ProviderKind {
                 supports_fork: false,
                 native_rewind: false,
                 manual_compaction: false,
+                goals: None,
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
@@ -256,6 +282,7 @@ impl ProviderKind {
                 supports_fork: false,
                 native_rewind: false,
                 manual_compaction: false,
+                goals: None,
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
@@ -273,6 +300,7 @@ impl ProviderKind {
                 supports_fork: true,
                 native_rewind: false,
                 manual_compaction: false,
+                goals: None,
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
@@ -1594,6 +1622,17 @@ pub enum SessionCommand {
     /// warn and ignore it, and the UI offers it only where
     /// [`Caps::manual_compaction`] is set.
     Compact,
+    /// Set, replace or change the status of the harness's standing goal the
+    /// way its own `/goal` does (Codex `thread/goal/set`, Claude Code's `/goal`
+    /// slash command). `None` keeps the current value. The provider reports
+    /// the result as [`AgentEvent::GoalUpdated`]; the UI offers it only where
+    /// [`Caps::goals`] is set.
+    SetGoal {
+        objective: Option<String>,
+        status: Option<GoalStatus>,
+    },
+    /// Clear the standing goal (Codex `thread/goal/clear`, `/goal clear`).
+    ClearGoal,
     Shutdown,
 }
 
@@ -1896,6 +1935,12 @@ pub enum AgentEvent {
         explanation: Option<String>,
         steps: Vec<PlanStep>,
     },
+    /// The harness's standing goal changed (Codex `thread/goal/updated` and
+    /// `thread/goal/cleared`, Claude Code's `goal_status` transcript records).
+    /// Replaces the session's goal wholesale; `None` means there is none.
+    GoalUpdated {
+        goal: Option<Goal>,
+    },
     /// History-only: retained to decode stored proposed-plan deltas; never emitted.
     ProposedPlanDelta {
         item_id: String,
@@ -1938,6 +1983,39 @@ pub enum PlanStepStatus {
     Pending,
     InProgress,
     Completed,
+}
+
+/// An objective the harness keeps working toward across turns until it is
+/// met, paused or cleared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Goal {
+    pub objective: String,
+    pub status: GoalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_used_secs: Option<u64>,
+    /// How many times the harness has checked the objective against the work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<u32>,
+    /// The latest check's verdict, when the harness explains it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    /// The harness judged it cannot make progress (Codex `blocked`, a Claude
+    /// Code check that found the objective impossible).
+    Blocked,
+    UsageLimited,
+    BudgetLimited,
+    Complete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -413,6 +413,8 @@ impl SessionActor for OpenCodeActor {
             }
             SessionCommand::RetryTurn { .. }
             | SessionCommand::SetOption { .. }
+            | SessionCommand::SetGoal { .. }
+            | SessionCommand::ClearGoal
             | SessionCommand::Shutdown => Ok(()),
         }
     }

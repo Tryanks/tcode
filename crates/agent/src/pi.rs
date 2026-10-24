@@ -460,6 +460,8 @@ impl SessionActor for PiActor {
             .map_err(|err| err.to_string()),
             SessionCommand::RetryTurn { .. }
             | SessionCommand::SetOption { .. }
+            | SessionCommand::SetGoal { .. }
+            | SessionCommand::ClearGoal
             | SessionCommand::Shutdown => Ok(()),
         }
     }

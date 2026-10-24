@@ -817,7 +817,40 @@ impl AppState {
                 .try_send(SessionCommand::Compact)
                 .map_err(provider_command_error),
             Runtime::Idle | Runtime::Starting { .. } => {
-                active.compact_requested = true;
+                active.requested_command = Some(SessionCommand::Compact);
+                self.ensure_started(target_id, cx);
+                Ok(())
+            }
+        }
+    }
+
+    /// A goal change ([`SessionCommand::SetGoal`] or
+    /// [`SessionCommand::ClearGoal`]). A harness whose change is a turn of its
+    /// own is held to the same rule as compaction; an idle provider is started
+    /// first and takes the change once it is live.
+    pub fn change_goal(
+        &mut self,
+        target_id: &str,
+        command: SessionCommand,
+        cx: &mut HostCx,
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let Some(active) = self.resident_mut(target_id) else {
+            return Err(provider_command_error("The thread is not open."));
+        };
+        let Some(control) = active.meta.provider.caps().goals else {
+            return Err(provider_command_error("This provider has no goal."));
+        };
+        if !control.live
+            && (active.turn_in_flight
+                || active.delivery_in_flight.is_some()
+                || active.timeline.turn_running)
+        {
+            return Err(provider_command_error("A turn is still running."));
+        }
+        match &active.runtime {
+            Runtime::Live(commands) => commands.try_send(command).map_err(provider_command_error),
+            Runtime::Idle | Runtime::Starting { .. } => {
+                active.requested_command = Some(command);
                 self.ensure_started(target_id, cx);
                 Ok(())
             }

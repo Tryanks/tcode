@@ -464,6 +464,16 @@ pub enum Command {
     CompactContext {
         session_id: String,
     },
+    /// Set, replace, pause or resume the harness's standing goal; only offered
+    /// where the provider has one (`Caps::goals`). `None` keeps the value.
+    SetGoal {
+        session_id: String,
+        objective: Option<String>,
+        status: Option<agent::GoalStatus>,
+    },
+    ClearGoal {
+        session_id: String,
+    },
     RespondApproval {
         session_id: String,
         request_id: String,
@@ -591,6 +601,8 @@ impl Command {
             | Self::RetryTurn { session_id, .. }
             | Self::Interrupt { session_id, .. }
             | Self::CompactContext { session_id, .. }
+            | Self::SetGoal { session_id, .. }
+            | Self::ClearGoal { session_id, .. }
             | Self::RespondApproval { session_id, .. }
             | Self::RespondUserInput { session_id, .. }
             | Self::SetActiveModel { session_id, .. }
