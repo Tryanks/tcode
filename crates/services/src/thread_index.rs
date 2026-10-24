@@ -250,6 +250,7 @@ pub enum Marker {
     ContextCompacted,
     ModelChanged { from: Option<String>, to: String },
     Rewind,
+    ControlAction { actor: String, action: String },
 }
 
 const HEAD_CHARS: usize = 200;
@@ -451,6 +452,7 @@ impl Activity {
             EntryContent::ProviderRelay { .. }
             | EntryContent::ModelChanged { .. }
             | EntryContent::ContextCompacted(_)
+            | EntryContent::ControlAction(_)
             | EntryContent::ContextWindowChanged { .. } => {}
         }
     }
@@ -535,6 +537,10 @@ fn summarize_turn(
                     compactions.1 += 1;
                 }
             }
+            EntryContent::ControlAction(action) => summary.markers.push(Marker::ControlAction {
+                actor: action.actor_title.clone(),
+                action: action.action.clone(),
+            }),
             _ => {}
         }
         activity.observe(&entry.content);
@@ -1292,6 +1298,13 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
         EntryContent::ContextWindowChanged { window } => {
             ("context_window_changed", format!("context window {window}"))
         }
+        EntryContent::ControlAction(action) => (
+            "control_action",
+            match &action.detail {
+                Some(detail) => format!("{}: {} ({detail})", action.actor_title, action.action),
+                None => format!("{}: {}", action.actor_title, action.action),
+            },
+        ),
     }
 }
 
