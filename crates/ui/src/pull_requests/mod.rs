@@ -47,7 +47,10 @@ pub use stack::present_result as present_stack_result;
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace=tcode_pull_requests,no_json)]
 pub struct LinkUrl(pub String);
-gpui::actions!(tcode_pull_requests, [OpenLinkDialog, OpenSourceControl]);
+gpui::actions!(
+    tcode_pull_requests,
+    [OpenLinkDialog, OpenSourceControl, ShowAgentTools]
+);
 
 fn appearance(state: PullRequestBadgeState, cx: &App) -> (IconName, Hsla, &'static str) {
     match state {
@@ -1298,17 +1301,154 @@ impl PullRequestsPanel {
             .into_any_element()
     }
 }
+/// Every tool and text Tcode injects into a thread's provider, grouped by the
+/// server that offers it.
+pub(crate) fn agent_sees_body(
+    tools: &tcode_protocol::InjectedTools,
+    id: &str,
+    cx: &App,
+) -> gpui::Div {
+    let muted = cx.theme().muted_foreground;
+    let caption = |text: String| div().text_caption(cx).child(text);
+    let tool = |(name, description): &(String, String)| {
+        v_flex()
+            .gap_0p5()
+            .child(
+                div()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(name.clone()),
+            )
+            .child(div().text_color(muted).child(description.clone()))
+    };
+    let mut body = v_flex()
+        .gap(cx.theme().tokens.spacing.sm)
+        .text_token(&cx.theme().tokens.typography.xs)
+        .child(caption(
+            crate::tr!("pull_requests.agent_tools").into_owned(),
+        ));
+    let listed: usize = tools.servers.iter().map(|server| server.tools).sum();
+    if listed == tools.tools.len() {
+        let mut rest = tools.tools.as_slice();
+        for server in &tools.servers {
+            let (own, next) = rest.split_at(server.tools);
+            rest = next;
+            body = body
+                .child(
+                    div()
+                        .pt(cx.theme().tokens.spacing.xs)
+                        .text_caption(cx)
+                        .child(crate::tr!(
+                            "pull_requests.channel_mcp_server",
+                            name = server.name.as_str()
+                        )),
+                )
+                .children(own.iter().map(tool));
+        }
+    } else {
+        body = body.children(tools.tools.iter().map(tool));
+    }
+    body.when(!tools.attached, |body| {
+        body.child(caption(
+            crate::tr!("pull_requests.agent_not_attached").into_owned(),
+        ))
+    })
+    .when(!tools.instructions.is_empty(), |body| {
+        body.child(caption(
+            crate::tr!("pull_requests.agent_instructions").into_owned(),
+        ))
+    })
+    .children(
+        tools
+            .instructions
+            .iter()
+            .enumerate()
+            .map(|(index, injected)| {
+                use agent::InstructionChannel;
+                use tcode_protocol::InjectedChannel;
+                let channel = match &injected.channel {
+                    InjectedChannel::Linking(InstructionChannel::SessionAppend) => {
+                        crate::tr!("pull_requests.channel_system").into_owned()
+                    }
+                    InjectedChannel::Linking(InstructionChannel::PerPromptSystem) => {
+                        crate::tr!("pull_requests.channel_system_per_prompt").into_owned()
+                    }
+                    InjectedChannel::Linking(InstructionChannel::DeveloperContext) => {
+                        crate::tr!("pull_requests.channel_developer_context").into_owned()
+                    }
+                    InjectedChannel::Linking(
+                        InstructionChannel::PerPromptUserBlock | InstructionChannel::None,
+                    ) => crate::tr!("pull_requests.channel_per_turn_block").into_owned(),
+                    InjectedChannel::McpServer(name) => {
+                        crate::tr!("pull_requests.channel_mcp_server", name = name).into_owned()
+                    }
+                    InjectedChannel::DeveloperInstructions => {
+                        crate::tr!("pull_requests.channel_developer_instructions").into_owned()
+                    }
+                };
+                v_flex()
+                    .gap_0p5()
+                    .child(div().text_caption(cx).child(channel))
+                    .child(crate::chat::components::disclosure::disclosure_body(
+                        &format!("{id}-instructions-{index}"),
+                        &injected.text,
+                        cx,
+                    ))
+            }),
+    )
+}
+
+/// The active thread's [`agent_sees_body`] in a dialog, for a thread with no
+/// pull request panel to hold it.
+pub(crate) fn open_agent_sees(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut App) {
+    let view = cx.new(|cx| AgentSees::new(store, cx));
+    window.open_dialog(cx, move |dialog, _, _| {
+        let view = view.clone();
+        dialog
+            .title(crate::tr!("pull_requests.agent_sees").into_owned())
+            .content(move |content, _, _| content.child(view.clone()))
+    });
+}
+
+struct AgentSees {
+    store: Entity<WorkspaceStore>,
+    _subscription: gpui::Subscription,
+}
+
+impl AgentSees {
+    fn new(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
+        let subscription = cx.observe(&store, |_, _, cx| cx.notify());
+        Self {
+            store,
+            _subscription: subscription,
+        }
+    }
+}
+
+impl Render for AgentSees {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tools = self
+            .store
+            .read(cx)
+            .session_status()
+            .and_then(|status| status.injected_tools.clone());
+        div()
+            .id("agent-sees-scroll")
+            .w_full()
+            .max_h(px(crate::overlay::DIALOG_LIST_HEIGHT))
+            .overflow_y_scroll_area()
+            .children(tools.map(|tools| agent_sees_body(&tools, "agent-sees", cx)))
+    }
+}
+
 impl PullRequestsPanel {
-    /// What the host injects into this thread's provider for pull requests, before any call.
+    /// What the host injects into this thread's provider, before any call.
     fn agent_tools(
         &self,
         tools: &tcode_protocol::InjectedTools,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.agent_tools_open;
-        let muted = cx.theme().muted_foreground;
         let label = crate::tr!("pull_requests.agent_sees").into_owned();
-        let caption = |key: &'static str| div().text_caption(cx).child(crate::tr!(key));
         let header = crate::material::accessible_clickable(
             h_flex(),
             "pr-agent-tools",
@@ -1327,67 +1467,7 @@ impl PullRequestsPanel {
             this.agent_tools_open = !this.agent_tools_open;
             cx.notify();
         }));
-        let body = v_flex()
-            .pt(cx.theme().tokens.spacing.xs)
-            .gap(cx.theme().tokens.spacing.sm)
-            .text_token(&cx.theme().tokens.typography.xs)
-            .child(caption("pull_requests.agent_tools"))
-            .children(tools.tools.iter().map(|(name, description)| {
-                v_flex()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .child(name.clone()),
-                    )
-                    .child(div().text_color(muted).child(description.clone()))
-            }))
-            .when(!tools.attached, |body| {
-                body.child(caption("pull_requests.agent_not_attached"))
-            })
-            .when(!tools.instructions.is_empty(), |body| {
-                body.child(caption("pull_requests.agent_instructions"))
-            })
-            .children(
-                tools
-                    .instructions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, injected)| {
-                        use agent::InstructionChannel;
-                        use tcode_protocol::InjectedChannel;
-                        let channel = match &injected.channel {
-                            InjectedChannel::Linking(InstructionChannel::SessionAppend) => {
-                                crate::tr!("pull_requests.channel_system").into_owned()
-                            }
-                            InjectedChannel::Linking(InstructionChannel::PerPromptSystem) => {
-                                crate::tr!("pull_requests.channel_system_per_prompt").into_owned()
-                            }
-                            InjectedChannel::Linking(InstructionChannel::DeveloperContext) => {
-                                crate::tr!("pull_requests.channel_developer_context").into_owned()
-                            }
-                            InjectedChannel::Linking(
-                                InstructionChannel::PerPromptUserBlock | InstructionChannel::None,
-                            ) => crate::tr!("pull_requests.channel_per_turn_block").into_owned(),
-                            InjectedChannel::McpServer(name) => {
-                                crate::tr!("pull_requests.channel_mcp_server", name = name)
-                                    .into_owned()
-                            }
-                            InjectedChannel::DeveloperInstructions => {
-                                crate::tr!("pull_requests.channel_developer_instructions")
-                                    .into_owned()
-                            }
-                        };
-                        v_flex()
-                            .gap_0p5()
-                            .child(div().text_caption(cx).child(channel))
-                            .child(crate::chat::components::disclosure::disclosure_body(
-                                &format!("pr-agent-instructions-{index}"),
-                                &injected.text,
-                                cx,
-                            ))
-                    }),
-            );
+        let body = agent_sees_body(tools, "pr-agent", cx).pt(cx.theme().tokens.spacing.xs);
         v_flex()
             .flex_none()
             .px(px(crate::material::CARD_INSET))

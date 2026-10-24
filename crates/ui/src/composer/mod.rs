@@ -83,6 +83,8 @@ use crate::usage::{METER_BLUE, METER_RED};
 /// File mentions are potentially unbounded; command and skill feeds are not
 /// capped and instead use the trigger menu's scrolling viewport.
 const FILE_MENU_ROW_CAP: usize = 50;
+/// Matching threads an `@` menu offers above the files.
+const THREAD_MENU_ROW_CAP: usize = 5;
 
 /// The desktop send and stop square: as tall as the control row's chips
 /// ([`Button::chip`]), which carry no square form.
@@ -1109,6 +1111,7 @@ impl Render for Composer {
                 .child(divider())
                 .child(self.render_context_meter(cx))
                 .child(self.render_permission_picker(cx))
+                .children(self.render_control_chip(cx))
                 .child(div().flex_1())
                 .children(mic)
                 .child(self.render_primary_action(turn_running, cx))
@@ -1318,6 +1321,7 @@ impl Render for Composer {
             )
             .when(has_terminal_contexts, |this| this.child(context_chips))
             .when(has_review_comments, |this| this.child(review_chips))
+            .children(self.render_reference_chips(cx))
             .child(
                 Textarea::new(&self.input)
                     .placeholder(desired_placeholder)
@@ -1351,6 +1355,7 @@ impl Render for Composer {
                     .when_some(approval, |this, request| {
                         this.child(self.render_approval_panel(&request, approval_count, cx))
                     })
+                    .children(self.render_control_request_panel(cx))
                     .when_some(user_input, |this, pending| {
                         this.child(self.render_user_input_panel(&pending, window, cx))
                     })
@@ -1380,6 +1385,7 @@ impl Render for Composer {
                                     .border_color(cx.theme().border)
                                     .bg(cx.theme().muted)
                                     .child(self.render_permission_picker(cx))
+                                    .children(self.render_control_chip(cx))
                                     .child(div().flex_1())
                                     .child(self.render_context_meter(cx)),
                             )
@@ -2222,6 +2228,75 @@ mod replica_tests {
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "New draft while the drop is pending"
+        );
+    }
+
+    /// Choosing a thread from the `@` menu references it: the host is asked to
+    /// add the reference and the draft keeps no mention text.
+    #[gpui::test]
+    fn an_at_thread_is_referenced_rather_than_written_into_the_draft(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        status.draft = false;
+        status.control = Some(tcode_protocol::ControlStatus {
+            grant: tcode_core::control::ControlGrant::default_grant(),
+            source: tcode_core::control::ControlGrantSource::Default,
+            pending_requests: Vec::new(),
+            references: Vec::new(),
+            self_settle: None,
+            tools_offered: true,
+        });
+        let mut current =
+            tcode_core::project::SessionMeta::new(status.provider, std::env::temp_dir(), None);
+        current.id = status.session_id.clone();
+        current.title = "Current".into();
+        let mut other = current.clone();
+        other.id = "release-thread".into();
+        other.title = "Release notes".into();
+        replace(
+            &incoming,
+            Topic::Index,
+            ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                summary: Default::default(),
+                sessions: vec![current, other],
+                projects: Vec::new(),
+            }),
+        );
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            composer.update(cx, |composer, cx| composer.focus(window, cx));
+        });
+        cx.simulate_input("@release");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        composer.read_with(cx, |composer, cx| {
+            assert_eq!(composer.menu_rows(cx).0[0].primary, "Release notes");
+        });
+        let row = cx.debug_bounds("menu-row-0").expect("thread row");
+        cx.simulate_click(row.center(), Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            ""
+        );
+        cx.run_until_parked();
+        assert!(
+            std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
+                tcode_protocol::decode_client_line(&line).unwrap().payload,
+                tcode_protocol::ClientPayload::Command(
+                    tcode_protocol::Command::AddThreadReference { thread_id, .. }
+                ) if thread_id == "release-thread"
+            )),
+            "no AddThreadReference was sent"
         );
     }
 }

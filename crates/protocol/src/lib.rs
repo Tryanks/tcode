@@ -39,13 +39,14 @@ pub use event::{
     AcpMarketplaceItem, AgentStatus, ArchivedSessions, ControlActivityEntry, ControlStatus,
     EventEnvelope, ExternalImportState, ExternalImportStatus, ForkAvailability, GitActionRequest,
     GitStatusStatus, IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions,
-    InjectedTools, MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge,
-    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog,
-    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
-    RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity,
-    SessionEventRecord, SessionPlan, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
-    TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, Topic,
+    InjectedServer, InjectedTools, MergeWorktreeFailure, NoticeSeverity, PluginCatalogState,
+    PluginChallenge, PluginChallengeKind, PluginOperationTarget, PluginStaleReason,
+    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
+    RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
+    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus,
+    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    ThreadReferenceStatus, Topic,
 };
 pub use query::{
     DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
@@ -214,7 +215,8 @@ pub use wire::{
 // RemoveThreadReference, SetFollowUp, SetParked, DismissSettleSuggestion and
 // RevokeSelfSettle commands and the ControlActivity and ReviewRecords queries;
 // SessionStatus.pull_request_tools (InjectedPullRequestTools) becomes
-// injected_tools (InjectedTools), listing every offered server's tools, and
+// injected_tools (InjectedTools), listing every offered server's tools with
+// the servers that offer them (InjectedServer), and
 // SessionStatus gains control; RuntimeNotice gains review_recorded.
 pub const PROTOCOL_VERSION: u32 = 18;
 

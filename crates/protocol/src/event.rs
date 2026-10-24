@@ -571,11 +571,21 @@ pub struct ControlActivityEntry {
 pub struct InjectedTools {
     /// Each tool's name and the description the model reads, across every server offered.
     pub tools: Vec<(String, String)>,
+    /// Which server offers them: `tools` holds each server's tools together, in this order.
+    #[serde(default)]
+    pub servers: Vec<InjectedServer>,
     /// False once the provider took none of Tcode's MCP servers: its model has neither these
     /// tools nor the linking instructions.
     pub attached: bool,
     /// Verbatim, as delivered.
     pub instructions: Vec<InjectedInstructions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectedServer {
+    pub name: String,
+    /// How many consecutive entries of `InjectedTools::tools` are this server's.
+    pub tools: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

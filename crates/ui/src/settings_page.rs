@@ -1,5 +1,6 @@
 //! Full-page settings route with section navigation and editable settings.
 
+mod control;
 pub(crate) mod thread_behavior;
 
 use std::collections::HashMap;
@@ -68,6 +69,7 @@ enum Section {
     Browser,
     ComputerUse,
     Orchestrate,
+    Control,
     Plugins,
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     Remote,
@@ -80,7 +82,7 @@ enum Section {
 /// headless listener in a browser. Choosing a machine, and the invitation other
 /// devices pair with, live in `crate::remote`.
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-const SECTIONS: [Section; 11] = [
+const SECTIONS: [Section; 12] = [
     Section::General,
     Section::Remote,
     Section::ThreadBehavior,
@@ -88,19 +90,21 @@ const SECTIONS: [Section; 11] = [
     Section::SourceControl,
     Section::Usage,
     Section::Orchestrate,
+    Section::Control,
     Section::Plugins,
     Section::ComputerUse,
     Section::Browser,
     Section::Archived,
 ];
 #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
-const SECTIONS: [Section; 10] = [
+const SECTIONS: [Section; 11] = [
     Section::General,
     Section::ThreadBehavior,
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
     Section::Orchestrate,
+    Section::Control,
     Section::Plugins,
     Section::ComputerUse,
     Section::Browser,
@@ -173,6 +177,7 @@ impl Section {
             | Self::Browser
             | Self::ComputerUse
             | Self::Orchestrate
+            | Self::Control
             | Self::Plugins
             | Self::Archived => SectionGroup::Machine,
         }
@@ -200,6 +205,7 @@ impl Section {
             | Self::Usage
             | Self::ComputerUse
             | Self::Orchestrate
+            | Self::Control
             | Self::Plugins
             | Self::Archived => true,
         }
@@ -216,6 +222,7 @@ impl Section {
             Self::Browser => "settings-nav-browser",
             Self::ComputerUse => "settings-nav-computer-use",
             Self::Orchestrate => "settings-nav-orchestrate",
+            Self::Control => "settings-nav-control",
             Self::Plugins => "settings-nav-plugins",
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => "settings-nav-remote",
@@ -233,6 +240,7 @@ impl Section {
             Self::Browser => IconName::Globe,
             Self::ComputerUse => IconName::LayoutDashboard,
             Self::Orchestrate => IconName::Map,
+            Self::Control => IconName::Layers,
             Self::Plugins => IconName::Puzzle,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => IconName::Network,
@@ -252,6 +260,7 @@ impl Section {
             Self::Browser => crate::tr!("settings.browser"),
             Self::ComputerUse => crate::tr!("settings.computer_use"),
             Self::Orchestrate => crate::tr!("settings.orchestrate"),
+            Self::Control => crate::tr!("control.title"),
             Self::Plugins => crate::tr!("settings.plugins"),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => crate::tr!("settings.remote"),
@@ -365,6 +374,7 @@ pub struct SettingsPage {
     auto_settle_input: SettingsInput,
     project_rules_editor: Option<Entity<thread_behavior::ProjectRulesEditor>>,
     project_rules_subscription: Option<Subscription>,
+    control: control::ControlSection,
     remote_attachment_limit_input: SettingsInput,
     /// Zero-based page shown by the Archived Threads list.
     archived_page: usize,
@@ -409,6 +419,7 @@ impl SettingsPage {
                 "browser" => Section::Browser,
                 "computer_use" => Section::ComputerUse,
                 "orchestrate" => Section::Orchestrate,
+                "control" => Section::Control,
                 "plugins" => Section::Plugins,
                 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
                 "remote" => Section::Remote,
@@ -610,6 +621,7 @@ impl SettingsPage {
             auto_settle_input: SettingsInput::new(auto_settle_input.clone()),
             project_rules_editor: None,
             project_rules_subscription: None,
+            control: control::ControlSection::default(),
             remote_attachment_limit_input: SettingsInput {
                 state: remote_attachment_limit_input.clone(),
                 pushed: remote_attachment_limit,
@@ -1259,6 +1271,9 @@ impl SettingsPage {
         if self.section != Section::ComputerUse {
             self.host_permissions = None;
         }
+        if self.section != Section::Control {
+            self.control.hidden();
+        }
         if self.section != Section::Plugins {
             self.plugins_panel.update(cx, |panel, _| panel.hide());
         }
@@ -1279,6 +1294,7 @@ impl SettingsPage {
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
             Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
+            Section::Control => self.render_control(cx),
             Section::Plugins => v_flex().child(self.plugins_panel.clone()),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Remote => v_flex().child(self.hosting_panel.clone()),
