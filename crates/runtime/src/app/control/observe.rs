@@ -1,5 +1,4 @@
 use super::*;
-use crate::app::settlement::SettlementHolds;
 use crate::app::snapshots::ActivityProjection;
 use control_mcp::{
     GetGitParams, GetPullRequestParams, GetSettingsParams, GetThreadParams, GitWhat, ItemKind,
@@ -17,6 +16,8 @@ const PAGE_CAP: u32 = 100;
 const SEARCH_LIMIT: u32 = 20;
 const SEARCH_CAP: u32 = 50;
 const PER_TURN_CAP: usize = 200;
+/// How many collapsed threads, and how many left-out thread ids, a review lists by name.
+const REVIEW_LIST_CAP: usize = 100;
 /// What one response may carry, about the size of one large file.
 const RESPONSE_BUDGET: usize = 60 * 1024;
 const TERMINAL_TAIL_BYTES: usize = 32 * 1024;
@@ -155,7 +156,7 @@ struct SearchHitRow {
     thread_id: String,
     title: String,
     turn: usize,
-    kind: &'static str,
+    kind: SearchKind,
     snippet: String,
 }
 
@@ -614,7 +615,7 @@ impl AppState {
         let activity = self.thread_activity.get(&meta.id);
         let last_activity = activity.and_then(|activity| activity.last_activity_at());
         let automation = self.settings.settlement_automation;
-        let SettlementHolds {
+        let tcode_core::settlement::SettlementBlockers {
             pending_approval,
             pending_input,
             live_run,
@@ -624,7 +625,7 @@ impl AppState {
             pending_human_message,
             scheduled_wake,
             pending_agent_message,
-        } = self.settlement_holds(meta, projection);
+        } = self.settlement_blockers(meta, projection);
         let mut reasons: Vec<&'static str> = [
             (meta.archived_at.is_some(), reason::ARCHIVED),
             (
@@ -914,7 +915,6 @@ impl AppState {
             None => 0,
         };
         let filter = SearchFilter {
-            thread_ids: None,
             kinds,
             limit: params.limit.unwrap_or(SEARCH_LIMIT).clamp(1, SEARCH_CAP) as usize,
             offset,
@@ -949,7 +949,7 @@ impl AppState {
                         thread_id: hit.hit.session_id,
                         title: hit.hit.session_title,
                         turn: hit.hit.turn,
-                        kind: hit.kind.as_str(),
+                        kind: hit.kind,
                     }
                 })
                 .collect();
@@ -1335,7 +1335,7 @@ impl AppState {
             if meta.is_settled() && at < since {
                 continue;
             }
-            let holds = self.settlement_holds(meta, &projection);
+            let holds = self.settlement_blockers(meta, &projection);
             if holds.live_run {
                 collapsed.push(collapse("running"));
                 continue;
@@ -1372,9 +1372,17 @@ impl AppState {
                     .then(|| now.saturating_sub(at) / DAY_MS),
             });
         }
+        let mut omitted = Vec::new();
+        if collapsed.len() > REVIEW_LIST_CAP {
+            omitted.push(format!(
+                "{} more collapsed threads (running, just active or orchestrated children) are \
+                 not listed; list_threads finds them",
+                collapsed.len() - REVIEW_LIST_CAP
+            ));
+            collapsed.truncate(REVIEW_LIST_CAP);
+        }
         let store = self.store.clone();
         Answer::Later(cx.unblock(move || {
-            let mut omitted = Vec::new();
             for candidate in &mut candidates {
                 if !cold.contains(&candidate.thread.id) {
                     continue;
@@ -1427,10 +1435,17 @@ impl AppState {
                 true
             });
             if !left_out.is_empty() {
+                let named = left_out.len().min(REVIEW_LIST_CAP);
+                let unnamed = left_out.len() - named;
                 omitted.push(format!(
-                    "{} candidates did not fit the response budget; get_thread each of: {}",
+                    "{} candidates did not fit the response budget; get_thread each of: {}{}",
                     left_out.len(),
-                    left_out.join(", ")
+                    left_out[..named].join(", "),
+                    if unnamed > 0 {
+                        format!(" and {unnamed} more, narrowed by scope or since")
+                    } else {
+                        String::new()
+                    }
                 ));
             }
             to_value(&ReviewAnswer {
@@ -1449,10 +1464,6 @@ impl AppState {
         }))
     }
 }
-
-#[cfg(test)]
-#[path = "observe_tests.rs"]
-mod tests;
 
 /// Blank every environment variable's value under an `env` key, whatever shape the list
 /// has (`{name, value}` entries or `[name, value]` pairs); the names stay.
@@ -1497,3 +1508,7 @@ fn redact_strings(value: &mut serde_json::Value) -> usize {
         _ => 0,
     }
 }
+
+#[cfg(test)]
+#[path = "observe_tests.rs"]
+mod tests;

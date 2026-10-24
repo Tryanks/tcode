@@ -440,3 +440,36 @@ fn get_settings_leaves_out_env_values_unknown_keys_and_tokens() {
     );
     assert_eq!(answer["redacted"], 1);
 }
+
+/// However many threads a review collapses, it names a bounded number and says how many
+/// more there are.
+#[test]
+fn review_candidates_bounds_the_collapsed_list() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-control-review-cap");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        add(state, thread("caller", "p"), None);
+        for index in 0..150 {
+            let mut child = thread(&format!("child-{index}"), "p");
+            child.parent_session_id = Some("caller".into());
+            add(state, child, None);
+        }
+    });
+    let review = call(
+        &state,
+        cx,
+        ControlOp::ReviewCandidates(control_mcp::ReviewCandidatesParams::default()),
+    )
+    .unwrap();
+    assert_eq!(review["collapsed"].as_array().unwrap().len(), 100);
+    // The 150 children and the caller itself, which was just active.
+    assert!(
+        review["omitted"].as_array().unwrap().iter().any(|note| note
+            .as_str()
+            .unwrap()
+            .starts_with("51 more collapsed threads")),
+        "{}",
+        review["omitted"]
+    );
+}
