@@ -826,7 +826,14 @@ impl Render for SourceControlPanel {
                     .text_secondary(compact, cx)
                     .child(crate::tr!("source_control.description").into_owned()),
             )
-            .child(crate::material::grouped(rows, cx))
+            .child(
+                v_flex()
+                    .child(crate::material::group_caption(
+                        crate::tr!("settings.hosts_section"),
+                        cx,
+                    ))
+                    .child(crate::material::grouped(rows, cx)),
+            )
             .child(if compact {
                 v_flex().gap_2().child(add).child(note)
             } else {
