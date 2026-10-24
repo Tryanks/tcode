@@ -523,6 +523,18 @@ impl AppState {
         };
         let mut meta = meta;
         meta.expectation = Some(ChildExpectation::opened(now_secs()));
+        Ok(self.install_background_thread(meta, brief, Vec::new(), cx))
+    }
+
+    /// Persist a new thread and start it in the background on `first_message`, written by an
+    /// agent. Nobody's selection or draft is touched.
+    pub(super) fn install_background_thread(
+        &mut self,
+        meta: SessionMeta,
+        first_message: String,
+        attachments: Vec<Attachment>,
+        cx: &mut HostCx,
+    ) -> String {
         self.thread_activity
             .insert(meta.id.clone(), Default::default());
         self.enqueue_store_write(
@@ -536,7 +548,7 @@ impl AppState {
         self.discover_pull_requests_for(&meta.id, false, cx);
         let id = meta.id.clone();
         let provider_commands = self.cached_provider_commands_for(&meta);
-        let mut child = Self::build_draft_session(
+        let mut session = Self::build_draft_session(
             meta.project_id.clone().unwrap_or_default(),
             meta.cwd.clone(),
             meta.provider,
@@ -544,14 +556,14 @@ impl AppState {
             None,
             provider_commands,
         );
-        child.meta = meta;
-        child.draft = false;
-        child.push_queued(brief, Vec::new());
-        child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
-        self.residents.parked.insert(id.clone(), child);
+        session.meta = meta;
+        session.draft = false;
+        session.push_queued(first_message, attachments);
+        session.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
+        self.residents.parked.insert(id.clone(), session);
         self.reactivate_session(&id, cx);
         self.ensure_session_started(&id, cx);
-        Ok(id)
+        id
     }
 
     /// Switch a child's fast mode and persist it. Fast mode is a launch-time
@@ -1898,6 +1910,19 @@ pub(super) fn resolve_orchestrate_collaboration(
     )
 }
 
+/// A native provider as a model names it: `claude`, `codex`, `opencode`, …
+pub(super) fn native_provider_named(name: &str) -> Option<ProviderKind> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude_code" | "claude-code" => Some(ProviderKind::ClaudeCode),
+        "codex" => Some(ProviderKind::Codex),
+        "pi" => Some(ProviderKind::Pi),
+        "opencode" | "open_code" | "open-code" => Some(ProviderKind::OpenCode),
+        "cursor" => Some(ProviderKind::Cursor),
+        "grok" => Some(ProviderKind::Grok),
+        _ => None,
+    }
+}
+
 fn resolve_orchestrate_profiles(
     profiles: &[OrchestrateChildModel],
     provider: &str,
@@ -1907,20 +1932,15 @@ fn resolve_orchestrate_profiles(
     catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
     collaboration: bool,
 ) -> Result<ResolvedDispatch, String> {
-    let provider = match provider.trim().to_ascii_lowercase().as_str() {
-        "claude" | "claude_code" | "claude-code" => ProviderKind::ClaudeCode,
-        "codex" => ProviderKind::Codex,
-        "pi" => ProviderKind::Pi,
-        "opencode" | "open_code" | "open-code" => ProviderKind::OpenCode,
-        "cursor" => ProviderKind::Cursor,
-        "grok" => ProviderKind::Grok,
-        "acp" => {
+    let provider = match native_provider_named(provider) {
+        Some(provider) => provider,
+        None if provider.trim().eq_ignore_ascii_case("acp") => {
             return Err(
                 "ACP child dispatch is not available yet; configure a native-provider child model"
                     .into(),
             );
         }
-        other => return Err(format!("unknown provider: {other}")),
+        None => return Err(format!("unknown provider: {}", provider.trim())),
     };
     let requested_model = model.map(str::trim).filter(|model| !model.is_empty());
     let requested_effort = effort.map(str::trim).filter(|effort| !effort.is_empty());

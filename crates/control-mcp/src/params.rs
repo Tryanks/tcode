@@ -739,3 +739,62 @@ pub mod settlement_reason {
     /// The host has not loaded the thread's activity yet.
     pub const ACTIVITY_UNKNOWN: &str = "activity_unknown";
 }
+
+// operate responses
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartThreadResponse {
+    pub thread_id: String,
+    /// False when an earlier call with the same `request_id` already started it.
+    pub created: bool,
+    pub title: String,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchResponse {
+    pub results: Vec<BatchResult>,
+}
+
+/// One `control_thread` change; a fork names the thread it created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunResult {
+    #[serde(flatten)]
+    pub result: BatchResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlThreadResponse {
+    pub results: Vec<RunResult>,
+}
+
+/// The outcome of one `git` or `pull_request` call, with what the host reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionResponse {
+    pub thread_id: String,
+    pub outcome: Outcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateProjectResponse {
+    pub project_id: String,
+    pub name: String,
+    pub root: String,
+    /// False when a project already covered the root.
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferenceResponse {
+    pub thread_id: String,
+    pub title: String,
+    /// The thread is in another project or runs another provider, so its content goes to
+    /// this thread's model vendor.
+    pub boundary_notice: bool,
+}

@@ -24,6 +24,8 @@ const CONTROL_ACTIVITY_LIMIT: usize = 200;
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,
     review_records: Vec<tcode_core::control::ReviewRecord>,
+    /// Answers to recent calls that carried a `request_id`, so a retry does not act twice.
+    answered: VecDeque<(String, serde_json::Value)>,
 }
 
 impl ControlState {
@@ -31,6 +33,7 @@ impl ControlState {
         Self {
             activity: VecDeque::new(),
             review_records,
+            answered: VecDeque::new(),
         }
     }
 }
@@ -258,6 +261,20 @@ impl AppState {
         }
     }
 
+    /// The answer an earlier call with this `key` got, if it is still remembered.
+    pub(super) fn answered(&self, key: &str) -> Option<serde_json::Value> {
+        self.control
+            .answered
+            .iter()
+            .find(|(answered, _)| answered == key)
+            .map(|(_, value)| value.clone())
+    }
+
+    pub(super) fn remember_answer(&mut self, key: String, value: serde_json::Value) {
+        self.control.answered.push_front((key, value));
+        self.control.answered.truncate(CONTROL_ACTIVITY_LIMIT);
+    }
+
     /// The grant check every call passes host-side, however the connection listed its tools:
     /// tier or category, the call's own categories, the scope it asks for, the targets it
     /// names, and the operations no grant exposes (approvals, credentials and hosting, anything
@@ -343,8 +360,8 @@ impl AppState {
             ControlOp::StartThread(p) => self.op_start_thread(caller, p, cx),
             ControlOp::SendMessage(p) => self.op_send_message(caller, p, cx),
             ControlOp::ControlThread(p) => self.op_control_thread(caller, p, cx),
-            ControlOp::PullRequest(p) => self.op_pull_request(caller, p, cx),
-            ControlOp::Git(p) => self.op_git(caller, p, cx),
+            ControlOp::PullRequest(p) => return self.op_pull_request(caller, p, cx),
+            ControlOp::Git(p) => return self.op_git(caller, p, cx),
             ControlOp::CreateProject(p) => self.op_create_project(caller, p, cx),
             ControlOp::NotifyWhen(p) => self.op_notify_when(caller, p, cx),
             ControlOp::CancelNotify(p) => self.op_cancel_notify(caller, p, cx),
