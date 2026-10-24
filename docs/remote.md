@@ -906,9 +906,10 @@ with **Pair again**; protocol mismatches stop with **Update the app**.
   keystore), `TCODE_ANDROID_KEYSTORE_PASSWORD`, `TCODE_ANDROID_KEY_ALIAS` and
   `TCODE_ANDROID_KEY_PASSWORD` before running `crates/android/host/build.sh
   --release`; with none of them set, Gradle's per-machine debug keystore signs
-  the build. iOS is not published yet; build it from source with
-  `crates/ios/host/build.sh`. For Android, enable USB debugging and authorize
-  your computer, then replace `VERSION` with the downloaded release version:
+  the build. The iOS IPA is unsigned: re-sign it with your own Apple ID, or
+  install it with a sideloading tool such as AltStore or Sideloadly. For
+  Android, enable USB debugging and authorize your computer, then replace
+  `VERSION` with the downloaded release version:
 
   ```sh
   adb install -r tcode-VERSION-android-arm64.apk

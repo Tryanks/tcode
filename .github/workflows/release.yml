@@ -75,6 +75,11 @@ jobs:
             target: aarch64-unknown-linux-gnu
             platform: linux
             arch: arm64
+          - label: iOS arm64
+            os: macos-26
+            target: aarch64-apple-ios
+            platform: ios
+            arch: arm64
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
@@ -106,12 +111,37 @@ jobs:
             libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev
 
       - name: Build release binary
+        if: matrix.platform != 'ios'
         shell: bash
         run: |
           start=$SECONDS
           cargo build --release --locked --target "${{ matrix.target }}"
           elapsed=$((SECONDS - start))
           echo "### ${{ matrix.label }} build: ${elapsed}s" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build unsigned iOS app
+        if: matrix.platform == 'ios'
+        shell: bash
+        env:
+          TCODE_IOS_RUST_PROFILE: release
+        run: |
+          set -euo pipefail
+          command -v xcodegen >/dev/null || brew install xcodegen
+          start=$SECONDS
+          crates/ios/host/build.sh --device
+          elapsed=$((SECONDS - start))
+          echo "### ${{ matrix.label }} build: ${elapsed}s" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package iOS IPA
+        if: matrix.platform == 'ios'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/ipa"
+          mkdir -p "$stage/Payload" dist
+          ditto crates/ios/host/build/Build/Products/Release-iphoneos/Tcode.app "$stage/Payload/Tcode.app"
+          (cd "$stage" && zip -qry "$GITHUB_WORKSPACE/dist/tcode-${VERSION}-ios-${{ matrix.arch }}-unsigned.ipa" Payload)
+          rm -rf "$stage"
 
       - name: Assemble macOS app bundle
         if: matrix.platform == 'macos'
@@ -342,7 +372,7 @@ jobs:
           - **Windows 11+**: the embedded preview uses the WebView2 runtime that ships with Windows.
           - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
           - **Android**: the arm64 APK is signed with the project's release key and installs over previous releases signed with it. A build signed with a different key (a local build, or a release from before the key existed) must be uninstalled first.
-          - **iOS 27+**: not published yet.
+          - **iOS / iPadOS 27+**: the arm64 IPA is unsigned. Re-sign it with your own Apple ID, or install it with a sideloading tool such as AltStore or Sideloadly, before it runs on a device.
 
           Packages are uploaded as soon as each platform build completes. Windows MSI/NSIS and
           Linux AppImage packages are not currently produced. `SHA256SUMS.txt` is added after every platform package has finished.
@@ -397,6 +427,7 @@ jobs:
             dist/*.dmg
             dist/*.zip
             dist/*.tar.gz
+            dist/*.ipa
           if-no-files-found: error
           retention-days: 14
 
