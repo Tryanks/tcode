@@ -35,8 +35,13 @@ impl ControlState {
     }
 }
 
-/// Where a call's answer goes once the host has it.
-pub(super) type ControlReply = smol::channel::Sender<Result<serde_json::Value, String>>;
+/// A call's answer: ready on the host thread, or computed off it because it runs git, reads
+/// the store or waits for work the call started, which would stall every client if awaited
+/// on the host thread.
+pub(super) enum Answer {
+    Now(Result<serde_json::Value, String>),
+    Later(HostTask<Result<serde_json::Value, String>>),
+}
 
 /// The thread behind a `tcode_control` call, with the grant in force when it arrived.
 #[derive(Clone)]
@@ -177,64 +182,80 @@ impl AppState {
         })
     }
 
+    /// `meta`'s thread as a `tcode_control` caller, with the grant in force now.
+    pub(super) fn caller_of(&self, meta: &SessionMeta) -> Caller {
+        Caller {
+            thread_id: meta.id.clone(),
+            project_id: meta.project_id.clone(),
+            grant: self.caller_grant(meta).0,
+        }
+    }
+
+    /// Whether a call may reach `target`: inside `scope` (the grant's, or the narrower one the
+    /// call asked for), or, for a read of its content, the caller itself, one of its
+    /// Orchestrate children or a thread it references.
+    pub(super) fn target_reachable(
+        &self,
+        caller: &Caller,
+        scope: &ControlScope,
+        target: &SessionMeta,
+        reads_content: bool,
+    ) -> bool {
+        if scope.reaches(caller.project_id.as_deref(), target.project_id.as_deref()) {
+            return true;
+        }
+        let caller_meta = || {
+            self.sessions
+                .iter()
+                .find(|meta| meta.id == caller.thread_id)
+                .or_else(|| {
+                    self.resident(&caller.thread_id)
+                        .map(|session| &session.meta)
+                })
+        };
+        reads_content
+            && (target.id == caller.thread_id
+                || target.parent_session_id.as_deref() == Some(caller.thread_id.as_str())
+                || caller_meta().is_some_and(|meta| {
+                    meta.references
+                        .iter()
+                        .any(|reference| reference.thread_id == target.id)
+                }))
+    }
+
     /// Resolve one `tcode_control` call on the host thread.
     pub(crate) fn handle_control_op(
         &mut self,
         thread_id: String,
         op: ControlOp,
-        reply: ControlReply,
+        reply: smol::channel::Sender<Result<serde_json::Value, String>>,
         cx: &mut HostCx,
     ) {
         let mut authored_cx = cx.clone();
         authored_cx.origin = Some(MessageOrigin::Agent);
         authored_cx.author = None;
         let cx = &mut authored_cx;
-        let refusal = match self.find_meta(&thread_id) {
-            _ if !self.settings.control.enabled => {
-                "tcode_control is turned off in Settings → Control".into()
-            }
+        let answer = match self.find_meta(&thread_id) {
+            _ if !self.settings.control.enabled => Answer::Now(Err(
+                "tcode_control is turned off in Settings → Control".into(),
+            )),
             Some(meta) if meta.archived_at.is_none() => {
-                let caller = Caller {
-                    thread_id,
-                    project_id: meta.project_id.clone(),
-                    grant: self.caller_grant(&meta).0,
-                };
+                let caller = self.caller_of(&meta);
                 match self.authorize_control(&caller, &op) {
-                    Ok(()) => return self.dispatch_control_op(&caller, op, reply, cx),
-                    Err(refusal) => refusal,
+                    Ok(()) => self.dispatch_control_op(&caller, op, cx),
+                    Err(refusal) => Answer::Now(Err(refusal)),
                 }
             }
-            _ => "unknown thread".into(),
+            _ => Answer::Now(Err("unknown thread".into())),
         };
-        let _ = reply.try_send(Err(refusal));
-    }
-
-    /// Whether `target` is within the caller's scope, or, for a read of its content, is the
-    /// caller itself, one of its Orchestrate children or a thread it references.
-    pub(super) fn target_reachable(
-        &self,
-        caller: &Caller,
-        target: &SessionMeta,
-        reads_content: bool,
-    ) -> bool {
-        if caller
-            .grant
-            .scope
-            .reaches(caller.project_id.as_deref(), target.project_id.as_deref())
-        {
-            return true;
+        match answer {
+            Answer::Now(result) => {
+                let _ = reply.try_send(result);
+            }
+            Answer::Later(task) => HostCx::spawn_detached(cx, async move {
+                let _ = reply.send(task.await).await;
+            }),
         }
-        reads_content
-            && (target.id == caller.thread_id
-                || target.parent_session_id.as_deref() == Some(caller.thread_id.as_str())
-                || self
-                    .find_meta(&caller.thread_id)
-                    .is_some_and(|caller_meta| {
-                        caller_meta
-                            .references
-                            .iter()
-                            .any(|reference| reference.thread_id == target.id)
-                    }))
     }
 
     /// The grant check every call passes host-side, however the connection listed its tools:
@@ -290,7 +311,7 @@ impl AppState {
             let Some(meta) = self.find_meta(target) else {
                 return Err(format!("unknown thread: {target}"));
             };
-            if !self.target_reachable(caller, &meta, op.reads_content()) {
+            if !self.target_reachable(caller, &grant.scope, &meta, op.reads_content()) {
                 return Err(format!(
                     "refused: thread {target} is outside your grant's scope ({})",
                     grant.scope.describe()
@@ -300,29 +321,23 @@ impl AppState {
         Ok(())
     }
 
-    fn dispatch_control_op(
-        &mut self,
-        caller: &Caller,
-        op: ControlOp,
-        reply: ControlReply,
-        cx: &mut HostCx,
-    ) {
-        let result = match op {
+    fn dispatch_control_op(&mut self, caller: &Caller, op: ControlOp, cx: &mut HostCx) -> Answer {
+        let now = match op {
+            ControlOp::ListThreads(p) => return self.op_list_threads(caller, p, cx),
+            ControlOp::Search(p) => return self.op_search(caller, p, cx),
+            ControlOp::GetGit(p) => return self.op_get_git(caller, p, cx),
+            ControlOp::ReviewCandidates(p) => return self.op_review_candidates(caller, p, cx),
+            ControlOp::UpdateThreads(p) => return self.op_update_threads(caller, p, cx),
             ControlOp::ListProjects(p) => self.op_list_projects(caller, p, cx),
-            ControlOp::ListThreads(p) => self.op_list_threads(caller, p, cx),
             ControlOp::GetThread(p) => self.op_get_thread(caller, p, cx),
-            ControlOp::Search(p) => self.op_search(caller, p, cx),
             ControlOp::Outline(p) => self.op_outline(caller, p, cx),
             ControlOp::Read(p) => self.op_read(caller, p, cx),
             ControlOp::SearchInItem(p) => self.op_search_in_item(caller, p, cx),
             ControlOp::FileHistory(p) => self.op_file_history(caller, p, cx),
-            ControlOp::GetGit(p) => self.op_get_git(caller, p, cx),
             ControlOp::GetPullRequest(p) => self.op_get_pull_request(caller, p, cx),
             ControlOp::ListProviders(p) => self.op_list_providers(caller, p, cx),
             ControlOp::GetSettings(p) => self.op_get_settings(caller, p, cx),
             ControlOp::ReadTerminal(p) => self.op_read_terminal(caller, p, cx),
-            ControlOp::ReviewCandidates(p) => self.op_review_candidates(caller, p, cx),
-            ControlOp::UpdateThreads(p) => return self.op_update_threads(caller, p, reply, cx),
             ControlOp::RecordReview(p) => self.op_record_review(caller, p, cx),
             ControlOp::SettleSelf(p) => self.op_settle_self(caller, p, cx),
             ControlOp::StartThread(p) => self.op_start_thread(caller, p, cx),
@@ -341,7 +356,7 @@ impl AppState {
             ControlOp::PatchSettings(p) => self.op_patch_settings(caller, p, cx),
             ControlOp::RequestGrant(p) => self.op_request_grant(caller, p, cx),
         };
-        let _ = reply.try_send(result);
+        Answer::Now(now)
     }
 
     /// Record a write in the target thread, as the actor's thread, and in the activity list.

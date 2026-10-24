@@ -215,7 +215,7 @@ impl AppState {
         self.settlement_timer = Some((deadline, task));
     }
 
-    fn settlement_due(
+    pub(super) fn settlement_due(
         &self,
         meta: &SessionMeta,
         now: u64,
@@ -225,12 +225,30 @@ impl AppState {
             return None;
         }
         let activity = self.thread_activity.get(&meta.id)?;
+        let blockers = self.settlement_holds(meta, projection).blockers();
+        let rule = self.settlement_rule(meta);
+        automatic_settlement_due(
+            meta,
+            activity,
+            blockers,
+            now,
+            rule.after_days,
+            rule.on_merge,
+        )
+    }
+
+    /// The host facts that hold a thread out of automatic settlement, one by one.
+    pub(super) fn settlement_holds(
+        &self,
+        meta: &SessionMeta,
+        projection: &super::snapshots::ActivityProjection<'_>,
+    ) -> SettlementHolds {
         let resident = self.resident(&meta.id);
-        let blockers = SettlementBlockers {
-            pending_input: resident.is_some_and(|session| {
-                !session.timeline.pending_approvals.is_empty()
-                    || session.timeline.pending_user_input.is_some()
-            }),
+        SettlementHolds {
+            pending_approval: resident
+                .is_some_and(|session| !session.timeline.pending_approvals.is_empty()),
+            pending_input: resident
+                .is_some_and(|session| session.timeline.pending_user_input.is_some()),
             live_run: resident.is_some_and(|session| {
                 session.preparing_worktree
                     || matches!(session.runtime, Runtime::Starting { .. })
@@ -238,13 +256,12 @@ impl AppState {
                     || session.delivery_in_flight.is_some()
                     || session.timeline.turn_running
             }),
-            completion_holding_work: resident
-                .is_some_and(|session| session.background_task_count > 0)
-                || projection.children_hold(&meta.id)
-                || (!meta.pull_request_watches_paused
-                    && tcode_core::pull_request::watched(&meta.pull_requests)
-                        .next()
-                        .is_some()),
+            background_work: resident.is_some_and(|session| session.background_task_count > 0),
+            unsettled_children: projection.children_hold(&meta.id),
+            pull_request_watches: !meta.pull_request_watches_paused
+                && tcode_core::pull_request::watched(&meta.pull_requests)
+                    .next()
+                    .is_some(),
             pending_human_message: resident.is_some_and(|session| {
                 session
                     .queue
@@ -263,17 +280,59 @@ impl AppState {
                     .iter()
                     .any(|message| message.origin != MessageOrigin::Human)
             }),
-        };
+        }
+    }
+
+    /// The time and merge rules in force for a thread: its project's overrides, else the
+    /// settings.
+    pub(super) fn settlement_rule(&self, meta: &SessionMeta) -> SettlementRule {
         let project = meta
             .project_id
             .as_deref()
             .and_then(|id| self.settings.project_settlement_overrides.get(id));
-        let days = project
-            .and_then(|settings| settings.auto_settle_after_days)
-            .unwrap_or(self.settings.auto_settle_after_days);
-        let on_merge = project
-            .and_then(|settings| settings.auto_settle_on_merge)
-            .unwrap_or(self.settings.auto_settle_on_merge);
-        automatic_settlement_due(meta, activity, blockers, now, days, on_merge)
+        let days = project.and_then(|settings| settings.auto_settle_after_days);
+        let on_merge = project.and_then(|settings| settings.auto_settle_on_merge);
+        SettlementRule {
+            after_days: days.unwrap_or(self.settings.auto_settle_after_days),
+            after_days_from_project: days.is_some(),
+            on_merge: on_merge.unwrap_or(self.settings.auto_settle_on_merge),
+            on_merge_from_project: on_merge.is_some(),
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct SettlementHolds {
+    pub(super) pending_approval: bool,
+    pub(super) pending_input: bool,
+    pub(super) live_run: bool,
+    pub(super) background_work: bool,
+    pub(super) unsettled_children: bool,
+    pub(super) pull_request_watches: bool,
+    pub(super) pending_human_message: bool,
+    pub(super) scheduled_wake: bool,
+    pub(super) pending_agent_message: bool,
+}
+
+impl SettlementHolds {
+    fn blockers(self) -> SettlementBlockers {
+        SettlementBlockers {
+            pending_input: self.pending_approval || self.pending_input,
+            live_run: self.live_run,
+            completion_holding_work: self.background_work
+                || self.unsettled_children
+                || self.pull_request_watches,
+            pending_human_message: self.pending_human_message,
+            scheduled_wake: self.scheduled_wake,
+            pending_agent_message: self.pending_agent_message,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SettlementRule {
+    pub(super) after_days: Option<f64>,
+    pub(super) after_days_from_project: bool,
+    pub(super) on_merge: bool,
+    pub(super) on_merge_from_project: bool,
 }

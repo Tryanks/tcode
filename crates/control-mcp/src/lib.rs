@@ -266,6 +266,7 @@ impl ControlOp {
             self,
             Self::NotifyWhen(_)
                 | Self::GetThread(_)
+                | Self::Search(_)
                 | Self::Outline(_)
                 | Self::Read(_)
                 | Self::SearchInItem(_)

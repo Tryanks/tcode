@@ -35,9 +35,8 @@ impl AppState {
         &mut self,
         caller: &Caller,
         params: UpdateThreadsParams,
-        reply: ControlReply,
         cx: &mut HostCx,
-    ) {
+    ) -> Answer {
         let positioned: BTreeSet<String> = params
             .changes
             .iter()
@@ -50,15 +49,13 @@ impl AppState {
             .map(|change| change.thread_id.clone())
             .collect();
         if positioned.is_empty() {
-            let answer = self.update_threads(caller, params, &HashMap::new(), cx);
-            let _ = reply.try_send(Ok(answer));
-            return;
+            return Answer::Now(Ok(self.update_threads(caller, params, &HashMap::new(), cx)));
         }
         let store = self.store.clone();
         let flush = self.store_write_barrier(cx);
         let host_cx = cx.clone();
         let caller = caller.clone();
-        HostCx::spawn_detached(cx, async move {
+        Answer::Later(cx.spawn_background(async move {
             let ends = match flush.recv().await {
                 Ok(Ok(())) => host_cx
                     .unblock(move || {
@@ -74,13 +71,18 @@ impl AppState {
                     .map_err(|error| error.to_string()),
                 error => Err(format!("store write barrier failed: {error:?}")),
             };
+            let (answered, answer) = smol::channel::bounded(1);
             host_cx.enqueue(move |state, cx| {
                 let result = ends
                     .map(|ends| state.update_threads(&caller, params, &ends, cx))
                     .map_err(|error| format!("could not read the threads' logs: {error}"));
-                let _ = reply.try_send(result);
+                let _ = answered.try_send(result);
             });
-        });
+            answer
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("the host stopped before the batch applied".into()))
+        }))
     }
 
     fn update_threads(
@@ -318,7 +320,7 @@ impl AppState {
         for (index, item) in params.items.into_iter().enumerate() {
             if !self
                 .find_meta(&item.thread_id)
-                .is_some_and(|meta| self.target_reachable(caller, &meta, true))
+                .is_some_and(|meta| self.target_reachable(caller, &caller.grant.scope, &meta, true))
             {
                 return Err(format!(
                     "item {index}: thread {} is unknown or outside your grant's scope",
@@ -471,11 +473,7 @@ impl AppState {
             return;
         };
         self.change_meta(id, &mut cx, |meta| meta.self_settle = None);
-        let caller = Caller {
-            thread_id: id.to_owned(),
-            project_id: meta.project_id.clone(),
-            grant: self.caller_grant(&meta).0,
-        };
+        let caller = self.caller_of(&meta);
         let mut detail = format!(
             "settled itself ({}; \u{201c}{}\u{201d})",
             describe_when(&grant.when),
