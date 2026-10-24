@@ -2,6 +2,7 @@ use super::test_support::*;
 use super::*;
 use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
+use tcode_core::notice::CHILD_REPORT_REMINDER;
 use tcode_core::project::ChildExpectation;
 use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{Command, CommandResponse, HostMessage, Subscription};
@@ -3325,7 +3326,17 @@ fn session_launch_scopes_mcp_registrations() {
 
 #[test]
 fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
-    use tcode_core::session::{ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_REPORT_LABEL};
+    use tcode_core::notice::{
+        CallbackEvent, HostNotice, ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_REPORT_LABEL,
+        OrchestrateCallback, host_notice,
+    };
+    fn only_callback(text: &str) -> OrchestrateCallback {
+        let Some(HostNotice::Orchestrate(mut callbacks)) = host_notice(text) else {
+            panic!("not a callback: {text}");
+        };
+        assert_eq!(callbacks.len(), 1);
+        callbacks.remove(0)
+    }
 
     // A report is the child's own words: never truncated, never supplemented.
     let report = "界".repeat(5000);
@@ -3342,11 +3353,11 @@ fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
             "[orchestrate] thread child (\"Title\") reported.\n{ORCHESTRATE_REPORT_LABEL}{report}"
         )
     );
-    let callback = tcode_core::session::parse_orchestrate_callback(&text).unwrap();
-    assert_eq!(callback.state, "reported");
+    let callback = only_callback(&text);
+    assert_eq!(callback.event, CallbackEvent::Ended("reported".into()));
     assert_eq!(
         callback.report(),
-        report,
+        Some(report.as_str()),
         "the lead's view shows the report alone"
     );
 
@@ -3376,11 +3387,11 @@ fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
         assert!(!text.contains("tokens:"));
         assert_eq!(text.contains("Final output tail"), truncated);
         assert_eq!(text.lines().last().unwrap(), expected_tail);
-        let callback = tcode_core::session::parse_orchestrate_callback(&text).unwrap();
-        assert_eq!(callback.state, "unreported");
+        let callback = only_callback(&text);
+        assert_eq!(callback.event, CallbackEvent::Ended("unreported".into()));
         assert_eq!(
             callback.report(),
-            expected_tail,
+            Some(expected_tail.as_str()),
             "the lead's view shows the output"
         );
     }
@@ -3406,7 +3417,7 @@ fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
 
 #[test]
 fn only_report_result_reaches_the_lead_and_a_silent_child_is_reminded_then_fallen_back() {
-    use tcode_core::session::{ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_REPORT_LABEL};
+    use tcode_core::notice::{ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_REPORT_LABEL};
     use tcode_core::settlement::AgentReport;
 
     let cx = &mut TestAppContext::default();
