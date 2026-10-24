@@ -1,8 +1,10 @@
 use super::*;
-use tcode_core::project::ChildExpectation;
-use tcode_core::session::{
-    ORCHESTRATE_FALLBACK_LABEL, ORCHESTRATE_OUTPUT_TAIL_LABEL, ORCHESTRATE_REPORT_LABEL,
+use tcode_core::notice::{
+    CHILD_REPORT_REMINDER, ORCHESTRATE_APPROVAL_PHRASE, ORCHESTRATE_FALLBACK_LABEL,
+    ORCHESTRATE_OUTPUT_TAIL_LABEL, ORCHESTRATE_QUESTION_PHRASE, ORCHESTRATE_REPORT_LABEL,
+    callback_header,
 };
+use tcode_core::project::ChildExpectation;
 use tcode_core::settings::{OrchestrateChildModel, orchestrate_efforts};
 use tcode_core::settlement::{AgentDelivery, AgentReport};
 
@@ -1564,8 +1566,8 @@ impl AppState {
             "You are the approver: use the approve tool with option: <exact id> or cancel: true; reject anything outside the brief's scope. To allow, prefer an allow_always option over allow_once when one is offered."
         };
         let text = format!(
-            "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {} (request_id: {}). Native options: {}. {}",
-            child.title,
+            "{} {ORCHESTRATE_APPROVAL_PHRASE}{} (request_id: {}). Native options: {}. {}",
+            callback_header(child_id, &child.title),
             approval_request_summary(&request),
             request.id,
             serde_json::to_string(&options).expect("approval options serialize"),
@@ -1617,8 +1619,8 @@ impl AppState {
             "You are the decider: use the answer tool with answers keyed by question id, a string (an option label or free text) for a single-choice question and an array of strings for a multi_select one, deciding from the brief and the user's instructions."
         };
         let text = format!(
-            "[orchestrate] thread {child_id} (\"{}\") is asking (request_id: {}; {delivery}). Questions: {}. {instruction}",
-            child.title,
+            "{} {ORCHESTRATE_QUESTION_PHRASE}request_id: {}; {delivery}). Questions: {}. {instruction}",
+            callback_header(child_id, &child.title),
             pending.request_id,
             serde_json::to_string(&pending.questions).expect("questions serialize"),
         );
@@ -1677,9 +1679,6 @@ impl AppState {
 
 pub(super) const ORCHESTRATE_GUIDANCE: &str =
     include_str!("../../../../assets/orchestrate/workflow.md");
-/// Sent to a child that ended its turn owing a report, once per expectation.
-pub(super) const CHILD_REPORT_REMINDER: &str =
-    include_str!("../../../../assets/orchestrate/reminder.md");
 
 /// What the lead can learn about a child (see `AppState::child_result`).
 pub(super) struct ChildResult {
@@ -2372,7 +2371,10 @@ pub(super) fn assemble_report_callback(
         }
         CallbackBody::Failure(error) => error.to_string(),
     };
-    format!("[orchestrate] thread {child_id} (\"{title}\") {state}.{token_segment}\n{body}")
+    format!(
+        "{} {state}.{token_segment}\n{body}",
+        callback_header(child_id, title)
+    )
 }
 
 #[cfg(test)]
