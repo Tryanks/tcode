@@ -17,8 +17,8 @@ concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
-# Tag-scoped Cargo caches cannot warm the next release and evict the main CI
-# caches from the shared Actions quota.
+# Tag-scoped caches, Cargo's or Docker's, cannot warm the next release and
+# evict the main CI caches from the shared Actions quota.
 jobs:
   setup:
     runs-on: ubuntu-24.04
@@ -354,6 +354,19 @@ jobs:
           produced. `SHA256SUMS.txt` is added after every platform package has finished.
           NOTES
 
+          # macOS runners run bash 3.2, which has no ${var,,}.
+          image_repo="$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          {
+            printf '\n## Docker (Linux amd64 / arm64)\n\n'
+            printf 'Images: `ghcr.io/%s-headless:%s` and `ghcr.io/%s-traverse:%s`. The agent CLIs named in `TCODE_AGENTS` (all six by default) install into the data volume on first start.\n\n' \
+              "$image_repo" "$VERSION" "$image_repo" "$VERSION"
+            printf 'Save this as `docker-compose.yml`, set `TCODE_PASSWORD` in `.env`, then run `docker compose up -d`. Set `TCODE_VERSION=%s` in `.env` to pin this release.\n\n' "$VERSION"
+            printf 'Container login methods and NAS setup: https://github.com/%s/blob/%s/docs/docker.md\n\n' "$REPOSITORY" "$RELEASE_TAG"
+            printf '```yaml\n'
+            cat docker-compose.yml
+            printf '```\n'
+          } >> "$notes_file"
+
           release_args=(
             "$RELEASE_TAG"
             --repo "$REPOSITORY"
@@ -411,24 +424,12 @@ jobs:
 
       - name: Install wasm tools
         run: |
-          cargo install wasm-bindgen-cli --version 0.2.127 --locked
+          cargo install wasm-bindgen-cli --locked --version "$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q;}' Cargo.lock)"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binaryen
 
       - name: Build browser bundle
-        run: |
-          set -euo pipefail
-          cargo build -p tcode-web --target wasm32-unknown-unknown --release --locked
-          mkdir -p crates/web/dist
-          wasm-bindgen --target web --out-dir crates/web/dist --out-name tcode_web \
-            target/wasm32-unknown-unknown/release/tcode_web.wasm
-          wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
-            --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue \
-            crates/web/dist/tcode_web_bg.wasm \
-            -o crates/web/dist/tcode_web_bg.optimized.wasm
-          mv crates/web/dist/tcode_web_bg.optimized.wasm crates/web/dist/tcode_web_bg.wasm
-          cp crates/web/static/index.html crates/web/static/auth.mjs crates/web/dist/
-          ls -lh crates/web/dist
+        run: crates/web/build.sh
 
       - name: Upload browser bundle
         uses: actions/upload-artifact@v7
@@ -642,6 +643,180 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  container-images:
+    name: Container images ${{ matrix.arch }}
+    needs: [setup, package-headless, package-traverse]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            archive_arch: x64
+            os: ubuntu-24.04
+          - arch: arm64
+            archive_arch: arm64
+            os: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: package-*-linux-${{ matrix.archive_arch }}
+          path: archives
+          merge-multiple: true
+
+      - name: Stage release binaries and image names
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/$ARCH"
+          for binary in tcode-headless tcode-traverse; do
+            tar -xzf "archives/$binary-$VERSION-linux-${{ matrix.archive_arch }}.tar.gz" -C "dist/$ARCH"
+          done
+          echo "HEADLESS_IMAGE=ghcr.io/${REPOSITORY,,}-headless" >> "$GITHUB_ENV"
+          echo "TRAVERSE_IMAGE=ghcr.io/${REPOSITORY,,}-traverse" >> "$GITHUB_ENV"
+          echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pairing probe build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang cmake pkg-config libssl-dev libzstd-dev
+
+      - name: Build native container pairing probe
+        run: cargo build -p tcode-traverse --example pair_and_query --locked
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build headless image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: crates/headless/Dockerfile
+          build-args: BINARY_SOURCE=release
+          load: true
+          tags: ${{ env.HEADLESS_IMAGE }}:${{ env.VERSION }}-${{ env.ARCH }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ env.REVISION }}
+
+      - name: Build Traverse image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: crates/traverse-server/Dockerfile
+          build-args: BINARY_SOURCE=release
+          load: true
+          tags: ${{ env.TRAVERSE_IMAGE }}:${{ env.VERSION }}-${{ env.ARCH }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ env.REVISION }}
+
+      - name: Verify containers before publishing
+        run: |
+          node crates/headless/container/smoke.mjs \
+            "$HEADLESS_IMAGE:$VERSION-$ARCH" \
+            "$PWD/target/debug/examples/pair_and_query" "$TRAVERSE_IMAGE:$VERSION-$ARCH"
+
+      - uses: anchore/sbom-action/download-syft@v0.24.3
+        id: syft
+
+      - name: Push verified architecture images
+        id: push
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          for entry in "headless=$HEADLESS_IMAGE:$VERSION-$ARCH" \
+                       "traverse=$TRAVERSE_IMAGE:$VERSION-$ARCH"; do
+            name="${entry%%=*}"
+            image="${entry#*=}"
+            "$SYFT" scan "docker:$image" --output "spdx-json=$RUNNER_TEMP/$name.spdx.json"
+            docker push "$image"
+            echo "$name=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" | cut -d@ -f2)" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.HEADLESS_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.headless }}
+          sbom-path: ${{ runner.temp }}/headless.spdx.json
+          push-to-registry: true
+
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.TRAVERSE_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.traverse }}
+          sbom-path: ${{ runner.temp }}/traverse.spdx.json
+          push-to-registry: true
+
+  publish-containers:
+    name: Publish ${{ matrix.image }}
+    needs: [setup, container-images]
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      matrix:
+        image: [headless, traverse]
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the version tag and stable alias
+        id: manifest
+        env:
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}-${{ matrix.image }}"
+          tags=(--tag "$image:$VERSION")
+          if [[ "$PRERELEASE" == false ]]; then
+            tags+=(--tag "$image:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "$image:$VERSION-amd64" "$image:$VERSION-arm64"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
   package-android:
     name: Android arm64
     needs: setup
@@ -744,12 +919,19 @@ jobs:
     needs: [setup, package, package-headless, package-traverse, package-android]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
       - name: Download all packages
         uses: actions/download-artifact@v8
         with:
           pattern: package-*
           path: dist
           merge-multiple: true
+
+      - name: Include Compose deployment template
+        run: cp docker-compose.yml dist/docker-compose.yml
 
       - name: Show release files
         run: ls -lh dist

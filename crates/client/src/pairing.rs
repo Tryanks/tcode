@@ -37,6 +37,10 @@ pub struct PairedHost {
     pub addrs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_connected_unix: Option<u64>,
+    /// The group this machine belongs to, as a machine of the group last
+    /// told this device; its machines are saved beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 /// `traverse` as a list, or as the single optional value older records
@@ -90,6 +94,8 @@ pub struct PairInvite {
     /// [`SECRET_BYTES`] random bytes as unpadded base64url.
     pub secret: String,
     pub space: Option<String>,
+    /// A group link names the machine's group; never with `space`.
+    pub group: Option<String>,
     /// Every Traverse instance the machine publishes to:
     /// [`TRAVERSE_OFFICIAL`] or an instance's base URL. Empty is the official
     /// instance only; the single entry [`TRAVERSE_OFF`] is none at all.
@@ -113,6 +119,7 @@ impl PairInvite {
             relay: self.relay.clone(),
             addrs: Vec::new(),
             last_connected_unix: None,
+            group_id: None,
         }
     }
 }
@@ -197,6 +204,13 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
     if space.as_deref().is_some_and(|id| !valid_space_id(id)) {
         return None;
     }
+    let group = field("group").ok()?;
+    if group
+        .as_deref()
+        .is_some_and(|id| space.is_some() || !valid_invitation_secret(id))
+    {
+        return None;
+    }
     let entries: Vec<&str> = all("traverse").collect();
     let off_alone = entries == [TRAVERSE_OFF];
     if entries.len() > MAX_TRAVERSE
@@ -223,6 +237,7 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
         host_id,
         secret,
         space,
+        group,
         traverse,
         relay,
         port,
@@ -238,6 +253,9 @@ pub fn pair_url(invite: &PairInvite) -> String {
         .append_pair("secret", &invite.secret);
     if let Some(space) = &invite.space {
         query.append_pair("space", space);
+    }
+    if let Some(group) = &invite.group {
+        query.append_pair("group", group);
     }
     for traverse in invite.traverse.iter().take(MAX_TRAVERSE) {
         query.append_pair("traverse", traverse);
@@ -267,6 +285,7 @@ mod tests {
             relay: None,
             addrs: vec!["192.168.1.2:47420".into()],
             last_connected_unix: None,
+            group_id: None,
         };
         let mut hosts = vec![host("desk", "first"), host("laptop", "laptop")];
         remember_host(&mut hosts, host("desk", "second"));
@@ -336,6 +355,7 @@ mod tests {
                 host_id: ID.into(),
                 secret: encode_secret(&std::array::from_fn(|i| i as u8)),
                 space: None,
+                group: None,
                 traverse: Vec::new(),
                 relay: Some("https://use1-1.relay.n0.iroh.link./".into()),
                 port: 47420,
@@ -354,6 +374,7 @@ mod tests {
                 host_id: ID.into(),
                 secret: SECRET.into(),
                 space: Some("shared".into()),
+                group: None,
                 traverse: vec![TRAVERSE_OFFICIAL.into(), "https://traverse.example/".into()],
                 relay: Some("https://relay.example/".into()),
                 port: 5000,
@@ -373,6 +394,18 @@ mod tests {
         assert_eq!(off.traverse, [TRAVERSE_OFF]);
         assert_eq!(off.relay, None);
         assert_eq!(pair_url(&off), lan_only);
+
+        // A group link names the group, never a space as well.
+        let group_link = format!(
+            "tcode://pair?v=3&id={ID}&secret={SECRET}&group={SECRET}&traverse=off&port=47420"
+        );
+        let group = parse_pair_url(&group_link).unwrap();
+        assert_eq!(group.group.as_deref(), Some(SECRET));
+        assert_eq!(pair_url(&group), group_link);
+        assert!(parse_pair_url(&group_link.replace("&group=", "&space=shared&group=")).is_none());
+        assert!(
+            parse_pair_url(&group_link.replace(&format!("group={SECRET}"), "group=home")).is_none()
+        );
 
         let url_safe_secret = "__-_AAAAAAAAAAAAAAAAAA";
         assert_eq!(

@@ -1283,8 +1283,10 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     assert!(!identity.pairing_enabled);
     let migrated = std::fs::read(dir.0.join(HOST_FILE)).unwrap();
     let persisted: Value = serde_json::from_slice(&migrated).unwrap();
+    // Outside a group the file stays version 3, which older builds read.
     assert_eq!(persisted["v"], 3);
     assert_eq!(identity.policy_revision, 0);
+    // A version 3 file that had no policy revision yet loads with no group.
     let mut older_v3 = persisted.clone();
     older_v3.as_object_mut().unwrap().remove("policy_revision");
     std::fs::write(
@@ -1292,12 +1294,13 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
         serde_json::to_vec(&older_v3).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        HostIdentity::load_or_create(&dir.0, "Test Host")
-            .unwrap()
-            .policy_revision,
-        0
-    );
+    let v3 = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
+    assert_eq!(v3.policy_revision, 0);
+    assert!(v3.group.is_none());
+    v3.save().unwrap();
+    let rewritten: Value =
+        serde_json::from_slice(&std::fs::read(dir.0.join(HOST_FILE)).unwrap()).unwrap();
+    assert_eq!(rewritten["v"], 3);
     assert_eq!(persisted["devices"][0]["access"], json!({"type":"full"}));
     for access in [
         None,

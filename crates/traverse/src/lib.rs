@@ -16,6 +16,7 @@
 #[cfg(feature = "browser")]
 pub mod browser;
 pub mod client;
+pub mod group;
 pub mod host;
 pub mod hosts;
 #[cfg(any(feature = "browser", feature = "native"))]

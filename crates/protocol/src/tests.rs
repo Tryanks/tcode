@@ -1209,7 +1209,40 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
             action
         );
     }
+    for (action, wire) in [
+        (
+            GroupAction::Create {
+                name: "Home".into(),
+            },
+            json!({"type":"create","content":{"name":"Home"}}),
+        ),
+        (
+            GroupAction::Join {
+                link: "tcode://pair?v=3".into(),
+                address: Some("192.168.1.2".into()),
+            },
+            json!({"type":"join","content":{"link":"tcode://pair?v=3","address":"192.168.1.2"}}),
+        ),
+        (GroupAction::Leave, json!({"type":"leave"})),
+        (
+            GroupAction::RemoveMachine("m".into()),
+            json!({"type":"remove_machine","content":"m"}),
+        ),
+        (
+            GroupAction::Admit("d".into()),
+            json!({"type":"admit","content":"d"}),
+        ),
+    ] {
+        let action = HostingAction::Group(action);
+        let wire = json!({"type":"group","content":wire});
+        assert_eq!(serde_json::to_value(&action).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<HostingAction>(wire).unwrap(),
+            action
+        );
+    }
     let mut state = HostingState {
+        group: None,
         created_space_id: None,
         spaces: Vec::new(),
         enabled: true,
