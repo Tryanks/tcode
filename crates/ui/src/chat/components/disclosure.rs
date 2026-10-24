@@ -33,6 +33,7 @@ pub(crate) fn notice_label(notice: &HostNotice) -> String {
         )
         .into_owned(),
         HostNotice::ReportReminder => crate::tr!("chat.report_reminder").into_owned(),
+        HostNotice::Control(messages) => messages.join(" · "),
     }
 }
 

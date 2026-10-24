@@ -1281,6 +1281,7 @@ pub(crate) fn notice_keys(notice: &HostNotice, entry_id: &str) -> Vec<String> {
             .collect(),
         HostNotice::PullRequest { .. } => vec![format!("pull-request-update-{entry_id}")],
         HostNotice::ReportReminder => vec![format!("report-reminder-{entry_id}")],
+        HostNotice::Control(_) => vec![format!("control-notice-{entry_id}")],
     }
 }
 

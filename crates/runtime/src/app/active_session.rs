@@ -523,9 +523,12 @@ impl ActiveSession {
     pub(super) fn push_or_merge_orchestrate_callback(&mut self, text: String) -> u64 {
         self.idle_since = None;
         let delivery_in_flight = self.delivery_in_flight;
+        // A merged message must still read as one notice (`tcode_core::notice::host_notice`).
+        let control = |text: &str| text.starts_with(tcode_core::notice::CONTROL_CALLBACK_PREFIX);
         if let Some(pending) = self.queue.iter_mut().find(|message| {
             message.kind == QueuedMessageKind::OrchestrateCallback
                 && Some(message.id) != delivery_in_flight
+                && control(&message.text) == control(&text)
         }) {
             pending.text.push_str("\n\n");
             pending.text.push_str(&text);

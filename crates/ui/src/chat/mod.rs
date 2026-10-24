@@ -2002,7 +2002,9 @@ impl ChatView {
                         column.child(self.compose_callback_row(turn, key(), label, callback, cx));
                 }
             }
-            HostNotice::PullRequest { .. } | HostNotice::ReportReminder => {
+            HostNotice::PullRequest { .. }
+            | HostNotice::ReportReminder
+            | HostNotice::Control(_) => {
                 column = column.child(self.compose_disclosure(
                     turn,
                     key(),
