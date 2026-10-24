@@ -208,6 +208,8 @@ pub struct SettlementBlockers {
     pub completion_holding_work: bool,
     pub pending_human_message: bool,
     pub scheduled_wake: bool,
+    /// An agent or server message waits in the queue; settling would drop it.
+    pub pending_agent_message: bool,
 }
 
 impl SettlementBlockers {
@@ -217,6 +219,7 @@ impl SettlementBlockers {
             || self.completion_holding_work
             || self.pending_human_message
             || self.scheduled_wake
+            || self.pending_agent_message
     }
 }
 
@@ -262,11 +265,19 @@ pub fn automatic_settlement_due(
         || meta.auto_settle_disabled_at.is_some()
         || meta.pinned_at.is_some()
         || meta.parent_session_id.is_some()
+        || meta.follow_up.is_some()
+        || meta.parked_at.is_some()
         || blockers.any()
     {
         return None;
     }
     let last_activity = activity.last_activity_at();
+    if meta
+        .settle_suggestion_dismissed_at
+        .is_some_and(|dismissed| dismissed.saturating_mul(1000) >= last_activity.unwrap_or(0))
+    {
+        return None;
+    }
     // Only the human resumes a thread; agent and server messages do not hold a finished PR open.
     let anchor = activity
         .last_human_message_at
@@ -411,6 +422,10 @@ mod tests {
             "background",
             "human",
             "wake",
+            "agent message",
+            "follow-up",
+            "parked",
+            "dismissed",
         ] {
             let mut blocked = meta.clone();
             match blocker {
@@ -420,6 +435,14 @@ mod tests {
                 "disabled" => blocked.auto_settle_disabled_at = Some(1),
                 "pinned" => blocked.pinned_at = Some(1),
                 "child" => blocked.parent_session_id = Some("lead".into()),
+                "follow-up" => {
+                    blocked.follow_up = Some(crate::control::FollowUp {
+                        since: 1,
+                        note: None,
+                    })
+                }
+                "parked" => blocked.parked_at = Some(1),
+                "dismissed" => blocked.settle_suggestion_dismissed_at = Some(100),
                 _ => {}
             }
             let blockers = SettlementBlockers {
@@ -428,6 +451,7 @@ mod tests {
                 completion_holding_work: blocker == "background",
                 pending_human_message: blocker == "human",
                 scheduled_wake: blocker == "wake",
+                pending_agent_message: blocker == "agent message",
             };
             assert_eq!(
                 settle(&blocked, &activity, blockers, now),
@@ -435,6 +459,13 @@ mod tests {
                 "{blocker}"
             );
         }
+        let mut dismissed_earlier = meta.clone();
+        dismissed_earlier.settle_suggestion_dismissed_at = Some(99);
+        assert_eq!(
+            settle(&dismissed_earlier, &activity, blockers, now),
+            Some(100_000),
+            "activity after a dismissed suggestion ends the dismissal"
+        );
     }
 
     const HOUR: u64 = 3_600_000;

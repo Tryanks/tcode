@@ -828,7 +828,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::SettleChildren { session_id } => {
             response = CommandResponse::ChildrenSettled(app.settle_children(&session_id, cx));
         }
-        Command::SettleSession { session_id } => app.settle_session(&session_id, cx),
+        Command::SettleSession { session_id } => {
+            app.settle_session(&session_id, cx);
+        }
         Command::SetControlGrant { session_id, grant } => {
             app.set_control_grant(&session_id, grant, cx)
         }

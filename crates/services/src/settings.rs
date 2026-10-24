@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use agent::ProviderKind;
 #[cfg(test)]
 use tcode_core::settings::{EnvVar, ThemeMode};
-use tcode_core::{pull_request::HostKind, settings::Settings};
+use tcode_core::{control::ReviewRecord, pull_request::HostKind, settings::Settings};
+
+const REVIEWS_FILE: &str = "reviews.json";
 
 type Secrets = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -347,6 +349,26 @@ impl SettingsStore {
         file.write_all(&data)?;
         fs::rename(&tmp, &self.secrets_path)?;
         restrict_permissions(&self.secrets_path)
+    }
+
+    /// The recorded conversation reviews, oldest first; unreadable records read as none.
+    pub fn load_review_records(&self) -> Vec<ReviewRecord> {
+        let Ok(bytes) = fs::read(self.data_file(REVIEWS_FILE)) else {
+            return Vec::new();
+        };
+        serde_json::from_slice(&bytes).unwrap_or_else(|err| {
+            log::warn!("failed to parse {REVIEWS_FILE}: {err}");
+            Vec::new()
+        })
+    }
+
+    pub fn save_review_records(&self, records: &[ReviewRecord]) -> std::io::Result<()> {
+        let path = self.data_file(REVIEWS_FILE);
+        let tmp = path.with_extension("json.tmp");
+        let data = serde_json::to_vec_pretty(records)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        fs::write(&tmp, data)?;
+        fs::rename(tmp, path)
     }
 
     pub fn save(&self, settings: &Settings) -> std::io::Result<()> {

@@ -620,6 +620,7 @@ impl AppState {
             self.settle_child_expectation(session_id, *status, cx);
             self.fire_control_watches(session_id, WatchEvent::TurnCompleted, cx);
             self.fire_control_watches(session_id, WatchEvent::Idle, cx);
+            self.settle_self_if_due(session_id, true, cx);
         }
 
         if matches!(event, AgentEvent::RewindCompleted { .. })

@@ -21,13 +21,25 @@ mod watches;
 /// How many writes Settings → Control lists.
 const CONTROL_ACTIVITY_LIMIT: usize = 200;
 
-#[derive(Default)]
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,
     review_records: Vec<tcode_core::control::ReviewRecord>,
 }
 
+impl ControlState {
+    pub(super) fn new(review_records: Vec<tcode_core::control::ReviewRecord>) -> Self {
+        Self {
+            activity: VecDeque::new(),
+            review_records,
+        }
+    }
+}
+
+/// Where a call's answer goes once the host has it.
+pub(super) type ControlReply = smol::channel::Sender<Result<serde_json::Value, String>>;
+
 /// The thread behind a `tcode_control` call, with the grant in force when it arrived.
+#[derive(Clone)]
 pub(super) struct Caller {
     pub(super) thread_id: String,
     pub(super) project_id: Option<String>,
@@ -170,16 +182,16 @@ impl AppState {
         &mut self,
         thread_id: String,
         op: ControlOp,
-        reply: smol::channel::Sender<Result<serde_json::Value, String>>,
+        reply: ControlReply,
         cx: &mut HostCx,
     ) {
         let mut authored_cx = cx.clone();
         authored_cx.origin = Some(MessageOrigin::Agent);
         authored_cx.author = None;
         let cx = &mut authored_cx;
-        let result = match self.find_meta(&thread_id) {
+        let refusal = match self.find_meta(&thread_id) {
             _ if !self.settings.control.enabled => {
-                Err("tcode_control is turned off in Settings → Control".into())
+                "tcode_control is turned off in Settings → Control".into()
             }
             Some(meta) if meta.archived_at.is_none() => {
                 let caller = Caller {
@@ -187,12 +199,42 @@ impl AppState {
                     project_id: meta.project_id.clone(),
                     grant: self.caller_grant(&meta).0,
                 };
-                self.authorize_control(&caller, &op)
-                    .and_then(|()| self.dispatch_control_op(&caller, op, cx))
+                match self.authorize_control(&caller, &op) {
+                    Ok(()) => return self.dispatch_control_op(&caller, op, reply, cx),
+                    Err(refusal) => refusal,
+                }
             }
-            _ => Err("unknown thread".into()),
+            _ => "unknown thread".into(),
         };
-        let _ = reply.try_send(result);
+        let _ = reply.try_send(Err(refusal));
+    }
+
+    /// Whether `target` is within the caller's scope, or, for a read of its content, is the
+    /// caller itself, one of its Orchestrate children or a thread it references.
+    pub(super) fn target_reachable(
+        &self,
+        caller: &Caller,
+        target: &SessionMeta,
+        reads_content: bool,
+    ) -> bool {
+        if caller
+            .grant
+            .scope
+            .reaches(caller.project_id.as_deref(), target.project_id.as_deref())
+        {
+            return true;
+        }
+        reads_content
+            && (target.id == caller.thread_id
+                || target.parent_session_id.as_deref() == Some(caller.thread_id.as_str())
+                || self
+                    .find_meta(&caller.thread_id)
+                    .is_some_and(|caller_meta| {
+                        caller_meta
+                            .references
+                            .iter()
+                            .any(|reference| reference.thread_id == target.id)
+                    }))
     }
 
     /// The grant check every call passes host-side, however the connection listed its tools:
@@ -244,24 +286,11 @@ impl AppState {
                 );
             }
         }
-        let caller_meta = self.find_meta(&caller.thread_id);
         for target in op.target_thread_ids() {
             let Some(meta) = self.find_meta(target) else {
                 return Err(format!("unknown thread: {target}"));
             };
-            let in_scope = grant
-                .scope
-                .reaches(caller.project_id.as_deref(), meta.project_id.as_deref());
-            let readable = op.reads_content()
-                && (target == caller.thread_id
-                    || meta.parent_session_id.as_deref() == Some(caller.thread_id.as_str())
-                    || caller_meta.as_ref().is_some_and(|caller_meta| {
-                        caller_meta
-                            .references
-                            .iter()
-                            .any(|reference| reference.thread_id == target)
-                    }));
-            if !in_scope && !readable {
+            if !self.target_reachable(caller, &meta, op.reads_content()) {
                 return Err(format!(
                     "refused: thread {target} is outside your grant's scope ({})",
                     grant.scope.describe()
@@ -275,9 +304,10 @@ impl AppState {
         &mut self,
         caller: &Caller,
         op: ControlOp,
+        reply: ControlReply,
         cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
-        match op {
+    ) {
+        let result = match op {
             ControlOp::ListProjects(p) => self.op_list_projects(caller, p, cx),
             ControlOp::ListThreads(p) => self.op_list_threads(caller, p, cx),
             ControlOp::GetThread(p) => self.op_get_thread(caller, p, cx),
@@ -292,7 +322,7 @@ impl AppState {
             ControlOp::GetSettings(p) => self.op_get_settings(caller, p, cx),
             ControlOp::ReadTerminal(p) => self.op_read_terminal(caller, p, cx),
             ControlOp::ReviewCandidates(p) => self.op_review_candidates(caller, p, cx),
-            ControlOp::UpdateThreads(p) => self.op_update_threads(caller, p, cx),
+            ControlOp::UpdateThreads(p) => return self.op_update_threads(caller, p, reply, cx),
             ControlOp::RecordReview(p) => self.op_record_review(caller, p, cx),
             ControlOp::SettleSelf(p) => self.op_settle_self(caller, p, cx),
             ControlOp::StartThread(p) => self.op_start_thread(caller, p, cx),
@@ -310,7 +340,8 @@ impl AppState {
             ControlOp::Rewind(p) => self.op_rewind(caller, p, cx),
             ControlOp::PatchSettings(p) => self.op_patch_settings(caller, p, cx),
             ControlOp::RequestGrant(p) => self.op_request_grant(caller, p, cx),
-        }
+        };
+        let _ = reply.try_send(result);
     }
 
     /// Record a write in the target thread, as the actor's thread, and in the activity list.

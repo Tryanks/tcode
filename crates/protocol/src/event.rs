@@ -882,6 +882,11 @@ pub enum RuntimeNotice {
         reason: MergeWorktreeFailure,
         detail: Option<String>,
     },
+    /// A thread's model recorded a conversation review.
+    ReviewRecorded {
+        items: usize,
+        coverage: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -899,7 +904,8 @@ impl RuntimeNotice {
             | Self::SwitchedBranch { .. }
             | Self::WorktreeSeeded { .. }
             | Self::WorktreeMergedFastForward
-            | Self::WorktreeMergedCommit => NoticeSeverity::Success,
+            | Self::WorktreeMergedCommit
+            | Self::ReviewRecorded { .. } => NoticeSeverity::Success,
         }
     }
 }
