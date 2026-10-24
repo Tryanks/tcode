@@ -1,5 +1,8 @@
 use super::*;
-use tcode_core::{project::Project, settings::ProjectSettlementSettings};
+use tcode_core::{
+    project::Project,
+    settings::{ProjectSettlementSettings, Settings},
+};
 
 pub(crate) fn open_project_rules(
     store: Entity<WorkspaceStore>,
@@ -67,8 +70,165 @@ impl SettingsPage {
         }
     }
 
-    pub(super) fn render_thread_behavior(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_threads(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let settings = self.store.read(cx).settings();
+        let delete_confirm_reset = self.reset_action(
+            "reset-delete-confirm",
+            settings.skip_delete_confirmation,
+            cx,
+            |this, _, cx| {
+                this.dispatch_settings(|store| store.set_skip_delete_confirmation(false), cx)
+            },
+        );
+        let threads = vec![
+            self.title_generation_row(cx),
+            self.toggle_row(
+                "delete-confirm",
+                crate::tr!("settings.delete_confirmation.title"),
+                crate::tr!("settings.delete_confirmation.description"),
+                !settings.skip_delete_confirmation,
+                delete_confirm_reset,
+                cx,
+                |store, checked| store.set_skip_delete_confirmation(!checked),
+            ),
+        ];
+        let settling = self.settling_rows(&settings, cx);
+        let panels = self.panel_rows(&settings, cx);
+        let model_limits = self.model_limit_rows(&settings, cx);
+        let compact = self.window_state.read(cx).compact;
+        v_flex()
+            .gap(crate::material::section_gap(cx))
+            .child(self.settings_group(crate::tr!("settings.threads_section"), threads, cx))
+            .child(
+                self.settings_group(crate::tr!("settings.settling_section"), settling, cx)
+                    .child(
+                        div()
+                            .pl(px(crate::material::CARD_INSET))
+                            .pt(cx.theme().tokens.spacing.sm)
+                            .text_secondary(compact, cx)
+                            .child(crate::tr!("settings.auto_settle.footnote")),
+                    ),
+            )
+            .child(self.settings_group(crate::tr!("settings.panels_section"), panels, cx))
+            .child(self.settings_group(
+                crate::tr!("settings.model_limits_section"),
+                model_limits,
+                cx,
+            ))
+    }
+
+    fn panel_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let auto_open_task_panel_reset = self.reset_action(
+            "reset-auto-open-task-panel",
+            settings.auto_open_task_panel,
+            cx,
+            |this, _, cx| this.dispatch_settings(|store| store.set_auto_open_task_panel(false), cx),
+        );
+        let live_command_panel_reset = self.reset_action(
+            "reset-live-command-panel",
+            settings.live_command_panel_disabled,
+            cx,
+            |this, _, cx| {
+                this.dispatch_settings(|store| store.set_live_command_panel_disabled(false), cx)
+            },
+        );
+        let word_wrap_reset = self.reset_action(
+            "reset-word-wrap",
+            settings.word_wrap_diffs,
+            cx,
+            |this, _, cx| this.dispatch_settings(|store| store.set_word_wrap_diffs(false), cx),
+        );
+        vec![
+            self.toggle_row(
+                "auto-open-task-panel",
+                crate::tr!("settings.auto_open_task_panel.title"),
+                crate::tr!("settings.auto_open_task_panel.description"),
+                settings.auto_open_task_panel,
+                auto_open_task_panel_reset,
+                cx,
+                WorkspaceStore::set_auto_open_task_panel,
+            ),
+            self.toggle_row(
+                "live-command-panel",
+                crate::tr!("settings.live_command_panel.title"),
+                crate::tr!("settings.live_command_panel.description"),
+                !settings.live_command_panel_disabled,
+                live_command_panel_reset,
+                cx,
+                |store, checked| store.set_live_command_panel_disabled(!checked),
+            ),
+            self.toggle_row(
+                "word-wrap",
+                crate::tr!("settings.word_wrap.title"),
+                crate::tr!("settings.word_wrap.description"),
+                settings.word_wrap_diffs,
+                word_wrap_reset,
+                cx,
+                WorkspaceStore::set_word_wrap_diffs,
+            ),
+        ]
+    }
+
+    fn model_limit_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let abort_on_fallback_reset = self.reset_action(
+            "reset-abort-on-model-fallback",
+            !settings.abort_on_model_fallback,
+            cx,
+            |this, _, cx| {
+                this.dispatch_settings(|store| store.set_abort_on_model_fallback(true), cx)
+            },
+        );
+        let mut rows = vec![self.toggle_row(
+            "abort-on-model-fallback",
+            crate::tr!("settings.abort_on_model_fallback.title"),
+            crate::tr!("settings.abort_on_model_fallback.description"),
+            settings.abort_on_model_fallback,
+            abort_on_fallback_reset,
+            cx,
+            WorkspaceStore::set_abort_on_model_fallback,
+        )];
+        if settings.abort_on_model_fallback {
+            let advisor_reset = self.reset_action(
+                "reset-fallback-review-advisor",
+                settings.fallback_review_advisor,
+                cx,
+                |this, _, cx| {
+                    this.dispatch_settings(|store| store.set_fallback_review_advisor(false), cx)
+                },
+            );
+            rows.push(self.toggle_row(
+                "fallback-review-advisor",
+                crate::tr!("settings.fallback_review_advisor.title"),
+                crate::tr!("settings.fallback_review_advisor.description"),
+                settings.fallback_review_advisor,
+                advisor_reset,
+                cx,
+                WorkspaceStore::set_fallback_review_advisor,
+            ));
+            rows.push(self.fallback_review_model_row(cx));
+        }
+        let resume_on_limit_reset_reset = self.reset_action(
+            "reset-resume-on-limit-reset",
+            !settings.resume_on_limit_reset,
+            cx,
+            |this, _, cx| this.dispatch_settings(|store| store.set_resume_on_limit_reset(true), cx),
+        );
+        rows.push(self.toggle_row(
+            "resume-on-limit-reset",
+            crate::tr!("settings.resume_on_limit_reset.title"),
+            crate::tr!("settings.resume_on_limit_reset.description"),
+            settings.resume_on_limit_reset,
+            resume_on_limit_reset_reset,
+            cx,
+            WorkspaceStore::set_resume_on_limit_reset,
+        ));
+        rows
+    }
+
+    /// Auto-settle, its days and merge rules, and the per-project overrides:
+    /// a phone lists every project as a link to its rules page; a wide window
+    /// adds overrides from a menu and edits them in a dialog.
+    fn settling_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let reset = self.reset_action(
             "reset-auto-settle",
             settings.auto_settle_after_days != Some(3.),
@@ -259,20 +419,7 @@ impl SettingsPage {
                 );
             }
         }
-        let compact = self.window_state.read(cx).compact;
-        v_flex()
-            .child(crate::material::group_caption(
-                crate::tr!("settings.threads_section"),
-                cx,
-            ))
-            .child(self.grouped_plain(rows, cx))
-            .child(
-                div()
-                    .pl(px(crate::material::CARD_INSET))
-                    .pt(cx.theme().tokens.spacing.sm)
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!("settings.auto_settle.footnote")),
-            )
+        rows
     }
 
     fn edit_project_rules(
@@ -287,7 +434,7 @@ impl SettingsPage {
             self.project_rules_subscription = self.project_rules_editor.as_ref().map(|editor| {
                 cx.subscribe(editor, |this, _, _: &gpui::DismissEvent, cx| {
                     this.window_state.update(cx, |state, cx| state.back(cx));
-                    this.section = Section::ThreadBehavior;
+                    this.section = Section::Threads;
                     this.project_rules_editor = None;
                     cx.notify();
                 })
