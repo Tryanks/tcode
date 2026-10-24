@@ -44,6 +44,11 @@ impl ControlTools {
         }
     }
 
+    /// The tools this connection lists, with their descriptions, in name order.
+    fn listed(&self) -> Vec<(String, String)> {
+        described(self.tool_router.list_all())
+    }
+
     async fn run(&self, op: ControlOp) -> CallToolResult {
         match self
             .broker
@@ -300,7 +305,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Ask the user for a wider grant: a scope, tiers and privileged categories, with your reason. Only asks: the user approves or declines in Tcode's UI, never in chat, and you receive a message \"[control] grant approved: …\" or \"[control] grant declined: …\" when they answer. An approved grant is recorded on this thread, visible to the user, and takes effect on your next call."
+        description = "Ask the user for a wider grant: a scope, tiers and privileged categories, with your reason. Only asks: the user approves or declines in Tcode's UI, never in chat, and you receive a message \"[control] grant approved: …\" or \"[control] grant declined: …\" when they answer. An approved grant is recorded on this thread and visible to the user. A wider scope or a newly allowed category applies at once to the tools you already have; tools the new grant adds appear only when your provider next starts a session, until then they are not in your tool list. With nothing granted, this is the only tool you have."
     )]
     async fn request_grant(&self, Parameters(p): Parameters<RequestGrantParams>) -> CallToolResult {
         self.run(ControlOp::RequestGrant(p)).await
@@ -313,10 +318,18 @@ fn tool_allowed(name: &str, grant: &ControlGrant) -> bool {
 
 /// Every tool `grant` allows, with the description its model reads, in name order.
 pub fn tool_descriptions(grant: &ControlGrant) -> Vec<(String, String)> {
-    ControlTools::tool_router()
-        .list_all()
+    described(
+        ControlTools::tool_router()
+            .list_all()
+            .into_iter()
+            .filter(|tool| tool_allowed(&tool.name, grant))
+            .collect(),
+    )
+}
+
+fn described(tools: Vec<rmcp::model::Tool>) -> Vec<(String, String)> {
+    tools
         .into_iter()
-        .filter(|tool| tool_allowed(&tool.name, grant))
         .map(|tool| {
             (
                 tool.name.to_string(),
@@ -342,13 +355,15 @@ impl ServerHandler for ControlTools {
 pub type Service = StreamableHttpService<ControlTools, LocalSessionManager>;
 
 /// A thread's endpoint; every connection reads the grant current when it opens, so a
-/// revoked or widened grant shows on the next connection, and every call is authorized
-/// again host-side.
+/// revoked or widened grant changes the tool list on the next connection, and records the
+/// tools it listed. Every call is authorized again host-side.
 pub fn service(broker: Broker, thread_id: String, grants: GrantSource) -> Service {
     StreamableHttpService::new(
         move || {
             let grant = grants.resolve(&thread_id);
-            Ok(ControlTools::new(broker.clone(), thread_id.clone(), &grant))
+            let tools = ControlTools::new(broker.clone(), thread_id.clone(), &grant);
+            grants.record_offered(&thread_id, tools.listed());
+            Ok(tools)
         },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),

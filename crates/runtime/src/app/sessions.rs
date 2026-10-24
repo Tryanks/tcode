@@ -1433,6 +1433,8 @@ impl AppState {
         fork.acp_agent_id = source.acp_agent_id.clone();
         fork.profile_id = source.profile_id.clone();
         fork.resume_cursor = source.resume_cursor.clone();
+        // The fork carries the source's context, so it may read what the source could.
+        fork.references = source.references.clone();
         fork.pending_fork = true;
         // `worktree` deliberately stays absent: it is an ownership/cleanup
         // marker. The cwd may be shared, but the fork must not own the source's

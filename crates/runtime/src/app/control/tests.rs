@@ -26,20 +26,66 @@ fn caller(project: &str, grant: ControlGrant) -> Caller {
         thread_id: "caller".into(),
         project_id: Some(project.into()),
         grant,
+        ancestors: Vec::new(),
     }
 }
 
+/// The `tcode_control` tools the thread's status discloses.
 fn tool_names(state: &AppState, id: &str) -> Vec<String> {
     state
         .session_status_snapshot(id)
         .unwrap()
         .injected_tools
-        .map(|tools| tools.tools.into_iter().map(|(name, _)| name).collect())
+        .map(|tools| {
+            tools
+                .tools
+                .into_iter()
+                .map(|(name, _)| name)
+                .filter(|name| control_mcp::tool_requirement(name).is_some())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-/// A thread whose provider takes MCP servers is registered with `tcode_control` and its
-/// grant's tools are disclosed; turning the setting off withdraws both.
+/// The tools a connection to `registration` lists, as the provider sees them.
+fn connect_and_list(registration: &agent::McpRegistration) -> Vec<String> {
+    let (url, token) = (&registration.url, &registration.bearer_token);
+    let (init, session) = rpc(
+        url,
+        token,
+        None,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"contract-fixture","version":"1"}}}),
+    );
+    assert!(
+        init["result"]["capabilities"]["tools"].is_object(),
+        "{init}"
+    );
+    rpc(
+        url,
+        token,
+        session.as_deref(),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    let (listed, _) = rpc(
+        url,
+        token,
+        session.as_deref(),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    );
+    let mut names: Vec<String> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A thread whose provider takes MCP servers is given `tcode_control` even with nothing
+/// granted, so it can still ask; the disclosed tools are the ones its connection actually
+/// received, which a later grant change alters only when the provider connects again.
+/// Turning the setting off withdraws the server.
 #[test]
 fn control_tools_follow_the_grant_and_the_setting() {
     let cx = &mut TestAppContext::default();
@@ -47,8 +93,9 @@ fn control_tools_follow_the_grant_and_the_setting() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let mut host = mcp_host::Host::bind().unwrap();
     let server = control_mcp::start(&mut host);
-    let meta = thread("caller", "p");
-    state.update(cx, |state, _| {
+    let mut meta = thread("caller", "p");
+    meta.control_grant = Some(ControlGrant::none());
+    let registration = state.update(cx, |state, _| {
         state.attach_control_mcp(server);
         state.sessions.push(meta.clone());
         state.install_selected(ActiveSession::new(meta.clone(), false, Vec::new()));
@@ -57,23 +104,67 @@ fn control_tools_follow_the_grant_and_the_setting() {
             registration.name,
             agent::McpRegistration::SERVER_NAME_CONTROL
         );
-        let tools = tool_names(state, "caller");
-        assert!(tools.iter().any(|name| name == "list_projects"));
-        assert!(tools.iter().any(|name| name == "request_grant"));
-        assert!(!tools.iter().any(|name| name == "delete_threads"));
-        assert!(
-            state
-                .session_status_snapshot("caller")
-                .unwrap()
-                .control
-                .unwrap()
-                .tools_offered
-        );
+        assert_eq!(tool_names(state, "caller"), ["request_grant"]);
+        registration
     });
+    host.start().unwrap();
 
+    let default_grant = ControlGrant::default_grant();
     state.dispatch_command(
         cx,
         1,
+        Command::SetControlGrant {
+            session_id: "caller".into(),
+            grant: Some(default_grant.clone()),
+        },
+    );
+    cx.run_until_parked();
+    let expected = |grant: &ControlGrant| -> Vec<String> {
+        let mut names: Vec<String> = control_mcp::tool_descriptions(grant)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        names
+    };
+    state.read(|state| {
+        assert_eq!(
+            tool_names(state, "caller"),
+            expected(&default_grant),
+            "before the first connection the grant's tools are disclosed"
+        );
+    });
+    let first = connect_and_list(&registration);
+    assert_eq!(first, expected(&default_grant));
+    assert!(!first.iter().any(|name| name == "delete_threads"));
+
+    let delete = ControlGrant {
+        categories: [ControlCategory::Delete].into_iter().collect(),
+        ..default_grant.clone()
+    };
+    state.dispatch_command(
+        cx,
+        2,
+        Command::SetControlGrant {
+            session_id: "caller".into(),
+            grant: Some(delete.clone()),
+        },
+    );
+    cx.run_until_parked();
+    state.read(|state| {
+        assert_eq!(
+            tool_names(state, "caller"),
+            first,
+            "the open connection still lists what it was given"
+        );
+    });
+    let second = connect_and_list(&registration);
+    assert!(second.iter().any(|name| name == "delete_threads"));
+    state.read(|state| assert_eq!(tool_names(state, "caller"), second));
+
+    state.dispatch_command(
+        cx,
+        3,
         Command::PatchSettings {
             patch: SettingsPatch::ControlEnabled(false),
         },
@@ -778,6 +869,7 @@ fn patch_settings_applies_allowed_patches_only() {
             thread("caller", "p"),
             &[ControlCategory::SettingsWrite],
         ));
+        let before = state.settings.clone();
         let patch = |patch: SettingsPatch| {
             ControlOp::PatchSettings(PatchSettingsParams {
                 patch: serde_json::to_value(patch).unwrap(),
@@ -792,11 +884,23 @@ fn patch_settings_applies_allowed_patches_only() {
                 enabled: None,
                 account: None,
             },
+            SettingsPatch::OrchestrateChildApproval(
+                tcode_core::settings::ChildApprovalMode::AlwaysAllow,
+            ),
+            SettingsPatch::AutoSettleAfterDays(Some(0.5)),
         ] {
             let refusal = call(state, "caller", patch(refused), cx).unwrap_err();
-            assert!(refusal.starts_with("refused: "), "{refusal}");
+            assert!(
+                refusal.starts_with("refused: `patch_settings` never changes"),
+                "{refusal}"
+            );
         }
         assert!(state.settings.control.enabled);
+        assert_eq!(
+            state.settings.auto_settle_after_days,
+            before.auto_settle_after_days
+        );
+        assert_eq!(state.settings.orchestrate, before.orchestrate);
 
         let wrap = !state.settings.word_wrap_diffs;
         call(
@@ -807,5 +911,70 @@ fn patch_settings_applies_allowed_patches_only() {
         )
         .unwrap();
         assert_eq!(state.settings.word_wrap_diffs, wrap);
+    });
+}
+
+/// An Orchestrate child may neither read nor act on its parent or the parent's ancestors,
+/// even inside its grant's scope; they are absent from its listings too.
+#[test]
+fn a_child_may_not_read_or_act_on_its_parent() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-control-parent");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        state.sessions.push(thread("grand", "p"));
+        let mut parent = thread("parent", "p");
+        parent.parent_session_id = Some("grand".into());
+        state.sessions.push(parent);
+        let mut child = thread("caller", "p");
+        child.parent_session_id = Some("parent".into());
+        state.sessions.push(child);
+        state.sessions.push(thread("sibling", "p"));
+        let get = |id: &str| {
+            ControlOp::GetThread(GetThreadParams {
+                thread_id: id.into(),
+            })
+        };
+        for ancestor in ["parent", "grand"] {
+            assert_eq!(
+                call(state, "caller", get(ancestor), cx),
+                Err(format!(
+                    "refused: thread {ancestor} orchestrates this thread; a child may not read or act on its parent"
+                ))
+            );
+        }
+        let settle = ControlOp::UpdateThreads(UpdateThreadsParams {
+            changes: vec![ThreadChange {
+                thread_id: "parent".into(),
+                op: ThreadOp::Settle,
+                expect: None,
+            }],
+            dry_run: None,
+            request_id: None,
+        });
+        assert!(
+            call(state, "caller", settle, cx)
+                .unwrap_err()
+                .contains("a child may not read or act on its parent")
+        );
+        assert!(call(state, "caller", get("sibling"), cx).is_ok());
+        let listed = call(
+            state,
+            "caller",
+            ControlOp::ListThreads(control_mcp::ListThreadsParams {
+                include_children: Some(true),
+                ..Default::default()
+            }),
+            cx,
+        )
+        .unwrap();
+        let mut ids: Vec<&str> = listed["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["caller", "sibling"]);
     });
 }

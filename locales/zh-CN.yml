@@ -1213,6 +1213,7 @@ notice:
   dirty_tree: "工作树中有未提交的更改"
   tcode_update_available: "Tcode %{version} 可用"
   review_recorded: "已记录回顾：%{items} 项，覆盖范围 %{coverage}"
+  reference_boundary_crossed: "“%{thread}”中的模型引用了来自其他项目或提供方的“%{title}”：它从中读取的内容会发送给该模型的供应商"
 attach:
   unsupported_type: "'%{name}' 的文件类型不受支持。请仅附加图片文件。"
   too_large: "'%{name}' 超过了 10MB 的附件大小限制。"

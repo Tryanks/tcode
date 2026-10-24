@@ -6,21 +6,62 @@ use control_mcp::{
 use tcode_core::settings::SettingsPatch;
 use tcode_protocol::{Command, Principal};
 
-/// Settings no grant lets an agent change: credentials and hosting, and everything that
-/// changes authority (grants, the control configuration, the settlement automation tier).
+/// The settings an agent may change, as display preferences only. Everything else touches
+/// authority (approvals, computer use, browser evaluation, plugins, child approval, grants,
+/// hosting, credentials), automation (settlement rules and tiers, resuming, fallbacks, title
+/// and review models) or UI state (sidebar, last project), and stays the user's. The match is
+/// exhaustive so a new setting is decided here, not allowed by default.
 pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
-    matches!(
-        patch,
+    match patch {
+        SettingsPatch::Language(_)
+        | SettingsPatch::ThemeMode(_)
+        | SettingsPatch::WordWrapDiffs(_)
+        | SettingsPatch::AutoOpenTaskPanel(_)
+        | SettingsPatch::LiveCommandPanelDisabled(_)
+        | SettingsPatch::SidebarProviderMarks(_)
+        | SettingsPatch::InactiveFrameThrottleDisabled(_)
+        | SettingsPatch::FallbackReviewAdvisor(_) => false,
         SettingsPatch::SourceControlHost { .. }
-            | SettingsPatch::RemoveSourceControlHost { .. }
-            | SettingsPatch::RemoteHostingEnabled(_)
-            | SettingsPatch::Traverse(_)
-            | SettingsPatch::RemoteHostName(_)
-            | SettingsPatch::ControlEnabled(_)
-            | SettingsPatch::ControlDefaultGrant(_)
-            | SettingsPatch::ControlProjectGrant { .. }
-            | SettingsPatch::SettlementAutomation(_)
-    )
+        | SettingsPatch::RemoveSourceControlHost { .. }
+        | SettingsPatch::SkipDeleteConfirmation(_)
+        | SettingsPatch::ProviderUpdateChecksDisabled(_)
+        | SettingsPatch::AbortOnModelFallback(_)
+        | SettingsPatch::ResumeOnLimitReset(_)
+        | SettingsPatch::AutoSettleAfterDays(_)
+        | SettingsPatch::AutoSettleOnMerge(_)
+        | SettingsPatch::ProjectSettlement { .. }
+        | SettingsPatch::ProjectMergeMethod { .. }
+        | SettingsPatch::RemoveAgentCreditsOnMerge(_)
+        | SettingsPatch::OrchestrateDecisionModels(_)
+        | SettingsPatch::OrchestrateChildModels(_)
+        | SettingsPatch::OrchestrateChildApproval(_)
+        | SettingsPatch::OrchestrateChildWorktrees(_)
+        | SettingsPatch::ComputerUseEnabled(_)
+        | SettingsPatch::ComputerUseImageMode(_)
+        | SettingsPatch::ComputerUseAllowInput(_)
+        | SettingsPatch::ComputerUseAllowForegroundFallback(_)
+        | SettingsPatch::ComputerUseShowAgentCursor(_)
+        | SettingsPatch::BrowserEnabled(_)
+        | SettingsPatch::BrowserHomeUrl(_)
+        | SettingsPatch::BrowserAllowEvaluate(_)
+        | SettingsPatch::PluginManagementEnabled(_)
+        | SettingsPatch::PluginManagementProvider { .. }
+        | SettingsPatch::ControlEnabled(_)
+        | SettingsPatch::ControlDefaultGrant(_)
+        | SettingsPatch::ControlProjectGrant { .. }
+        | SettingsPatch::SettlementAutomation(_)
+        | SettingsPatch::TitleGenerationProvider(_)
+        | SettingsPatch::TitleGenerationModel(_)
+        | SettingsPatch::TitleGenerationProfileId(_)
+        | SettingsPatch::FallbackReviewProvider(_)
+        | SettingsPatch::FallbackReviewModel(_)
+        | SettingsPatch::FallbackReviewProfileId(_)
+        | SettingsPatch::SidebarLayout(_)
+        | SettingsPatch::RemoteHostingEnabled(_)
+        | SettingsPatch::Traverse(_)
+        | SettingsPatch::RemoteHostName(_)
+        | SettingsPatch::LastProject(_) => true,
+    }
 }
 
 /// The context every privileged write runs in: the host's full authority, authored by the
@@ -335,12 +376,6 @@ impl AppState {
             .to_owned();
         let patch: SettingsPatch = serde_json::from_value(params.patch)
             .map_err(|error| format!("invalid settings patch: {error}"))?;
-        if settings_patch_never_exposed(&patch) {
-            return Err(format!(
-                "refused: `patch_settings` never changes {name}: credentials, hosting, \
-                 tcode_control grants and the settlement automation tier stay the user's"
-            ));
-        }
         self.validate_command_target(&Command::PatchSettings {
             patch: patch.clone(),
         })

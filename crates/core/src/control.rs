@@ -98,13 +98,28 @@ pub enum ControlScope {
 
 impl ControlScope {
     /// Whether a target in `target_project` is reachable from a caller in `caller_project`.
-    /// A thread without a project is reachable only from a host-wide scope, or from the
-    /// caller's own scope when the caller also has none.
+    /// Every scope includes the caller's own project; a thread without a project is
+    /// reachable only from a host-wide scope, or from a caller that also has none.
     pub fn reaches(&self, caller_project: Option<&str>, target_project: Option<&str>) -> bool {
         match self {
             Self::Host => true,
             Self::Project => caller_project == target_project,
-            Self::Projects(ids) => target_project.is_some_and(|id| ids.iter().any(|p| p == id)),
+            Self::Projects(ids) => {
+                caller_project == target_project
+                    || target_project.is_some_and(|id| ids.iter().any(|p| p == id))
+            }
+        }
+    }
+
+    /// Whether a call may ask for this scope under `granted`, from a caller in
+    /// `caller_project`: everything it reaches, `granted` reaches too.
+    pub fn within(&self, granted: &ControlScope, caller_project: Option<&str>) -> bool {
+        match (self, granted) {
+            (_, Self::Host) | (Self::Project, _) => true,
+            (Self::Projects(ids), _) => ids
+                .iter()
+                .all(|id| granted.reaches(caller_project, Some(id))),
+            (Self::Host, _) => false,
         }
     }
 
@@ -116,20 +131,25 @@ impl ControlScope {
         }
     }
 
-    /// The scope covering both: `Host` dominates, two project lists join, and the caller's
-    /// own project is kept beside an explicit list only as `Project` when neither names one.
-    fn widen(&mut self, other: &ControlScope) {
+    /// The scope covering both, for a caller in `caller_project`: `Host` dominates, and
+    /// project lists join, naming the caller's own project when one side meant it.
+    fn widen(&mut self, other: &ControlScope, caller_project: Option<&str>) {
+        let ids = |scope: &ControlScope| match scope {
+            Self::Projects(ids) => ids.clone(),
+            _ => caller_project.map(str::to_owned).into_iter().collect(),
+        };
         *self = match (&*self, other) {
             (Self::Host, _) | (_, Self::Host) => Self::Host,
-            (Self::Projects(a), Self::Projects(b)) => {
-                let mut ids = a.clone();
-                ids.extend(b.iter().filter(|id| !a.contains(id)).cloned());
-                Self::Projects(ids)
-            }
-            (Self::Projects(ids), Self::Project) | (Self::Project, Self::Projects(ids)) => {
-                Self::Projects(ids.clone())
-            }
             (Self::Project, Self::Project) => Self::Project,
+            (a, b) => {
+                let mut joined = ids(a);
+                for id in ids(b) {
+                    if !joined.contains(&id) {
+                        joined.push(id);
+                    }
+                }
+                Self::Projects(joined)
+            }
         };
     }
 }
@@ -181,9 +201,9 @@ impl ControlGrant {
         self.tiers.is_empty() && self.categories.is_empty()
     }
 
-    /// Widen this grant by everything `other` allows.
-    pub fn merge(&mut self, other: &ControlGrant) {
-        self.scope.widen(&other.scope);
+    /// Widen this grant, held by a thread in `caller_project`, by everything `other` allows.
+    pub fn merge(&mut self, other: &ControlGrant, caller_project: Option<&str>) {
+        self.scope.widen(&other.scope, caller_project);
         self.tiers.extend(other.tiers.iter().copied());
         self.categories.extend(other.categories.iter().copied());
     }
@@ -294,7 +314,9 @@ pub struct ThreadReference {
     pub by: ReferenceOrigin,
     /// Unix seconds.
     pub created_at: u64,
-    /// The reference crosses a project or provider boundary, which the user was told once.
+    /// The reference crosses a project or provider boundary: the referenced thread's content
+    /// may reach another model vendor. The user is told once when the reference is made,
+    /// at the mention for a chip and by a runtime notice for the `reference` tool.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub boundary_notice: bool,
 }
@@ -427,27 +449,47 @@ mod tests {
             tiers: [ControlTier::Observe].into_iter().collect(),
             categories: BTreeSet::new(),
         };
-        grant.merge(&ControlGrant {
-            scope: ControlScope::Projects(vec!["b".into(), "a".into()]),
-            tiers: [ControlTier::Operate].into_iter().collect(),
-            categories: [ControlCategory::Terminal].into_iter().collect(),
-        });
+        grant.merge(
+            &ControlGrant {
+                scope: ControlScope::Projects(vec!["b".into(), "a".into()]),
+                tiers: [ControlTier::Operate].into_iter().collect(),
+                categories: [ControlCategory::Terminal].into_iter().collect(),
+            },
+            Some("own"),
+        );
         assert_eq!(
             grant.scope,
             ControlScope::Projects(vec!["a".into(), "b".into()])
         );
         assert!(grant.allows_tier(ControlTier::Observe) && grant.allows_tier(ControlTier::Operate));
         assert!(grant.allows_category(ControlCategory::Terminal));
-        grant.merge(&ControlGrant::none());
+        grant.merge(&ControlGrant::none(), Some("own"));
         assert_eq!(
             grant.scope,
-            ControlScope::Projects(vec!["a".into(), "b".into()])
+            ControlScope::Projects(vec!["a".into(), "b".into(), "own".into()])
         );
-        grant.merge(&ControlGrant {
-            scope: ControlScope::Host,
-            ..ControlGrant::none()
-        });
+        grant.merge(
+            &ControlGrant {
+                scope: ControlScope::Host,
+                ..ControlGrant::none()
+            },
+            Some("own"),
+        );
         assert_eq!(grant.scope, ControlScope::Host);
+
+        // The default grant's own project survives approving another project.
+        let mut grant = ControlGrant::default_grant();
+        grant.merge(
+            &ControlGrant {
+                scope: ControlScope::Projects(vec!["b".into()]),
+                ..ControlGrant::none()
+            },
+            Some("own"),
+        );
+        assert_eq!(
+            grant.scope,
+            ControlScope::Projects(vec!["own".into(), "b".into()])
+        );
     }
 
     #[test]
@@ -456,7 +498,21 @@ mod tests {
         assert!(!ControlScope::Project.reaches(Some("a"), Some("b")));
         assert!(!ControlScope::Project.reaches(Some("a"), None));
         assert!(ControlScope::Projects(vec!["b".into()]).reaches(Some("a"), Some("b")));
+        assert!(ControlScope::Projects(vec!["b".into()]).reaches(Some("a"), Some("a")));
+        assert!(!ControlScope::Projects(vec!["b".into()]).reaches(Some("a"), Some("c")));
         assert!(!ControlScope::Projects(vec!["b".into()]).reaches(Some("a"), None));
         assert!(ControlScope::Host.reaches(Some("a"), None));
+    }
+
+    #[test]
+    fn a_requested_scope_is_within_the_grant_only_when_the_grant_reaches_all_of_it() {
+        let b = ControlScope::Projects(vec!["b".into()]);
+        assert!(ControlScope::Project.within(&b, Some("a")));
+        assert!(ControlScope::Projects(vec!["a".into(), "b".into()]).within(&b, Some("a")));
+        assert!(!ControlScope::Projects(vec!["c".into()]).within(&b, Some("a")));
+        assert!(ControlScope::Projects(vec!["a".into()]).within(&ControlScope::Project, Some("a")));
+        assert!(!b.within(&ControlScope::Project, Some("a")));
+        assert!(!ControlScope::Host.within(&b, Some("a")));
+        assert!(ControlScope::Host.within(&ControlScope::Host, Some("a")));
     }
 }

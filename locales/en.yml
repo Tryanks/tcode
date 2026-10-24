@@ -1220,6 +1220,7 @@ notice:
   dirty_tree: "Working tree has uncommitted changes"
   tcode_update_available: "Tcode %{version} available"
   review_recorded: "Review recorded: %{items} items, coverage %{coverage}"
+  reference_boundary_crossed: "The model in “%{thread}” referenced “%{title}” from another project or provider: what it reads there goes to that model's vendor"
 attach:
   unsupported_type: "Unsupported file type for '%{name}'. Please attach image files only."
   too_large: "'%{name}' exceeds the 10MB attachment limit."

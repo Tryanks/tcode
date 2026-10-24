@@ -88,10 +88,12 @@ impl AppState {
                 .control_grant
                 .clone()
                 .unwrap_or_else(|| self.caller_grant(&meta).0);
-            grant.merge(&request.grant);
+            grant.merge(&request.grant, meta.project_id.as_deref());
             meta.control_grant = Some(grant);
             format!(
-                "[control] grant approved: {}. Your grant is now {}.",
+                "[control] grant approved: {}. Your grant is now {}. It applies at once to the \
+                 tools you already have; tools it adds appear when your provider next starts a \
+                 session.",
                 request.grant.describe(),
                 meta.control_grant.as_ref().expect("set above").describe()
             )

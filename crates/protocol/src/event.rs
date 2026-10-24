@@ -897,6 +897,14 @@ pub enum RuntimeNotice {
         items: usize,
         coverage: String,
     },
+    /// A thread's model referenced a thread in another project or of another provider, so
+    /// that thread's content may now reach this thread's model vendor; the user is told once.
+    ReferenceBoundaryCrossed {
+        thread: String,
+        thread_title: String,
+        referenced: String,
+        title: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -908,7 +916,9 @@ pub enum NoticeSeverity {
 impl RuntimeNotice {
     pub fn severity(&self) -> NoticeSeverity {
         match self {
-            Self::ProviderMessage(_) | Self::WorktreeMergeFailed { .. } => NoticeSeverity::Warning,
+            Self::ProviderMessage(_)
+            | Self::WorktreeMergeFailed { .. }
+            | Self::ReferenceBoundaryCrossed { .. } => NoticeSeverity::Warning,
             Self::TcodeUpdateAvailable { .. }
             | Self::NativeRewindCompleted { .. }
             | Self::SwitchedBranch { .. }

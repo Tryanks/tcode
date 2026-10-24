@@ -720,7 +720,7 @@ impl AppState {
             .sessions
             .iter()
             .filter(|meta| {
-                scope.reaches(caller.project_id.as_deref(), meta.project_id.as_deref())
+                self.target_reachable(caller, &scope, meta, false)
                     && states.contains(&thread_state(meta))
                     && (include_children || meta.parent_session_id.is_none())
                     && params
@@ -1290,8 +1290,7 @@ impl AppState {
             .sessions
             .iter()
             .filter(|meta| {
-                meta.archived_at.is_none()
-                    && scope.reaches(caller.project_id.as_deref(), meta.project_id.as_deref())
+                meta.archived_at.is_none() && self.target_reachable(caller, &scope, meta, false)
             })
             .map(|meta| (self.activity_at(meta), meta))
             .collect();

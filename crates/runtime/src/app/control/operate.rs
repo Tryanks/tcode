@@ -96,7 +96,81 @@ fn linked_key(meta: &SessionMeta, name: &str) -> Option<PullRequestKey> {
         .map(|link| link.key.clone())
 }
 
+/// The refusal for an option that decides what runs without the user's approval, which only
+/// the user changes.
+fn approval_option_refusal(provider: ProviderKind, id: &str) -> Option<String> {
+    agent::option_governs_approvals(provider, id).then(|| {
+        format!("refused: option {id} sets the permission mode, which only the user changes")
+    })
+}
+
+/// `cwd`, relative to `root`, as a directory inside it; absolute paths, `..` and links that
+/// lead out are refused.
+fn cwd_inside(root: &Path, cwd: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(cwd);
+    let outside = || "refused: cwd must be inside the project".to_string();
+    if relative.is_absolute()
+        || relative.components().any(|part| {
+            !matches!(
+                part,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(outside());
+    }
+    let joined = root.join(relative);
+    let (Ok(canonical), Ok(canonical_root)) = (fs::canonicalize(&joined), fs::canonicalize(root))
+    else {
+        return Err(format!(
+            "invalid cwd: {} is not a directory on this host",
+            joined.display()
+        ));
+    };
+    if !canonical.starts_with(&canonical_root) {
+        return Err(outside());
+    }
+    Ok(joined)
+}
+
 impl AppState {
+    /// `paths` as attachments the caller may send: the same rule a space client's attachment
+    /// passes, over the projects the caller's grant reaches.
+    fn agent_attachments(
+        &self,
+        caller: &Caller,
+        paths: Option<Vec<String>>,
+        cx: &HostCx,
+    ) -> Result<Vec<PathBuf>, String> {
+        let projects: Vec<String> = self
+            .projects
+            .iter()
+            .filter(|project| {
+                caller
+                    .grant
+                    .scope
+                    .reaches(caller.project_id.as_deref(), Some(&project.id))
+            })
+            .map(|project| project.id.clone())
+            .collect();
+        paths
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from)
+            .map(|path| {
+                self.authorize_attachment(&path, &projects, cx)
+                    .map(|()| path.clone())
+                    .map_err(|_| {
+                        format!(
+                            "refused: attachment {} is not in the attachments folder of a \
+                             thread in your scope",
+                            path.display()
+                        )
+                    })
+            })
+            .collect()
+    }
+
     /// Why an agent may not write to `target`, if it may not: archived threads, read-only
     /// subagent mirrors and unsent drafts, which belong to their composer.
     fn agent_write_refusal(&self, target: &str) -> Option<String> {
@@ -146,12 +220,7 @@ impl AppState {
                 cwd: meta.cwd.display().to_string(),
             });
         }
-        let attachment_paths: Vec<PathBuf> = params
-            .attachments
-            .unwrap_or_default()
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+        let attachment_paths = self.agent_attachments(caller, params.attachments, cx)?;
         if params.message.trim().is_empty() && attachment_paths.is_empty() {
             return Err("message is empty".into());
         }
@@ -200,13 +269,20 @@ impl AppState {
         }
         let cwd = match params.cwd {
             None => project.root.clone(),
-            Some(cwd) => project.root.join(cwd),
+            Some(cwd) => cwd_inside(&project.root, &cwd)?,
         };
         if !cwd.is_dir() {
             return Err(format!(
                 "invalid cwd: {} is not a directory on this host",
                 cwd.display()
             ));
+        }
+        let options = params.options.unwrap_or_default();
+        if let Some(refusal) = options
+            .keys()
+            .find_map(|id| approval_option_refusal(provider, id))
+        {
+            return Err(refusal);
         }
         let model = params
             .model
@@ -222,20 +298,12 @@ impl AppState {
         {
             meta.title = title;
         }
-        meta.option_selections = params
-            .options
-            .unwrap_or_default()
+        meta.option_selections = options
             .into_iter()
             .map(|(id, value)| OptionSelection { id, value })
             .collect();
-        if let Some(permission) = self.initial_permission_selection(Some(&project.id), provider)
-            && !meta
-                .option_selections
-                .iter()
-                .any(|selection| selection.id == permission.id)
-        {
-            meta.option_selections.push(permission);
-        }
+        meta.option_selections
+            .extend(self.initial_permission_selection(Some(&project.id), provider));
         meta.started_by = Some(StartedBy {
             thread_id: caller.thread_id.clone(),
             request_id: params.request_id,
@@ -269,12 +337,7 @@ impl AppState {
         if let Some(answer) = key.as_deref().and_then(|key| self.answered(key)) {
             return Ok(answer);
         }
-        let attachment_paths: Vec<PathBuf> = params
-            .attachments
-            .unwrap_or_default()
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+        let attachment_paths = self.agent_attachments(caller, params.attachments, cx)?;
         if params.text.trim().is_empty() && attachment_paths.is_empty() {
             return Err("text is empty".into());
         }
@@ -494,14 +557,19 @@ impl AppState {
                 },
                 format!("set model {model}"),
             ),
-            RunOp::SetOption { id, value } => (
-                Command::SetActiveOption {
-                    session_id,
-                    id: id.clone(),
-                    value: Some(value.clone()),
-                },
-                format!("set option {id}"),
-            ),
+            RunOp::SetOption { id, value } => {
+                if let Some(refusal) = approval_option_refusal(meta.provider, id) {
+                    return Err(failed(refusal));
+                }
+                (
+                    Command::SetActiveOption {
+                        session_id,
+                        id: id.clone(),
+                        value: Some(value.clone()),
+                    },
+                    format!("set option {id}"),
+                )
+            }
             RunOp::Fork => {
                 if let Some(refusal) = fork_refusal(Self::session_fork_availability(
                     &meta,
