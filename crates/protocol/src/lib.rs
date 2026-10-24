@@ -215,7 +215,7 @@ pub use wire::{
 // RevokeSelfSettle commands and the ControlActivity and ReviewRecords queries;
 // SessionStatus.pull_request_tools (InjectedPullRequestTools) becomes
 // injected_tools (InjectedTools), listing every offered server's tools, and
-// SessionStatus gains control.
+// SessionStatus gains control; RuntimeNotice gains review_recorded.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 #[cfg(test)]

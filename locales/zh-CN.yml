@@ -1205,6 +1205,7 @@ notice:
   worktree_merge_git_error: "无法合并工作树分支：%{error}"
   dirty_tree: "工作树中有未提交的更改"
   tcode_update_available: "Tcode %{version} 可用"
+  review_recorded: "已记录回顾：%{items} 项，覆盖范围 %{coverage}"
 attach:
   unsupported_type: "'%{name}' 的文件类型不受支持。请仅附加图片文件。"
   too_large: "'%{name}' 超过了 10MB 的附件大小限制。"

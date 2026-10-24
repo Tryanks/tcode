@@ -1,6 +1,21 @@
 use super::*;
 use tcode_core::thread_sort::ThreadSection;
 
+/// What a settle did, or would do, beyond marking the thread settled. Unsettle restores none
+/// of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SettleEffects {
+    pub provider_detached: bool,
+    pub pull_request_watches_ended: usize,
+    /// Agent and server messages dropped from the queue; human ones stay.
+    pub queued_dropped: usize,
+    /// Open terminals inspected; the ones at an idle shell are closed.
+    pub terminals_checked: usize,
+    pub unpinned: bool,
+    /// Pending non-blocking input answered with empty answers.
+    pub input_answered: bool,
+}
+
 /// Sessions viewed by clients and sessions retained for in-flight work or re-adoption.
 #[derive(Default)]
 pub struct ResidentSessions {
@@ -932,7 +947,8 @@ impl AppState {
         let settlement_changed = self.settings.auto_settle_after_days
             != settings.auto_settle_after_days
             || self.settings.auto_settle_on_merge != settings.auto_settle_on_merge
-            || self.settings.project_settlement_overrides != settings.project_settlement_overrides;
+            || self.settings.project_settlement_overrides != settings.project_settlement_overrides
+            || self.settings.settlement_automation != settings.settlement_automation;
         self.enqueue_settings(&settings, cx);
         if ProviderKind::NATIVE
             .iter()
@@ -1044,18 +1060,59 @@ impl AppState {
         })
     }
 
-    pub fn settle_session(&mut self, id: &str, cx: &mut HostCx) {
-        if !self.settle_thread_busy(id) {
-            self.settle_session_at(id, now_secs(), cx);
+    pub fn settle_session(&mut self, id: &str, cx: &mut HostCx) -> Option<SettleEffects> {
+        if self.settle_thread_busy(id) {
+            return None;
+        }
+        self.settle_session_at(id, now_secs(), cx)
+    }
+
+    /// What settling the thread now would do beyond marking it settled.
+    pub(super) fn settle_effects(&self, id: &str) -> SettleEffects {
+        let meta = self.find_meta(id);
+        let resident = self.resident(id);
+        SettleEffects {
+            provider_detached: resident
+                .is_some_and(|session| !matches!(session.runtime, Runtime::Idle)),
+            pull_request_watches_ended: meta.as_ref().map_or(0, |meta| {
+                meta.pull_requests
+                    .iter()
+                    .filter(|link| link.watch.is_some())
+                    .count()
+            }),
+            queued_dropped: resident.map_or(0, |session| {
+                session
+                    .queue
+                    .iter()
+                    .filter(|message| message.origin != MessageOrigin::Human)
+                    .count()
+            }),
+            terminals_checked: resident
+                .map(|session| &session.terminal_workspace)
+                .or_else(|| {
+                    self.terminal_workspaces
+                        .get(&ConversationDestination::Thread(id.to_owned()))
+                })
+                .map_or(0, |workspace| workspace.terminals.len()),
+            unpinned: meta.as_ref().is_some_and(|meta| meta.pinned_at.is_some()),
+            input_answered: resident
+                .and_then(|session| session.timeline.pending_user_input.as_ref())
+                .is_some_and(|input| !input.delivery.is_blocking()),
         }
     }
 
     /// Settle this thread only: detach its provider, cancel its automatic
     /// queue and close its idle terminals. Children are separate threads.
-    pub(super) fn settle_session_at(&mut self, id: &str, timestamp: u64, cx: &mut HostCx) {
-        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
-            return;
-        };
+    pub(super) fn settle_session_at(
+        &mut self,
+        id: &str,
+        timestamp: u64,
+        cx: &mut HostCx,
+    ) -> Option<SettleEffects> {
+        let mut meta = self
+            .find_meta(id)
+            .filter(|meta| meta.archived_at.is_none())?;
+        let effects = self.settle_effects(id);
         if !meta.is_settled() {
             meta.settled_at = Some(timestamp);
         }
@@ -1090,6 +1147,7 @@ impl AppState {
         self.persist_meta(&meta, cx);
         self.reschedule_scheduled_wake(cx);
         self.close_settled_idle_terminals(id, cx);
+        Some(effects)
     }
 
     pub fn unsettle_session(&mut self, id: &str, cx: &mut HostCx) {
@@ -1192,16 +1250,23 @@ impl AppState {
 
     /// A message accepted for this thread: reopen it and make any completion
     /// already on its way from it stale. Its queued work blocks settlement
-    /// until the provider records it.
+    /// until the provider records it. The user speaking withdraws a self-settle
+    /// grant: the thread may only settle itself again if asked anew.
     pub(super) fn reactivate_session(&mut self, id: &str, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
             return;
         };
-        if meta.settled_override.is_none()
+        let withdraws_self_settle = meta.self_settle.is_some()
+            && cx.origin.unwrap_or(MessageOrigin::Human) == MessageOrigin::Human;
+        if !withdraws_self_settle
+            && meta.settled_override.is_none()
             && meta.settled_at.is_none()
             && meta.cancelled_at.is_none()
         {
             return;
+        }
+        if withdraws_self_settle {
+            meta.self_settle = None;
         }
         if meta.is_settled() {
             meta.unsettled_at = Some(now_secs());

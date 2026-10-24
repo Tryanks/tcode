@@ -615,6 +615,7 @@ impl AppState {
         // describe what comes next, not the turn that just ended.
         if let AgentEvent::TurnCompleted { status, .. } = &event {
             self.settle_child_expectation(session_id, *status, cx);
+            self.settle_self_if_due(session_id, true, cx);
         }
 
         if matches!(event, AgentEvent::RewindCompleted { .. })

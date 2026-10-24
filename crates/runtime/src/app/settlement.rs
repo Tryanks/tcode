@@ -1,4 +1,5 @@
 use super::*;
+use tcode_core::control::SettlementAutomation;
 use tcode_core::settlement::{SettlementBlockers, SettlementDue, automatic_settlement_due};
 
 const ACTIVITY_BATCH_SIZE: usize = 16;
@@ -143,6 +144,7 @@ impl AppState {
     }
 
     pub(super) fn evaluate_thread_settlement(&mut self, id: &str, cx: &mut HostCx) {
+        self.settle_self_if_due(id, false, cx);
         let mut next = Some(id.to_owned());
         let mut visited = HashSet::new();
         while let Some(id) = next.take() {
@@ -219,6 +221,9 @@ impl AppState {
         now: u64,
         projection: &super::snapshots::ActivityProjection<'_>,
     ) -> Option<SettlementDue> {
+        if self.settings.settlement_automation != SettlementAutomation::ExplicitSignals {
+            return None;
+        }
         let activity = self.thread_activity.get(&meta.id)?;
         let resident = self.resident(&meta.id);
         let blockers = SettlementBlockers {
@@ -251,6 +256,12 @@ impl AppState {
                     .queue
                     .iter()
                     .any(|message| message.not_before.is_some())
+            }),
+            pending_agent_message: resident.is_some_and(|session| {
+                session
+                    .queue
+                    .iter()
+                    .any(|message| message.origin != MessageOrigin::Human)
             }),
         };
         let project = meta

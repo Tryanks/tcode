@@ -1212,6 +1212,7 @@ notice:
   worktree_merge_git_error: "Could not merge the worktree branch: %{error}"
   dirty_tree: "Working tree has uncommitted changes"
   tcode_update_available: "Tcode %{version} available"
+  review_recorded: "Review recorded: %{items} items, coverage %{coverage}"
 attach:
   unsupported_type: "Unsupported file type for '%{name}'. Please attach image files only."
   too_large: "'%{name}' exceeds the 10MB attachment limit."
