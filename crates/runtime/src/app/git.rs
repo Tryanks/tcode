@@ -88,6 +88,8 @@ impl AppState {
     ///
     /// `message` is the commit message (commit actions); `included` the checked
     /// file subset (`None` = all); `feature_branch` the safeguard's new branch.
+    /// The returned channel carries the same outcome as the toast: git's output
+    /// or the failure detail.
     pub fn run_git_action(
         &mut self,
         target_id: &str,
@@ -96,13 +98,16 @@ impl AppState {
         included: Option<Vec<String>>,
         feature_branch: Option<String>,
         cx: &mut HostCx,
-    ) {
+    ) -> smol::channel::Receiver<Result<String, String>> {
+        let (done, outcome) = smol::channel::bounded(1);
         if self.git_busy.contains(target_id) {
             emit_runtime(cx, RuntimeEvent::Toast(RuntimeToast::GitBusy));
-            return;
+            let _ = done.try_send(Err("another git action is running in this thread".into()));
+            return outcome;
         }
         let Some(cwd) = self.resident(target_id).map(|a| a.meta.cwd.clone()) else {
-            return;
+            let _ = done.try_send(Err("the thread is not open".into()));
+            return outcome;
         };
         let current_branch = self.git_branch_name(target_id);
         self.git_busy.insert(target_id.to_string());
@@ -156,7 +161,9 @@ impl AppState {
                     active.git_branch = git_branch;
                 }
                 state.refresh_git_status(&target_id, cx);
+                let _ = done.try_send(result);
             });
         });
+        outcome
     }
 }

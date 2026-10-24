@@ -118,18 +118,7 @@ impl AppState {
             .unwrap_or_default();
         let text = append_terminal_contexts_to_prompt(&text, terminal_contexts);
         let text = append_review_comments_to_prompt(&text, self.review_comments(target_id));
-        let attachments = attachment_paths
-            .into_iter()
-            .filter_map(|path| {
-                let bytes = fs::read(&path).ok()?;
-                Some(Attachment {
-                    media_type: mime_from_path(&path),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                    source_path: Some(path.to_string_lossy().into_owned()),
-                })
-            })
-            .collect();
-        (text, attachments)
+        (text, read_attachments(attachment_paths))
     }
 
     pub(super) fn clear_consumed_draft_context(&mut self, target_id: &str, cx: &mut HostCx) {
@@ -824,12 +813,18 @@ impl AppState {
 
     /// Merge a clean dedicated-worktree branch into its clean original checkout
     /// without blocking the host owner thread.
-    pub fn merge_worktree(&mut self, session_id: &str, cx: &mut HostCx) {
+    /// The returned channel carries the notice the clients are shown.
+    pub fn merge_worktree(
+        &mut self,
+        session_id: &str,
+        cx: &mut HostCx,
+    ) -> smol::channel::Receiver<RuntimeNotice> {
+        let (done, outcome) = smol::channel::bounded(1);
         let Some(meta) = self.find_meta(session_id) else {
-            return;
+            return outcome;
         };
         let Some(worktree) = meta.worktree else {
-            return;
+            return outcome;
         };
         let destination = worktree.root_project_path;
         let worktree_path = meta.cwd;
@@ -867,9 +862,11 @@ impl AppState {
                         RuntimeNotice::WorktreeMergeFailed { reason, detail }
                     }
                 };
-                emit_runtime(cx, RuntimeEvent::Notice(notice));
+                emit_runtime(cx, RuntimeEvent::Notice(notice.clone()));
+                let _ = done.try_send(notice);
             });
         });
+        outcome
     }
 
     /// Toggle a project's collapsed state (persisted in settings).
@@ -1356,17 +1353,7 @@ impl AppState {
         let source = resident
             .map(|session| &session.meta)
             .or_else(|| self.sessions.iter().find(|meta| meta.id == id))?;
-        let error = match Self::session_fork_availability(source, resident) {
-            ForkAvailability::Unsupported => {
-                Some("This provider does not support conversation forks.")
-            }
-            ForkAvailability::Empty => Some("This conversation is empty and cannot be forked."),
-            ForkAvailability::Running => {
-                Some("Wait for the running turn to finish before forking this conversation.")
-            }
-            ForkAvailability::Available => None,
-        };
-        if let Some(error) = error {
+        if let Some(error) = fork_refusal(Self::session_fork_availability(source, resident)) {
             self.report_error(RuntimeError::External(error.into()), cx);
             return None;
         }
@@ -2207,5 +2194,32 @@ fn project_directory_error(error: std::io::Error) -> ProtocolError {
         }
         .into(),
         message: error.to_string(),
+    }
+}
+
+/// Images at `paths` as message attachments; an unreadable path is left out.
+pub(super) fn read_attachments(paths: Vec<PathBuf>) -> Vec<Attachment> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let bytes = fs::read(&path).ok()?;
+            Some(Attachment {
+                media_type: mime_from_path(&path),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                source_path: Some(path.to_string_lossy().into_owned()),
+            })
+        })
+        .collect()
+}
+
+/// Why a thread cannot be forked right now, if it cannot.
+pub(super) fn fork_refusal(availability: ForkAvailability) -> Option<&'static str> {
+    match availability {
+        ForkAvailability::Unsupported => Some("This provider does not support conversation forks."),
+        ForkAvailability::Empty => Some("This conversation is empty and cannot be forked."),
+        ForkAvailability::Running => {
+            Some("Wait for the running turn to finish before forking this conversation.")
+        }
+        ForkAvailability::Available => None,
     }
 }

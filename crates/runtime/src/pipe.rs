@@ -639,7 +639,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             message,
             included,
             feature_branch,
-        } => app.run_git_action(&session_id, action, message, included, feature_branch, cx),
+        } => {
+            app.run_git_action(&session_id, action, message, included, feature_branch, cx);
+        }
         Command::RefreshAcpRegistry => app.refresh_acp_registry(cx),
         Command::InstallAcpAgent { id } => app.install_acp_agent(id, cx),
         Command::RemoveAcpAgent { id } => app.remove_acp_agent(&id, cx),
@@ -895,7 +897,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::ForkThread { id } => {
             response = CommandResponse::SessionId(app.fork_thread(&id, cx));
         }
-        Command::MergeWorktree { session_id } => app.merge_worktree(&session_id, cx),
+        Command::MergeWorktree { session_id } => {
+            app.merge_worktree(&session_id, cx);
+        }
         Command::DeleteSession {
             session_id,
             remove_worktree,
@@ -1009,7 +1013,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.set_active_option(&session_id, &id, value, cx),
         Command::LoadBranches { session_id } => app.load_branches(&session_id, cx),
         Command::CheckoutBranch { session_id, branch } => {
-            app.checkout_branch(&session_id, branch, cx)
+            app.checkout_branch(&session_id, branch, cx);
         }
         Command::ToggleFavoriteModel { model } => app.toggle_favorite_model(&model, cx),
         Command::RewindTurn {
