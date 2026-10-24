@@ -1713,6 +1713,11 @@ pub enum AgentEvent {
         from_model: Option<String>,
         to_provider: ProviderKind,
         to_model: Option<String>,
+        /// The handoff as sent to `to_provider`: the transcript of the
+        /// conversation so far wrapped around the user's message. Records from
+        /// before it was kept carry `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
     /// History-only: retained to decode stored plan decisions; never emitted.
     PlanResolved {

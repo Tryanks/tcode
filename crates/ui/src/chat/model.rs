@@ -1372,10 +1372,12 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         EntryContent::ProviderRelay {
             from_provider,
             to_provider,
+            prompt,
             ..
         } => {
             from_provider.hash(hash);
             to_provider.hash(hash);
+            prompt.as_ref().map(String::len).hash(hash);
         }
         EntryContent::ModelChanged { from, to, reason } => {
             from.hash(hash);

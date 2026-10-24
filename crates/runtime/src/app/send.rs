@@ -424,6 +424,7 @@ impl AppState {
             from_model: pending.from_model,
             to_provider: active.meta.provider,
             to_model: active.meta.model.clone(),
+            prompt: Some(assemble_relay_prompt(&transcript, &text)),
         };
         let session_id = active.meta.id.clone();
         active.shutdown_to_idle();

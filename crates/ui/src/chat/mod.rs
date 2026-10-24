@@ -1417,17 +1417,31 @@ impl ChatView {
                     let EntryContent::ProviderRelay {
                         from_provider,
                         to_provider,
+                        prompt,
                         ..
-                    } = entry.content
+                    } = &entry.content
                     else {
                         unreachable!();
                     };
                     column = column.child(components::dividers::relay_divider(
                         &entry.id,
-                        from_provider,
-                        to_provider,
+                        *from_provider,
+                        *to_provider,
                         cx,
                     ));
+                    if let Some(prompt) = prompt {
+                        column = column.child(
+                            self.compose_disclosure(
+                                index,
+                                format!("relay-handoff-{}", entry.id),
+                                crate::tr!("chat.relay_handoff", to = to_provider.display_name())
+                                    .into_owned()
+                                    .into(),
+                                prompt,
+                                cx,
+                            ),
+                        );
+                    }
                 }
                 Segment::ModelChange(entry) => {
                     let EntryContent::ModelChanged { from, to, reason } = &entry.content else {

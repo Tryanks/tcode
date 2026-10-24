@@ -7,6 +7,7 @@ chat:
   discard_delivery: "Discard"
   history_record_too_large: A history record exceeds the 8 MiB response limit.
   relayed: "Relayed from %{from} to %{to}"
+  relay_handoff: "Handoff sent to %{to}"
   model_changed: "Model changed: %{from} → %{to}"
   model_changed_to: "Model changed to %{to}"
   new_thread: "New thread"

@@ -5215,12 +5215,24 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
             active.timeline.turns[0].status,
             Some(TurnStatus::Interrupted)
         );
-        assert!(active.timeline.entries.iter().any(|entry| {
-            matches!(entry.content, EntryContent::ProviderRelay { .. }) && entry.turn == 1
-        }));
+        let relay = active
+            .timeline
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
+            .expect("relay entry");
+        assert_eq!(relay.turn, 1);
         let transcript = active.queue[0].relay_transcript.as_deref().unwrap();
         assert!(transcript.contains("They differ in"));
         assert!(transcript.contains("still running when the conversation was handed over"));
+        // The timeline discloses the handoff exactly as it goes out.
+        let EntryContent::ProviderRelay { prompt, .. } = &relay.content else {
+            unreachable!();
+        };
+        assert_eq!(
+            prompt.as_deref(),
+            Some(active.queue[0].wire_text(&[]).as_str())
+        );
     });
 }
 
