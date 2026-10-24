@@ -6634,10 +6634,9 @@ fn terminal_open_installs_after_executor_pump_in_the_project_cwd() {
     });
 }
 
-/// An `ActiveSession` wired to a fake live provider: commands land on the
-/// returned receiver, nothing real is spawned.
-/// Compaction is a turn of the provider's own, so it is forwarded only to an
-/// idle live provider; over a running turn the command is refused.
+/// Compaction is a turn of the provider's own, as is a goal change where the
+/// harness runs it as one (Claude Code's `/goal`), so each is forwarded only to
+/// an idle live provider; over a running turn the command is refused.
 #[test]
 fn compaction_waits_for_the_running_turn() {
     let cx = &mut TestAppContext::default();
@@ -6667,6 +6666,11 @@ fn compaction_waits_for_the_running_turn() {
             cx,
         );
         assert!(state.compact_context(&id, cx).is_err());
+        assert!(
+            state
+                .change_goal(&id, SessionCommand::ClearGoal, cx)
+                .is_err()
+        );
         assert!(commands.try_recv().is_err());
 
         state.on_event(
@@ -6680,11 +6684,17 @@ fn compaction_waits_for_the_running_turn() {
         );
         state.compact_context(&id, cx).unwrap();
         assert!(matches!(commands.try_recv(), Ok(SessionCommand::Compact)));
+        state
+            .change_goal(&id, SessionCommand::ClearGoal, cx)
+            .unwrap();
+        assert!(matches!(commands.try_recv(), Ok(SessionCommand::ClearGoal)));
     });
 
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+/// An `ActiveSession` wired to a fake live provider: commands land on the
+/// returned receiver, nothing real is spawned.
 fn fake_live_session(cwd: PathBuf) -> (ActiveSession, smol::channel::Receiver<SessionCommand>) {
     let (commands, receiver) = smol::channel::unbounded();
     let mut session = AppState::build_draft_session(

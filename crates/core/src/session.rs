@@ -567,6 +567,8 @@ pub struct Timeline {
     pub plan_steps: Vec<PlanStep>,
     /// The explanation string from the latest `PlanUpdated`, if any.
     pub plan_explanation: Option<String>,
+    /// The harness's standing goal from the latest `GoalUpdated`, if any.
+    pub goal: Option<agent::Goal>,
     /// The open user-input request (Claude `AskUserQuestion`, Codex
     /// `requestUserInput` / `request_user_input_async`), if any. Cleared when
     /// it resolves or the turn ends.
@@ -1097,6 +1099,7 @@ impl Timeline {
                 self.plan_steps = steps.clone();
                 self.plan_explanation = explanation.clone();
             }
+            AgentEvent::GoalUpdated { goal } => self.goal = goal.clone(),
             AgentEvent::ProposedPlanDelta { item_id, text } => {
                 self.apply_delta(ts, item_id, DeltaKind::AssistantText, text);
             }
