@@ -267,7 +267,24 @@ impl AppState {
             Some(meta) if meta.archived_at.is_none() => {
                 let caller = self.caller_of(&meta);
                 match self.authorize_control(&caller, &op) {
-                    Ok(()) => self.dispatch_control_op(&caller, op, cx),
+                    // A tool call must never take the host down: a panic in one
+                    // handler answers that call and leaves every other thread served.
+                    Ok(()) => {
+                        let name = op.tool_name();
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.dispatch_control_op(&caller, op, cx)
+                        })) {
+                            Ok(answer) => answer,
+                            Err(_) => {
+                                log::error!(
+                                    "tcode_control: {name} panicked for thread {thread_id}"
+                                );
+                                Answer::Now(Err(format!(
+                                    "{name} failed inside tcode; see the host log"
+                                )))
+                            }
+                        }
+                    }
                     Err(refusal) => Answer::Now(Err(refusal)),
                 }
             }
@@ -423,6 +440,16 @@ impl AppState {
         };
         let at = now_millis();
         self.record_event(target, &AgentEvent::ControlAction(action.clone()), cx);
+        if target != caller.thread_id {
+            let in_caller = ControlAction {
+                detail: Some(match &action.detail {
+                    Some(detail) => format!("{target_title} — {detail}"),
+                    None => target_title.clone(),
+                }),
+                ..action.clone()
+            };
+            self.record_event(&caller.thread_id, &AgentEvent::ControlAction(in_caller), cx);
+        }
         self.control.activity.push_front(ControlActivityEntry {
             target_thread_id: target.to_owned(),
             target_title,

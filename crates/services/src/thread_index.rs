@@ -1447,7 +1447,7 @@ pub fn redact(text: &str) -> (String, usize) {
     let mut copied = 0;
     let mut i = 0;
     while i < bytes.len() {
-        let at_word_start = i == 0 || !is_token_byte(bytes[i - 1]);
+        let at_word_start = text.is_char_boundary(i) && (i == 0 || !is_token_byte(bytes[i - 1]));
         let hit = if at_word_start {
             secret_at(text, i)
         } else {
@@ -2039,5 +2039,10 @@ mod tests {
         let harmless = "AKIA1234 short, ghp_short, sk-ant, Bearer abc, task #929 commit abc1234, \
                         GHPX_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
         assert_eq!(redact(harmless), (harmless.to_owned(), 0));
+        let multibyte = "摘要… 密钥 sk-proj-abcdefghijklmnopqrstuvwxyz0123 结束 🙂";
+        assert_eq!(
+            redact(multibyte),
+            ("摘要… 密钥 [redacted] 结束 🙂".to_owned(), 1)
+        );
     }
 }

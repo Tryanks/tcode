@@ -332,7 +332,10 @@ impl ServerHandler for ControlTools {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(format!(
+                "{INSTRUCTIONS} You are thread {}; pass that id wherever a tool asks about your own thread.",
+                self.thread_id
+            ))
     }
 }
 
