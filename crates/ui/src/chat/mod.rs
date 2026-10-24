@@ -3628,11 +3628,17 @@ impl Render for ChatView {
         self.composer
             .update(cx, |composer, cx| composer.set_compact(compact, cx));
         // The phone reads on T1 paper; the desktop keeps the glass canvas.
-        let root = v_flex().size_full().min_w_0().bg(if compact {
-            crate::material::content_surface(cx)
-        } else {
-            crate::material::canvas(cx)
-        });
+        // The header's title menu dispatches these, and the header is a sibling of `main`.
+        let root = v_flex()
+            .size_full()
+            .min_w_0()
+            .bg(if compact {
+                crate::material::content_surface(cx)
+            } else {
+                crate::material::canvas(cx)
+            })
+            .on_action(cx.listener(Self::on_link_dialog))
+            .on_action(cx.listener(Self::on_show_agent_tools));
 
         if self.workspace_store.read(cx).chat_loading() {
             return root.child(
@@ -3944,8 +3950,6 @@ impl Render for ChatView {
             .size_full()
             .min_h_0()
             .on_action(cx.listener(Self::on_link_url))
-            .on_action(cx.listener(Self::on_link_dialog))
-            .on_action(cx.listener(Self::on_show_agent_tools))
             .on_action(cx.listener(Self::on_rewind_turn))
             .on_action(cx.listener(Self::on_open_file_diff))
             .child(

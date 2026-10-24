@@ -1468,12 +1468,28 @@ impl PullRequestsPanel {
             cx.notify();
         }));
         let body = agent_sees_body(tools, "pr-agent", cx).pt(cx.theme().tokens.spacing.xs);
+        // Open in the side panel, the list takes a flex share (basis 0) and scrolls in it: at
+        // its content height it would push the panel past its bounds. The bottom sheet
+        // scrolls its own content, so there the list keeps its natural height.
+        let fill = open && !self.window_state.read(cx).compact;
         v_flex()
-            .flex_none()
+            .map(|section| {
+                if fill {
+                    section.flex_1().min_h_0()
+                } else {
+                    section.flex_none()
+                }
+            })
             .px(px(crate::material::CARD_INSET))
             .py(cx.theme().tokens.spacing.sm)
             .child(header)
-            .child(gpui_base::Collapsible::new().open(open).content(body))
+            .child(
+                div()
+                    .id("pr-agent-tools-scroll")
+                    .when(fill, |list| list.flex_1().min_h_0())
+                    .child(gpui_base::Collapsible::new().open(open).content(body))
+                    .overflow_y_scroll_area(),
+            )
             .into_any_element()
     }
 }
