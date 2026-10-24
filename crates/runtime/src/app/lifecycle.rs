@@ -522,41 +522,30 @@ impl AppState {
         }
     }
 
-    /// Start a fresh idle grace period, enforce the resident LRU bound, and
-    /// reap only if no intervening work or re-adoption made the timer stale.
+    /// Start the idle grace and enforce the parked LRU bound. A live provider
+    /// keeps the grace its last turn end started, so parking a thread does not
+    /// extend its process's life.
     pub(super) fn mark_resident_idle(&mut self, session_id: &str, cx: &mut HostCx) {
-        let fully_idle = self
+        let rewind_pending = self.pending_native_rewinds.contains_key(session_id);
+        let Some(session) = self
             .residents
-            .parked
-            .get(session_id)
-            .is_some_and(|session| {
-                session.queue.is_empty()
-                    && !session.turn_in_flight
-                    && session.delivery_in_flight.is_none()
-                    && session.background_task_count == 0
-            })
-            && !self.pending_native_rewinds.contains_key(session_id);
-        if !fully_idle {
+            .resident_mut(session_id)
+            .filter(|session| !rewind_pending && session.fully_idle())
+        else {
             return;
-        }
-
-        let idle_since = Instant::now();
-        self.residents
-            .parked
-            .get_mut(session_id)
-            .unwrap()
-            .idle_since = Some(idle_since);
+        };
+        let armed = session
+            .idle_since
+            .filter(|_| matches!(session.runtime, Runtime::Live(_)));
+        let idle_since = armed.unwrap_or_else(Instant::now);
+        session.idle_since = Some(idle_since);
 
         let mut residents: Vec<_> = self
             .residents
             .parked
             .iter()
             .filter(|(id, session)| {
-                session.queue.is_empty()
-                    && !session.turn_in_flight
-                    && session.delivery_in_flight.is_none()
-                    && session.background_task_count == 0
-                    && !self.pending_native_rewinds.contains_key(id.as_str())
+                session.fully_idle() && !self.pending_native_rewinds.contains_key(id.as_str())
             })
             .filter_map(|(id, session)| {
                 session.idle_since.map(|idle| {
@@ -598,38 +587,41 @@ impl AppState {
             replay_bytes -= bytes;
         }
 
+        if armed.is_some() {
+            return;
+        }
         let session_id = session_id.to_string();
-        let resident_idle_grace = self.resident_idle_grace;
+        let deadline = idle_since + self.resident_idle_grace;
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            smol::Timer::after(resident_idle_grace).await;
+            smol::Timer::at(deadline).await;
             host_cx.enqueue(move |state, cx| state.reap_idle_resident(&session_id, idle_since, cx));
         });
     }
 
-    /// The idle grace timer's expiry: shut the resident down only if it is
-    /// still parked in the same idle period the timer was started for, so a
-    /// re-adopted or re-parked session is left to its newer timer.
+    /// The idle grace timer's expiry: act only if the resident is still in the
+    /// idle period the timer was started for. A parked resident is forgotten;
+    /// a viewed one keeps its timeline and only loses its provider process.
     pub(super) fn reap_idle_resident(
         &mut self,
         session_id: &str,
         idle_since: Instant,
         cx: &mut HostCx,
     ) {
-        let still_idle = self
-            .residents
-            .parked
-            .get(session_id)
-            .is_some_and(|session| {
-                session.idle_since == Some(idle_since)
-                    && session.queue.is_empty()
-                    && !session.turn_in_flight
-                    && session.delivery_in_flight.is_none()
-                    && session.background_task_count == 0
-            })
-            && !self.pending_native_rewinds.contains_key(session_id);
-        if still_idle {
+        let still_idle = !self.pending_native_rewinds.contains_key(session_id)
+            && self.residents.resident(session_id).is_some_and(|session| {
+                session.idle_since == Some(idle_since) && session.fully_idle()
+            });
+        if !still_idle {
+            return;
+        }
+        if self.residents.parked.contains_key(session_id) {
             self.drop_background(session_id, cx);
+        } else if let Some(viewed) = self.residents.live.get_mut(session_id)
+            && matches!(viewed.runtime, Runtime::Live(_))
+        {
+            log::info!("shutting down idle provider of viewed session {session_id}");
+            viewed.shutdown_to_idle();
         }
     }
 
