@@ -11,7 +11,7 @@ use gpui::{
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled, div,
     linear_color_stop, linear_gradient, px,
 };
-use gpui_base::{StyledExt as _, v_flex};
+use gpui_base::{StyledExt as _, Toolbar, v_flex};
 
 /// Height reserved beneath chat messages for hover-revealed actions.
 pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
@@ -185,6 +185,67 @@ pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stat
         .cursor_pointer()
         .hover(|style| style.bg(cx.theme().list_hover))
         .active(|style| style.bg(cx.theme().list_active))
+}
+
+/// The three heights a horizontal bar of controls takes. gpui-base's `Toolbar`
+/// is a behaviour primitive (role, roving arrow focus) with no geometry, and
+/// its tokens carry no bar or control height, so the heights live here, once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Bar {
+    /// A window's top strip: the height of the caption cluster
+    /// ([`CAPTION_STRIP_HEIGHT`](crate::window_caption::CAPTION_STRIP_HEIGHT)).
+    Strip,
+    /// A panel or page toolbar: 40 on the desktop, the `TabBar` underline
+    /// height; a [`TOUCH_TARGET`] on a touch layout.
+    Toolbar,
+    /// A section header inside a rail or list: a small control's height on the
+    /// desktop; a [`TOUCH_TARGET`] on a touch layout.
+    Section,
+}
+
+pub(crate) fn bar_height(kind: Bar, compact: bool) -> f32 {
+    match (kind, compact) {
+        (Bar::Strip, _) => crate::window_caption::CAPTION_STRIP_HEIGHT,
+        (Bar::Toolbar | Bar::Section, true) => TOUCH_TARGET,
+        (Bar::Toolbar, false) => 40.,
+        (Bar::Section, false) => 28.,
+    }
+}
+
+/// One horizontal bar of controls — a page header, a panel toolbar, a section
+/// header — on gpui-base's [`Toolbar`], which gives it the toolbar role and
+/// roving arrow-key focus. The bar owns its height, inset (`spacing.sm`, the
+/// page inset on a touch layout) and gap; callers add content.
+pub(crate) fn bar(id: impl Into<ElementId>, kind: Bar, compact: bool, cx: &App) -> Toolbar {
+    let spacing = &cx.theme().tokens.spacing;
+    let inset = if compact {
+        px(COMPACT_PAGE_INSET)
+    } else {
+        spacing.sm
+    };
+    Toolbar::new(id)
+        .h_flex()
+        .flex_none()
+        .w_full()
+        .h(px(bar_height(kind, compact)))
+        .px(inset)
+        .gap(spacing.xs)
+}
+
+/// A [`bar`] separated from the content below it by a hairline.
+pub(crate) fn bar_divider_below(bar: Toolbar, cx: &App) -> Toolbar {
+    bar.border_b_1().border_color(cx.theme().border)
+}
+
+/// The title inside a [`bar`]: takes the remaining width and truncates.
+pub(crate) fn bar_title(title: impl Into<SharedString>, cx: &App) -> Div {
+    use crate::typography::TextRole as _;
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_title(cx)
+        .child(title.into())
 }
 
 /// The height of a [`selectable_row`].

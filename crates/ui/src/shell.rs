@@ -89,12 +89,12 @@ pub(crate) const WINDOW_DRAGGABLE: bool = cfg!(not(any(
 /// column top rows are the drag surface). Mirrors gpui-component's `TitleBar`
 /// mechanics: a press arms a move, the first drag calls `start_window_move`.
 /// Child buttons that stop propagation on mouse-down won't arm a drag.
-pub(crate) fn window_drag_area(
+pub(crate) fn window_drag_area<E: gpui::InteractiveElement>(
     id: impl Into<ElementId>,
-    el: Div,
+    el: E,
     window: &mut Window,
     cx: &mut App,
-) -> Div {
+) -> E {
     if !WINDOW_DRAGGABLE {
         return el;
     }
