@@ -19,26 +19,13 @@ fn acked(
     command: Command,
 ) -> Result<CommandResponse, tcode_protocol::ProtocolError> {
     state.dispatch_command(cx, id, command);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        cx.run_until_parked();
-        if let Some(result) = cx
-            .drain_outgoing()
-            .into_iter()
-            .find_map(|message| match message {
-                tcode_protocol::HostMessage::Ack { id: acked, result } if acked == id => {
-                    Some(result)
-                }
-                _ => None,
-            })
-        {
-            return result;
+    cx.run_until_sent(|message| match message {
+        tcode_protocol::HostMessage::Ack { id: acked, result } if *acked == id => {
+            Some(result.clone())
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the command was answered"
-        );
-    }
+        _ => None,
+    })
+    .0
 }
 
 struct HostReply {
@@ -597,7 +584,7 @@ fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_bra
     let _server = fixture.serve(move |exchange| {
         let sent: Value = serde_json::from_slice(&exchange.body).unwrap();
         arrived.send(sent).unwrap();
-        resume.recv_timeout(Duration::from_secs(5)).unwrap();
+        resume.recv_timeout(HOST_DEADLINE).unwrap();
         exchange.reply(
             200,
             "",
@@ -672,7 +659,7 @@ fn a_project_move_waits_for_discovery_to_leave_its_root() {
     let _server = fixture.serve(move |exchange| {
         if let Some((arrived, resume)) = held.lock().unwrap().take() {
             arrived.send(()).unwrap();
-            resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            resume.recv_timeout(HOST_DEADLINE).unwrap();
         }
         exchange.reply(200, "", br#"{"data":{"repository":{"h0":{"nodes":[]}}}}"#);
     });
@@ -1266,28 +1253,14 @@ fn reads_answer_only_a_linked_pull_request_and_a_synced_change_reads_it_fresh() 
                 read: tcode_protocol::PullRequestRead::Conversation,
             }),
         );
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            cx.run_until_parked();
-            if let Some(result) =
-                cx.drain_outgoing()
-                    .into_iter()
-                    .find_map(|message| match message {
-                        tcode_protocol::HostMessage::QueryResult { id, result }
-                            if id == next_id =>
-                        {
-                            Some(result)
-                        }
-                        _ => None,
-                    })
-            {
-                return result;
+        let read_id = next_id;
+        cx.run_until_sent(|message| match message {
+            tcode_protocol::HostMessage::QueryResult { id, result } if *id == read_id => {
+                Some(result.clone())
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the read was answered"
-            );
-        }
+            _ => None,
+        })
+        .0
     };
 
     sweep(&state, &mut cx);
@@ -1634,28 +1607,17 @@ fn a_review_draft_is_its_accounts_and_an_unanswered_submission_waits_for_a_later
     let mut answer = |state: &TestEntity, cx: &mut TestAppContext, payload| {
         next_id += 1;
         state.deliver(cx, next_id, payload);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            cx.run_until_parked();
-            if let Some(result) =
-                cx.drain_outgoing()
-                    .into_iter()
-                    .find_map(|message| match message {
-                        tcode_protocol::HostMessage::Ack { id, result } if id == next_id => {
-                            Some(result.map(|response| json!(response)))
-                        }
-                        tcode_protocol::HostMessage::QueryResult { id, result }
-                            if id == next_id =>
-                        {
-                            Some(result.map(|response| json!(response)))
-                        }
-                        _ => None,
-                    })
-            {
-                return result;
+        let answer_id = next_id;
+        cx.run_until_sent(|message| match message {
+            tcode_protocol::HostMessage::Ack { id, result } if *id == answer_id => {
+                Some(result.clone().map(|response| json!(response)))
             }
-            assert!(std::time::Instant::now() < deadline, "it was answered");
-        }
+            tcode_protocol::HostMessage::QueryResult { id, result } if *id == answer_id => {
+                Some(result.clone().map(|response| json!(response)))
+            }
+            _ => None,
+        })
+        .0
     };
     let body = |body: &str| {
         tcode_protocol::ClientPayload::Command(Command::EditPullRequestReviewDraft {

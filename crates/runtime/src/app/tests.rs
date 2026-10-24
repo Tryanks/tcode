@@ -9044,18 +9044,13 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
             tcode_client::attachment::AttachmentPolicy::LOCAL,
         )
     });
-    cx.run_until_parked();
-    let archived = cx
-        .drain_outgoing()
-        .into_iter()
-        .find_map(|message| match message {
-            HostMessage::QueryResult {
-                id: 3,
-                result: Ok(QueryResponse::ArchivedSessions(archived)),
-            } => Some(archived),
-            _ => None,
-        })
-        .expect("archived list reply");
+    let (archived, _) = cx.run_until_sent(|message| match message {
+        HostMessage::QueryResult {
+            id: 3,
+            result: Ok(QueryResponse::ArchivedSessions(archived)),
+        } => Some(archived.clone()),
+        _ => None,
+    });
     assert_eq!(archived.revision, summary_revision);
     assert_eq!(archived.sessions[0].title, "Archived rename");
 
@@ -9976,21 +9971,11 @@ fn send_to_host(
 /// Run the host until it answered client message `id` and parked, and
 /// return every message it serialized since the last drain.
 fn answered(cx: &mut TestAppContext, id: u64) -> Vec<HostMessage> {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut messages = Vec::new();
-    loop {
-        cx.run_until_parked();
-        messages.extend(cx.drain_outgoing());
-        if messages.iter().any(|message| {
-            matches!(message, HostMessage::Ack { id: reply, .. } | HostMessage::QueryResult { id: reply, .. } if *reply == id)
-        }) {
-            return messages;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the host did not answer message {id} within thirty seconds"
-        );
-    }
+    cx.run_until_sent(|message| {
+        matches!(message, HostMessage::Ack { id: reply, .. } | HostMessage::QueryResult { id: reply, .. } if *reply == id)
+            .then_some(())
+    })
+    .1
 }
 
 /// Send `payload` through the host pipe as client message `id`, and return
@@ -12215,17 +12200,10 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             email: None,
         },
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        cx.run_until_parked();
-        if cx.drain_outgoing().iter().any(|message| matches!(message, HostMessage::Ack { id: 644, result: Err(error) } if error.code == "settings_write_failed")) {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "secret write failure acknowledged"
-        );
-    }
+    cx.run_until_sent(|message| {
+        matches!(message, HostMessage::Ack { id: 644, result: Err(error) } if error.code == "settings_write_failed")
+            .then_some(())
+    });
     assert_eq!(
         std::fs::read_to_string(store.root().join("secrets.json")).unwrap(),
         unreadable
