@@ -38,12 +38,17 @@ impl Composer {
         let trigger = Button::new("control-chip")
             .debug_selector(|| "control-chip".into())
             .aria_label(label.clone())
+            // The grant summary truncates so the send button keeps its place in the row.
+            .max_w(px(200.))
+            .min_w_0()
+            .overflow_hidden()
             .ghost()
             .chip()
             .touch(self.compact)
             .disabled(!self.interactive(cx))
             .child(
                 h_flex()
+                    .w_full()
                     .min_w_0()
                     .overflow_hidden()
                     .gap_1p5()
