@@ -32,9 +32,13 @@ pub(super) struct ControlState {
 }
 
 impl ControlState {
-    pub(super) fn new(review_records: Vec<tcode_core::control::ReviewRecord>) -> Self {
+    pub(super) fn new(
+        review_records: Vec<tcode_core::control::ReviewRecord>,
+        mut activity: Vec<ControlActivityEntry>,
+    ) -> Self {
+        activity.truncate(CONTROL_ACTIVITY_LIMIT);
         Self {
-            activity: VecDeque::new(),
+            activity: activity.into(),
             review_records,
             answered: VecDeque::new(),
             content_read: HashMap::new(),
@@ -388,7 +392,19 @@ impl AppState {
         }
         for target in op.target_thread_ids() {
             let Some(meta) = self.find_meta(target) else {
-                return Err(format!("unknown thread: {target}"));
+                let referenced = self.find_meta(&caller.thread_id).is_some_and(|meta| {
+                    meta.references
+                        .iter()
+                        .any(|reference| reference.thread_id == target)
+                });
+                return Err(if referenced {
+                    format!(
+                        "referenced thread {target} was deleted; what you already read cannot \
+                         be recalled"
+                    )
+                } else {
+                    format!("unknown thread: {target}")
+                });
             };
             if caller.ancestors.iter().any(|ancestor| ancestor == target) {
                 return Err(format!(
@@ -486,6 +502,8 @@ impl AppState {
             action,
         });
         self.control.activity.truncate(CONTROL_ACTIVITY_LIMIT);
+        let entries = self.control.activity.iter().cloned().collect();
+        self.enqueue_store_write(StoreWrite::WriteControlActivity(entries), cx);
     }
 
     pub(crate) fn control_activity(&self, limit: usize) -> Vec<ControlActivityEntry> {

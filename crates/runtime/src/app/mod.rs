@@ -505,6 +505,7 @@ impl AppState {
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
         let review_records = settings_store.load_review_records();
+        let control_activity = settings_store.load_control_activity();
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
         forge.configure(settings.source_control.hosts.clone());
         let releases = Arc::new(ReleaseFeed::new(tcode_services::github::GitHubApi::host(
@@ -625,7 +626,7 @@ impl AppState {
             acp_installing: std::collections::HashSet::new(),
             plugin_catalogs: HashMap::new(),
             mcp: McpWiring::default(),
-            control: control::ControlState::new(review_records),
+            control: control::ControlState::new(review_records, control_activity),
             callback_approval_requests: HashSet::new(),
             callback_user_input_requests: HashSet::new(),
             approvals: Default::default(),

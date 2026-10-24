@@ -557,15 +557,7 @@ pub struct ThreadReferenceStatus {
     pub boundary_notice: bool,
 }
 
-/// One `tcode_control` write, as Settings → Control lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ControlActivityEntry {
-    pub target_thread_id: String,
-    pub target_title: String,
-    /// Unix milliseconds.
-    pub at: u64,
-    pub action: tcode_core::control::ControlAction,
-}
+pub use tcode_core::control::ControlActivityEntry;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InjectedTools {

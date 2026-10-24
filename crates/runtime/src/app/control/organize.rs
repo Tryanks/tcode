@@ -390,6 +390,9 @@ impl AppState {
             );
         }
         let meta = self.find_meta(&caller.thread_id).ok_or("unknown thread")?;
+        if !self.user_said(&meta, consent_quote) {
+            return Err("consent_required: the quote is not something the user said here".into());
+        }
         if let SelfSettleWhen::PrMerged { url } | SelfSettleWhen::PrClosed { url } = &params.when
             && pull_request_state(&meta, url).is_none()
         {
@@ -421,6 +424,33 @@ impl AppState {
             "note": "The host settles this thread only after its current turn has ended. A new \
                      message from the user withdraws the grant, and the user can revoke it.",
         }))
+    }
+
+    /// Whether `quote` appears, ignoring case and runs of whitespace, in a message the user
+    /// sent in `meta`'s own thread; agent and host messages do not count.
+    fn user_said(&self, meta: &SessionMeta, quote: &str) -> bool {
+        let collapse = |text: &str| {
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
+        let quote = collapse(quote);
+        let unmarked = MessageOrigin::legacy(meta.parent_session_id.is_some());
+        self.event_records.get(&meta.id).is_some_and(|log| {
+            log.records().iter().any(|record| {
+                let text = match &record.event {
+                    AgentEvent::ItemCompleted(agent::ThreadItem {
+                        content: agent::ItemContent::UserMessage { text, .. },
+                        ..
+                    })
+                    | AgentEvent::SteerRequested { text, .. } => text,
+                    _ => return false,
+                };
+                record.origin.unwrap_or(unmarked) == MessageOrigin::Human
+                    && collapse(text).contains(&quote)
+            })
+        })
     }
 
     /// Settle a thread whose self-settle grant is met: `end_of_turn` once `turn_ended`, a pull

@@ -1209,7 +1209,11 @@ impl AppState {
         params: GetSettingsParams,
         _cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
-        let mut settings = serde_json::to_value(&self.settings).map_err(|e| e.to_string())?;
+        let mut settings = self.settings.clone();
+        // Keys this build does not know are not described anywhere and may hold anything.
+        settings.unknown.clear();
+        let mut settings = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
+        strip_env_values(&mut settings);
         if let Some(keys) = params.keys
             && let serde_json::Value::Object(fields) = &mut settings
         {
@@ -1223,7 +1227,12 @@ impl AppState {
                 return Err(format!("unknown settings keys: {}", missing.join(", ")));
             }
         }
-        Ok(serde_json::json!({ "settings": settings }))
+        let redacted = redact_strings(&mut settings);
+        Ok(serde_json::json!({
+            "settings": settings,
+            "redacted": redacted,
+            "omitted": ["environment variable values", "settings keys this build does not know"],
+        }))
     }
 
     pub(super) fn op_read_terminal(
@@ -1444,3 +1453,47 @@ impl AppState {
 #[cfg(test)]
 #[path = "observe_tests.rs"]
 mod tests;
+
+/// Blank every environment variable's value under an `env` key, whatever shape the list
+/// has (`{name, value}` entries or `[name, value]` pairs); the names stay.
+fn strip_env_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, field) in fields.iter_mut() {
+                if key == "env"
+                    && let serde_json::Value::Array(vars) = field
+                {
+                    for var in vars {
+                        match var {
+                            serde_json::Value::Object(var) => {
+                                var.remove("value");
+                            }
+                            serde_json::Value::Array(pair) if pair.len() == 2 => {
+                                pair[1] = serde_json::Value::String(String::new());
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    strip_env_values(field);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_env_values),
+        _ => {}
+    }
+}
+
+/// Redact every string in `value` in place; how many secrets were replaced.
+fn redact_strings(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(text) => {
+            let (clean, count) = redact(text);
+            *text = clean;
+            count
+        }
+        serde_json::Value::Array(items) => items.iter_mut().map(redact_strings).sum(),
+        serde_json::Value::Object(fields) => fields.values_mut().map(redact_strings).sum(),
+        _ => 0,
+    }
+}

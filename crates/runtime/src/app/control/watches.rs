@@ -49,6 +49,12 @@ fn one_line_head(text: &str, chars: usize) -> String {
     head
 }
 
+/// `text` as one quoted string literal, so another thread's title or question cannot end
+/// the quote and read as part of the callback.
+fn quoted(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_default()
+}
+
 impl AppState {
     pub(super) fn op_notify_when(
         &mut self,
@@ -149,8 +155,8 @@ impl AppState {
             return;
         };
         let text = format!(
-            "{CONTROL_CALLBACK_PREFIX}thread {target_id} (\"{}\") {}{}",
-            target.title,
+            "{CONTROL_CALLBACK_PREFIX}thread {target_id} ({}) {}{}",
+            quoted(&target.title),
             wire_name(event),
             self.watch_event_detail(&target, event)
         );
@@ -158,6 +164,11 @@ impl AppState {
             let Some(mut meta) = self.find_meta(&watcher) else {
                 continue;
             };
+            // The watcher's grant may have narrowed since it asked.
+            let caller = self.caller_of(&meta);
+            if !self.target_reachable(&caller, &caller.grant.scope, &target, true) {
+                continue;
+            }
             let before = meta.control_watches.len();
             meta.control_watches
                 .retain(|watch| !(watch.once && fires(watch)));
@@ -184,7 +195,7 @@ impl AppState {
                         .first()
                         .map(|question| one_line_head(&question.question, QUESTION_HEAD_CHARS))
                         .unwrap_or_default();
-                    format!("\"{question}\" (request_id: {})", pending.request_id)
+                    format!("{} (request_id: {})", quoted(&question), pending.request_id)
                 }),
             WatchEvent::NeedsApproval => self
                 .approval_requests(&target.id)
