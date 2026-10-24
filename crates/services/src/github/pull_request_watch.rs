@@ -2,8 +2,9 @@
 
 use super::{
     GitHubApi, GitHubError, RequestOptions,
-    api::Authentication,
+    api::{Authentication, RestRequest},
     graphql::{self, AliasItem, Document, Variables},
+    pull_request_reads::percent_encode,
     repository::Repository,
 };
 use crate::forge::{Fingerprint, Tail, Tails};
@@ -11,7 +12,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tcode_core::{
     pull_request::{Mergeability, PullRequestKey, PullRequestState},
-    pull_request_watch::{CheckStatus, PullRequestCheck, PullRequestRemark, PullRequestWatchRead},
+    pull_request_watch::{
+        self as watch, CheckStatus, PullRequestCheck, PullRequestRemark, PullRequestWatchRead,
+    },
 };
 
 /// Past this many requests a list is reported incomplete rather than read on.
@@ -200,14 +203,19 @@ fn decode_fingerprint(pr: &Value) -> Option<Fingerprint> {
 /// State, head, checks, mergeability and the authenticated account, in one point.
 pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchRead, GitHubError> {
     let options = options(api, &key.host, "PullRequestWatchDetail")?;
-    // GitHub Enterprise Server has no per-pull-request required flag.
-    let required = if key.host == "github.com" {
-        " isRequired(pullRequestNumber: $number)"
+    // GitHub Enterprise Server has no per-pull-request required flag, so nothing there is known
+    // to be required.
+    let github_com = key.host == "github.com";
+    let (required, rules) = if github_com {
+        (
+            " isRequired(pullRequestNumber: $number)",
+            " baseRef { rules(first: 100) { nodes { parameters { ... on RequiredStatusChecksParameters { requiredStatusChecks { context } } } } } }",
+        )
     } else {
-        ""
+        ("", "")
     };
     let document = format!(
-        "query PullRequestWatchDetail($owner: String!, $name: String!, $number: Int!, $checksAfter: String) {{ viewer {{ login }} repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ number state mergedAt mergeable headRefOid baseRefName author {{ login }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100, after: $checksAfter) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on StatusContext {{ context state targetUrl createdAt{required} }} ... on CheckRun {{ name status conclusion startedAt completedAt detailsUrl{required} checkSuite {{ workflowRun {{ workflow {{ name }} }} }} }} }} }} }} }} }} }} }} }} }}"
+        "query PullRequestWatchDetail($owner: String!, $name: String!, $number: Int!, $checksAfter: String) {{ viewer {{ login }} repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ number state mergedAt mergeable headRefOid baseRefName author {{ login }}{rules} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100, after: $checksAfter) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on StatusContext {{ context state targetUrl createdAt{required} }} ... on CheckRun {{ name status conclusion startedAt completedAt detailsUrl{required} checkSuite {{ workflowRun {{ workflow {{ name }} }} }} }} }} }} }} }} }} }} }} }} }}"
     );
     let mut variables = repository_variables(key)?;
     let mut contexts = Vec::new();
@@ -259,18 +267,29 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
             _ => return Err(GitHubError::InvalidResponse),
         }
     };
+    let base_branch = pr["baseRefName"].as_str().unwrap_or_default().to_owned();
+    // A list cut short could hide a pending check behind a passing gate; an empty one keeps
+    // what the agent was told.
+    let mut checks = if complete {
+        checks(&contexts)
+    } else {
+        Vec::new()
+    };
+    if github_com && state == PullRequestState::Open && watch::checks_pass(&checks) {
+        checks.extend(unreported_required(
+            api,
+            key,
+            &base_branch,
+            &pr["baseRef"],
+            &contexts,
+        )?);
+    }
     let login = |value: &Value| value["login"].as_str().map(str::to_owned);
     Ok(PullRequestWatchRead {
         state,
         head_sha: pr["headRefOid"].as_str().map(str::to_owned),
-        base_branch: pr["baseRefName"].as_str().unwrap_or_default().to_owned(),
-        // A list cut short could hide a pending check behind a passing gate; an empty one keeps
-        // what the agent was told.
-        checks: if complete {
-            checks(&contexts)
-        } else {
-            Vec::new()
-        },
+        base_branch,
+        checks,
         mergeability: match pr["mergeable"].as_str() {
             Some("MERGEABLE") => Mergeability::Clean,
             Some("CONFLICTING") => Mergeability::Conflicting,
@@ -281,6 +300,76 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
         viewer: login(&data["viewer"]),
         author: login(&pr["author"]),
     })
+}
+
+/// The checks the base branch requires that have not reported on the head yet, as pending.
+/// GitHub creates a job that waits on others only once they finish, so until then the checks
+/// read do not show it. Rulesets come with the detail; branch protection is readable through
+/// REST alone, and a token that may not read it leaves those checks unknown.
+fn unreported_required(
+    api: &GitHubApi,
+    key: &PullRequestKey,
+    base_branch: &str,
+    base_ref: &Value,
+    contexts: &[Value],
+) -> Result<Vec<PullRequestCheck>, GitHubError> {
+    let repository = Repository::from_key(key).ok_or(GitHubError::Request)?;
+    let path = format!(
+        "/repos/{}/{}/branches/{}",
+        repository.owner,
+        repository.name,
+        percent_encode(base_branch)
+    );
+    let branch: Value = match api.rest(
+        &key.host,
+        RestRequest {
+            answers: &[403],
+            ..RestRequest::get(&path)
+        },
+        &options(api, &key.host, "PullRequestWatchRequiredChecks")?,
+    ) {
+        Ok(response) if response.status == 403 => Value::Null,
+        Ok(response) => response.json()?,
+        Err(GitHubError::NotFound) => Value::Null,
+        Err(error) => return Err(error),
+    };
+    let reported: HashSet<String> = contexts
+        .iter()
+        .filter_map(|raw| trimmed(&raw["name"]).or_else(|| trimmed(&raw["context"])))
+        .collect();
+    let mut expected: Vec<String> = Vec::new();
+    let protection = &branch["protection"];
+    let protected = protection["required_status_checks"]["contexts"]
+        .as_array()
+        .filter(|_| protection["enabled"].as_bool() != Some(false))
+        .into_iter()
+        .flatten()
+        .filter_map(trimmed);
+    let ruled = base_ref["rules"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|rule| {
+            rule["parameters"]["requiredStatusChecks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|check| trimmed(&check["context"]));
+    for context in protected.chain(ruled) {
+        if !reported.contains(&context) && !expected.contains(&context) {
+            expected.push(context);
+        }
+    }
+    Ok(expected
+        .into_iter()
+        .map(|name| PullRequestCheck {
+            name,
+            status: CheckStatus::Pending,
+            url: None,
+            required: Some(true),
+        })
+        .collect())
 }
 
 fn trimmed(value: &Value) -> Option<String> {
