@@ -10,6 +10,8 @@ use std::{
 use iroh::{EndpointId, SecretKey};
 use serde::{Deserialize, Serialize};
 
+use crate::group::{Declined, GroupRecord, Membership};
+
 /// One device allowed to open `tcode/1` connections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceRecord {
@@ -49,6 +51,7 @@ pub struct HostIdentity {
     pub spaces: Vec<SpaceRecord>,
     pub policy_revision: u64,
     pub pairing_enabled: bool,
+    pub group: Option<GroupRecord>,
     path: PathBuf,
 }
 
@@ -65,7 +68,14 @@ struct HostFile {
     policy_revision: u64,
     #[serde(default = "enabled")]
     pairing_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<GroupRecord>,
 }
+
+/// A machine outside any group writes version 3, which an older build still
+/// reads; version 4 adds the group.
+const VERSION_WITHOUT_GROUP: u32 = 3;
+const VERSION: u32 = 4;
 
 fn enabled() -> bool {
     true
@@ -96,7 +106,7 @@ impl HostIdentity {
                     value["v"] = 3.into();
                 }
                 let file: HostFile = serde_json::from_value(value).map_err(io::Error::other)?;
-                if file.v != 3 {
+                if file.v != VERSION && file.v != VERSION_WITHOUT_GROUP {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("{HOST_FILE} has unsupported version {}", file.v),
@@ -112,6 +122,7 @@ impl HostIdentity {
                     spaces: file.spaces,
                     policy_revision: file.policy_revision,
                     pairing_enabled: file.pairing_enabled,
+                    group: file.group,
                     path,
                 };
                 if migrated || identity.host_name != host_name {
@@ -128,6 +139,7 @@ impl HostIdentity {
                     spaces: Vec::new(),
                     policy_revision: 0,
                     pairing_enabled: true,
+                    group: None,
                     path,
                 };
                 identity.save()?;
@@ -147,13 +159,18 @@ impl HostIdentity {
 
     pub fn save(&self) -> io::Result<()> {
         let file = HostFile {
-            v: 3,
+            v: if self.group.is_some() {
+                VERSION
+            } else {
+                VERSION_WITHOUT_GROUP
+            },
             host_name: self.host_name.clone(),
             secret_key: encode_hex(&self.secret_key.to_bytes()),
             devices: self.devices.clone(),
             spaces: self.spaces.clone(),
             policy_revision: self.policy_revision,
             pairing_enabled: self.pairing_enabled,
+            group: self.group.clone(),
         };
         write_private(&self.path, &serde_json::to_vec_pretty(&file)?)
     }
@@ -179,6 +196,67 @@ impl HostIdentity {
                 access: DeviceGrant::Full,
             }),
         }
+    }
+
+    /// Bring the allow list in line with the group: admit its member
+    /// devices (or, while `accept_new` is off, record them as declined) and
+    /// remove its removed ones, however they were paired. A space member is
+    /// left as it is, and so is `local`, the device sharing this machine's
+    /// data directory, which reaches it without the network. Returns the
+    /// devices removed, whose connections the caller closes.
+    pub fn apply_group(&mut self, accept_new: bool, local: Option<&str>) -> Vec<String> {
+        let Some(group) = &mut self.group else {
+            return Vec::new();
+        };
+        let mut removed = Vec::new();
+        for device in &group.state.devices {
+            if Some(device.id.as_str()) == local {
+                continue;
+            }
+            let listed = self
+                .devices
+                .iter()
+                .position(|record| record.id == device.id);
+            match (device.entry.state, listed) {
+                (Membership::Removed, Some(index)) => {
+                    self.devices.remove(index);
+                    removed.push(device.id.clone());
+                }
+                (Membership::Member, None) => {
+                    let declined = group.declined.iter().any(|declined| {
+                        declined.id == device.id && declined.counter == device.entry.counter
+                    });
+                    if declined {
+                        continue;
+                    }
+                    if !accept_new {
+                        group.declined.retain(|declined| declined.id != device.id);
+                        group.declined.push(Declined {
+                            id: device.id.clone(),
+                            counter: device.entry.counter,
+                        });
+                        continue;
+                    }
+                    self.devices.push(DeviceRecord {
+                        id: device.id.clone(),
+                        name: device.name.clone(),
+                        platform: device.platform.clone(),
+                        created_unix: now_unix(),
+                        access: DeviceGrant::Full,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let members = &group.state.devices;
+        group.declined.retain(|declined| {
+            members.iter().any(|device| {
+                device.id == declined.id
+                    && device.entry.counter == declined.counter
+                    && device.entry.is_member()
+            })
+        });
+        removed
     }
 
     /// Remove a device from the allow list. Returns whether it was listed.
@@ -320,6 +398,33 @@ impl DeviceIdentity {
     pub(crate) fn downgrade(&self) -> std::sync::Weak<DeviceInner> {
         Arc::downgrade(&self.inner)
     }
+}
+
+/// The device of `device.json` in `data_dir`, if this data directory has
+/// one: on a desktop, the window's identity beside the machine's.
+pub fn existing_device(data_dir: &Path) -> Option<(EndpointId, crate::wire::DeviceClaim)> {
+    let bytes = fs::read(data_dir.join(DEVICE_FILE)).ok()?;
+    let file: DeviceFile = serde_json::from_slice(&bytes).ok()?;
+    let id = parse_secret_key(&file.secret_key).ok()?.public();
+    Some((
+        id,
+        crate::wire::DeviceClaim {
+            name: file.details.name.unwrap_or_else(|| "Tcode".into()),
+            platform: file.details.platform,
+        },
+    ))
+}
+
+/// The machine id of `traverse.json` in `data_dir`, if this data directory
+/// hosts a machine.
+pub fn existing_machine_id(data_dir: &Path) -> Option<EndpointId> {
+    let bytes = fs::read(data_dir.join(HOST_FILE)).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(
+        parse_secret_key(value["secret_key"].as_str()?)
+            .ok()?
+            .public(),
+    )
 }
 
 pub(crate) fn now_unix() -> u64 {

@@ -170,6 +170,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "ureq",
  "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3840,6 +3841,7 @@ dependencies = [
  "gpui-fast",
  "gpui-fast-wgpu",
  "gpui-mobile-pacing",
+ "gpui-mobile-touch",
  "jni 0.22.4",
  "log",
  "ndk",
@@ -3930,7 +3932,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_repr",
- "similar",
+ "similar 2.7.0",
  "smallvec",
  "smol",
  "tracing",
@@ -4276,12 +4278,14 @@ dependencies = [
  "gpui-fast",
  "gpui-fast-wgpu",
  "gpui-mobile-pacing",
+ "gpui-mobile-touch",
  "libc",
  "log",
  "parking_lot",
  "pathfinder_geometry",
  "raw-window-handle",
  "smallvec",
+ "unicode-segmentation",
  "uuid",
  "zed-font-kit",
 ]
@@ -4323,6 +4327,13 @@ dependencies = [
 [[package]]
 name = "gpui-mobile-pacing"
 version = "0.1.0"
+
+[[package]]
+name = "gpui-mobile-touch"
+version = "0.1.0"
+dependencies = [
+ "gpui-fast",
+]
 
 [[package]]
 name = "gpui-pre"
@@ -7920,6 +7931,7 @@ dependencies = [
  "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
 ]
@@ -10659,6 +10671,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "similar"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
+dependencies = [
+ "bstr",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "simple-dns"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11324,11 +11346,13 @@ dependencies = [
 name = "tcode-headless"
 version = "0.1.0"
 dependencies = [
+ "agent",
  "env_logger",
  "qrcode",
  "serde",
  "serde_json",
  "tcode-client",
+ "tcode-core",
  "tcode-protocol",
  "tcode-runtime",
  "tcode-services",
@@ -11503,6 +11527,7 @@ dependencies = [
  "criterion",
  "futures",
  "futures-lite",
+ "gdk",
  "gpui-android",
  "gpui-base",
  "gpui-fast",
@@ -11521,8 +11546,10 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-image-io",
+ "objc2-ui-kit",
  "objc2-web-kit",
  "percent-encoding",
  "preview-mcp",
@@ -11532,7 +11559,7 @@ dependencies = [
  "rust-i18n",
  "serde",
  "serde_json",
- "similar",
+ "similar 3.2.0",
  "smol",
  "syntect",
  "sys-locale",
@@ -11547,6 +11574,7 @@ dependencies = [
  "unicode-width 0.2.2",
  "url",
  "web-time",
+ "webkit2gtk",
  "webview2-com",
  "windows-core 0.61.2",
 ]

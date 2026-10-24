@@ -81,7 +81,7 @@ enum WebViewSlot {
     },
     Ready {
         view: Entity<WebView>,
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         remote: Option<super::remote::RemoteBrowser>,
     },
 }
@@ -130,10 +130,14 @@ pub struct BrowserLifecycle {
     slots: HashMap<String, WebViewSlot>,
     warm: HashSet<String>,
     active_identity: Option<(String, String)>,
+    /// The size the Preview panel last showed a page at: what a conversation
+    /// nobody is looking at would get on screen.
+    #[cfg(not(target_os = "android"))]
+    panel_size: Option<gpui::Size<gpui::Pixels>>,
     creator: Creator,
     proxy: Option<tcode_traverse::preview::ProxyEntry>,
     endpoint: Option<tcode_traverse::preview::PreviewEndpoint>,
-    #[cfg(any(target_os = "windows", target_os = "android"))]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
     _native_proxy: Option<tcode_traverse::preview::NativeProxy>,
 }
 
@@ -152,15 +156,19 @@ impl BrowserLifecycle {
                 tcode_traverse::preview::PreviewEndpoint::new(host, tunnels.clone())
             })
         });
-        #[cfg(any(target_os = "windows", target_os = "android"))]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
         let mut native_proxy = None;
-        // The browser engine is pointed at a loopback bridge; macOS maps
-        // URLs per route instead and needs no entry.
+        // The browser engine is pointed at a loopback bridge; macOS and iOS
+        // map URLs per route instead and need no entry.
         let proxy: Result<Option<tcode_traverse::preview::ProxyEntry>, String> =
             proxy.and_then(|target| {
                 target
                     .map(|_target| {
-                        #[cfg(any(target_os = "windows", target_os = "android"))]
+                        #[cfg(any(
+                            target_os = "windows",
+                            target_os = "linux",
+                            target_os = "android"
+                        ))]
                         {
                             let bridge = tcode_traverse::preview::NativeProxy::new(
                                 endpoint.clone().unwrap(),
@@ -169,7 +177,7 @@ impl BrowserLifecycle {
                             native_proxy = Some(bridge);
                             Ok(entry)
                         }
-                        #[cfg(not(any(target_os = "windows", target_os = "android")))]
+                        #[cfg(any(target_os = "macos", target_os = "ios"))]
                         Ok(tcode_traverse::preview::ProxyEntry {
                             origin: String::new(),
                         })
@@ -194,11 +202,13 @@ impl BrowserLifecycle {
             owner,
             proxy: proxy.ok().flatten(),
             endpoint,
-            #[cfg(any(target_os = "windows", target_os = "android"))]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
             _native_proxy: native_proxy,
             slots: HashMap::new(),
             warm: HashSet::new(),
             active_identity: None,
+            #[cfg(not(target_os = "android"))]
+            panel_size: None,
             creator,
         }
     }
@@ -266,7 +276,7 @@ impl BrowserLifecycle {
                 // asynchronous didStart, so a wait_for issued right after
                 // this navigation cannot fail on the old record.
                 load_error::forget(raw);
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let mapped = match self
                     .remote_browser(key)
                     .map(|remote| remote.navigate(url))
@@ -278,7 +288,7 @@ impl BrowserLifecycle {
                         return availability;
                     }
                 };
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let url = mapped.as_deref().unwrap_or(url);
                 match raw.load_url(url) {
                     Ok(()) => {
@@ -313,7 +323,50 @@ impl BrowserLifecycle {
             };
             let visible = Some(candidate.as_str()) == key;
             view.update(cx, |view, _| set_webview_visible(view, visible));
+            #[cfg(not(target_os = "android"))]
+            if visible {
+                let size = view.read(cx).bounds().size;
+                if size.width > gpui::px(0.) && size.height > gpui::px(0.) {
+                    self.panel_size = Some(size);
+                }
+            }
         }
+    }
+
+    /// Give a hidden browser the viewport it would have on screen: `canvas`
+    /// when the conversation fixed one, else the panel's, else `fallback`.
+    /// A browser that was never shown is otherwise laid out at 0×0, which
+    /// leaves an agent driving a background conversation with an empty page.
+    #[cfg(not(target_os = "android"))]
+    pub(super) fn stage_hidden(
+        &self,
+        key: &str,
+        canvas: Option<gpui::Size<gpui::Pixels>>,
+        fallback: gpui::Size<gpui::Pixels>,
+        cx: &App,
+    ) {
+        let Some(view) = self.ready_view(key) else {
+            return;
+        };
+        let view = view.read(cx);
+        if view.visible() {
+            return;
+        }
+        let own = Some(view.bounds().size)
+            .filter(|size| size.width > gpui::px(0.) && size.height > gpui::px(0.));
+        let size = canvas.or(self.panel_size).or(own).unwrap_or(fallback);
+        let rect = wry::Rect {
+            position: wry::dpi::LogicalPosition::new(-20000., -20000.).into(),
+            size: wry::dpi::LogicalSize::new(f64::from(size.width), f64::from(size.height)).into(),
+        };
+        if let Err(error) = view.set_bounds(rect) {
+            log::debug!("preview: failed to size hidden webview {key}: {error}");
+        }
+        #[cfg(target_os = "ios")]
+        super::ios::set_frame(
+            view.raw(),
+            gpui::Bounds::new(gpui::point(gpui::px(-20000.), gpui::px(-20000.)), size),
+        );
     }
 
     /// Hide children that cannot remain mounted, without showing a newly
@@ -392,7 +445,7 @@ impl BrowserLifecycle {
     /// The last navigation failure the platform reported for this browser, if
     /// the current page is still the one it left behind.
     pub(super) fn load_error(&self, key: &str, cx: &App) -> Option<LoadError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if let Some(remote) = self.remote_browser(key) {
             let routes = remote.routes.borrow();
             if let Some(message) = routes.error() {
@@ -408,7 +461,7 @@ impl BrowserLifecycle {
         Some(error)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn remote_browser(&self, key: &str) -> Option<&super::remote::RemoteBrowser> {
         match self.slots.get(key)? {
             WebViewSlot::Ready { remote, .. } => remote.as_ref(),
@@ -418,14 +471,14 @@ impl BrowserLifecycle {
     }
 
     pub(super) fn logical_url(&self, _key: &str, actual: &str) -> String {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if let Some(remote) = self.remote_browser(_key) {
             return remote.routes.borrow().logical_url(actual);
         }
         actual.into()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub(super) fn remote_url(&self, key: &str) -> Option<String> {
         self.remote_browser(key)?
             .routes
@@ -434,7 +487,7 @@ impl BrowserLifecycle {
             .map(str::to_owned)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub(super) fn external_url(&self, key: &str, logical: &str) -> Option<String> {
         match self.remote_browser(key) {
             Some(remote) => remote.routes.borrow().external_url(logical),
@@ -702,8 +755,12 @@ mod platform {
             }
         };
         load_error::install(webview.read(cx).raw());
+        #[cfg(target_os = "linux")]
+        trap_gdk_x_errors();
+        #[cfg(target_os = "ios")]
+        super::super::ios::adopt(webview.read(cx).raw());
         webview.update(cx, |view, _| set_webview_visible(view, false));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         let remote = lifecycle
             .endpoint
             .clone()
@@ -712,12 +769,25 @@ mod platform {
             key.to_string(),
             WebViewSlot::Ready {
                 view: webview.clone(),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
                 remote,
             },
         );
         Availability::Ready(webview)
     }
+}
+
+/// gpui-webview 0.8 releases a webview by destroying its X11 composition
+/// surface through GPUI's xcb connection while GDK's Xlib connection still
+/// holds unsent requests for the WebKit windows inside it. Those requests then
+/// fail with `BadWindow`, which GDK's default handler turns into `exit(1)` —
+/// on closing a page, deleting its thread, or quitting. GDK's connection
+/// carries only the embedded WebKit windows, so its X errors are trapped for
+/// the rest of the process once GTK is up.
+#[cfg(target_os = "linux")]
+fn trap_gdk_x_errors() {
+    static TRAPPED: std::sync::Once = std::sync::Once::new();
+    TRAPPED.call_once(gdk::error_trap_push);
 }
 
 #[cfg(target_os = "windows")]

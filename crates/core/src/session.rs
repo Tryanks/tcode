@@ -500,12 +500,14 @@ pub enum EntryContent {
     #[rustfmt::skip]
     ProviderStartError { error: String },
     /// A tcode-level conversation handoff, rendered as a divider before the
-    /// first user message sent to the new provider.
+    /// first user message sent to the new provider, with the handoff `prompt`
+    /// as sent disclosed under it.
     ProviderRelay {
         from_provider: agent::ProviderKind,
         from_model: Option<String>,
         to_provider: agent::ProviderKind,
         to_model: Option<String>,
+        prompt: Option<String>,
     },
     /// The provider changed the model actually serving this session.
     ModelChanged {
@@ -587,9 +589,52 @@ pub struct Timeline {
     /// Full output lengths of the items whose records arrived shortened
     /// ([`StoredEvent::elided`]), keyed by item id.
     pub elided_outputs: HashMap<String, u64>,
+    entry_index: EntryIndex,
+}
+
+/// Where each entry id first appears in [`Timeline::entries`], so the fold
+/// finds an item's entry without a linear search per event, which made
+/// folding a long log quadratic. It is derived from `entries`: it covers the
+/// prefix it has seen, takes no part in equality, is reset by the fold's own
+/// edits other than appends, and every hit is checked against `entries`,
+/// which code outside the fold may also edit.
+#[derive(Debug, Clone, Default)]
+struct EntryIndex {
+    first: HashMap<String, usize>,
+    covered: usize,
+}
+
+impl PartialEq for EntryIndex {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Timeline {
+    /// The position of the first entry with `id`.
+    fn first_entry(&mut self, id: &str) -> Option<usize> {
+        let index = &mut self.entry_index;
+        if index.covered > self.entries.len() {
+            *index = EntryIndex::default();
+        }
+        for (position, entry) in self.entries.iter().enumerate().skip(index.covered) {
+            index.first.entry(entry.id.clone()).or_insert(position);
+        }
+        index.covered = self.entries.len();
+        let position = *index.first.get(id)?;
+        if self.entries[position].id == id {
+            return Some(position);
+        }
+        self.entry_index = EntryIndex::default();
+        self.first_entry(id)
+    }
+
+    /// Edits to `entries` other than appends move the positions the index
+    /// holds.
+    fn reindex_entries(&mut self) {
+        self.entry_index = EntryIndex::default();
+    }
+
     /// Fold a whole event sequence (replay path). Accepts either bare
     /// [`AgentEvent`]s (ts unknown) or timestamped [`StoredEvent`]s.
     pub fn fold_events(events: impl IntoIterator<Item = impl Into<StoredEvent>>) -> Self {
@@ -719,6 +764,7 @@ impl Timeline {
                 from_model,
                 to_provider,
                 to_model,
+                prompt,
             } => {
                 let turn = self.begin_user_turn();
                 let id = self.synthetic_id("relay", ts);
@@ -729,6 +775,7 @@ impl Timeline {
                         from_model: from_model.clone(),
                         to_provider: *to_provider,
                         to_model: to_model.clone(),
+                        prompt: prompt.clone(),
                     },
                     ts,
                     turn,
@@ -1158,6 +1205,7 @@ impl Timeline {
     /// active history without tcode rewriting either transcript file.
     fn rewind_conversation(&mut self, target_turn: usize) {
         self.entries.retain(|entry| entry.turn < target_turn);
+        self.reindex_entries();
         self.turns.truncate(target_turn);
         self.tool_clock = ToolClock::default();
         self.turn_running = false;
@@ -1187,9 +1235,10 @@ impl Timeline {
     /// a timestamped record names itself, and only untimestamped legacy logs
     /// fall back to the fold-relative counter.
     fn synthetic_id(&mut self, prefix: &str, ts: Option<u64>) -> String {
-        synthetic_entry_id(prefix, ts, &mut self.next_synthetic_id, |id| {
-            self.entries.iter().any(|entry| entry.id == id)
-        })
+        let mut next = self.next_synthetic_id;
+        let id = synthetic_entry_id(prefix, ts, &mut next, |id| self.first_entry(id).is_some());
+        self.next_synthetic_id = next;
+        id
     }
 
     fn refresh_partial_turn_changes(&mut self, turn: usize) {
@@ -1218,11 +1267,9 @@ impl Timeline {
         });
     }
 
-    fn item_turn(&self, item_id: &str) -> Option<usize> {
-        self.entries
-            .iter()
-            .find(|entry| entry.id == item_id)
-            .map(|entry| entry.turn)
+    fn item_turn(&mut self, item_id: &str) -> Option<usize> {
+        self.first_entry(item_id)
+            .map(|position| self.entries[position].turn)
     }
 
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
@@ -1232,8 +1279,8 @@ impl Timeline {
             return;
         }
         let mut incoming = EntryContent::Item(item.content.clone());
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item.id) {
-            let entry = Arc::make_mut(entry);
+        if let Some(position) = self.first_entry(&item.id) {
+            let entry = Arc::make_mut(&mut self.entries[position]);
             entry.content = merge_content(
                 std::mem::replace(&mut entry.content, incoming.clone()),
                 incoming,
@@ -1289,7 +1336,7 @@ impl Timeline {
         text: &str,
         attachments: &[String],
     ) {
-        if self.entries.iter().any(|entry| entry.id == request_id) {
+        if self.first_entry(request_id).is_some() {
             return;
         }
         let turn = self.ensure_turn();
@@ -1307,7 +1354,7 @@ impl Timeline {
     }
 
     fn accept_steer(&mut self, request_id: &str, target: Option<usize>) {
-        let Some(position) = self.entries.iter().position(|entry| entry.id == request_id) else {
+        let Some(position) = self.first_entry(request_id) else {
             return;
         };
         if !matches!(
@@ -1321,6 +1368,7 @@ impl Timeline {
         }
 
         let mut entry = self.entries.remove(position);
+        self.reindex_entries();
         if let EntryContent::Steer {
             status: status @ SteeringStatus::Pending,
             ..
@@ -1347,6 +1395,7 @@ impl Timeline {
                     }
                 )
         });
+        self.reindex_entries();
     }
 
     fn apply_delta(&mut self, ts: Option<u64>, item_id: &str, kind: DeltaKind, text: &str) {
@@ -1677,6 +1726,7 @@ mod tests {
                 from_model: Some("opus".into()),
                 to_provider: agent::ProviderKind::Codex,
                 to_model: Some("gpt-5".into()),
+                prompt: None,
             },
             user_msg("u2", "after"),
         ]);

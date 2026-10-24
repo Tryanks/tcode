@@ -4,7 +4,7 @@
 //! version via rename.
 use std::{fs, io, path::Path};
 
-use tcode_client::pairing::{PairedHost, valid_host_id};
+use tcode_client::pairing::{MAX_ADDRS, PairedHost, valid_host_id};
 
 /// The saved machines. A record whose id is not a Traverse machine id is
 /// left out: the previous transport's `hosts.json` named machines by UUID,
@@ -52,6 +52,65 @@ pub fn update_hosts(data_dir: &Path, update: impl FnOnce(&mut Vec<PairedHost>)) 
         write_hosts(data_dir, &hosts)?;
     }
     Ok(())
+}
+
+/// Save what a machine of group `group_id` says about the group: every
+/// member machine is kept beside the others with the group's id, and a
+/// machine that is no longer a member loses it but stays saved, since it
+/// still admits this device as one it paired. `roster` is `None` when the
+/// machine that told this device has no group any more. `local` is the
+/// machine sharing this data directory, which is never a remote machine.
+pub fn apply_roster(
+    hosts: &mut Vec<PairedHost>,
+    from: &str,
+    roster: Option<&crate::group::Roster>,
+    local: Option<&str>,
+) {
+    let Some(roster) = roster else {
+        if let Some(host) = hosts.iter_mut().find(|host| host.host_id == from) {
+            host.group_id = None;
+        }
+        return;
+    };
+    for machine in &roster.machines {
+        if Some(machine.id.as_str()) == local || !valid_host_id(&machine.id) {
+            continue;
+        }
+        match hosts.iter_mut().find(|host| host.host_id == machine.id) {
+            Some(host) if machine.member => {
+                host.group_id = Some(roster.id.clone());
+                host.name.clone_from(&machine.name);
+                if host.traverse.is_empty() {
+                    host.traverse.clone_from(&machine.traverse);
+                }
+                if host.relay.is_none() {
+                    host.relay.clone_from(&machine.relay);
+                }
+                for addr in &machine.addrs {
+                    if host.addrs.len() < MAX_ADDRS && !host.addrs.contains(addr) {
+                        host.addrs.push(addr.clone());
+                    }
+                }
+            }
+            Some(host) => {
+                if host.group_id.as_deref() == Some(roster.id.as_str()) {
+                    host.group_id = None;
+                }
+            }
+            None if machine.member => hosts.push(PairedHost {
+                host_id: machine.id.clone(),
+                name: machine.name.clone(),
+                space_id: None,
+                space_name: None,
+                traverse: machine.traverse.clone(),
+                relay: machine.relay.clone(),
+                addrs: machine.addrs.iter().take(MAX_ADDRS).cloned().collect(),
+                last_connected_unix: None,
+                group_id: Some(roster.id.clone()),
+            }),
+            None => {}
+        }
+    }
 }
 
 fn hosts_lock(data_dir: &Path) -> io::Result<fs::File> {
@@ -124,6 +183,7 @@ mod tests {
             relay: None,
             addrs: vec!["192.168.1.5:47420".into()],
             last_connected_unix: None,
+            group_id: None,
         }
     }
 

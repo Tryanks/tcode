@@ -1,7 +1,7 @@
 //! Child-process helpers.
 //!
 //! Every process tcode spawns (git, the provider CLIs, npm, editors, …) must go
-//! through these constructors, for two Windows reasons:
+//! through these constructors, for three Windows reasons:
 //!
 //! 1. A plain `Command` pops a console window for the child, which is jarring in
 //!    a GUI app. `CREATE_NO_WINDOW` suppresses it.
@@ -9,8 +9,11 @@
 //!    `npm` / `pnpm` / `bun` (and `claude`) **`.cmd` shims** are invisible to it.
 //!    [`resolve_program`] does a `PATHEXT`-aware PATH search first (shared with
 //!    the agent crate's provider-binary resolution).
+//! 3. A child inherits every inheritable handle of tcode's, tcode's own stdout
+//!    and stderr included, so a child that outlives tcode keeps whoever reads
+//!    tcode's output waiting. [`agent::keep_own_stdio_from_children`] stops it.
 //!
-//! On other platforms both are no-ops / passthroughs — `exec` resolves PATH.
+//! On other platforms all three are no-ops / passthroughs — `exec` resolves PATH.
 
 /// `CREATE_NO_WINDOW`: run the child without allocating a console.
 #[cfg(windows)]
@@ -44,6 +47,7 @@ pub fn resolve_program<S: AsRef<std::ffi::OsStr>>(program: S) -> std::ffi::OsStr
 /// A `std::process::Command` that never flashes a console window, with its
 /// program resolved through [`resolve_program`].
 pub fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    agent::keep_own_stdio_from_children();
     // Approved constructor: this is the helper every other site must use.
     #[allow(clippy::disallowed_methods)]
     let mut cmd = std::process::Command::new(resolve_program(program));

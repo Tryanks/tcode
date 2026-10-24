@@ -340,13 +340,28 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
             state.load_background_session(meta, cx);
         }
     });
+    // The turn's end can show before its last reply is folded in.
+    let replies = |mirror: &ActiveSession| {
+        mirror
+            .timeline
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.content,
+                    EntryContent::Item(ItemContent::AssistantMessage { .. })
+                )
+            })
+            .count()
+    };
     cx.run_until(|state| {
         state.resident(&mirror_id).is_some_and(|mirror| {
-            mirror
-                .timeline
-                .turns
-                .first()
-                .is_some_and(|turn| turn.end_ts.is_some())
+            replies(mirror) == expected_items
+                && mirror
+                    .timeline
+                    .turns
+                    .first()
+                    .is_some_and(|turn| turn.end_ts.is_some())
         })
     });
     state.update(cx, |state, _| {
@@ -364,18 +379,6 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
                 .unwrap()
                 .activity
                 .working
-        );
-        assert_eq!(
-            mirror
-                .timeline
-                .entries
-                .iter()
-                .filter(|entry| matches!(
-                    entry.content,
-                    EntryContent::Item(ItemContent::AssistantMessage { .. })
-                ))
-                .count(),
-            expected_items
         );
     });
 }
@@ -5212,12 +5215,24 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
             active.timeline.turns[0].status,
             Some(TurnStatus::Interrupted)
         );
-        assert!(active.timeline.entries.iter().any(|entry| {
-            matches!(entry.content, EntryContent::ProviderRelay { .. }) && entry.turn == 1
-        }));
+        let relay = active
+            .timeline
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.content, EntryContent::ProviderRelay { .. }))
+            .expect("relay entry");
+        assert_eq!(relay.turn, 1);
         let transcript = active.queue[0].relay_transcript.as_deref().unwrap();
         assert!(transcript.contains("They differ in"));
         assert!(transcript.contains("still running when the conversation was handed over"));
+        // The timeline discloses the handoff exactly as it goes out.
+        let EntryContent::ProviderRelay { prompt, .. } = &relay.content else {
+            unreachable!();
+        };
+        assert_eq!(
+            prompt.as_deref(),
+            Some(active.queue[0].wire_text(&[]).as_str())
+        );
     });
 }
 
@@ -5604,7 +5619,8 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
     });
 
     assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
-    cx.run_until_parked();
+    // The session's records reach clients once its log has been read.
+    cx.run_until(|state| state.log_hydrations.is_empty());
     let outgoing = cx.drain_outgoing();
     assert!(outgoing.iter().any(|message| matches!(
         message,
@@ -6112,7 +6128,6 @@ fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() 
         assert_eq!(active.meta.updated_at, updated_at);
         assert_eq!(state.sessions[0].updated_at, updated_at);
         assert!(matches!(active.runtime, Runtime::Live(_)));
-        assert!(active.idle_since.is_none());
         assert!(!state.residents.parked.contains_key("idle-resident"));
         assert!(actor.try_recv().is_err(), "re-adoption sent Shutdown");
     });
@@ -6142,7 +6157,6 @@ fn subscribing_readopts_an_uncommitted_draft_before_its_idle_reaper() {
         state.subscribe(&subscription, cx);
         state.reap_idle_resident(&id, idle_since, cx);
         assert!(state.residents.live[&id].draft);
-        assert!(state.residents.live[&id].idle_since.is_none());
         assert!(!state.residents.parked.contains_key(&id));
         assert_eq!(state.residents.live.len(), 1);
     });
@@ -6171,30 +6185,56 @@ fn resident_idle_reaper_shuts_down_untouched_provider() {
 }
 
 #[test]
-fn resident_idle_reaper_ignores_readopted_session() {
+fn idle_grace_runs_from_the_last_turn_end_whether_viewed_or_parked() {
     let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-idle-resident-stale-timer-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
+    let test_store = TestStore::new("tcode-idle-grace-turn-end-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "idle-resident".into();
     let meta = session.meta.clone();
+    let complete_turn = |state: &mut AppState, turn: &str, cx: &mut HostCx| {
+        state.on_event(
+            "idle-resident",
+            AgentEvent::TurnStarted {
+                turn_id: turn.into(),
+            },
+            cx,
+        );
+        state.on_event(
+            "idle-resident",
+            AgentEvent::TurnCompleted {
+                turn_id: turn.into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+        state.residents.live["idle-resident"].idle_since.unwrap()
+    };
 
     state.update(cx, |state, cx| {
         state.sessions.push(meta);
         state.install_selected(session);
+        let first_turn_end = complete_turn(state, "first", cx);
         state.park_active(cx);
-        let idle_since = state.residents.parked["idle-resident"].idle_since.unwrap();
+        assert_eq!(
+            state.residents.parked["idle-resident"].idle_since,
+            Some(first_turn_end),
+            "parking restarted the grace"
+        );
         state.select_session("idle-resident", cx);
-        // Fire the grace timer that parking armed, now that its session has
-        // been re-adopted; the real timer would land identically but later.
-        state.reap_idle_resident("idle-resident", idle_since, cx);
+        let second_turn_end = complete_turn(state, "second", cx);
+        // Fire both grace timers now; the real ones would land identically
+        // but later. The first idle period ended with the second turn.
+        state.reap_idle_resident("idle-resident", first_turn_end, cx);
+        assert!(actor.try_recv().is_err(), "stale timer sent Shutdown");
+        state.reap_idle_resident("idle-resident", second_turn_end, cx);
 
         let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, "idle-resident");
-        assert!(matches!(active.runtime, Runtime::Live(_)));
-        assert!(actor.try_recv().is_err(), "stale timer sent Shutdown");
+        assert!(matches!(active.runtime, Runtime::Idle));
+        assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
     });
 }
 
@@ -9041,18 +9081,13 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
             tcode_client::attachment::AttachmentPolicy::LOCAL,
         )
     });
-    cx.run_until_parked();
-    let archived = cx
-        .drain_outgoing()
-        .into_iter()
-        .find_map(|message| match message {
-            HostMessage::QueryResult {
-                id: 3,
-                result: Ok(QueryResponse::ArchivedSessions(archived)),
-            } => Some(archived),
-            _ => None,
-        })
-        .expect("archived list reply");
+    let (archived, _) = cx.run_until_sent(|message| match message {
+        HostMessage::QueryResult {
+            id: 3,
+            result: Ok(QueryResponse::ArchivedSessions(archived)),
+        } => Some(archived.clone()),
+        _ => None,
+    });
     assert_eq!(archived.revision, summary_revision);
     assert_eq!(archived.sessions[0].title, "Archived rename");
 
@@ -9355,6 +9390,8 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
             &through_pipe(&state, cx, 1, subscribe_events("thread", None)),
             1,
         );
+        // The window can be served before the whole log is read and kept.
+        cx.run_until(|state| state.event_records.contains_key("thread"));
         let snapshot = |diff: &str| AgentEvent::TurnChangesUpdated {
             turn_id: "t".into(),
             changes: vec![agent::FileChange {
@@ -9971,21 +10008,11 @@ fn send_to_host(
 /// Run the host until it answered client message `id` and parked, and
 /// return every message it serialized since the last drain.
 fn answered(cx: &mut TestAppContext, id: u64) -> Vec<HostMessage> {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut messages = Vec::new();
-    loop {
-        cx.run_until_parked();
-        messages.extend(cx.drain_outgoing());
-        if messages.iter().any(|message| {
-            matches!(message, HostMessage::Ack { id: reply, .. } | HostMessage::QueryResult { id: reply, .. } if *reply == id)
-        }) {
-            return messages;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the host did not answer message {id} within thirty seconds"
-        );
-    }
+    cx.run_until_sent(|message| {
+        matches!(message, HostMessage::Ack { id: reply, .. } | HostMessage::QueryResult { id: reply, .. } if *reply == id)
+            .then_some(())
+    })
+    .1
 }
 
 /// Send `payload` through the host pipe as client message `id`, and return
@@ -10222,7 +10249,10 @@ fn a_cold_thread_left_before_its_log_is_read_sends_no_window_and_keeps_no_log() 
     send_to_host(&state, cx, 1, subscribe_events("left", None));
     send_to_host(&state, cx, 2, unsubscribe_events("left"));
     state.read(|state| assert!(state.log_hydrations.contains_key("left")));
-    let messages = answered(cx, 1);
+    let mut messages = answered(cx, 1);
+    // The whole log's read can finish after the subscription is answered.
+    cx.run_until(|state| state.log_hydrations.is_empty());
+    messages.extend(cx.drain_outgoing());
 
     assert!(
         messages
@@ -10241,7 +10271,6 @@ fn a_cold_thread_left_before_its_log_is_read_sends_no_window_and_keeps_no_log() 
     );
     state.read(|state| {
         assert!(state.resident("left").is_none());
-        assert!(state.log_hydrations.is_empty());
         assert!(state.event_records.is_empty());
     });
 }
@@ -10279,9 +10308,10 @@ fn pages_and_outputs_of_a_thread_nobody_opened_are_read_and_not_kept() {
         query_reply(&through_pipe(&state, cx, 2, read_output), 2),
         QueryResponse::ItemOutput(output)
     );
+    // The bounded read answers first; the whole log's read finishes after.
+    cx.run_until(|state| state.log_hydrations.is_empty());
     state.read(|state| {
         assert!(state.resident("cold").is_none());
-        assert!(state.log_hydrations.is_empty());
         assert!(state.event_records.is_empty());
     });
 }
@@ -10511,7 +10541,7 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     let mut open = |state: &TestEntity, cx: &mut TestAppContext, after: Option<u64>| {
         id += 1;
         let browsing = id == 1;
-        let page_before = store.next_row("long").unwrap().saturating_sub(400);
+        let page_before = store.read_log("long").unwrap().next_row.saturating_sub(400);
         // Delay the full read's completion, not the bounded requests' mailbox.
         let held_hydration = store.turn_index("long").unwrap().map(|_| {
             let (mailbox, completions) = smol::channel::unbounded();
@@ -11511,7 +11541,7 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
     let op = |state: &TestEntity, cx: &mut TestAppContext, op| {
         let (reply, response) = smol::channel::bounded(1);
         state.update(cx, |state, cx| state.handle_orchestrate_op(op, reply, cx));
-        cx.run_until_parked();
+        cx.run_until(|_| !response.is_empty());
         response.try_recv().unwrap()
     };
     // Every run here started and ended at `stamp`.
@@ -12209,17 +12239,10 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             email: None,
         },
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        cx.run_until_parked();
-        if cx.drain_outgoing().iter().any(|message| matches!(message, HostMessage::Ack { id: 644, result: Err(error) } if error.code == "settings_write_failed")) {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "secret write failure acknowledged"
-        );
-    }
+    cx.run_until_sent(|message| {
+        matches!(message, HostMessage::Ack { id: 644, result: Err(error) } if error.code == "settings_write_failed")
+            .then_some(())
+    });
     assert_eq!(
         std::fs::read_to_string(store.root().join("secrets.json")).unwrap(),
         unreadable

@@ -17,6 +17,8 @@ concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
+# Tag-scoped caches, Cargo's or Docker's, cannot warm the next release and
+# evict the main CI caches from the shared Actions quota.
 jobs:
   setup:
     runs-on: ubuntu-24.04
@@ -53,11 +55,6 @@ jobs:
             target: aarch64-apple-darwin
             platform: macos
             arch: arm64
-          - label: macOS x64
-            os: macos-26
-            target: x86_64-apple-darwin
-            platform: macos
-            arch: x64
           - label: Windows x64
             os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -77,6 +74,11 @@ jobs:
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux
+            arch: arm64
+          - label: iOS arm64
+            os: macos-26
+            target: aarch64-apple-ios
+            platform: ios
             arch: arm64
     runs-on: ${{ matrix.os }}
     env:
@@ -98,11 +100,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-${{ matrix.target }}
-
       - name: Install Linux system dependencies
         if: matrix.platform == 'linux'
         run: |
@@ -111,19 +108,41 @@ jobs:
           "${apt_get[@]}" install -y --no-install-recommends \
             build-essential clang cmake pkg-config libssl-dev libzstd-dev \
             libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
-            libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev
-          if cargo tree -e normal -i glib-sys >/dev/null 2>&1; then
-            "${apt_get[@]}" install -y --no-install-recommends \
-              libgtk-3-dev libwebkit2gtk-4.1-dev
-          fi
+            libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev
 
       - name: Build release binary
+        if: matrix.platform != 'ios'
         shell: bash
         run: |
           start=$SECONDS
           cargo build --release --locked --target "${{ matrix.target }}"
           elapsed=$((SECONDS - start))
           echo "### ${{ matrix.label }} build: ${elapsed}s" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build unsigned iOS app
+        if: matrix.platform == 'ios'
+        shell: bash
+        env:
+          TCODE_IOS_RUST_PROFILE: release
+        run: |
+          set -euo pipefail
+          command -v xcodegen >/dev/null || brew install xcodegen
+          start=$SECONDS
+          crates/ios/host/build.sh --device
+          elapsed=$((SECONDS - start))
+          echo "### ${{ matrix.label }} build: ${elapsed}s" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package iOS IPA
+        if: matrix.platform == 'ios'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/ipa"
+          mkdir -p "$stage/Payload" dist
+          ditto crates/ios/host/build/Build/Products/Release-iphoneos/Tcode.app "$stage/Payload/Tcode.app"
+          (cd "$stage" && zip -qry "$GITHUB_WORKSPACE/dist/tcode-${VERSION}-ios-${{ matrix.arch }}-unsigned.ipa" Payload)
+          rm -rf "$stage"
 
       - name: Assemble macOS app bundle
         if: matrix.platform == 'macos'
@@ -151,7 +170,7 @@ jobs:
             <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>CFBundleVersion</key><string>${VERSION}</string>
             <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
-            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>LSMinimumSystemVersion</key><string>27.0</string>
             <key>NSHighResolutionCapable</key><true/>
             <key>NSMicrophoneUsageDescription</key><string>Tcode uses the microphone for voice input in the message composer.</string>
             <key>NSSpeechRecognitionUsageDescription</key><string>Tcode transcribes your speech on-device to type messages by voice.</string>
@@ -289,7 +308,7 @@ jobs:
           @"
           Tcode $env:VERSION
 
-          Microsoft Edge WebView2 Runtime is required (included with Windows 11).
+          Requires Windows 11 or later.
           "@ | Set-Content "$stage\README.txt"
           Compress-Archive -Path "$stage\*" -DestinationPath "dist\tcode-$env:VERSION-windows-${{ matrix.arch }}.zip"
           Remove-Item -Recurse -Force $stage
@@ -347,19 +366,31 @@ jobs:
           cat > "$notes_file" <<'NOTES'
           ## Platform notes
 
-          - **macOS 12+**: release builds are Developer ID signed and notarized when the maintainer has configured signing credentials. If you downloaded an unsigned build, clear Gatekeeper quarantine after moving the app to Applications with:
+          - **macOS 27+** (Apple silicon): release builds are Developer ID signed and notarized when the maintainer has configured signing credentials. If you downloaded an unsigned build, clear Gatekeeper quarantine after moving the app to Applications with:
 
             `xattr -dr com.apple.quarantine /Applications/Tcode.app`
 
-          - **Windows**: Microsoft Edge WebView2 Runtime is required. It is included with Windows 11.
-          - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
+          - **Windows 11+**: the embedded preview uses the WebView2 runtime that ships with Windows.
+          - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, a working Vulkan ICD/graphics driver, GTK 3 and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`). The embedded preview runs when Tcode runs on X11; on a Wayland session start it with `WAYLAND_DISPLAY` unset to use XWayland.
           - **Android**: the arm64 APK is signed with the project's release key and installs over previous releases signed with it. A build signed with a different key (a local build, or a release from before the key existed) must be uninstalled first.
-          - **iOS**: not published yet.
+          - **iOS / iPadOS 27+**: the arm64 IPA is unsigned. Re-sign it with your own Apple ID, or install it with a sideloading tool such as AltStore or Sideloadly, before it runs on a device.
 
-          Packages are uploaded as soon as each platform build completes. macOS artifacts are
-          architecture-specific. Windows MSI/NSIS and Linux AppImage packages are not currently
-          produced. `SHA256SUMS.txt` is added after every platform package has finished.
+          Packages are uploaded as soon as each platform build completes. Windows MSI/NSIS and
+          Linux AppImage packages are not currently produced. `SHA256SUMS.txt` is added after every platform package has finished.
           NOTES
+
+          # macOS runners run bash 3.2, which has no ${var,,}.
+          image_repo="$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          {
+            printf '\n## Docker (Linux amd64 / arm64)\n\n'
+            printf 'Images: `ghcr.io/%s-headless:%s` and `ghcr.io/%s-traverse:%s`. The agent CLIs named in `TCODE_AGENTS` (all six by default) install into the data volume on first start.\n\n' \
+              "$image_repo" "$VERSION" "$image_repo" "$VERSION"
+            printf 'Save this as `docker-compose.yml`, set `TCODE_PASSWORD` in `.env`, then run `docker compose up -d`. Set `TCODE_VERSION=%s` in `.env` to pin this release.\n\n' "$VERSION"
+            printf 'Container login methods and NAS setup: https://github.com/%s/blob/%s/docs/docker.md\n\n' "$REPOSITORY" "$RELEASE_TAG"
+            printf '```yaml\n'
+            cat docker-compose.yml
+            printf '```\n'
+          } >> "$notes_file"
 
           release_args=(
             "$RELEASE_TAG"
@@ -397,6 +428,7 @@ jobs:
             dist/*.dmg
             dist/*.zip
             dist/*.tar.gz
+            dist/*.ipa
           if-no-files-found: error
           retention-days: 14
 
@@ -416,31 +448,14 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-web-bundle
-
       - name: Install wasm tools
         run: |
-          cargo install wasm-bindgen-cli --version 0.2.127 --locked
+          cargo install wasm-bindgen-cli --locked --version "$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q;}' Cargo.lock)"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binaryen
 
       - name: Build browser bundle
-        run: |
-          set -euo pipefail
-          cargo build -p tcode-web --target wasm32-unknown-unknown --release --locked
-          mkdir -p crates/web/dist
-          wasm-bindgen --target web --out-dir crates/web/dist --out-name tcode_web \
-            target/wasm32-unknown-unknown/release/tcode_web.wasm
-          wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
-            --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue \
-            crates/web/dist/tcode_web_bg.wasm \
-            -o crates/web/dist/tcode_web_bg.optimized.wasm
-          mv crates/web/dist/tcode_web_bg.optimized.wasm crates/web/dist/tcode_web_bg.wasm
-          cp crates/web/static/index.html crates/web/static/auth.mjs crates/web/dist/
-          ls -lh crates/web/dist
+        run: crates/web/build.sh
 
       - name: Upload browser bundle
         uses: actions/upload-artifact@v7
@@ -462,11 +477,6 @@ jobs:
             target: aarch64-apple-darwin
             platform: macos
             arch: arm64
-          - label: macOS x64
-            os: macos-26
-            target: x86_64-apple-darwin
-            platform: macos
-            arch: x64
           - label: Windows x64
             os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -503,11 +513,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-headless-${{ matrix.target }}
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'linux'
@@ -572,11 +577,6 @@ jobs:
             target: aarch64-apple-darwin
             platform: macos
             arch: arm64
-          - label: macOS x64
-            os: macos-26
-            target: x86_64-apple-darwin
-            platform: macos
-            arch: x64
           - label: Windows x64
             os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -613,11 +613,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-traverse-${{ matrix.target }}
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'linux'
@@ -664,6 +659,180 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  container-images:
+    name: Container images ${{ matrix.arch }}
+    needs: [setup, package-headless, package-traverse]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            archive_arch: x64
+            os: ubuntu-24.04
+          - arch: arm64
+            archive_arch: arm64
+            os: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: package-*-linux-${{ matrix.archive_arch }}
+          path: archives
+          merge-multiple: true
+
+      - name: Stage release binaries and image names
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/$ARCH"
+          for binary in tcode-headless tcode-traverse; do
+            tar -xzf "archives/$binary-$VERSION-linux-${{ matrix.archive_arch }}.tar.gz" -C "dist/$ARCH"
+          done
+          echo "HEADLESS_IMAGE=ghcr.io/${REPOSITORY,,}-headless" >> "$GITHUB_ENV"
+          echo "TRAVERSE_IMAGE=ghcr.io/${REPOSITORY,,}-traverse" >> "$GITHUB_ENV"
+          echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pairing probe build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang cmake pkg-config libssl-dev libzstd-dev
+
+      - name: Build native container pairing probe
+        run: cargo build -p tcode-traverse --example pair_and_query --locked
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build headless image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: crates/headless/Dockerfile
+          build-args: BINARY_SOURCE=release
+          load: true
+          tags: ${{ env.HEADLESS_IMAGE }}:${{ env.VERSION }}-${{ env.ARCH }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ env.REVISION }}
+
+      - name: Build Traverse image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: crates/traverse-server/Dockerfile
+          build-args: BINARY_SOURCE=release
+          load: true
+          tags: ${{ env.TRAVERSE_IMAGE }}:${{ env.VERSION }}-${{ env.ARCH }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ env.REVISION }}
+
+      - name: Verify containers before publishing
+        run: |
+          node crates/headless/container/smoke.mjs \
+            "$HEADLESS_IMAGE:$VERSION-$ARCH" \
+            "$PWD/target/debug/examples/pair_and_query" "$TRAVERSE_IMAGE:$VERSION-$ARCH"
+
+      - uses: anchore/sbom-action/download-syft@v0.24.3
+        id: syft
+
+      - name: Push verified architecture images
+        id: push
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          for entry in "headless=$HEADLESS_IMAGE:$VERSION-$ARCH" \
+                       "traverse=$TRAVERSE_IMAGE:$VERSION-$ARCH"; do
+            name="${entry%%=*}"
+            image="${entry#*=}"
+            "$SYFT" scan "docker:$image" --output "spdx-json=$RUNNER_TEMP/$name.spdx.json"
+            docker push "$image"
+            echo "$name=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" | cut -d@ -f2)" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.HEADLESS_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.headless }}
+          sbom-path: ${{ runner.temp }}/headless.spdx.json
+          push-to-registry: true
+
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.TRAVERSE_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.traverse }}
+          sbom-path: ${{ runner.temp }}/traverse.spdx.json
+          push-to-registry: true
+
+  publish-containers:
+    name: Publish ${{ matrix.image }}
+    needs: [setup, container-images]
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      matrix:
+        image: [headless, traverse]
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the version tag and stable alias
+        id: manifest
+        env:
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}-${{ matrix.image }}"
+          tags=(--tag "$image:$VERSION")
+          if [[ "$PRERELEASE" == false ]]; then
+            tags+=(--tag "$image:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "$image:$VERSION-amd64" "$image:$VERSION-arm64"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
   package-android:
     name: Android arm64
     needs: setup
@@ -682,11 +851,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
-
-      - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-android-arm64
 
       - name: Set up JDK 21
         uses: actions/setup-java@v6
@@ -771,12 +935,19 @@ jobs:
     needs: [setup, package, package-headless, package-traverse, package-android]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
       - name: Download all packages
         uses: actions/download-artifact@v8
         with:
           pattern: package-*
           path: dist
           merge-multiple: true
+
+      - name: Include Compose deployment template
+        run: cp docker-compose.yml dist/docker-compose.yml
 
       - name: Show release files
         run: ls -lh dist

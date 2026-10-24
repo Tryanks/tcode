@@ -7,6 +7,7 @@ chat:
   discard_delivery: "丢弃"
   history_record_too_large: 一条历史记录超过了 8 MiB 的响应大小限制。
   relayed: "已从 %{from} 接力至 %{to}"
+  relay_handoff: "发送给 %{to} 的接力内容"
   model_changed: "模型已切换：%{from} → %{to}"
   model_changed_to: "模型已切换至 %{to}"
   new_thread: "新建对话"
@@ -1204,7 +1205,7 @@ image_viewer:
   load_failed: "无法加载此图片。"
 preview:
   external_unavailable: "请先在预览中打开远程页面。转发后的浏览器链接仅在此预览保持打开时有效。"
-  remote_forwarding: "远程回环地址通过转发访问，其他地址从此 Mac 直接访问。"
+  remote_forwarding: "远程回环地址通过转发访问，其他地址从本设备直接访问。"
   load_error: "无法加载 %{url}：%{message}（%{code}）"
   title: "预览"
   no_session: "打开一个会话以使用预览浏览器。"
@@ -1218,8 +1219,6 @@ preview:
   close: "关闭预览并释放页面"
   copy_url: "复制网址"
   starting: "预览正在启动…"
-  no_backend: "这台设备没有内嵌浏览器。"
-  no_backend_hint: "请在系统浏览器中打开该页面，或复制其网址。"
   unsupported_client: "这台设备没有内嵌浏览器，预览工具在这里不可用"
   unavailable: "预览浏览器无法启动。"
   unavailable_hint: "它需要系统的 webview 组件。Tcode 的其他功能不受影响。"
@@ -1361,6 +1360,7 @@ hosts:
   forget: "移除"
   actions: "%{name} 的操作"
   pair_again: "重新配对"
+  in_group: "主机组成员"
   local:
     unavailable: "无法启动：%{reason}"
     default_settings: "%{reason}。无法读取本机设置，当前使用默认语言和主题。"
@@ -1523,6 +1523,52 @@ spaces:
     show_qr: "显示二维码"
     hide_qr: "隐藏二维码"
     resume: "开启链接"
+
+group:
+  section: "主机组"
+  intro: "主机组把本机和你的其他主机连在一起。设备只要和组里任意一台主机配对，就能打开组里的每一台主机；任何一台主机离开，组都会继续存在。"
+  risk: "组里的每一台主机都能让设备进入其他所有主机。只与你信任的主机组队；在你创建或加入之前，主机组不会开启。"
+  failed: "无法更新主机组：%{error}"
+  leave: "退出主机组"
+  leave_title: "退出「%{name}」？"
+  leave_description: "其他主机不再通过本机接纳设备。已和本机配对的设备仍与本机保持配对。"
+  detail_note: "要添加设备或另一台主机，请使用本机的邀请：用它配对的设备会被组里每一台主机接纳；在任意一台主机上移除设备，会从所有主机上移除。"
+  invitation_note: "本机在「%{name}」中：用这个邀请配对的设备可以打开组里的每一台主机，另一台主机也可以用它加入这个组。"
+  summary:
+    machine_one: "1 台主机"
+    machines: "%{count} 台主机"
+  create:
+    action: "创建主机组"
+    title: "创建主机组"
+    placeholder: "主机组名称"
+    confirm: "创建主机组"
+  join:
+    action: "加入主机组"
+    title: "加入主机组"
+    description: "粘贴组里某台主机的邀请（在它的“主机”页或 设置 → 远程 中）。和设备配对一样，邀请只能用一次，五分钟内有效。"
+    placeholder: "tcode://pair?…"
+    address: "主机的 IP 地址（可选）"
+    address_placeholder: "仅在找不到该主机时填写，例如 192.168.1.20"
+    confirm: "加入主机组"
+    not_a_group_link: "这不是主机组中主机的邀请。"
+    joined: "已加入「%{name}」"
+  brought:
+    title: "组里的每一台主机都会接纳以下已与本机配对的设备："
+    none: "本机还没有配对任何设备，因此不会带入任何设备。"
+  machines:
+    title: "主机"
+    this: "本机"
+    remove: "移除"
+    remove_title: "将 %{name} 移出主机组？"
+    remove_description: "从现在起，其他主机不再与它同步，也不再接纳它带来的设备。它已经带入的设备仍保有访问权限。"
+  declined:
+    title: "等待本机接纳"
+    description: "本机已关闭新设备配对期间，其他主机接纳了这些设备。"
+    admit: "接纳"
+  remove_device:
+    title: "将 %{name} 移出主机组？"
+    description: "该设备会从「%{group}」里的每一台主机上断开并取消配对，而不只是本机。只有重新配对才能再加入。"
+    action: "从所有主机移除"
 
 member:
   connection: "共享空间「%{space}」· %{machine}"

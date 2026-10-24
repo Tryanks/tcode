@@ -46,7 +46,6 @@ private final class Sink: @unchecked Sendable {
     }
 }
 
-@available(macOS 26, *)
 private final class DictationAudio: @unchecked Sendable {
     let converter: AVAudioConverter
     let continuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation
@@ -81,7 +80,6 @@ private final class DictationAudio: @unchecked Sendable {
     }
 }
 
-@available(macOS 26, *)
 @MainActor
 private final class MacDictation {
     static var sessions: [UInt64: MacDictation] = [:]
@@ -235,7 +233,6 @@ private enum Availability {
     static let lock = NSLock()
 
     static func check(_ language: String) -> Bool {
-        guard #available(macOS 26, *) else { return false }
         if let known = lock.withLock({ languages[language] }) { return known }
         let done = DispatchSemaphore(value: 0)
         let result = Box()
@@ -270,10 +267,6 @@ public func tcodeMacSpeechStart(_ id: UInt64, _ bytes: UnsafePointer<UInt8>?, _ 
                                 _ context: UnsafeRawPointer?, _ callback: SpeechCallback,
                                 _ release: SpeechRelease) {
     let sink = Sink(context: context, callback: callback, release: release)
-    guard #available(macOS 26, *) else {
-        sink.emit(Kind.unsupported)
-        return
-    }
     let language = speechLanguage(bytes, length)
     MainActor.assumeIsolated {
         // One AVAudioEngine input tap at a time.
@@ -286,6 +279,5 @@ public func tcodeMacSpeechStart(_ id: UInt64, _ bytes: UnsafePointer<UInt8>?, _ 
 
 @_cdecl("tcode_macos_speech_stop")
 public func tcodeMacSpeechStop(_ id: UInt64, _ finish: UInt8) {
-    guard #available(macOS 26, *) else { return }
     MainActor.assumeIsolated { MacDictation.sessions[id]?.stop(finish: finish != 0) }
 }

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 use tcode_client::pairing::{PairInvite, pair_url, parse_pair_url};
+use tcode_core::settings::{Settings, provider_key};
 use tcode_protocol::{TraverseLookupState, TraverseManifestState, TraverseSourceStatus};
 use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::store::{Migration, MigrationPhase, MigrationProgress, SessionStore};
@@ -136,6 +137,19 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     install_interrupt_handler();
     if migrate_store(&store)? == Migration::Cancelled {
         return Ok(());
+    }
+    if let Some(selection) = std::env::var_os("TCODE_AGENTS") {
+        let selection = selection
+            .into_string()
+            .map_err(|_| "TCODE_AGENTS must be valid Unicode")?;
+        let settings_store = tcode_services::settings::SettingsStore::new(remote_data_dir.clone());
+        let mut settings = settings_store
+            .try_load()
+            .map_err(|error| format!("could not load provider settings: {error}"))?;
+        select_agents(&mut settings, &selection)?;
+        settings_store
+            .save(&settings)
+            .map_err(|error| format!("could not save provider selection: {error}"))?;
     }
     if let Some(password) =
         option_value(args, "--password").or_else(|| std::env::var("TCODE_PASSWORD").ok())
@@ -571,6 +585,32 @@ fn option_value(args: &[String], name: &str) -> Option<String> {
     option_values(args, name).into_iter().next()
 }
 
+fn select_agents(settings: &mut Settings, selection: &str) -> Result<(), String> {
+    let names: Vec<_> = selection
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    for name in &names {
+        if !agent::ProviderKind::NATIVE
+            .iter()
+            .any(|kind| provider_key(*kind) == *name)
+        {
+            return Err(format!("unknown TCODE_AGENTS entry {name:?}"));
+        }
+    }
+    for kind in agent::ProviderKind::NATIVE {
+        settings.provider_mut(kind).enabled = names.contains(&provider_key(kind));
+    }
+    for profile in settings.profiles.values_mut() {
+        if profile.kind != agent::ProviderKind::Acp && !names.contains(&provider_key(profile.kind))
+        {
+            profile.settings.enabled = false;
+        }
+    }
+    Ok(())
+}
+
 /// Every value given for a repeatable option, in order.
 fn option_values(args: &[String], name: &str) -> Vec<String> {
     args.windows(2)
@@ -635,6 +675,46 @@ fn wait_for_interrupt() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn container_agent_selection_updates_native_cards_and_preserves_configuration() {
+        use agent::ProviderKind;
+        let mut settings: Settings = serde_json::from_str(
+            r#"{"providers":{"claude":{"binary_path":"/custom/claude","enabled":true}},
+                "profiles":{"custom-claude":{"kind":"claude_code","enabled":true}},
+                "acp_agents":{"custom":{"id":"custom","name":"Custom",
+                    "launch":{"kind":"custom","command":"/data/bin/custom-acp"}}}}"#,
+        )
+        .unwrap();
+        select_agents(&mut settings, " codex,pi,codex ").unwrap();
+        assert!(settings.provider(ProviderKind::Codex).enabled);
+        assert!(settings.provider(ProviderKind::Pi).enabled);
+        for kind in [
+            ProviderKind::ClaudeCode,
+            ProviderKind::OpenCode,
+            ProviderKind::Cursor,
+            ProviderKind::Grok,
+        ] {
+            assert!(!settings.provider(kind).enabled);
+        }
+        assert_eq!(
+            settings.provider(ProviderKind::ClaudeCode).binary_path,
+            Some(PathBuf::from("/custom/claude"))
+        );
+        assert!(!settings.profiles["custom-claude"].settings.enabled);
+        assert!(settings.acp_agents["custom"].enabled);
+
+        select_agents(&mut settings, "").unwrap();
+        assert!(
+            ProviderKind::NATIVE
+                .into_iter()
+                .all(|kind| !settings.provider(kind).enabled)
+        );
+        assert!(settings.acp_agents["custom"].enabled);
+        let before = settings.clone();
+        assert!(select_agents(&mut settings, "codex,typo").is_err());
+        assert_eq!(settings, before);
+    }
 
     #[test]
     fn traverse_flags_list_the_sources_to_publish_to() {

@@ -4,18 +4,19 @@
 //! copy-URL, the per-conversation URL/canvas state and the loading/error copy
 //! are ordinary replicated-store UI. What is native is the embedded browser —
 //! creating a `gpui-webview` child view, driving its history and JS, and snapshotting
-//! it — and that lives behind [`PREVIEW_BACKEND`].
+//! it — and that lives behind [`preview_backend`].
 //!
 //! ## Where a backend exists
 //!
-//! macOS, Windows and Android, and only with the `native-preview` feature.
-//! Tcode's Linux client uses GPUI's calloop backend on Wayland or X11, while
-//! `gpui-webview` requires the application to start in X11 windowing mode and
-//! drives GTK from GPUI. Tcode does not opt into that setup, so Linux is excluded.
-//! Android hosts activity-owned WebViews through JNI. iOS and the browser have
-//! no child-view seam. Those clients render
-//! the same panel with open-externally and copy-URL, and answer every automation
-//! request with an explicit "unsupported" rather than timing out.
+//! macOS, Windows, Linux, Android and iOS, and only with the `native-preview`
+//! feature (`cfg(preview_backend)`, set by the build script). On Linux
+//! `gpui-webview` embeds WebKitGTK as an X11 child and drives GTK from GPUI, so
+//! the backend exists only when GPUI runs on X11 (see [`preview_backend`]).
+//! Android hosts activity-owned WebViews through JNI; iOS adds a `gpui-webview`
+//! child to the GPUI host view and places it itself (see [`ios`]). A client
+//! without a backend — the browser, Linux on Wayland — neither offers the tab
+//! ([`WorkspaceStore::offers_preview`](crate::store::WorkspaceStore::offers_preview))
+//! nor subscribes to the agent's preview requests.
 //!
 //! Windows creation is deliberately asynchronous. WebView2 construction is
 //! asynchronous underneath, but wry's synchronous `build_as_child` waits by
@@ -62,26 +63,28 @@ use crate::window_caption;
 use crate::window_state::{Route, WindowState};
 use crate::{icon::IconName, sizing::Sizable as _};
 
-/// Whether this build can embed a browser. Views ask before offering an action
+/// Whether this client can embed a browser. Views ask before offering an action
 /// that needs one, so nothing renders an enabled control that cannot work.
-pub(crate) const PREVIEW_BACKEND: bool = cfg!(all(
-    feature = "native-preview",
-    any(
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android"
-    )
-));
+///
+/// On Linux `gpui-webview` parents WebKitGTK to an X11 window, so a client that
+/// GPUI connected to Wayland has none. GPUI picks Wayland whenever
+/// `WAYLAND_DISPLAY` names one, and `guess_compositor` reports that same choice;
+/// a window cannot change display server once open.
+pub fn preview_backend() -> bool {
+    #[cfg(all(preview_backend, target_os = "linux"))]
+    {
+        static ON_X11: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON_X11.get_or_init(|| gpui::GraphicalEnvironment::detect().guess_compositor() == "X11")
+    }
+    #[cfg(not(all(preview_backend, target_os = "linux")))]
+    {
+        cfg!(preview_backend)
+    }
+}
 
-#[cfg(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows", target_os = "android")
-))]
+#[cfg(preview_backend)]
 pub(crate) mod lifecycle;
-#[cfg(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows", target_os = "android")
-))]
+#[cfg(preview_backend)]
 mod load_error;
 
 /// The reply channel a broker request is answered on.
@@ -89,13 +92,7 @@ type ReplyTx = async_channel::Sender<Result<PreviewResponse, String>>;
 
 // Only a build with a backend routes by these; the tests below pin the contract
 // on every target so a portable edit cannot quietly change it.
-#[cfg_attr(
-    not(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(preview_backend), allow(dead_code))]
 fn visible_preview_key(
     active_key: Option<&str>,
     route: Route,
@@ -110,13 +107,7 @@ fn visible_preview_key(
 /// Resolve an MCP request's physical session id to the stable WebView key.
 /// Only the active surface can be an unsent project draft; every background
 /// request therefore keys directly by its stored session id.
-#[cfg_attr(
-    not(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(preview_backend), allow(dead_code))]
 fn preview_key_for_session(
     requested_session_id: &str,
     active_session_id: Option<&str>,
@@ -129,13 +120,10 @@ fn preview_key_for_session(
     }
 }
 
-/// What an automation tool answers when the platform webview cannot be created
-/// (Windows without the WebView2 runtime): say so plainly, with the underlying
-/// error, rather than leaving the agent to guess why nothing happened.
-#[cfg(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows", target_os = "android")
-))]
+/// What an automation tool answers when the platform webview cannot be created:
+/// say so plainly, with the underlying error, rather than leaving the agent to
+/// guess why nothing happened.
+#[cfg(preview_backend)]
 fn unavailable_message(err: &str) -> String {
     format!(
         "the preview browser is unavailable on this machine \
@@ -176,22 +164,13 @@ pub struct PreviewPanel {
     /// actual page URL or conversation changes.
     mirrored_url: Option<String>,
     compact_overflow_open: bool,
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     /// Discovered localhost dev-server ports (populated by the "Ports" button).
     dev_ports: Vec<u16>,
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     /// Discards a completed scan when a newer click has superseded it.
     port_scan_generation: u64,
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     backend: backend::Backend,
     _subscriptions: Vec<Subscription>,
 }
@@ -213,10 +192,7 @@ impl PreviewPanel {
                 this.sync_visibility(cx);
                 cx.notify();
             }),
-            #[cfg(all(
-                feature = "native-preview",
-                any(target_os = "macos", target_os = "windows", target_os = "android")
-            ))]
+            #[cfg(preview_backend)]
             cx.subscribe(
                 &store,
                 |this, _, state: &tcode_client::ConnectionState, cx| {
@@ -242,20 +218,11 @@ impl PreviewPanel {
             mirrored: None,
             mirrored_url: None,
             compact_overflow_open: false,
-            #[cfg(all(
-                feature = "native-preview",
-                any(target_os = "macos", target_os = "windows", target_os = "android")
-            ))]
+            #[cfg(preview_backend)]
             dev_ports: Vec::new(),
-            #[cfg(all(
-                feature = "native-preview",
-                any(target_os = "macos", target_os = "windows", target_os = "android")
-            ))]
+            #[cfg(preview_backend)]
             port_scan_generation: 0,
-            #[cfg(all(
-                feature = "native-preview",
-                any(target_os = "macos", target_os = "windows", target_os = "android")
-            ))]
+            #[cfg(preview_backend)]
             backend: backend::Backend::new(store.read(cx).preview_proxy(), cx),
             _subscriptions: subscriptions,
         };
@@ -296,11 +263,7 @@ impl PreviewPanel {
         }
     }
 
-    #[cfg(all(
-        test,
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(all(test, preview_backend))]
     pub(crate) fn url_field(&self, cx: &gpui::App) -> String {
         self.url_input.read(cx).value().to_string()
     }
@@ -314,9 +277,9 @@ impl PreviewPanel {
     /// cross-platform launcher (`open` / `ShellExecute` / `xdg-open`, and the
     /// browser's own `window.open`).
     fn open_in_system_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        #[cfg(all(feature = "native-preview", target_os = "macos"))]
+        #[cfg(all(preview_backend, any(target_os = "macos", target_os = "ios")))]
         let url = self.external_preview_url(cx);
-        #[cfg(not(all(feature = "native-preview", target_os = "macos")))]
+        #[cfg(not(all(preview_backend, any(target_os = "macos", target_os = "ios"))))]
         let url = self.active_url(cx);
         if let Some(url) = url {
             cx.open_url(&url);
@@ -375,8 +338,9 @@ impl PreviewPanel {
         // those ports belong to the wrong computer, so the affordance is hidden
         // rather than offering the user a list of their own dev servers as if
         // they were the host's. A host URL typed into the field still works.
-        let offer_ports =
-            !cfg!(target_os = "android") && PREVIEW_BACKEND && !self.store.read(cx).is_remote();
+        let offer_ports = !cfg!(any(target_os = "android", target_os = "ios"))
+            && preview_backend()
+            && !self.store.read(cx).is_remote();
         // Compact: one toolbar row on the page inset, with 44pt touch targets.
         // Close is a right-panel affordance — the Panel page's Back leaves it —
         // so it is not drawn here at all.
@@ -514,6 +478,7 @@ impl PreviewPanel {
         }
     }
 
+    #[cfg(preview_backend)]
     fn render_note(&self, title: String, detail: Option<String>, cx: &Context<Self>) -> AnyElement {
         v_flex()
             .flex_1()
@@ -565,10 +530,7 @@ impl Render for PreviewPanel {
     }
 }
 
-#[cfg(not(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows", target_os = "android")
-)))]
+#[cfg(not(preview_backend))]
 mod portable {
     use tcode_protocol::PreviewRequest;
 
@@ -630,20 +592,14 @@ mod portable {
 
         pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
 
+        /// Unreachable: without a backend the store never offers the tab.
         pub(super) fn render_body(
             &mut self,
-            active: Option<&str>,
+            _active: Option<&str>,
             _window: &mut Window,
-            cx: &mut Context<Self>,
+            _cx: &mut Context<Self>,
         ) -> AnyElement {
-            if active.is_none() {
-                return self.render_note(crate::tr!("preview.no_session").into_owned(), None, cx);
-            }
-            self.render_note(
-                crate::tr!("preview.no_backend").into_owned(),
-                Some(crate::tr!("preview.no_backend_hint").into_owned()),
-                cx,
-            )
+            div().into_any_element()
         }
 
         /// Nothing here can drive a page. Answer immediately and explicitly:
@@ -664,10 +620,7 @@ mod portable {
     }
 }
 
-#[cfg(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows", target_os = "android")
-))]
+#[cfg(preview_backend)]
 mod backend;
 
 #[cfg(test)]
@@ -680,10 +633,7 @@ mod tests {
     /// A client with no embedded browser is still reachable over the preview
     /// topic. It must answer, and say why, rather than let the agent's call sit
     /// until it times out.
-    #[cfg(not(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    )))]
+    #[cfg(not(preview_backend))]
     #[gpui::test]
     fn a_client_without_a_backend_refuses_preview_requests_immediately(
         cx: &mut gpui::TestAppContext,
@@ -828,16 +778,24 @@ mod tests {
     }
 }
 
-#[cfg(all(feature = "native-preview", target_os = "android"))]
+#[cfg(all(preview_backend, target_os = "android"))]
 mod android;
-#[cfg(any(test, all(feature = "native-preview", target_os = "android")))]
+#[cfg(any(test, all(preview_backend, target_os = "android")))]
 mod android_geometry;
 
+#[cfg(all(preview_backend, target_os = "ios"))]
+mod ios;
+
 #[cfg(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows")
+    preview_backend,
+    any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "ios"
+    )
 ))]
 mod proxy;
 
-#[cfg(all(feature = "native-preview", target_os = "macos"))]
+#[cfg(all(preview_backend, any(target_os = "macos", target_os = "ios")))]
 mod remote;

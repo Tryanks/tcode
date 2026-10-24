@@ -34,6 +34,11 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-z", gpui_base::input::Undo, Some("Input")),
         KeyBinding::new("cmd-shift-z", gpui_base::input::Redo, Some("Input")),
     ]);
+    // A browser hands the clipboard only to its own paste event, which the
+    // key fires once no binding claims it; gpui-base's Paste would read the
+    // clipboard itself, which a page without a secure context cannot.
+    #[cfg(target_family = "wasm")]
+    cx.bind_keys([KeyBinding::new("ctrl-v", NoAction, Some("Input"))]);
     for number in 1..=9 {
         let key = format!("secondary-{number}");
         cx.bind_keys([

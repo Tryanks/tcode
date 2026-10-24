@@ -21,7 +21,6 @@ use tcode_ui::overlay::{DialogActions, OverlayExt as _};
 use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
 mod migration;
-#[cfg(not(target_os = "linux"))]
 mod preview_smoke;
 
 /// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
@@ -38,8 +37,8 @@ fn main_window_background() -> WindowBackgroundAppearance {
     if cfg!(target_os = "windows") {
         WindowBackgroundAppearance::Blurred
     } else if vibrancy_enabled() {
-        // `run_shell` slides a stock `NSVisualEffectView` under a transparent
-        // window; GPUI's `Blurred` material stopped blurring on macOS 27.
+        // `run_shell` slides Liquid Glass under a transparent window; GPUI's
+        // `Blurred` is a colorless blur with no glass option.
         WindowBackgroundAppearance::Transparent
     } else {
         WindowBackgroundAppearance::Opaque
@@ -465,14 +464,12 @@ fn main() {
     }
 
     let preview_smoke = std::env::args().any(|arg| arg == "--preview-smoke");
-    #[cfg(target_os = "linux")]
-    if preview_smoke {
+    if preview_smoke && !tcode_ui::preview_backend() {
         use std::io::Write as _;
         eprintln!("preview-smoke: SKIP (no native webview)");
         let _ = std::io::stderr().flush();
         return;
     }
-    #[cfg(not(target_os = "linux"))]
     let preview_smoke_watchdog = preview_smoke.then(preview_smoke::Watchdog::start);
 
     // A Finder/Dock launch inherits launchd's minimal PATH, under which none of
@@ -549,7 +546,7 @@ fn main() {
                     );
                     std::process::exit(1);
                 };
-                AttachmentTarget::Remote(host)
+                AttachmentTarget::Remote(Box::new(host))
             }
             None => AttachmentTarget::Local,
         }
@@ -698,7 +695,6 @@ fn main() {
                 }
 
                 cx.spawn(async move |cx| {
-                    #[cfg(not(target_os = "linux"))]
                     if let Some(watchdog) = preview_smoke_watchdog {
                         preview_smoke::run(watchdog, shell, window, cx).await;
                         return;

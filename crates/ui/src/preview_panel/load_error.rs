@@ -1,7 +1,7 @@
 //! The last navigation failure reported by the native webview.
 //!
-//! A failed navigation is invisible to JavaScript: WebKit and WebView2 keep the
-//! previous document loaded, so the status probe keeps reporting the old URL and
+//! A failed navigation is invisible to JavaScript: WebKit, WebKitGTK and WebView2
+//! keep the previous document loaded, so the status probe keeps reporting the old URL and
 //! an agent cannot tell an untrusted certificate from a slow dev server. Both
 //! engines *do* report the failure to their navigation delegate, so we keep the
 //! last one per native webview and surface it from `preview_status` and
@@ -20,7 +20,8 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LoadError {
     pub(crate) url: String,
-    /// `NSURLErrorDomain -1202` on macOS, `CertificateIsInvalid` on Windows.
+    /// `NSURLErrorDomain -1202` on macOS, `CertificateIsInvalid` on Windows,
+    /// `g-io-error-quark ConnectionRefused` on Linux.
     pub(crate) code: String,
     pub(crate) message: String,
 }
@@ -78,13 +79,15 @@ pub(crate) fn forget(raw: &wry::WebView) {
     clear(imp::key(raw));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod imp {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-    use objc2::{ffi, sel};
+    use objc2::{ffi, msg_send, sel};
     use objc2_foundation::{NSError, NSURL, NSURLErrorFailingURLErrorKey};
-    use objc2_web_kit::WKWebView;
+    #[cfg(target_os = "ios")]
+    use wry::WebViewExtIOS as _;
+    #[cfg(target_os = "macos")]
     use wry::WebViewExtMacOS as _;
 
     use super::LoadError;
@@ -211,10 +214,11 @@ mod imp {
     }
 
     fn current_url(webview: *mut AnyObject) -> Option<String> {
-        // SAFETY: WebKit passes the live web view that failed.
-        let webview: &WKWebView = unsafe { webview.cast::<WKWebView>().as_ref() }?;
-        let url = unsafe { webview.URL() }?;
-        url.absoluteString().map(|url| url.to_string())
+        // SAFETY: WebKit passes the live web view that failed. objc2-web-kit
+        // declares WKWebView for macOS only, so `URL` is sent untyped.
+        let webview = unsafe { webview.as_ref() }?;
+        let url: Option<Retained<NSURL>> = unsafe { msg_send![webview, URL] };
+        url?.absoluteString().map(|url| url.to_string())
     }
 }
 
@@ -334,6 +338,79 @@ mod imp {
                 "ValidProxyAuthenticationRequired"
             }
             _ => "Unknown",
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
+    use webkit2gtk::glib::{self, ObjectType as _};
+    use webkit2gtk::{LoadEvent, NetworkError, PolicyError, WebViewExt as _, gio};
+    use wry::WebViewExtUnix as _;
+
+    use super::LoadError;
+
+    pub(super) fn key(raw: &wry::WebView) -> usize {
+        raw.webview().as_ptr() as usize
+    }
+
+    /// WebKitGTK reports a failed navigation through `load-failed`, and an
+    /// untrusted certificate first through `load-failed-with-tls-errors`.
+    /// `load-failed` is handled so WebKit does not load its stock error page:
+    /// that page's own `Started` would clear the record, and the other engines
+    /// keep the previous document on screen too.
+    pub(super) fn install(raw: &wry::WebView) {
+        let webview = raw.webview();
+        webview.connect_load_changed(|webview, event| {
+            if event == LoadEvent::Started {
+                super::clear(webview.as_ptr() as usize);
+            }
+        });
+        webview.connect_load_failed(|webview, _, uri, error| {
+            // A certificate failure was already recorded with its flags.
+            if error.kind::<gio::TlsError>().is_none()
+                && error.kind::<NetworkError>() != Some(NetworkError::Cancelled)
+            {
+                super::record(
+                    webview.as_ptr() as usize,
+                    LoadError {
+                        url: uri.to_string(),
+                        code: error_code(error),
+                        message: error.message().to_string(),
+                    },
+                );
+            }
+            true
+        });
+        webview.connect_load_failed_with_tls_errors(|webview, uri, _, flags| {
+            super::record(
+                webview.as_ptr() as usize,
+                LoadError {
+                    url: uri.to_string(),
+                    code: format!("WebKitTlsCertificate {flags:?}"),
+                    message: "the server's TLS certificate is not trusted".into(),
+                },
+            );
+            false
+        });
+    }
+
+    /// GLib errors carry a domain and an enum value; name both so a refused
+    /// connection reads differently from a policy cancellation.
+    fn error_code(error: &glib::Error) -> String {
+        fn named<T: glib::error::ErrorDomain + std::fmt::Debug>(
+            error: &glib::Error,
+        ) -> Option<String> {
+            error.kind::<T>().map(|kind| format!("{kind:?}"))
+        }
+        let kind = named::<NetworkError>(error)
+            .or_else(|| named::<PolicyError>(error))
+            .or_else(|| named::<gio::IOErrorEnum>(error))
+            .or_else(|| named::<gio::ResolverError>(error));
+        let domain = error.domain();
+        match kind {
+            Some(kind) => format!("{} {kind}", domain.as_str()),
+            None => domain.as_str().to_string(),
         }
     }
 }

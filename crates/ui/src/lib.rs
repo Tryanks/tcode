@@ -79,6 +79,7 @@ pub use i18n::{
     LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, apply_locale, resolve_locale, set_locale,
     translate, translate_with_args,
 };
+pub use preview_panel::preview_backend;
 pub use run::{
     ShellOptions, THEME_JSON, flattened_theme_json, init_client, last_host_target,
     open_client_window, run_shell,

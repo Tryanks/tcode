@@ -37,7 +37,7 @@ use crate::window_state::WindowState;
 use tcode_core::project::SessionMeta;
 use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
 
-/// Left inset so branding clears the native macOS 26 traffic lights near x=72.
+/// Left inset so branding clears the native macOS traffic lights near x=72.
 #[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
 #[cfg(not(target_os = "macos"))]
@@ -136,7 +136,7 @@ impl SettingsCapabilities {
         #[cfg(not(feature = "remote-hosting"))]
         let hosting = cfg!(target_family = "wasm");
         Self {
-            preview_backend: crate::preview_panel::PREVIEW_BACKEND,
+            preview_backend: crate::preview_panel::preview_backend(),
             hosting,
             local_permissions: cfg!(all(feature = "local-permissions", target_os = "macos")),
             remote_attachment: store.is_remote(),

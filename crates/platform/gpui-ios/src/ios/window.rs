@@ -5,10 +5,11 @@ use gpui::{
     Bounds, Capslock, DevicePixels, DispatchEventResult, FrameRequestSource, GpuSpecs, Modifiers,
     Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
     Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size, TextInputConfiguration,
-    TextInputStateChange, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    TextInputStateChange, TouchEvent, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
     WindowControlArea, WindowInsets, WindowParams, WindowVisibility, px, size,
 };
 use gpui_mobile_pacing::FramePacer;
+use gpui_mobile_touch::TwoFingerGestures;
 use gpui_wgpu::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
@@ -73,6 +74,7 @@ pub(crate) struct IosWindow {
     pacing: Rc<RefCell<FramePacer>>,
     forced_frame: Cell<bool>,
     active_touches: Cell<usize>,
+    touch_gestures: RefCell<TwoFingerGestures>,
     display_callback: RefCell<Option<UnitCallback>>,
     using_input_handler: Cell<bool>,
     text_input_active: Cell<bool>,
@@ -202,6 +204,7 @@ impl IosWindow {
             pacing: Rc::new(RefCell::new(FramePacer::default())),
             forced_frame: Cell::new(true),
             active_touches: Cell::new(0),
+            touch_gestures: RefCell::default(),
             display_callback: RefCell::new(None),
             using_input_handler: Cell::new(false),
             text_input_active: Cell::new(false),
@@ -270,6 +273,7 @@ impl IosWindow {
             return;
         }
         self.active_touches.set(0);
+        self.touch_gestures.take();
         self.pacing.borrow_mut().suspend();
         self.renderer.borrow_mut().unconfigure_surface();
         self.report_visibility();
@@ -281,6 +285,7 @@ impl IosWindow {
         }
         if in_background {
             self.active_touches.set(0);
+            self.touch_gestures.take();
             self.pacing.borrow_mut().suspend();
         } else {
             self.schedule_frame();
@@ -371,6 +376,13 @@ impl IosWindow {
             .borrow_mut()
             .set_touching(active > 0, Instant::now());
         super::ffi::host_schedule_frame();
+    }
+
+    pub(crate) fn dispatch_touches(&self, touches: impl IntoIterator<Item = TouchEvent>) {
+        let inputs = self.touch_gestures.borrow_mut().handle(touches);
+        for input in inputs {
+            self.dispatch_input(input);
+        }
     }
 
     pub(crate) fn input_activity(&self) {
