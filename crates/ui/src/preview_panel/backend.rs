@@ -25,8 +25,12 @@ const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly
 
 /// The error `preview_screenshot` reports where native-webview snapshots have no
 /// implementation.
-#[cfg_attr(any(target_os = "macos", target_os = "android"), allow(dead_code))]
-const SCREENSHOT_UNSUPPORTED: &str = "preview_screenshot is only supported on macOS and Android";
+#[cfg_attr(
+    any(target_os = "macos", target_os = "ios", target_os = "android"),
+    allow(dead_code)
+)]
+const SCREENSHOT_UNSUPPORTED: &str =
+    "preview_screenshot is only supported on macOS, iOS and Android";
 
 fn wait_timeout_message(pending: &[String]) -> String {
     format!(
@@ -76,7 +80,7 @@ impl PreviewPanel {
         self.backend.lifecycle.clone()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub(super) fn external_preview_url(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let key = self.active_key(cx)?;
         let logical = self
@@ -328,7 +332,7 @@ impl PreviewPanel {
     }
 
     pub(super) fn rescan_ports(&mut self, cx: &mut Context<Self>) {
-        if cfg!(target_os = "android") || self.store.read(cx).is_remote() {
+        if cfg!(any(target_os = "android", target_os = "ios")) || self.store.read(cx).is_remote() {
             return;
         }
         self.port_scan_generation = self.port_scan_generation.wrapping_add(1);
@@ -378,7 +382,7 @@ impl PreviewPanel {
                     .update(cx, |input, cx| input.set_value(url, window, cx));
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if let Some(key) = active
             && let Some(url) = self.lifecycle_entity().read(cx).remote_url(key)
             && self.store.read(cx).preview_url(key).as_ref() != Some(&url)
@@ -391,6 +395,8 @@ impl PreviewPanel {
         let body: AnyElement = match active {
             Some(id) => match self.ensure_webview(id, window, cx) {
                 Availability::Ready(view) => {
+                    #[cfg(target_os = "ios")]
+                    let view = super::ios::element(view);
                     if let Some((width, height)) = self.store.read(cx).preview_canvas(id) {
                         div()
                             .flex()
@@ -463,7 +469,7 @@ impl PreviewPanel {
                 .child(body)
                 .into_any_element();
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if self.store.read(cx).is_remote() {
             return v_flex()
                 .size_full()
@@ -928,10 +934,7 @@ impl PreviewPanel {
     }
 
     /// Snapshot the native WKWebView in-process and answer with a base64 PNG.
-    ///
-    /// macOS only. Elsewhere the tool reports a normal MCP error rather than
-    /// pretending to have a portable native-webview snapshot implementation.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn screenshot(
         &mut self,
         _session_id: &str,
@@ -941,17 +944,21 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) {
         use block2::RcBlock;
-        use objc2_app_kit::NSImage;
+        #[cfg(target_os = "macos")]
+        use objc2_app_kit::NSImage as Image;
         use objc2_foundation::NSError;
-        use objc2_web_kit::WKWebView;
+        #[cfg(target_os = "ios")]
+        use objc2_ui_kit::UIImage as Image;
+        #[cfg(target_os = "ios")]
+        use wry::WebViewExtIOS as _;
+        #[cfg(target_os = "macos")]
         use wry::WebViewExtMacOS as _;
 
         let Some(view) = self.lifecycle_entity().read(cx).ready_view(key) else {
             let _ = reply.try_send(Err("preview browser is not open".into()));
             return;
         };
-        let native = view.read(cx).raw().webview();
-        let webview: &WKWebView = &native;
+        let webview = view.read(cx).raw().webview();
         // The native frame, not the GPUI bounds: a hidden browser has never
         // been laid out by GPUI, only staged offscreen.
         let frame = webview.frame();
@@ -960,7 +967,7 @@ impl PreviewPanel {
             return;
         }
         let callback_reply = reply.clone();
-        let handler = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+        let handler = RcBlock::new(move |image: *mut Image, error: *mut NSError| {
             let result = if let Some(image) = unsafe { image.as_ref() } {
                 snapshot_reply(image)
             } else if !error.is_null() {
@@ -970,8 +977,18 @@ impl PreviewPanel {
             };
             let _ = callback_reply.try_send(result);
         });
+        #[cfg(target_os = "macos")]
         unsafe {
             webview.takeSnapshotWithConfiguration_completionHandler(None, &handler);
+        }
+        // lb-wry's iOS WKWebView binding declares no snapshot method.
+        #[cfg(target_os = "ios")]
+        unsafe {
+            let () = objc2::msg_send![
+                &*webview,
+                takeSnapshotWithConfiguration: std::ptr::null::<objc2::runtime::AnyObject>(),
+                completionHandler: &*handler
+            ];
         }
 
         cx.spawn(async move |_, cx| {
@@ -1037,9 +1054,8 @@ impl PreviewPanel {
         .detach();
     }
 
-    /// See the macOS implementation: screen capture has no portable
-    /// equivalent, so this is a plain tool error off macOS.
-    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    /// WebView2 capture is not implemented, so this is a plain tool error.
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
     fn screenshot(
         &mut self,
         _session_id: &str,
@@ -1054,20 +1070,32 @@ impl PreviewPanel {
 
 #[cfg(target_os = "macos")]
 fn snapshot_reply(image: &objc2_app_kit::NSImage) -> Result<PreviewResponse, String> {
+    let cg_image =
+        unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
+            .ok_or_else(|| "failed to obtain CGImage from WKWebView snapshot".to_string())?;
+    png_reply(&cg_image)
+}
+
+#[cfg(target_os = "ios")]
+fn snapshot_reply(image: &objc2_ui_kit::UIImage) -> Result<PreviewResponse, String> {
+    let cg_image = unsafe { image.CGImage() }
+        .ok_or_else(|| "failed to obtain CGImage from WKWebView snapshot".to_string())?;
+    png_reply(&cg_image)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn png_reply(cg_image: &objc2_core_graphics::CGImage) -> Result<PreviewResponse, String> {
     use base64::Engine as _;
     use objc2_core_foundation::{CFMutableData, CFString};
     use objc2_image_io::CGImageDestination;
 
-    let cg_image =
-        unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
-            .ok_or_else(|| "failed to obtain CGImage from WKWebView snapshot".to_string())?;
     let data = CFMutableData::new(None, 0)
         .ok_or_else(|| "failed to allocate PNG destination data".to_string())?;
     let png_type = CFString::from_static_str("public.png");
     let destination = unsafe { CGImageDestination::with_data(&data, &png_type, 1, None) }
         .ok_or_else(|| "failed to create PNG image destination".to_string())?;
     unsafe {
-        destination.add_image(&cg_image, None);
+        destination.add_image(cg_image, None);
         if !destination.finalize() {
             return Err("failed to finalize WKWebView snapshot PNG".into());
         }

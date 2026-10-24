@@ -57,4 +57,13 @@ fn main() {
     .expect("write icon names");
     println!("cargo:rerun-if-changed={}", icons_dir.display());
     println!("cargo:rerun-if-changed=build.rs");
+
+    // The targets where `native-preview` embeds a system browser in the window.
+    println!("cargo::rustc-check-cfg=cfg(preview_backend)");
+    let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if env::var_os("CARGO_FEATURE_NATIVE_PREVIEW").is_some()
+        && matches!(os.as_str(), "macos" | "windows" | "android" | "ios")
+    {
+        println!("cargo::rustc-cfg=preview_backend");
+    }
 }

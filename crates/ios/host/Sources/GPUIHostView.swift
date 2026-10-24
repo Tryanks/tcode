@@ -74,11 +74,7 @@ final class GPUIHostViewController: UIViewController {
         guard started else { return }
         if frameScreen !== screen || frameScene !== scene {
             displayLink?.invalidate()
-            if #available(iOS 27.0, *) {
-                displayLink = scene.displayLink(target: self, selector: #selector(renderFrame))
-            } else {
-                displayLink = screen.displayLink(withTarget: self, selector: #selector(renderFrame))
-            }
+            displayLink = scene.displayLink(target: self, selector: #selector(renderFrame))
             frameScreen = screen
             frameScene = scene
             displayLink?.add(to: .main, forMode: .common)

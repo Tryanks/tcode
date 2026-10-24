@@ -657,12 +657,15 @@ localhost bypasses, waits for the override before navigation, and clears it when
 the attachment's views are destroyed. The override is process-wide, so embedded
 preview views belong to one attachment.
 
-macOS attached Preview uses per-port forwarding for HTTP(S) loopback URLs:
-`localhost`, IPv4 loopback addresses and `::1`. The requested host and port are
-sent unchanged in the tunnel's opening line. The viewing Mac allocates its own
-loopback port, so a viewer service at the remote port cannot collide with it.
-`localhost` reserves both IPv4 and IPv6 listeners at that port. Numeric loopback
-URLs need that same address to be bindable on the viewing Mac; unassigned
+macOS and iOS attached Preview use per-port forwarding for HTTP(S) loopback
+URLs: `localhost`, IPv4 loopback addresses and `::1`. WebKit applies a website
+store's proxy configuration to public destinations but bypasses destinations on
+the viewing device's own interfaces, so a proxy cannot keep loopback on the
+machine. The requested host and port are sent unchanged in the tunnel's opening
+line. The viewing device allocates its own loopback port, so a viewer service at
+the remote port cannot collide with it. `localhost` reserves both IPv4 and IPv6
+listeners at that port. Numeric loopback URLs need that same address to be
+bindable on the viewing device; unassigned
 addresses such as `127.0.0.2` can report an allocation error. Tcode does not
 add loopback aliases to the OS. No OS DNS, hosts file or proxy settings are
 changed. Public/LAN destinations are **direct from the viewer**, as the Preview
@@ -714,8 +717,8 @@ included. It serves one request per connection and answers ambiguous
 framing (chunked plus `Content-Length`, unknown transfer codings, origin-form
 requests) with `400`. Unsupported proxy facilities fail closed; there is no
 direct-network fallback. Closing the attachment cancels the listener and
-active connections. macOS keeps its per-browser URL mapping over the same
-tunnels.
+active connections. macOS and iOS keep their per-browser URL mapping over the
+same tunnels.
 
 When the main connection reconnects and its saved addresses change, existing
 Preview browsers follow the new connection: their local proxy/forwarding ports,
@@ -725,8 +728,7 @@ interrupted requests or reload pages automatically: use the existing Reload
 action if a page was interrupted. Another machine cannot retarget an existing
 attachment's Preview.
 
-The iOS embedded preview remains unsupported. The browser client cannot
-override its browser's proxy.
+The browser client cannot override its browser's proxy.
 
 ## Security
 
@@ -881,9 +883,9 @@ with **Pair again**; protocol mismatches stop with **Update the app**.
   scroll further back than that. During a large output burst the visible screen
   keeps updating, while scrollback catches up after scrolling has stopped for
   100 ms. This avoids repeatedly sending the whole retained ring between PTY reads.
-- Android has an embedded WebView preview with history, JavaScript automation,
-  navigation errors and visible-page PNG capture. iOS and the browser client
-  retain URL/open/copy actions without an embedded preview backend.
+- Android and iOS have an embedded preview with history, JavaScript automation,
+  navigation errors and visible-page PNG capture. The browser client retains
+  URL/open/copy actions without an embedded preview backend.
 - Phones, tablets and browsers do not run providers, terminals or project files
   locally; the machine does. Every product view is present on them — threads,
   chat, approvals, the terminal, diff, plan, preview, search, import and export —

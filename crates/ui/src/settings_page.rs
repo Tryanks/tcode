@@ -37,7 +37,7 @@ use crate::window_state::WindowState;
 use tcode_core::project::SessionMeta;
 use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
 
-/// Left inset so branding clears the native macOS 26 traffic lights near x=72.
+/// Left inset so branding clears the native macOS traffic lights near x=72.
 #[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
 #[cfg(not(target_os = "macos"))]

@@ -118,7 +118,7 @@ crates/ios/host/build.sh --device
 
 The script builds `tcode-ios`, copies `libtcode_ios.a` into the ignored host
 `lib/` directory, generates `Tcode.xcodeproj`, and builds the Debug `Tcode`
-scheme. The simulator destination defaults to iPhone 17 / iOS 26.5; set
+scheme. The simulator destination defaults to iPhone 18 Pro / iOS 27.0; set
 `TCODE_IOS_SIMULATOR_OS` for another installed runtime. Set
 `TCODE_IOS_RUST_PROFILE=release` for an optimized Rust library; the Xcode host
 configuration remains Debug. Device builds are unsigned and need signing and

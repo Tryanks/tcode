@@ -165,14 +165,14 @@ guide.
 ## Getting started
 
 **1. Install Tcode.** Download a build for your platform from
-[Releases](https://github.com/Tryanks/tcode/releases) — macOS (Apple Silicon /
-Intel), Windows (x64 / ARM64), Linux (x64 / ARM64) — and run it. Check the release
-notes for runtime requirements and signing status. Windows preview uses
-WebView2; Linux needs the listed system libraries and a Vulkan driver.
+[Releases](https://github.com/Tryanks/tcode/releases) — macOS 27+ (Apple
+silicon), Windows 11+ (x64 / ARM64), Linux (x64 / ARM64) — and run it. Check the
+release notes for runtime requirements and signing status. Linux needs the listed
+system libraries and a Vulkan driver.
 
 For an unsigned macOS build, remove quarantine after installing the app with
 `xattr -dr com.apple.quarantine /Applications/Tcode.app`. The embedded preview
-browser is available on macOS, Windows and Android; voice input requires macOS 26 or later.
+browser is available on macOS, Windows, Android and iOS.
 
 Each release uses the native application icon format for its platform: `.icns`
 inside the macOS app bundle, an `.ico` resource embedded directly in the Windows

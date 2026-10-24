@@ -2,7 +2,6 @@ import Speech
 
 /// The on-device transcriber dictation uses for a language. Shared by the macOS
 /// client and the iOS host.
-@available(macOS 26, iOS 26, *)
 struct Transcription {
     let locale: Locale
     let module: any SpeechModule

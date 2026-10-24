@@ -1,4 +1,4 @@
-//! Desktop proxy configuration absent from wry's endpoint type. The bridge
+//! Attached-browser configuration absent from wry's endpoint type. The bridge
 //! asks for no credentials: the paired connection is the authority.
 use tcode_traverse::preview::ProxyEntry;
 
@@ -9,7 +9,7 @@ pub(super) fn builder<'a>(
     let Some(_host) = host else {
         return Ok(builder);
     };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         // Every attached browser gets a separate nonpersistent WK store.
         // Cookies are scoped by hostname, not by our allocated viewing ports.

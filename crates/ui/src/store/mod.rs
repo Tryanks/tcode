@@ -119,10 +119,7 @@ pub enum WorkspaceAttachment {
 
 /// Where a remote attachment's Preview goes: the paired machine and the
 /// tunnels the attachment's transport opens to it.
-#[cfg(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows", target_os = "android")
-))]
+#[cfg(preview_backend)]
 pub(crate) type PreviewTarget = (
     tcode_client::pairing::PairedHost,
     std::sync::Arc<dyn tcode_client::host::TunnelOpener>,
@@ -157,13 +154,7 @@ pub struct WorkspaceStore {
     /// The transport's live view of the attached machine: its authenticated
     /// pairing and how the connection is carried. `None` locally and in a
     /// browser.
-    #[cfg_attr(
-        not(all(
-            feature = "native-preview",
-            any(target_os = "macos", target_os = "windows", target_os = "android")
-        )),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(preview_backend), allow(dead_code))]
     current_host: Option<LiveHost>,
     client_preferences: ClientPreferences,
     image_namespace: u64,
@@ -582,10 +573,7 @@ impl WorkspaceStore {
     }
 
     /// The paired machine Preview reaches and the tunnels that reach it.
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     pub(crate) fn preview_proxy(&self) -> Result<Option<PreviewTarget>, String> {
         if !self.is_remote() {
             return Ok(None);
@@ -4425,10 +4413,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     #[gpui::test]
     fn preview_reads_the_attachment_route_when_saved_hosts_are_stale(cx: &mut TestAppContext) {
         use std::rc::Rc;

@@ -88,8 +88,8 @@ pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
 };
 /// Left padding on the chat header while the sidebar is collapsed, so its
-/// leading control clears the native macOS traffic lights (which end near x=72
-/// on macOS 26). Only applied on macOS: see [`traffic_light_clearance`].
+/// leading control clears the native macOS traffic lights (which end near
+/// x=72). Only applied on macOS: see [`traffic_light_clearance`].
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// The header's padding on either side, unless it clears the traffic lights.
 const HEADER_PADDING: f32 = 16.;
