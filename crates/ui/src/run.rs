@@ -164,8 +164,8 @@ pub fn open_client_window<V: Render>(
             cx.new(|cx| gpui_base::Root::new(view, window, cx))
         })
         .expect("failed to open the tcode window");
-    // A transparent macOS window gets its blur from a stock semantic material
-    // rather than GPUI's `Blurred` path; see `macos_backdrop`.
+    // A transparent macOS window gets Liquid Glass underneath, which GPUI's
+    // `Blurred` path cannot give; see `macos_backdrop`.
     #[cfg(target_os = "macos")]
     if window_background == gpui::WindowBackgroundAppearance::Transparent {
         use crate::theme::ActiveTheme as _;

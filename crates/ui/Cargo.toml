@@ -114,7 +114,7 @@ async-lock = { version = "3", optional = true }
 computer-use-mcp = { path = "../computer-use-mcp", optional = true }
 block2 = { version = "0.6.2", optional = true }
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSAppearance", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow", "objc2-core-graphics"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSAppearance", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "NSResponder", "NSGlassEffectView", "NSView", "NSWindow", "objc2-core-graphics"] }
 objc2-foundation = { version = "0.3.2", features = ["NSDictionary", "NSError", "NSString", "NSURLError", "NSURLRequest", "block2"], optional = true }
 
 # The macOS WKWebView snapshot backend, and the navigation delegate the
