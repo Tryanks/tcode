@@ -7,6 +7,7 @@ chat:
   discard_delivery: "丢弃"
   history_record_too_large: 一条历史记录超过了 8 MiB 的响应大小限制。
   relayed: "已从 %{from} 接力至 %{to}"
+  relay_handoff: "发送给 %{to} 的接力内容"
   model_changed: "模型已切换：%{from} → %{to}"
   model_changed_to: "模型已切换至 %{to}"
   new_thread: "新建对话"
