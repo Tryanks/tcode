@@ -914,6 +914,26 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                     .map(|()| CommandResponse::Unit),
             );
         }
+        Command::SetGoal {
+            session_id,
+            objective,
+            status,
+        } => {
+            return CommandOutcome::Immediate(
+                app.change_goal(
+                    &session_id,
+                    agent::SessionCommand::SetGoal { objective, status },
+                    cx,
+                )
+                .map(|()| CommandResponse::Unit),
+            );
+        }
+        Command::ClearGoal { session_id } => {
+            return CommandOutcome::Immediate(
+                app.change_goal(&session_id, agent::SessionCommand::ClearGoal, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::RespondApproval {
             session_id,
             request_id,
@@ -1525,14 +1545,16 @@ mod tests {
             },
         })
         .expect("subscribe to the thread");
-        // Answered from the thread's history once it is in memory.
-        smol::block_on(link.query(Query::SessionHistoryPage {
-            session_id: meta.id.clone(),
-            before: 1,
-            limit: 1,
-        }))
-        .expect("history page");
-        let reads = reader.event_reads();
+        // The subscription is answered from the log's tail while its one read
+        // of the whole log runs on; a user opens the image after that read.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while reader.event_reads() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the subscription never read the thread's log"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         let source = smol::block_on(host.open(
             tcode_protocol::Principal::Full,
@@ -1560,7 +1582,7 @@ mod tests {
         assert_eq!(received, bytes);
         assert_eq!(
             reader.event_reads(),
-            reads,
+            1,
             "the original was served from the thread's history"
         );
 

@@ -626,6 +626,8 @@ impl Composer {
         let text = input.read(cx).value().trim().to_string();
         let composer_state = self.workspace_store.read(cx).composer_state();
         let compact_offered = compact_offered(&composer_state);
+        let goal_offered = goal_offered(&composer_state);
+        let current_goal = composer_state.goal.clone();
         let terminal_contexts = composer_state.terminal_contexts;
         if !self.has_sendable_content(cx) {
             return;
@@ -660,8 +662,18 @@ impl Composer {
         }
         // Local mode and picker commands are consumed without sending a turn.
         if terminal_contexts.is_empty()
-            && let Some(command) = slash_command(&text, compact_offered)
+            && let Some(command) = slash_command(&text, compact_offered, goal_offered)
         {
+            if let SlashIntent::Goal(GoalIntent::Edit) = command {
+                match current_goal {
+                    Some(goal) => self.edit_goal(&goal.objective, window, cx),
+                    None => window.push_notification(
+                        Notification::info(crate::tr!("composer.goal_usage")),
+                        cx,
+                    ),
+                }
+                return;
+            }
             input.update(cx, |state, cx| state.replace_all("", window, cx));
             match command {
                 SlashIntent::Model => {
@@ -670,6 +682,17 @@ impl Composer {
                 SlashIntent::Compact => {
                     self.workspace_store
                         .update(cx, |store, _cx| store.compact_context());
+                }
+                SlashIntent::Goal(intent) => {
+                    self.workspace_store.update(cx, |store, _cx| match intent {
+                        GoalIntent::Set(objective) => {
+                            store.set_goal(Some(objective), Some(agent::GoalStatus::Active))
+                        }
+                        GoalIntent::Pause => store.set_goal(None, Some(agent::GoalStatus::Paused)),
+                        GoalIntent::Resume => store.set_goal(None, Some(agent::GoalStatus::Active)),
+                        GoalIntent::Clear => store.clear_goal(),
+                        GoalIntent::Edit => {}
+                    })
                 }
             }
             cx.notify();
@@ -1395,6 +1418,7 @@ impl Render for Composer {
                         this.child(self.render_fallback_review_panel(&review, cx))
                     })
                     .children(self.render_trigger_menu(cx))
+                    .children(self.render_goal_strip(cx))
                     .children(self.render_queue_strip(cx))
                     .child(v_flex().w_full().child(card).when(
                         self.compact || (readonly && compact),

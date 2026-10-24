@@ -202,7 +202,9 @@ pub use wire::{
 // Unreleased: an original's metadata, the OriginalReady reply and the browser
 // /original response (X-Image-Dimensions) carry the image's displayed size;
 // the provider_relay event and timeline entry carry `prompt`, the handoff as
-// sent to the new provider.
+// sent to the new provider; the agent event stream gains goal_updated,
+// SessionStatus carries the harness's standing goal, and the protocol adds the
+// SetGoal and ClearGoal commands.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 #[cfg(test)]
