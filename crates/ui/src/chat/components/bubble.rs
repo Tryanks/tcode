@@ -1,12 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::menu::{ContextMenuExt as _, PopupMenu};
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
 use agent::RewindMode;
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, Entity, InteractiveElement as _, IntoElement as _,
@@ -135,7 +133,7 @@ pub(crate) fn native_rewind_button(
         cx,
     )
     .disabled(disabled)
-    .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)));
+    .touch(compact);
     Some(
         crate::material::overlay_popover(("rewind-menu", turn), cx)
             .anchor(Anchor::TopRight)
@@ -145,7 +143,7 @@ pub(crate) fn native_rewind_button(
             .trigger(trigger)
             .content(move |_state, _window, cx| {
                 let muted = cx.theme().muted_foreground;
-                let accent = cx.theme().accent;
+                let hover = cx.theme().muted;
                 let popover = cx.entity();
                 let RewindHandlers {
                     files_and_conversation,
@@ -175,23 +173,18 @@ pub(crate) fn native_rewind_button(
                     let popover = popover.clone();
                     menu = menu.child(
                         crate::material::accessible_clickable(
-                            h_flex(),
+                            crate::material::menu_item_frame(compact, cx),
                             ("rewind-option", index),
                             Role::MenuItem,
                             label.clone(),
                             cx,
                         )
                         .w_full()
-                        .when(compact, |row| row.min_h(px(44.)))
-                        .px_2()
-                        .py_1p5()
-                        .gap_2()
                         .items_center()
-                        .rounded(cx.theme().tokens.radius.sm)
                         .cursor_pointer()
-                        .text_size(px(13.))
-                        .hover(move |style| style.bg(accent))
-                        .child(Icon::new(IconName::Undo).xsmall().text_color(muted))
+                        .text_body(compact, cx)
+                        .hover(move |style| style.bg(hover))
+                        .child(Icon::new(IconName::Undo).text_color(muted))
                         .child(label)
                         .on_click(move |event, window, cx| {
                             popover.update(cx, |state, cx| state.dismiss(window, cx));
@@ -227,6 +220,8 @@ pub(crate) fn user_bubble(
     } = data;
     let BubbleHandlers { copy, images } = handlers;
     let menu_items = bubble_menu_items(Arc::from(visible), rewind_menu);
+    let prose = cx.theme().tokens.typography.md;
+    let spacing = &cx.theme().tokens.spacing;
     let text_style = window.text_style();
     let text_width = visible.lines().fold(px(0.), |width, line| {
         let run = text_style.to_run(line.len());
@@ -234,7 +229,7 @@ pub(crate) fn user_bubble(
             window
                 .text_system()
                 // Must match the bubble's rendered text size below.
-                .layout_line(line, px(15.), &[run], None)
+                .layout_line(line, prose.size, &[run], None)
                 .width,
         )
     });
@@ -263,25 +258,30 @@ pub(crate) fn user_bubble(
                 .map(|(image_index, (path, on_click))| {
                     let menu_path = path.clone();
                     let path = PathBuf::from(path);
-                    div()
-                        .id(SharedString::from(format!(
-                            "user-image-{entry_id}-{image_index}"
-                        )))
-                        .size(px(120.))
-                        .rounded_xl()
-                        .overflow_hidden()
-                        .bg(cx.theme().muted)
-                        .cursor_pointer()
-                        .child(
-                            img(crate::store::image_preview(path, 120., true))
-                                .id("attachment-image")
-                                .size(px(120.))
-                                .rounded_xl()
-                                .object_fit(ObjectFit::Cover)
-                                .with_fallback(crate::image_viewer::unpreviewed(true, false, cx)),
-                        )
-                        .on_click(on_click)
-                        .context_menu(move |menu, _, _| menu.path_items(&menu_path, None))
+                    // The image is the control; a `Button` would add chrome
+                    // around a picture.
+                    crate::material::accessible_clickable(
+                        div(),
+                        SharedString::from(format!("user-image-{entry_id}-{image_index}")),
+                        Role::Button,
+                        crate::tr!("markdown.open_image").into_owned(),
+                        cx,
+                    )
+                    .size(px(120.))
+                    .rounded(crate::material::radius_card(cx))
+                    .overflow_hidden()
+                    .bg(cx.theme().muted)
+                    .cursor_pointer()
+                    .child(
+                        img(crate::store::image_preview(path, 120., true))
+                            .id("attachment-image")
+                            .size(px(120.))
+                            .rounded(crate::material::radius_card(cx))
+                            .object_fit(ObjectFit::Cover)
+                            .with_fallback(crate::image_viewer::unpreviewed(true, false, cx)),
+                    )
+                    .on_click(on_click)
+                    .context_menu(move |menu, _, _| menu.path_items(&menu_path, None))
                 })
                 .collect::<Vec<_>>(),
         )
@@ -306,21 +306,16 @@ pub(crate) fn user_bubble(
         .when_some(steering, |column, steering| {
             let selector = format!("steering-{entry_id}");
             column.child(
-                div()
-                    .debug_selector(move || selector)
-                    .h(px(18.))
-                    .px(px(6.))
-                    .mb(px(-2.))
-                    .flex()
-                    .items_center()
-                    .rounded(crate::material::radius_chip(cx))
-                    .bg(cx.theme().muted)
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(match steering {
+                crate::material::semantic_chip(
+                    match steering {
                         SteeringStatus::Pending => crate::tr!("chat.steering"),
                         SteeringStatus::Accepted => crate::tr!("chat.steered"),
-                    }),
+                    },
+                    cx.theme().muted,
+                    cx.theme().muted_foreground,
+                    cx,
+                )
+                .debug_selector(move || selector),
             )
         })
         .children(thumbnails)
@@ -328,12 +323,12 @@ pub(crate) fn user_bubble(
             column.child({
                 let pending = steering == Some(SteeringStatus::Pending);
                 div()
-                    .w((text_width + px(20.)).ceil() + px(3.))
+                    .w((text_width + spacing.md * 2.).ceil() + px(3.))
                     .flex_none()
                     .max_w_3_4()
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(cx.theme().tokens.radius.lg)
+                    .px(spacing.md)
+                    .py(spacing.xs)
+                    .rounded(crate::material::radius_composer(cx))
                     .bg(cx.theme().foreground.opacity(0.08))
                     .when(pending, |bubble| {
                         bubble
@@ -342,7 +337,7 @@ pub(crate) fn user_bubble(
                             .border_color(cx.theme().border)
                     })
                     .text_color(cx.theme().foreground)
-                    .text_size(px(15.))
+                    .text_token(&prose)
                     .child(content)
             })
         })

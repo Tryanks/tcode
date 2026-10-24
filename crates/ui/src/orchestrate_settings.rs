@@ -1,6 +1,7 @@
 //! Settings → Orchestrate: decision peers and execution-model routing profiles.
 
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{InputEvent, Textarea, TextareaState};
 use crate::widgets::switch::Switch;
@@ -13,7 +14,7 @@ use gpui::{
     IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_core::provider_models::FastMode;
@@ -335,8 +336,8 @@ impl OrchestrateSettingsPanel {
         }
     }
 
-    /// The per-item "restore default" affordance, mirroring the General page:
-    /// icon-only, ghost, and inline immediately after the row's title.
+    /// The per-item "restore default" affordance: icon-only, ghost, and inline
+    /// immediately after the row's title.
     fn reset_button(
         &self,
         id: impl Into<ElementId>,
@@ -361,11 +362,12 @@ impl OrchestrateSettingsPanel {
         &self,
         title: impl Into<gpui::SharedString>,
         reset: Option<AnyElement>,
+        cx: &App,
     ) -> AnyElement {
         h_flex()
             .items_center()
             .gap_1()
-            .child(div().text_size(px(13.)).font_medium().child(title.into()))
+            .child(div().text_body(false, cx).child(title.into()))
             .children(reset)
             .into_any_element()
     }
@@ -403,8 +405,7 @@ impl OrchestrateSettingsPanel {
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(13.))
-                    .line_height(px(18.))
+                    .text_body(false, cx)
                     .text_color(cx.theme().foreground)
                     .child(text.into()),
             )
@@ -412,28 +413,30 @@ impl OrchestrateSettingsPanel {
     }
 
     fn render_intro(&self, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
+        h_flex()
             .w_full()
-            .gap_0p5()
+            .gap_1p5()
+            .items_start()
+            .text_body(false, cx)
+            .text_color(cx.theme().muted_foreground)
             .child(
+                // One body line tall, so the icon centres on the title.
                 h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(Icon::new(IconName::Info).xsmall())
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_medium()
-                            .child(crate::tr!("orchestrate.all_models.title")),
-                    ),
+                    .flex_none()
+                    .h(cx.theme().tokens.typography.sm.line_height)
+                    .child(Icon::new(IconName::Info)),
             )
             .child(
-                div()
-                    .pl(px(20.))
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("orchestrate.all_models.description")),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(crate::tr!("orchestrate.all_models.title"))
+                    .child(
+                        div()
+                            .text_secondary(false, cx)
+                            .child(crate::tr!("orchestrate.all_models.description")),
+                    ),
             )
             .into_any_element()
     }
@@ -470,12 +473,10 @@ impl OrchestrateSettingsPanel {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .text_size(px(13.))
+                    .text_body(false, cx)
                     .child(div().flex_1().min_w_0().child(selected_label))
                     .child(
-                        Icon::new(IconName::ChevronDown)
-                            .xsmall()
-                            .text_color(cx.theme().muted_foreground),
+                        Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
                     ),
             );
         let panel = cx.entity();
@@ -492,37 +493,39 @@ impl OrchestrateSettingsPanel {
                  -> AnyElement {
                     let panel = panel.clone();
                     let popover = cx.entity();
-                    h_flex()
-                        .id(id)
-                        .w_full()
-                        .px_2()
-                        .py_1()
-                        .gap_2()
-                        .items_center()
-                        .rounded(crate::material::radius_button(cx))
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(cx.theme().accent))
-                        .child(
-                            v_flex().flex_1().min_w_0().gap_0p5().child(label).child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(description),
-                            ),
-                        )
-                        .when(mode == selected, |row| {
-                            row.child(Icon::new(IconName::Check).xsmall())
-                        })
-                        .on_click(move |_, window, cx| {
-                            panel.update(cx, |panel, cx| {
-                                panel.store.update(cx, |store, _cx| {
-                                    store.set_orchestrate_child_approval(mode)
-                                });
+                    crate::material::accessible_clickable(
+                        crate::material::menu_item_frame(false, cx),
+                        id,
+                        gpui::Role::MenuItem,
+                        label.clone(),
+                        cx,
+                    )
+                    .aria_selected(mode == selected)
+                    .w_full()
+                    .items_center()
+                    .text_body(false, cx)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(cx.theme().muted))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(label)
+                            .child(div().text_secondary(false, cx).child(description)),
+                    )
+                    .when(mode == selected, |row| {
+                        row.child(Icon::new(IconName::Check))
+                    })
+                    .on_click(move |_, window, cx| {
+                        panel.update(cx, |panel, cx| {
+                            panel.store.update(cx, |store, _cx| {
+                                store.set_orchestrate_child_approval(mode)
                             });
-                            popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        })
-                        .into_any_element()
+                        });
+                        popover.update(cx, |state, cx| state.dismiss(window, cx));
+                    })
+                    .into_any_element()
                 };
                 v_flex()
                     .p_1()
@@ -576,14 +579,8 @@ impl OrchestrateSettingsPanel {
 
         crate::material::group(cx)
             .child(
-                h_flex()
-                    .w_full()
-                    .min_h(px(56.))
-                    .px_3()
-                    .py_2()
-                    .gap_3()
+                crate::material::group_row(cx)
                     .flex_wrap()
-                    .items_center()
                     .child(
                         v_flex()
                             .flex_basis(px(260.))
@@ -593,11 +590,11 @@ impl OrchestrateSettingsPanel {
                             .child(self.row_title(
                                 crate::tr!("orchestrate.child_approval.title").into_owned(),
                                 reset,
+                                cx,
                             ))
                             .child(
                                 div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
+                                    .text_secondary(false, cx)
                                     .child(crate::tr!("orchestrate.child_approval.description")),
                             ),
                     )
@@ -617,13 +614,7 @@ impl OrchestrateSettingsPanel {
         });
         crate::material::group(cx)
             .child(
-                h_flex()
-                    .w_full()
-                    .min_h(px(56.))
-                    .px_3()
-                    .py_2()
-                    .gap_3()
-                    .items_center()
+                crate::material::group_row(cx)
                     .child(
                         v_flex()
                             .flex_1()
@@ -632,11 +623,11 @@ impl OrchestrateSettingsPanel {
                             .child(self.row_title(
                                 crate::tr!("orchestrate.child_worktrees.title").into_owned(),
                                 reset,
+                                cx,
                             ))
                             .child(
                                 div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
+                                    .text_secondary(false, cx)
                                     .child(crate::tr!("orchestrate.child_worktrees.description")),
                             ),
                     )
@@ -677,12 +668,11 @@ impl OrchestrateSettingsPanel {
                     .when(!compact, |text| text.flex_1())
                     .min_w_0()
                     .gap_0p5()
-                    .child(div().text_size(px(15.)).font_semibold().child(title.into()))
+                    .child(div().text_title(cx).child(title.into()))
                     .child(
                         div()
                             .debug_selector(|| "orchestrate-section-description".into())
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
+                            .text_secondary(compact, cx)
                             .child(description.into()),
                     ),
             )
@@ -792,29 +782,20 @@ impl OrchestrateSettingsPanel {
                 )
             });
             rows.push(
-                v_flex()
-                    .w_full()
-                    .gap_2()
-                    .px_3()
-                    .py_3()
+                crate::material::group_row_stacked(cx)
+                    .items_stretch()
                     .child(
                         h_flex()
                             .w_full()
                             .gap_2()
                             .items_center()
-                            .child(provider_glyph(provider).small())
+                            .child(div().text_body(false, cx).child(provider_glyph(provider)))
                             .child(
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(self.row_title(name, reset))
-                                    .child(
-                                        div()
-                                            .font_family("monospace")
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(subtitle),
-                                    ),
+                                    .child(self.row_title(name, reset, cx))
+                                    .child(div().text_meta_mono(false, cx).child(subtitle)),
                             )
                             .child({
                                 let (bg, fg) = if profile.enabled {
@@ -889,15 +870,13 @@ impl OrchestrateSettingsPanel {
                                     .items_start()
                                     .child(
                                         div()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
+                                            .text_caption(cx)
                                             .child(crate::tr!("orchestrate.children.effort_label")),
                                     )
-                                    .child(div().text_size(px(12.)).child(efforts))
+                                    .child(div().text_body(false, cx).child(efforts))
                                     .child(
                                         div()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
+                                            .text_secondary(false, cx)
                                             .child(crate::tr!("orchestrate.children.effort_hint")),
                                     ),
                             )
@@ -909,12 +888,9 @@ impl OrchestrateSettingsPanel {
                                         .gap_1()
                                         .items_start()
                                         .child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(crate::tr!(
-                                                    "orchestrate.children.fast_label"
-                                                )),
+                                            div().text_caption(cx).child(crate::tr!(
+                                                "orchestrate.children.fast_label"
+                                            )),
                                         )
                                         .child(
                                             Switch::new(("orchestrate-child-fast", index))
@@ -950,15 +926,11 @@ impl Render for OrchestrateSettingsPanel {
         let compact = crate::window_seam::window_is_compact(window, cx);
         v_flex()
             .w_full()
-            .gap_6()
-            .child(
-                div()
-                    .pl_3()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("settings.orchestrate_section")),
-            )
+            .gap(crate::material::section_gap(cx))
+            .child(crate::material::group_caption(
+                crate::tr!("settings.orchestrate_section"),
+                cx,
+            ))
             .child(self.render_intro(cx))
             .child(self.render_child_approval(cx))
             .child(self.render_child_worktrees(cx))

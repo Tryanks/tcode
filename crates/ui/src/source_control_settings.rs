@@ -8,6 +8,7 @@ use crate::{
     sizing::Sizable as _,
     store::{StoreChange, TopicKind, WorkspaceStore},
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         Tooltip,
         button::{Button, ButtonVariant, ButtonVariants as _},
@@ -20,7 +21,7 @@ use crate::{
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_base::{h_flex, v_flex};
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,8 +59,8 @@ fn prefill(kind: HostKind) -> &'static str {
     }
 }
 
-fn mark(kind: HostKind, size: f32) -> Icon {
-    Icon::empty().path(kind.terms().mark).size(px(size))
+fn mark(kind: HostKind) -> Icon {
+    Icon::empty().path(kind.terms().mark)
 }
 
 /// The hosts to list, each with its kind: configured, reported by the host, and github.com;
@@ -199,21 +200,16 @@ impl SourceControlPanel {
         let compact = self.window_state.read(cx).compact;
         let selector = format!("source-control-notice-{host}");
         Some(
-            v_flex()
+            crate::material::card(cx)
+                .w_full()
                 .debug_selector(move || selector)
-                .gap_1()
-                .px_3()
-                .py_2()
-                .rounded_md()
-                .bg(theme.muted)
-                .text_size(px(12.))
+                .text_token(&theme.tokens.typography.xs)
                 .child(
                     h_flex()
                         .gap_2()
                         .items_center()
                         .child(
                             Icon::new(crate::icon::IconName::TriangleAlert)
-                                .size(px(12.))
                                 .text_color(theme.warning),
                         )
                         .child(div().flex_1().min_w_0().child(text.into_owned())),
@@ -232,7 +228,7 @@ impl SourceControlPanel {
                                     .min_w_0()
                                     .flex_wrap()
                                     .px_1()
-                                    .rounded_sm()
+                                    .rounded(crate::material::radius_chip(cx))
                                     .bg(theme.secondary)
                                     .font_family(theme.mono_font_family.clone())
                                     // Each word keeps the space after it, so the gaps are the
@@ -273,6 +269,7 @@ impl SourceControlPanel {
             .unwrap_or_else(|| HostSettings::new(kind));
         let status = settings.status.get(host).cloned();
         let theme = cx.theme().clone();
+        let compact = self.window_state.read(cx).compact;
         let store = self.store.clone();
         let toggle_host = host.to_owned();
         let switch = Switch::new(SharedString::from(format!("source-control-enabled-{host}")))
@@ -308,35 +305,28 @@ impl SourceControlPanel {
             .w_full()
             .gap_3()
             .items_center()
-            .child(mark(kind, 16.).text_color(header_color))
+            .text_body(compact, cx)
+            .child(mark(kind).text_color(header_color))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(2.))
+                    .gap_0p5()
                     .child(
                         div()
-                            .text_size(px(14.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(header_color)
                             .truncate()
                             .child(host.to_owned()),
                     )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
-                            .child(kind_line),
-                    ),
+                    .child(div().text_secondary(compact, cx).child(kind_line)),
             )
             .child(switch);
-        let mut row = v_flex().gap_2().p_4().child(header);
+        let mut row = crate::material::group_row_stacked(cx).child(header);
         if !choice.enabled {
             return row
                 .child(
                     div()
-                        .text_size(px(12.))
-                        .text_color(theme.muted_foreground)
+                        .text_secondary(compact, cx)
                         .child(crate::tr!("source_control.off", host = host).into_owned()),
                 )
                 .into_any_element();
@@ -359,8 +349,7 @@ impl SourceControlPanel {
                 .flex()
                 .flex_wrap()
                 .gap_1()
-                .text_size(px(13.))
-                .text_color(theme.muted_foreground)
+                .text_secondary(compact, cx)
                 .child(status_line(status.as_ref()))
                 .when(
                     status
@@ -430,8 +419,7 @@ impl SourceControlPanel {
         {
             row = row.child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(theme.muted_foreground)
+                    .text_secondary(compact, cx)
                     .child(crate::tr!("source_control.env_override").into_owned()),
             );
         }
@@ -456,10 +444,10 @@ impl SourceControlPanel {
         let input = token.clone();
         let store = self.store.clone();
         let clear_store = self.store.clone();
-        let compact = self.window_state.read(cx).compact;
         let field =
             div()
-                .min_w(px(120.))
+                // The token field's floor before the buttons wrap; gpui-base has no field-width token.
+                .min_w(gpui::px(120.))
                 .map(|field| {
                     if compact {
                         field.w_full()
@@ -479,7 +467,7 @@ impl SourceControlPanel {
                 .ghost()
                 .outline()
                 .compact()
-                .when(compact, |button| button.min_h(px(44.)))
+                .touch(compact)
                 .label(crate::tr!("source_control.set").into_owned())
                 .aria_label(crate::tr!("source_control.set_label", host = host).into_owned())
                 .on_click(move |_, window, cx| {
@@ -498,7 +486,7 @@ impl SourceControlPanel {
                 )))
                 .ghost()
                 .compact()
-                .when(compact, |button| button.min_h(px(44.)))
+                .touch(compact)
                 .disabled(!token_set)
                 .label(crate::tr!("source_control.clear").into_owned())
                 .aria_label(crate::tr!("source_control.clear_label", host = host).into_owned())
@@ -515,7 +503,7 @@ impl SourceControlPanel {
                 Button::new(SharedString::from(format!("source-control-remove-{host}")))
                     .ghost()
                     .compact()
-                    .when(compact, |button| button.min_h(px(44.)))
+                    .touch(compact)
                     .label(crate::tr!("source_control.remove_host").into_owned())
                     .on_click(move |_, window, cx| {
                         confirm_remove(store.clone(), remove_host.clone(), window, cx)
@@ -525,6 +513,7 @@ impl SourceControlPanel {
         // A phone gives the field the row and puts the buttons under it, at the end.
         let editor = if compact {
             v_flex()
+                .w_full()
                 .gap_2()
                 .child(field)
                 .child(h_flex().w_full().justify_end().child(buttons))
@@ -548,8 +537,7 @@ impl SourceControlPanel {
                 .flex_wrap()
                 .gap_1()
                 .items_center()
-                .text_size(px(12.))
-                .text_color(theme.muted_foreground)
+                .text_secondary(compact, cx)
                 .children(scopes)
                 .when_some(token_url, |help, url| {
                     help.child(external_link(
@@ -575,7 +563,6 @@ impl SourceControlPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme().clone();
         let compact = self.window_state.read(cx).compact;
         let saved = status.and_then(|status| status.source.clone());
         let saved_email = match &saved {
@@ -674,8 +661,7 @@ impl SourceControlPanel {
             .w_full()
             .items_start()
             .gap_1()
-            .text_size(px(12.))
-            .text_color(theme.muted_foreground)
+            .text_secondary(compact, cx)
             .child(div().w_full().child(description.into_owned()))
             .when_some(link, |description, url| {
                 description.child(external_link(
@@ -702,7 +688,7 @@ impl SourceControlPanel {
         .ghost()
         .outline()
         .compact()
-        .when(compact, |button| button.min_h(px(44.)))
+        .touch(compact)
         .label(crate::tr!("source_control.set").into_owned())
         .aria_label(crate::tr!("source_control.set_label", host = host).into_owned())
         .on_click(move |_, window, cx| {
@@ -732,7 +718,7 @@ impl SourceControlPanel {
         )))
         .ghost()
         .compact()
-        .when(compact, |button| button.min_h(px(44.)))
+        .touch(compact)
         .disabled(!status.is_some_and(|status| status.token_set))
         .label(crate::tr!("source_control.clear").into_owned())
         .aria_label(crate::tr!("source_control.clear_label", host = host).into_owned())
@@ -743,6 +729,7 @@ impl SourceControlPanel {
         });
         let email_label = crate::tr!("source_control.bitbucket_email_label", host = host);
         v_flex()
+            .w_full()
             .gap_2()
             .child(track)
             .child(description)
@@ -767,8 +754,7 @@ impl SourceControlPanel {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
+                            .text_secondary(compact, cx)
                             .children(replaces.map(|replaces| replaces.into_owned())),
                     )
                     .child(h_flex().gap_2().child(set).child(clear)),
@@ -778,11 +764,10 @@ impl SourceControlPanel {
 }
 
 fn confirm_remove(store: Entity<WorkspaceStore>, host: String, window: &mut Window, cx: &mut App) {
-    window.open_alert_dialog(cx, move |alert, _, cx| {
+    window.open_alert_dialog(cx, move |alert, _, _| {
         let store = store.clone();
         let host = host.clone();
         alert
-            .bg(cx.theme().popover)
             .title(crate::tr!("source_control.remove_title", host = &host).into_owned())
             .description(crate::tr!("source_control.remove_desc").into_owned())
             .button_props(
@@ -805,17 +790,10 @@ impl Render for SourceControlPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.store.read(cx).settings().source_control.clone();
         let hosts = listed(&settings);
-        let mut rows = Vec::new();
-        for (index, (host, kind)) in hosts.iter().enumerate() {
-            let row = self.row(host, *kind, window, cx);
-            rows.push(
-                div()
-                    .when(index > 0, |row| {
-                        row.border_t_1().border_color(cx.theme().border)
-                    })
-                    .child(row),
-            );
-        }
+        let rows = hosts
+            .iter()
+            .map(|(host, kind)| self.row(host, *kind, window, cx))
+            .collect();
         let compact = self.window_state.read(cx).compact;
         let store = self.store.clone();
         let listed_hosts: Vec<String> = hosts.into_iter().map(|(host, _)| host).collect();
@@ -829,11 +807,10 @@ impl Render for SourceControlPanel {
                 AddHostDialog::open(store.clone(), listed_hosts.clone(), window, cx)
             });
         let note = div()
-            .text_size(px(12.))
-            .text_color(cx.theme().muted_foreground)
+            .text_secondary(compact, cx)
             .child(crate::tr!("source_control.detection_note").into_owned());
         v_flex()
-            .gap(px(24.))
+            .gap(crate::material::section_gap(cx))
             .on_action(cx.listener(|this, action: &ChooseAccount, _, cx| {
                 this.store.update(cx, |store, _| {
                     store.patch_source_control_host(
@@ -846,11 +823,10 @@ impl Render for SourceControlPanel {
             }))
             .child(
                 div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_secondary(compact, cx)
                     .child(crate::tr!("source_control.description").into_owned()),
             )
-            .child(crate::material::group(cx).children(rows))
+            .child(crate::material::grouped(rows, cx))
             .child(if compact {
                 v_flex().gap_2().child(add).child(note)
             } else {
@@ -913,24 +889,17 @@ impl AddHostDialog {
         });
         let content = dialog.clone();
         let footer = dialog.clone();
-        window.open_dialog(cx, move |builder, _, cx| {
+        window.open_dialog(cx, move |builder, _, _| {
             let content = content.clone();
             let cancel = footer.clone();
             let add = footer.clone();
             builder
-                .w(px(460.))
-                .rounded(crate::material::radius_overlay(cx))
-                .bg(cx.theme().popover)
-                .border_1()
-                .border_color(cx.theme().border)
-                .shadow_xl()
                 .title(crate::tr!("source_control.add_host").into_owned())
                 .content(move |el, _, _| el.child(content.clone()))
                 .footer(
                     DialogActions::new()
                         .child(
                             Button::new("source-control-add-cancel")
-                                .rounded(crate::material::radius_button(cx))
                                 .outline()
                                 .small()
                                 .label(crate::tr!("settings.cancel"))
@@ -941,7 +910,6 @@ impl AddHostDialog {
                         )
                         .child(
                             Button::new("source-control-add-confirm")
-                                .rounded(crate::material::radius_button(cx))
                                 .primary()
                                 .small()
                                 .label(crate::tr!("source_control.add"))
@@ -1030,15 +998,11 @@ impl AddHostDialog {
 }
 
 impl Render for AddHostDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let theme = cx.theme();
         let kind = self.kind;
-        let label = |text: SharedString| {
-            div()
-                .text_size(px(12.))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(text)
-        };
+        let label = |text: SharedString| div().text_caption(cx).child(text);
         v_flex()
             .gap_2()
             .on_action(cx.listener(|this, action: &ChooseKind, window, cx| {
@@ -1057,11 +1021,13 @@ impl Render for AddHostDialog {
                             .w_full()
                             .gap_2()
                             .items_center()
-                            .child(mark(kind, 16.))
+                            .child(mark(kind))
                             .child(kind.terms().name)
-                            .child(div().ml_auto().child(
-                                Icon::new(crate::icon::IconName::ChevronDown).size(px(14.)),
-                            )),
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .child(Icon::new(crate::icon::IconName::ChevronDown)),
+                            ),
                     )
                     // gpui-base has no Select; a button with a menu stands in for one.
                     .dropdown_menu(move |mut menu, _, _| {
@@ -1088,8 +1054,7 @@ impl Render for AddHostDialog {
             .child(Input::new(&self.input).disabled(kind.fixed_host().is_some()))
             .child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(theme.muted_foreground)
+                    .text_secondary(compact, cx)
                     .flex()
                     .flex_wrap()
                     .children(
@@ -1107,8 +1072,9 @@ impl Render for AddHostDialog {
             )
             .child(
                 div()
-                    .min_h(px(16.))
-                    .text_size(px(12.))
+                    // Holds one line while empty, so an error does not move the dialog.
+                    .min_h(theme.tokens.typography.xs.line_height)
+                    .text_token(&theme.tokens.typography.xs)
                     .text_color(theme.danger)
                     .children(self.error.clone()),
             )

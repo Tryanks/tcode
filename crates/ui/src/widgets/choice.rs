@@ -5,6 +5,7 @@ use crate::{
     icon::{Icon, IconName},
     material::focus_ring,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         Tooltip,
         tabs::{segment, segmented_track},
@@ -164,7 +165,7 @@ fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &Ap
         .items_center()
         .px(px(if compact { 14. } else { 12. }))
         .gap(px(if compact { 8. } else { 6. }))
-        .text_size(px(if compact { 15. } else { 13. }))
+        .text_body(compact, cx)
         .font_medium()
         .whitespace_nowrap()
         .text_color(theme.muted_foreground)
@@ -175,12 +176,10 @@ fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &Ap
         })
         .child(div().flex_none().child(label))
         .when(recommended, |this| {
-            this.child(
-                Icon::new(IconName::Star)
-                    .size(px(if compact { 13. } else { 11. }))
-                    .flex_none(),
-            )
-            .tooltip(|window, cx| Tooltip::new(crate::tr!("choice.recommended")).build(window, cx))
+            this.child(Icon::new(IconName::Star).flex_none())
+                .tooltip(|window, cx| {
+                    Tooltip::new(crate::tr!("choice.recommended")).build(window, cx)
+                })
         });
     segment(radio, selected, !disabled, compact, cx)
 }

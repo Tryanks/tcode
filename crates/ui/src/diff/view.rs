@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::highlight::HighlightTheme;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
@@ -759,22 +760,16 @@ impl DiffPanel {
         )
         .flex_1()
         .min_w_0()
-        .h(px(40.))
+        .h(px(material::bar_height(material::Bar::Toolbar, false)))
         .mb(px(-1.))
         .self_end();
-        h_flex()
-            .flex_none()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .h(px(if hosts_caption {
-                window_caption::CAPTION_STRIP_HEIGHT
-            } else {
-                40.
-            }))
-            .w_full()
-            .px_2()
+        let kind = if hosts_caption {
+            material::Bar::Strip
+        } else {
+            material::Bar::Toolbar
+        };
+        material::bar_divider_below(material::bar("right-panel-header", kind, false, cx), cx)
             .when(hosts_caption, |strip| strip.pr_0())
-            .gap_1()
             .child(tabs)
             // The gap between the tabs and the icon cluster holds nothing, so
             // it doubles as the window's drag handle: `window_drag_area` for the
@@ -783,57 +778,57 @@ impl DiffPanel {
             // children, so without it the drag hitbox collapses to zero height.
             .child(window_caption::drag_region(crate::window_drag_area(
                 "right-panel-tabs-drag",
-                div().flex_none().w(px(8.)).h_full(),
+                div().flex_none().w(cx.theme().tokens.spacing.sm).h_full(),
                 window,
                 cx,
             )))
             // Right icon cluster: expand toggle, a layout no-op, close.
             .child(
-                Button::new("diff-expand")
-                    .debug_selector(|| "diff-expand".into())
-                    .flex_none()
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(if expanded {
+                material::toolbar_icon_button(
+                    "diff-expand",
+                    if expanded {
                         IconName::Minimize
                     } else {
                         IconName::Maximize
-                    })
-                    .tooltip(if expanded {
+                    },
+                    if expanded {
                         crate::tr!("diff.restore_width")
                     } else {
                         crate::tr!("diff.expand_width")
-                    })
-                    .on_click(move |_, _, cx| {
-                        store.update(cx, |store, cx| {
-                            store.toggle_diff_expanded(cx);
-                        });
-                    }),
+                    },
+                    false,
+                )
+                .debug_selector(|| "diff-expand".into())
+                .flex_none()
+                .on_click(move |_, _, cx| {
+                    store.update(cx, |store, cx| {
+                        store.toggle_diff_expanded(cx);
+                    });
+                }),
             )
             .child(
-                Button::new("diff-layout")
-                    .flex_none()
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::PanelRight)
-                    .tooltip(crate::tr!("diff.layout_soon")),
+                material::toolbar_icon_button(
+                    "diff-layout",
+                    IconName::PanelRight,
+                    crate::tr!("diff.layout_soon"),
+                    false,
+                )
+                .flex_none(),
             )
             .child(
-                Button::new("diff-close")
-                    .debug_selector(|| "diff-close".into())
-                    .flex_none()
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::Close)
-                    .tooltip(crate::tr!("diff.close"))
-                    .on_click(move |_, _, cx| {
-                        store_close.update(cx, |store, cx| {
-                            store.close_diff_panel(cx);
-                        });
-                    }),
+                material::toolbar_icon_button(
+                    "diff-close",
+                    IconName::Close,
+                    crate::tr!("diff.close"),
+                    false,
+                )
+                .debug_selector(|| "diff-close".into())
+                .flex_none()
+                .on_click(move |_, _, cx| {
+                    store_close.update(cx, |store, cx| {
+                        store.close_diff_panel(cx);
+                    });
+                }),
             )
             // Last child: the panel's own actions keep their places to its left.
             .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
@@ -939,6 +934,7 @@ impl DiffPanel {
             None => crate::tr!("diff.no_changes").into_owned(),
         };
         let muted = cx.theme().muted_foreground;
+        let compact = self.compact(cx);
         let panel = cx.entity();
         let session_selector = session.clone();
 
@@ -948,225 +944,225 @@ impl DiffPanel {
             .compact()
             .child(
                 h_flex()
-                    .gap_1p5()
+                    .gap(cx.theme().tokens.spacing.sm)
                     .items_center()
-                    .text_size(px(13.))
+                    .text_body(compact, cx)
                     .font_medium()
                     .child(label)
-                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+                    .child(Icon::new(IconName::ChevronDown).text_color(muted)),
             );
 
-        let selector = Popover::new("diff-turn-popover")
-            .trigger(trigger)
-            .content(move |_, _, cx| {
-                let panel_for = panel.clone();
-                let session_for = session_selector.clone();
-                let scope_row =
-                    |id: &'static str,
-                     label: gpui::SharedString,
-                     scope: DiffScope,
-                     cx: &mut gpui::Context<gpui_base::PopoverState>| {
-                        let panel = panel_for.clone();
-                        let session = session_for.clone();
-                        material::accessible_clickable(
-                            h_flex(),
-                            id,
-                            Role::MenuItem,
-                            label.clone(),
-                            cx,
-                        )
-                        .aria_selected(selected_scope == Some(scope))
-                        .flex_none()
-                        .w_full()
-                        .px_2()
-                        .py_1()
-                        .items_center()
-                        .rounded(cx.theme().tokens.radius.sm)
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|row| row.bg(cx.theme().list_hover))
-                        .when(selected_scope == Some(scope), |row| {
-                            row.bg(cx.theme().list_active)
-                        })
-                        .child(div().flex_1().child(label))
-                        .when(selected_scope == Some(scope), |row| {
-                            row.child(Icon::new(IconName::Check).xsmall())
-                        })
-                        .on_click({
-                            let popover = cx.entity();
-                            move |_, window, cx| {
-                                panel.update(cx, |this, cx| {
-                                    this.scopes.insert(session.clone(), scope);
-                                    this.cache = None;
-                                    this.workspace_store.update(cx, |store, cx| {
-                                        store.discard_diff_focus(cx);
-                                    });
-                                    cx.notify();
-                                });
-                                popover.update(cx, |state, cx| state.dismiss(window, cx));
-                            }
-                        })
-                    };
-                let turn_rows = (!turns.is_empty()).then(|| {
-                    let turns = turns.clone();
-                    let panel = panel.clone();
-                    let session = session_selector.clone();
-                    let popover = cx.entity();
-                    crate::scroll::VirtualList::uniform(
-                        "diff-turn-items",
-                        turns.len(),
-                        move |range, _, cx| {
-                            range
-                                .map(|index| {
-                                    let turn = turns[index];
-                                    div().pb_0p5().child(turn_row(
-                                        turn,
-                                        selected_scope == Some(DiffScope::Turn(turn)),
-                                        &panel,
-                                        &session,
-                                        &popover,
-                                        cx,
-                                    ))
-                                })
-                                .collect()
-                        },
-                    )
-                    .w_full()
-                    .min_h_0()
-                });
-                v_flex()
-                    .id("diff-turn-list")
-                    .role(Role::Menu)
-                    .aria_label(crate::tr!("diff.scope_menu"))
-                    .min_w(px(190.))
-                    .max_h(px(320.))
-                    .pt_1()
-                    .px_1()
-                    // The last turn row carries its gap.
-                    .pb(px(if turn_rows.is_some() { 2. } else { 4. }))
-                    .gap_0p5()
-                    .child(scope_row(
-                        "diff-scope-working",
-                        crate::tr!("diff.working_tree").into_owned().into(),
-                        DiffScope::WorkingTree,
-                        cx,
-                    ))
-                    .child(scope_row(
-                        "diff-scope-branch",
-                        crate::tr!("diff.branch_changes").into_owned().into(),
-                        DiffScope::Branch,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_2()
-                            .pt_2()
-                            .pb_1()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("diff.turns")),
-                    )
-                    .children(turn_rows)
-            })
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
-            .rounded(material::radius_overlay(cx));
-
-        let base_selector =
-            (selected_scope == Some(DiffScope::Branch)).then(|| {
-                let mut branches: Rc<[String]> = self
-                    .git_preview
-                    .as_ref()
-                    .map(|preview| preview.result.branches.as_slice().into())
-                    .unwrap_or_default();
-                if branches.is_empty() {
-                    branches = active_state
-                        .as_ref()
-                        .map(|active| active.branches.as_slice().into())
-                        .unwrap_or_default();
-                }
-                let current = self
-                    .bases
-                    .get(&session)
-                    .cloned()
-                    .or_else(|| {
-                        self.git_preview
-                            .as_ref()
-                            .and_then(|p| p.result.default_base.clone())
-                    })
-                    .unwrap_or_else(|| "HEAD".to_string());
-                let panel = cx.entity();
-                let session_base = session.clone();
-                let current_label = current.clone();
-                let current: Rc<str> = current.into();
-                let trigger = Button::new("diff-base-select")
-                    .ghost()
-                    .outline()
-                    .compact()
-                    .label(current_label)
-                    .icon(IconName::ChevronDown);
-                Popover::new("diff-base-popover")
-                    .trigger(trigger)
-                    .content(move |_, _, cx| {
-                        let branches = branches.clone();
-                        let current = current.clone();
-                        let panel = panel.clone();
-                        let session = session_base.clone();
-                        let popover = cx.entity();
-                        let branch_count = branches.len();
-                        let widest = branches
-                            .iter()
-                            .enumerate()
-                            .max_by_key(|(_, branch)| branch.chars().count())
-                            .map_or(0, |(index, _)| index);
-                        div()
-                            .id("diff-base-list")
-                            .role(Role::Menu)
-                            .aria_label(crate::tr!("diff.base_branches"))
-                            .child(
-                                crate::scroll::VirtualList::uniform(
-                                    "diff-base-items",
-                                    branch_count,
-                                    move |range, _, cx| {
-                                        range
-                                            .map(|index| {
-                                                let branch = &branches[index];
-                                                div().pb_0p5().child(base_row(
-                                                    index,
-                                                    branch,
-                                                    *branch == *current,
-                                                    &panel,
-                                                    &session,
-                                                    &popover,
-                                                    cx,
-                                                ))
-                                            })
-                                            .collect()
-                                    },
-                                )
-                                .width_from_row(widest)
-                                .min_w(px(180.))
-                                .max_h(px(280.))
-                                .pt_1()
-                                .px_1()
-                                // The last row carries its gap.
-                                .pb(px(if branch_count == 0 { 4. } else { 2. })),
+        let selector =
+            Popover::new("diff-turn-popover")
+                .trigger(trigger)
+                .content(move |_, _, cx| {
+                    let panel_for = panel.clone();
+                    let session_for = session_selector.clone();
+                    let scope_row =
+                        |id: &'static str,
+                         label: gpui::SharedString,
+                         scope: DiffScope,
+                         cx: &mut gpui::Context<gpui_base::PopoverState>| {
+                            let panel = panel_for.clone();
+                            let session = session_for.clone();
+                            menu_row(
+                                id.into(),
+                                label.clone(),
+                                selected_scope == Some(scope),
+                                compact,
+                                cx,
                             )
-                    })
-                    .bg(cx.theme().popover)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .shadow_xl()
-                    .rounded(material::radius_overlay(cx))
-                    .into_any_element()
-            });
+                            .child(div().flex_1().child(label))
+                            .when(selected_scope == Some(scope), |row| {
+                                row.child(Icon::new(IconName::Check))
+                            })
+                            .on_click({
+                                let popover = cx.entity();
+                                move |_, window, cx| {
+                                    panel.update(cx, |this, cx| {
+                                        this.scopes.insert(session.clone(), scope);
+                                        this.cache = None;
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.discard_diff_focus(cx);
+                                        });
+                                        cx.notify();
+                                    });
+                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                }
+                            })
+                        };
+                    let turn_rows = (!turns.is_empty()).then(|| {
+                        let turns = turns.clone();
+                        let panel = panel.clone();
+                        let session = session_selector.clone();
+                        let popover = cx.entity();
+                        crate::scroll::VirtualList::uniform(
+                            "diff-turn-items",
+                            turns.len(),
+                            move |range, _, cx| {
+                                range
+                                    .map(|index| {
+                                        let turn = turns[index];
+                                        div().pb_0p5().child(turn_row(
+                                            turn,
+                                            selected_scope == Some(DiffScope::Turn(turn)),
+                                            compact,
+                                            &panel,
+                                            &session,
+                                            &popover,
+                                            cx,
+                                        ))
+                                    })
+                                    .collect()
+                            },
+                        )
+                        .w_full()
+                        .min_h_0()
+                    });
+                    v_flex()
+                        .id("diff-turn-list")
+                        .role(Role::Menu)
+                        .aria_label(crate::tr!("diff.scope_menu"))
+                        // A popover sizes to its content; the turn list is virtual,
+                        // so the menu's extent is fixed here and it scrolls past it.
+                        .min_w(px(190.))
+                        .max_h(px(320.))
+                        .pt_1()
+                        .px_1()
+                        // The last turn row carries its gap.
+                        .pb(if turn_rows.is_some() {
+                            cx.theme().tokens.spacing.xxs
+                        } else {
+                            cx.theme().tokens.spacing.xs
+                        })
+                        .gap_0p5()
+                        .child(scope_row(
+                            "diff-scope-working",
+                            crate::tr!("diff.working_tree").into_owned().into(),
+                            DiffScope::WorkingTree,
+                            cx,
+                        ))
+                        .child(scope_row(
+                            "diff-scope-branch",
+                            crate::tr!("diff.branch_changes").into_owned().into(),
+                            DiffScope::Branch,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .flex_none()
+                                .px_2()
+                                .pt_2()
+                                .pb_1()
+                                .text_caption(cx)
+                                .child(crate::tr!("diff.turns")),
+                        )
+                        .children(turn_rows)
+                });
+
+        let base_selector = (selected_scope == Some(DiffScope::Branch)).then(|| {
+            let mut branches: Rc<[String]> = self
+                .git_preview
+                .as_ref()
+                .map(|preview| preview.result.branches.as_slice().into())
+                .unwrap_or_default();
+            if branches.is_empty() {
+                branches = active_state
+                    .as_ref()
+                    .map(|active| active.branches.as_slice().into())
+                    .unwrap_or_default();
+            }
+            let current = self
+                .bases
+                .get(&session)
+                .cloned()
+                .or_else(|| {
+                    self.git_preview
+                        .as_ref()
+                        .and_then(|p| p.result.default_base.clone())
+                })
+                .unwrap_or_else(|| "HEAD".to_string());
+            let panel = cx.entity();
+            let session_base = session.clone();
+            let current_label = current.clone();
+            let current: Rc<str> = current.into();
+            let trigger = Button::new("diff-base-select")
+                .ghost()
+                .outline()
+                .compact()
+                .label(current_label)
+                .icon(IconName::ChevronDown);
+            Popover::new("diff-base-popover")
+                .trigger(trigger)
+                .content(move |_, _, cx| {
+                    let branches = branches.clone();
+                    let current = current.clone();
+                    let panel = panel.clone();
+                    let session = session_base.clone();
+                    let popover = cx.entity();
+                    let branch_count = branches.len();
+                    let widest = branches
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, branch)| branch.chars().count())
+                        .map_or(0, |(index, _)| index);
+                    div()
+                        .id("diff-base-list")
+                        .role(Role::Menu)
+                        .aria_label(crate::tr!("diff.base_branches"))
+                        .child(
+                            crate::scroll::VirtualList::uniform(
+                                "diff-base-items",
+                                branch_count,
+                                move |range, _, cx| {
+                                    range
+                                        .map(|index| {
+                                            let branch = &branches[index];
+                                            let panel = panel.clone();
+                                            let session = session.clone();
+                                            let popover = popover.clone();
+                                            div().pb_0p5().child(base_row(
+                                                index,
+                                                branch,
+                                                *branch == *current,
+                                                compact,
+                                                move |chosen, window, cx| {
+                                                    panel.update(cx, |this, cx| {
+                                                        this.bases.insert(session.clone(), chosen);
+                                                        this.cache = None;
+                                                        this.git_preview = None;
+                                                        cx.notify();
+                                                    });
+                                                    popover.update(cx, |state, cx| {
+                                                        state.dismiss(window, cx)
+                                                    });
+                                                },
+                                                cx,
+                                            ))
+                                        })
+                                        .collect()
+                                },
+                            )
+                            .width_from_row(widest)
+                            // A popover sizes to its content; the branch list
+                            // is virtual, so its extent is fixed here.
+                            .min_w(px(180.))
+                            .max_h(px(280.))
+                            .pt_1()
+                            .px_1()
+                            // The last row carries its gap.
+                            .pb(if branch_count == 0 {
+                                cx.theme().tokens.spacing.xs
+                            } else {
+                                cx.theme().tokens.spacing.xxs
+                            }),
+                        )
+                })
+                .into_any_element()
+        });
 
         let wrap_on = self.workspace_store.read(cx).diff_word_wrap();
         let split_on = self.workspace_store.read(cx).diff_split();
-        let compact = self.compact(cx);
         // One description of the view options, rendered as four dense toggles on
         // the desktop and as one overflow menu on a page with no room for them.
         let options = [
@@ -1204,18 +1200,8 @@ impl DiffPanel {
                 crate::tr!("diff.toggle_invisibles").into_owned(),
             ),
         ];
-        let mut toolbar = h_flex()
-            .flex_none()
-            .h(px(if compact { material::TOUCH_TARGET } else { 40. }))
-            .w_full()
-            .px(px(if compact {
-                material::COMPACT_PAGE_INSET
-            } else {
-                8.
-            }))
-            .gap_1()
-            .items_center()
-            .child(selector);
+        let mut toolbar =
+            material::bar("diff-toolbar", material::Bar::Toolbar, compact, cx).child(selector);
         if compact {
             // The scope and base pickers are the row; everything else is one
             // overflow menu, so a 393pt page never has to choose what to clip.
@@ -1237,13 +1223,8 @@ impl DiffPanel {
             toolbar = toolbar.child(div().flex_1());
             for (option, id, icon, on, label) in options {
                 toolbar = toolbar.child(
-                    Button::new(id)
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(icon)
+                    material::toolbar_icon_button(id, icon, label, false)
                         .selected(on)
-                        .tooltip(label)
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.apply_view_option(option, cx)),
                         ),
@@ -1413,16 +1394,15 @@ impl DiffPanel {
                     } == Some(comment.line_end)
             })
             .map(|comment| {
-                h_flex()
+                material::card(cx)
+                    .flex_row()
+                    .items_center()
                     .min_w_full()
-                    .px_3()
-                    .py_1p5()
-                    .gap_2()
                     .relative()
-                    .rounded(material::radius_card(cx))
-                    .bg(cx.theme().muted)
                     .font_family(cx.theme().font_family.clone())
-                    .text_size(px(11.))
+                    .text_token(&cx.theme().tokens.typography.xs)
+                    // The comment's accent rail; no owner draws an accent edge
+                    // on a card.
                     .child(
                         div()
                             .absolute()
@@ -1433,7 +1413,7 @@ impl DiffPanel {
                             .rounded_full()
                             .bg(cx.theme().primary),
                     )
-                    .child(Icon::empty().path("icons/pencil.svg").xsmall())
+                    .child(Icon::empty().path("icons/pencil.svg"))
                     .child(comment.text.clone())
                     .into_any_element()
             })
@@ -1452,13 +1432,8 @@ impl DiffPanel {
         if selection.is_some() {
             if let Some(input) = &self.comment_input {
                 rows.push(
-                    v_flex()
+                    material::card(cx)
                         .min_w_full()
-                        .px_3()
-                        .py_2()
-                        .gap_2()
-                        .bg(cx.theme().muted)
-                        .rounded(material::radius_card(cx))
                         .font_family(cx.theme().font_family.clone())
                         .child(Input::new(input).appearance(false))
                         .child(
@@ -1499,7 +1474,7 @@ impl DiffPanel {
             .gap_1()
             .child(
                 div()
-                    .text_size(px(15.))
+                    .text_body(self.compact(cx), cx)
                     .text_color(cx.theme().muted_foreground)
                     .child(crate::tr!("diff.empty")),
             )
@@ -1507,9 +1482,37 @@ impl DiffPanel {
     }
 }
 
+/// One item of the scope and base pickers: a menu item that marks the chosen
+/// scope. These pickers are virtual lists inside a `Popover`, which
+/// `PopupMenu` does not host, so the item is drawn on the menu's frame.
+fn menu_row(
+    id: gpui::ElementId,
+    label: gpui::SharedString,
+    selected: bool,
+    compact: bool,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    material::accessible_clickable(
+        material::menu_item_frame(compact, cx),
+        id,
+        Role::MenuItem,
+        label,
+        cx,
+    )
+    .aria_selected(selected)
+    .flex_none()
+    .w_full()
+    .items_center()
+    .text_body(compact, cx)
+    .cursor_pointer()
+    .hover(|row| row.bg(cx.theme().muted))
+    .when(selected, |row| row.bg(cx.theme().muted))
+}
+
 fn turn_row(
     turn: usize,
     selected: bool,
+    compact: bool,
     panel: &Entity<DiffPanel>,
     session: &str,
     popover: &Entity<PopoverState>,
@@ -1521,29 +1524,15 @@ fn turn_row(
     let label: gpui::SharedString = crate::tr!("diff.turn", count = turn + 1)
         .into_owned()
         .into();
-    material::accessible_clickable(
-        h_flex(),
-        ("diff-turn-item", turn),
-        Role::MenuItem,
+    menu_row(
+        ("diff-turn-item", turn).into(),
         label.clone(),
+        selected,
+        compact,
         cx,
     )
-    .aria_selected(selected)
-    .flex_none()
-    .w_full()
-    .px_2()
-    .py_1()
-    .gap_2()
-    .items_center()
-    .rounded(cx.theme().tokens.radius.sm)
-    .text_size(px(13.))
-    .cursor_pointer()
-    .hover(|s| s.bg(cx.theme().list_hover))
-    .when(selected, |this| this.bg(cx.theme().list_active))
     .child(div().flex_1().min_w_0().truncate().child(label))
-    .when(selected, |this| {
-        this.child(Icon::new(IconName::Check).xsmall())
-    })
+    .when(selected, |this| this.child(Icon::new(IconName::Check)))
     .on_click(move |_, window, cx| {
         panel.update(cx, |this, cx| {
             this.scopes.insert(session.clone(), DiffScope::Turn(turn));
@@ -1562,31 +1551,20 @@ fn base_row(
     index: usize,
     branch: &str,
     selected: bool,
-    panel: &Entity<DiffPanel>,
-    session: &str,
-    popover: &Entity<PopoverState>,
+    compact: bool,
+    on_pick: impl Fn(String, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
-    let panel = panel.clone();
-    let session = session.to_string();
-    let popover = popover.clone();
     let chosen = branch.to_string();
-    material::accessible_clickable(
-        h_flex(),
-        ("diff-base-item", index),
-        Role::MenuItem,
-        crate::tr!("diff.base_branch", branch = branch).into_owned(),
+    menu_row(
+        ("diff-base-item", index).into(),
+        crate::tr!("diff.base_branch", branch = branch)
+            .into_owned()
+            .into(),
+        selected,
+        compact,
         cx,
     )
-    .aria_selected(selected)
-    .flex_none()
-    .w_full()
-    .px_2()
-    .py_1()
-    .rounded(cx.theme().tokens.radius.sm)
-    .cursor_pointer()
-    .hover(|row| row.bg(cx.theme().list_hover))
-    .when(selected, |row| row.bg(cx.theme().list_active))
     .child(
         div()
             .flex_1()
@@ -1594,18 +1572,8 @@ fn base_row(
             .truncate()
             .child(branch.to_string()),
     )
-    .when(selected, |row| {
-        row.child(Icon::new(IconName::Check).xsmall())
-    })
-    .on_click(move |_, window, cx| {
-        panel.update(cx, |this, cx| {
-            this.bases.insert(session.clone(), chosen.clone());
-            this.cache = None;
-            this.git_preview = None;
-            cx.notify();
-        });
-        popover.update(cx, |state, cx| state.dismiss(window, cx));
-    })
+    .when(selected, |row| row.child(Icon::new(IconName::Check)))
+    .on_click(move |_, window, cx| on_pick(chosen.clone(), window, cx))
     .into_any_element()
 }
 

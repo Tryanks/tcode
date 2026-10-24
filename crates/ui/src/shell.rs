@@ -23,6 +23,7 @@ use web_time::Instant;
 
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::tabs::{TabBar, TabItem};
 use crate::window_state::{NavigationPanel, NavigationSnapshot};
 use gpui::{
@@ -33,8 +34,8 @@ use gpui::{
     WeakEntity, Window, actions, canvas, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{
-    NavMotion, NavOperation, NavStack, NavStackState, ResizableState, StyledExt as _, h_flex,
-    h_resizable, motion::PresencePhase, motion::Transition, resizable_panel, v_flex,
+    NavMotion, NavOperation, NavStack, NavStackState, ResizableState, h_flex, h_resizable,
+    motion::PresencePhase, motion::Transition, resizable_panel, v_flex,
 };
 use tcode_client::host::ClientHost;
 use tcode_core::ui::RightTab;
@@ -89,12 +90,12 @@ pub(crate) const WINDOW_DRAGGABLE: bool = cfg!(not(any(
 /// column top rows are the drag surface). Mirrors gpui-component's `TitleBar`
 /// mechanics: a press arms a move, the first drag calls `start_window_move`.
 /// Child buttons that stop propagation on mouse-down won't arm a drag.
-pub(crate) fn window_drag_area(
+pub(crate) fn window_drag_area<E: gpui::InteractiveElement>(
     id: impl Into<ElementId>,
-    el: Div,
+    el: E,
     window: &mut Window,
     cx: &mut App,
-) -> Div {
+) -> E {
     if !WINDOW_DRAGGABLE {
         return el;
     }
@@ -1560,25 +1561,20 @@ fn nav_bar(
     // own controls out of the content and stays draggable by its top strip.
     let traffic_lights = window_caption::traffic_light_inset(window);
     let hosts_caption = window_caption::compact_hosts_caption();
-    let leading = h_flex()
-        .absolute()
-        .inset_0()
-        .px(px(4.))
-        .when(traffic_lights > Pixels::ZERO, |row| row.pl(traffic_lights))
-        .items_center()
-        .children(back)
-        .child(window_caption::drag_region(div().flex_1().h_full()))
-        .children(actions)
-        .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)));
+    // The 44pt controls keep their glyphs clear of the edge inside their own hit
+    // box, so the strip takes the dense inset, not the page inset.
+    let strip = crate::material::bar("compact-nav", crate::material::Bar::Strip, false, cx)
+        .relative()
+        .when(traffic_lights > Pixels::ZERO, |strip| {
+            strip.pl(traffic_lights)
+        })
+        .when(hosts_caption, |strip| strip.pr_0());
     v_flex()
         .flex_none()
         .w_full()
         .bg(crate::material::content_surface(cx))
         .child(
-            window_drag_area("compact-nav-drag", div(), window, cx)
-                .relative()
-                .w_full()
-                .h(px(52.))
+            window_drag_area("compact-nav-drag", strip, window, cx)
                 .child(
                     // Centered in the room the controls leave it: the back
                     // label and the trailing actions each reserve their own
@@ -1596,76 +1592,41 @@ fn nav_bar(
                                 .max_w_full()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(17.))
-                                .line_height(px(22.))
-                                .font_semibold()
+                                .text_title(cx)
                                 .child(title),
                         )
                         .children(subtitle),
                 )
-                .child(leading),
+                .children(back)
+                .child(window_caption::drag_region(div().flex_1().h_full()))
+                .children(actions)
+                .children(hosts_caption.then(|| window_caption::caption_controls(window, cx))),
         )
         .child(crate::material::faded_hairline(cx))
 }
 
-/// Back control labelled with the parent destination's short fixed label.
-fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Stateful<Div> {
-    crate::material::accessible_clickable(h_flex(), id, Role::Button, parent.clone(), cx)
+/// Back control labelled with the parent destination's short fixed label,
+/// which is never truncated.
+fn back_button(id: &'static str, parent: SharedString) -> crate::widgets::button::Button {
+    use crate::widgets::button::{Button, ButtonVariants as _};
+    Button::new(id)
+        .ghost()
+        .touch(true)
+        .icon(Icon::empty().path("icons/chevron-left.svg"))
+        .label(parent)
         // A control press must not arm the ancestor window drag region.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .flex_none()
-        .h(px(44.))
-        .pl(px(4.))
-        .pr(px(10.))
-        .gap(px(2.))
-        .items_center()
-        .rounded(cx.theme().tokens.radius.lg)
-        .cursor_pointer()
-        .text_color(cx.theme().foreground)
-        .active(|s| s.bg(cx.theme().foreground.opacity(0.08)))
-        .child(
-            Icon::empty()
-                .path("icons/chevron-left.svg")
-                .size(px(20.))
-                .flex_none(),
-        )
-        .child(
-            // A fixed label is short by construction: it is never truncated.
-            div()
-                .flex_none()
-                .text_size(px(15.))
-                .line_height(px(20.))
-                .child(parent),
-        )
 }
 
-/// A nav-bar icon button: 44×44 touch target, a 20pt stroke icon in
-/// `foreground`. Blue is reserved for primary actions and live state.
+/// A nav-bar icon button. Blue is reserved for primary actions and live state.
 fn nav_icon_button(
     id: impl Into<ElementId>,
     aria_label: impl Into<SharedString>,
     icon: IconName,
-    enabled: bool,
-    cx: &App,
-) -> gpui::Stateful<Div> {
-    let theme = cx.theme();
-    crate::material::accessible_clickable(div(), id, Role::Button, aria_label.into(), cx)
+) -> crate::widgets::button::Button {
+    crate::material::toolbar_icon_button(id, icon, aria_label, true)
         // A control press must not arm the ancestor window drag region.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .size(px(44.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(cx.theme().tokens.radius.lg)
-        .cursor_pointer()
-        .text_color(if enabled {
-            theme.foreground
-        } else {
-            theme.muted_foreground
-        })
-        .active(|s| s.bg(theme.foreground.opacity(0.08)))
-        .child(Icon::new(icon).size(px(20.)))
 }
 
 /// The muted second line under a nav-bar title: how the machine a thread
@@ -1675,9 +1636,7 @@ fn nav_subtitle(text: impl Into<SharedString>, cx: &App) -> AnyElement {
         .max_w_full()
         .min_w_0()
         .truncate()
-        .text_size(px(13.))
-        .line_height(px(18.))
-        .text_color(cx.theme().muted_foreground)
+        .text_secondary(true, cx)
         .child(text.into())
         .into_any_element()
 }
@@ -1717,7 +1676,7 @@ impl AppShell {
             self.window_state.read(cx).parent()?.back_label()
         };
         Some(
-            back_button("compact-back", label, cx)
+            back_button("compact-back", label)
                 .debug_selector(|| "compact-back".into())
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.back(window, cx);
@@ -1731,8 +1690,6 @@ impl AppShell {
             "compact-open-palette",
             crate::tr!("sidebar.search").into_owned(),
             IconName::Search,
-            self.attachment.is_some(),
-            cx,
         )
         .debug_selector(|| "compact-open-palette".into())
         .on_click(cx.listener(|this, _, window, cx| {
@@ -1882,15 +1839,12 @@ impl AppShell {
             ),
             None => (crate::tr!("mobile.threads").into_owned().into(), None),
         };
-        let projects = store.projects();
         let sidebar = attachment.sidebar.clone();
         let actions = vec![
             nav_icon_button(
                 "compact-new-thread",
                 compact_label("new_thread"),
                 IconName::Plus,
-                !projects.is_empty(),
-                cx,
             )
             .debug_selector(|| "compact-new-thread".into())
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1901,8 +1855,6 @@ impl AppShell {
                 "compact-settings",
                 compact_label("settings"),
                 IconName::Settings,
-                true,
-                cx,
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.window_state
@@ -2015,8 +1967,6 @@ impl AppShell {
                         "compact-panels",
                         crate::tr!("chat.panels").into_owned(),
                         IconName::PanelRight,
-                        true,
-                        cx,
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.open_panels(cx);
@@ -2153,7 +2103,13 @@ impl AppShell {
                 window,
                 cx,
             ))
-            .child(div().flex_none().px(px(16.)).py(px(8.)).child(segments))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(crate::material::COMPACT_PAGE_INSET))
+                    .py(cx.theme().tokens.spacing.sm)
+                    .child(segments),
+            )
             .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
     }
@@ -2589,8 +2545,7 @@ impl AppShell {
                 ]));
                 element
             })
-            .text_size(px(16.))
-            .line_height(px(22.))
+            .text_token(&cx.theme().tokens.typography.md)
             .on_action(cx.listener(Self::on_toggle_palette))
             .on_action(cx.listener(Self::on_open_source_control))
             .key_context("TcodeShell")
@@ -2666,20 +2621,14 @@ impl AppShell {
         };
         window_drag_area(
             "hosts-header-drag",
-            h_flex()
-                .flex_none()
-                .h(px(52.))
-                .w_full()
-                .px_2()
-                .gap_2()
-                .items_center()
+            crate::material::bar("hosts-header", crate::material::Bar::Strip, false, cx)
                 .when(hosts_caption, |strip| strip.relative()),
             window,
             cx,
         )
-        .child(window_caption::drag_region(
-            div().flex_1().text_size(px(15.)).font_medium().child(title),
-        ))
+        .child(window_caption::drag_region(crate::material::bar_title(
+            title, cx,
+        )))
         .children(hosts_caption.then(|| {
             div()
                 .absolute()
@@ -3001,24 +2950,23 @@ impl AppShell {
                                     px(RIGHT_PANEL_MIN_WIDTH).min(beside_sidebar)..beside_sidebar,
                                 )
                                 .child(
-                                    div()
-                                        .id("right-panel-overlay")
-                                        .debug_selector(|| "right-panel-overlay".into())
-                                        .size_full()
-                                        .role(Role::Dialog)
-                                        .tab_group()
-                                        .track_focus(&focus)
-                                        .key_context("Popover")
-                                        .on_action(window.listener_for(
-                                            &attachment.floating_focus,
-                                            gpui_base::PopoverState::on_action_cancel,
-                                        ))
-                                        .bg(cx.theme().popover)
-                                        .shadow_lg()
-                                        .border_l_1()
-                                        .border_color(cx.theme().border)
-                                        .occlude()
-                                        .child(panel),
+                                    crate::material::floating_panel(
+                                        div().id("right-panel-overlay"),
+                                        crate::material::Side::Right,
+                                        cx,
+                                    )
+                                    .debug_selector(|| "right-panel-overlay".into())
+                                    .size_full()
+                                    .role(Role::Dialog)
+                                    .tab_group()
+                                    .track_focus(&focus)
+                                    .key_context("Popover")
+                                    .on_action(window.listener_for(
+                                        &attachment.floating_focus,
+                                        gpui_base::PopoverState::on_action_cancel,
+                                    ))
+                                    .occlude()
+                                    .child(panel),
                                 ),
                         ),
                 )
@@ -3104,30 +3052,26 @@ impl AppShell {
                 )
                 .when(overlay_visible, |this| {
                     this.child(
-                        div()
-                            .id("sidebar-hover-overlay")
-                            .absolute()
-                            .left_0()
-                            .top_0()
-                            .h_full()
-                            .w(overlay_width)
-                            // The sidebar fill is translucent, so back the
-                            // floating layer with the near-opaque popover surface
-                            // to prevent the chat beneath from bleeding through.
-                            .bg(cx.theme().popover)
-                            .shadow_lg()
-                            .border_r_1()
-                            .border_color(cx.theme().border)
-                            // The blocker and hover listener share this hitbox:
-                            // the overlay owns its full visible lifetime.
-                            .occlude()
-                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                this.update_sidebar_overlay(
-                                    SidebarHoverTransition::Overlay(*hovered),
-                                    cx,
-                                );
-                            }))
-                            .child(sidebar),
+                        crate::material::floating_panel(
+                            div().id("sidebar-hover-overlay"),
+                            crate::material::Side::Left,
+                            cx,
+                        )
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .h_full()
+                        .w(overlay_width)
+                        // The blocker and hover listener share this hitbox:
+                        // the overlay owns its full visible lifetime.
+                        .occlude()
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            this.update_sidebar_overlay(
+                                SidebarHoverTransition::Overlay(*hovered),
+                                cx,
+                            );
+                        }))
+                        .child(sidebar),
                     )
                 })
                 .into_any_element()

@@ -29,6 +29,7 @@ use crate::{
     sizing::Sizable as _,
     store::{TopicKind, WorkspaceStore, observe_store_topics},
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         button::{Button, ButtonVariants as _},
         input::Input,
@@ -841,14 +842,12 @@ impl PullRequestView {
                     .unwrap_or_else(|| key.repository.clone())
             });
         let muted = cx.theme().muted_foreground;
-        let text = if compact { 13. } else { 12. };
         let mut line_two = h_flex()
             .flex_wrap()
-            .gap_x(px(6.))
-            .gap_y(px(2.))
+            .gap_x(cx.theme().tokens.spacing.sm)
+            .gap_y(cx.theme().tokens.spacing.xxs)
             .items_center()
-            .text_size(px(text))
-            .text_color(muted)
+            .text_secondary(compact, cx)
             .child(
                 div()
                     .id("pr-detail-number")
@@ -938,7 +937,11 @@ impl PullRequestView {
                     .into_owned()
                 }));
         }
-        let mut chips = h_flex().gap(px(6.)).items_center().text_size(px(text));
+        let mut chips = h_flex()
+            .gap(cx.theme().tokens.spacing.sm)
+            .items_center()
+            .text_secondary(compact, cx)
+            .text_color(cx.theme().foreground);
         let mut has_chip = false;
         if let Some(snapshot) = snapshot
             .as_ref()
@@ -949,7 +952,7 @@ impl PullRequestView {
                     .flex_none()
                     .gap_1()
                     .items_center()
-                    .child(Icon::new(icon).size(px(14.)).text_color(color))
+                    .child(Icon::new(icon).text_color(color))
                     .child(label)
             };
             if let Some(checks) = snapshot.checks_state {
@@ -1041,7 +1044,7 @@ impl PullRequestView {
             chips = chips.child(
                 div()
                     .id("pr-detail-watch")
-                    .child(Icon::new(IconName::Eye).size(px(14.)).text_color(muted))
+                    .child(Icon::new(IconName::Eye).text_color(muted))
                     .tooltip(move |window, cx| {
                         Tooltip::new(
                             crate::tr!(if paused {
@@ -1063,22 +1066,23 @@ impl PullRequestView {
         let _ = (&session, window);
         v_flex()
             .flex_none()
-            .px(px(if compact {
-                material::COMPACT_PAGE_INSET
+            .px(if compact {
+                px(material::COMPACT_PAGE_INSET)
             } else {
-                12.
-            }))
+                cx.theme().tokens.spacing.sm
+            })
             .pt_2()
             .pb_2()
-            .gap(px(6.))
+            .gap(cx.theme().tokens.spacing.xs)
             .child(
                 h_flex()
                     .items_start()
                     .gap_2()
                     .child(
                         div()
-                            .pt(px(2.))
-                            .child(Icon::new(glyph).size(px(16.)).text_color(color)),
+                            .pt(cx.theme().tokens.spacing.xs)
+                            .text_title(cx)
+                            .child(Icon::new(glyph).text_color(color)),
                     )
                     .child(self.title_line(title, snapshot.is_some(), cx)),
             )
@@ -1143,9 +1147,8 @@ impl PullRequestView {
                 h_flex()
                     .gap_1()
                     .items_center()
-                    .text_size(px(11.))
-                    .text_color(muted)
-                    .child(Icon::new(IconName::Unlink).size(px(12.)))
+                    .text_secondary(compact, cx)
+                    .child(Icon::new(IconName::Unlink))
                     .child(crate::tr!(condition))
             }))
             .into_any_element()
@@ -1238,7 +1241,6 @@ impl PullRequestView {
     /// The title, its edit affordance (`pr-title-edit`) and the title editor.
     fn title_line(&self, title: String, known: bool, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.compact(cx);
-        let size = if compact { 17. } else { 15. };
         let editable = known
             && !self.read_only(cx)
             && self
@@ -1263,7 +1265,7 @@ impl PullRequestView {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(size))
+                        .text_title(cx)
                         .child(Input::new(input).disabled(saving)),
                 )
                 .child(
@@ -1288,8 +1290,7 @@ impl PullRequestView {
         let text = div()
             .flex_1()
             .min_w_0()
-            .text_size(px(size))
-            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_title(cx)
             .line_clamp(2)
             .when(!known, |title| {
                 title.font_family(cx.theme().mono_font_family.clone())
@@ -1483,73 +1484,62 @@ impl PullRequestView {
         let url = self.url(cx);
         let store = self.store.clone();
         let session = self.current.as_ref().map(|(session, _)| session.clone());
-        h_flex()
-            .flex_none()
-            .h(px(40.))
-            .px_2()
-            .gap_1()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                Button::new("pr-detail-back")
+        material::bar_divider_below(
+            material::bar("pr-detail-sub-bar", material::Bar::Toolbar, false, cx),
+            cx,
+        )
+        .items_center()
+        .child(
+            Button::new("pr-detail-back")
+                .ghost()
+                .small()
+                .icon(IconName::ChevronLeft)
+                .label(crate::tr!("pull_requests.detail.back"))
+                .tooltip(crate::tr!("pull_requests.detail.back_tooltip"))
+                .on_click(move |_, _, cx| {
+                    if let Some(session) = &session {
+                        store.update(cx, |store, cx| {
+                            store.set_open_pull_request(session, None, cx)
+                        });
+                    }
+                }),
+        )
+        .child(div().flex_1())
+        .children(self.primary(false, cx))
+        .child(self.refresh_button(refreshing, false, cx))
+        .when_some(url, |bar, url| {
+            bar.child(
+                Button::new("pr-detail-open")
                     .ghost()
                     .small()
-                    .icon(IconName::ChevronLeft)
-                    .label(crate::tr!("pull_requests.detail.back"))
-                    .tooltip(crate::tr!("pull_requests.detail.back_tooltip"))
-                    .on_click(move |_, _, cx| {
-                        if let Some(session) = &session {
-                            store.update(cx, |store, cx| {
-                                store.set_open_pull_request(session, None, cx)
-                            });
-                        }
-                    }),
+                    .compact()
+                    .icon(IconName::ExternalLink)
+                    .tooltip(crate::tr!(
+                        "pull_requests.open_on_host",
+                        host_name = self.host_name(cx)
+                    ))
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
             )
-            .child(div().flex_1())
-            .children(self.primary(false, cx))
-            .child(self.refresh_button(refreshing, false, cx))
-            .when_some(url, |bar, url| {
-                bar.child(
-                    Button::new("pr-detail-open")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::ExternalLink)
-                        .tooltip(crate::tr!(
-                            "pull_requests.open_on_host",
-                            host_name = self.host_name(cx)
-                        ))
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
-                )
-            })
-            .when_some(self.menu(cx).zip(key), |bar, (menu, key)| {
-                bar.child(
-                    Button::new("pr-detail-menu")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::Ellipsis)
-                        .aria_label(
-                            crate::tr!(
-                                "pull_requests.actions_for",
-                                number = key.number.to_string()
-                            )
+        })
+        .when_some(self.menu(cx).zip(key), |bar, (menu, key)| {
+            bar.child(
+                Button::new("pr-detail-menu")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .icon(IconName::Ellipsis)
+                    .aria_label(
+                        crate::tr!("pull_requests.actions_for", number = key.number.to_string())
                             .into_owned(),
-                        )
-                        .tooltip(
-                            crate::tr!(
-                                "pull_requests.actions_for",
-                                number = key.number.to_string()
-                            )
+                    )
+                    .tooltip(
+                        crate::tr!("pull_requests.actions_for", number = key.number.to_string())
                             .into_owned(),
-                        )
-                        .dropdown_menu(move |menu_state, window, cx| {
-                            (menu)(menu_state, window, cx)
-                        }),
-                )
-            })
-            .into_any_element()
+                    )
+                    .dropdown_menu(move |menu_state, window, cx| (menu)(menu_state, window, cx)),
+            )
+        })
+        .into_any_element()
     }
 
     /// The header's primary action (`pr-primary-action`): one, by the rank, from the host's
@@ -1584,6 +1574,8 @@ impl PullRequestView {
             }
             (false, None) => crate::tr!("pull_requests.detail.refresh_unloaded").into_owned(),
         };
+        // `toolbar_icon_button`'s touch form takes its glyph as a child, which `Button::loading`
+        // cannot swap for a spinner, so this square holds the button's place while it spins.
         if refreshing {
             return div()
                 .flex_none()
@@ -1728,8 +1720,7 @@ impl PullRequestView {
                 h_flex()
                     .flex_none()
                     .gap_1()
-                    .text_size(px(11.))
-                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_meta_mono(compact, cx)
                     .child(
                         div()
                             .text_color(cx.theme().success)
@@ -1741,27 +1732,31 @@ impl PullRequestView {
                             .child(format!("−{deletions}")),
                     )
             });
-        h_flex()
-            .flex_none()
-            .when(compact, |row| row.py(px(8.)))
-            .when(!compact, |row| row.h(px(40.)))
-            .px(px(if compact {
-                material::COMPACT_PAGE_INSET
-            } else {
-                12.
-            }))
-            .gap_2()
-            .items_center()
-            .child(
-                div().flex_1().min_w_0().child(
-                    TabBar::new("pr-view")
-                        .segmented()
-                        .compact(compact)
-                        .items(segments),
-                ),
-            )
-            .children(stats)
-            .into_any_element()
+        let switch = div().flex_1().min_w_0().child(
+            TabBar::new("pr-view")
+                .segmented()
+                .compact(compact)
+                .items(segments),
+        );
+        if compact {
+            // A touch segmented track is taller than a touch bar, so this row takes its content's
+            // height at the page inset.
+            let spacing = &cx.theme().tokens.spacing;
+            h_flex()
+                .flex_none()
+                .py(spacing.sm)
+                .px(px(material::COMPACT_PAGE_INSET))
+                .gap(spacing.sm)
+                .child(switch)
+                .children(stats)
+                .into_any_element()
+        } else {
+            material::bar("pr-view-bar", material::Bar::Toolbar, false, cx)
+                .items_center()
+                .child(switch)
+                .children(stats)
+                .into_any_element()
+        }
     }
 
     /// Host conditions above the switch: a credential to connect, a rate limit, an unlink.
@@ -1779,16 +1774,17 @@ impl PullRequestView {
             .collect::<Vec<_>>()
         });
         let errors = errors.unwrap_or_default();
+        let inset = if self.compact(cx) {
+            px(material::COMPACT_PAGE_INSET)
+        } else {
+            cx.theme().tokens.spacing.sm
+        };
         let notice = |text: String, action: Option<AnyElement>, cx: &App| {
-            h_flex()
-                .mx(px(12.))
-                .px_3()
-                .py_2()
-                .gap_2()
+            material::card(cx)
+                .flex_row()
                 .items_center()
-                .rounded_md()
-                .bg(cx.theme().muted)
-                .text_size(px(12.))
+                .mx(inset)
+                .text_token(&cx.theme().tokens.typography.xs)
                 .child(div().flex_1().min_w_0().child(text))
                 .children(action)
                 .into_any_element()
@@ -1966,35 +1962,32 @@ impl PullRequestView {
                 )
                 .into_any_element()
             }
-            _ => v_flex()
-                .m_3()
-                .p_3()
-                .gap_2()
-                .rounded(material::radius_card(cx))
-                .bg(cx.theme().danger.opacity(0.08))
-                .border_1()
-                .border_color(cx.theme().danger.opacity(0.3))
-                .text_size(px(13.))
-                .child(div().font_weight(gpui::FontWeight::MEDIUM).child(title))
+            _ => div()
+                .p(cx.theme().tokens.spacing.md)
                 .child(
-                    div()
-                        .id("pr-failure-reason")
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(reason(error))
-                        .tooltip({
-                            let full = error.message.clone();
-                            move |window, cx| Tooltip::new(full.clone()).build(window, cx)
-                        }),
-                )
-                .child(
-                    div().child(
-                        Button::new("pr-failure-retry")
-                            .outline()
-                            .xsmall()
-                            .label(crate::tr!("pull_requests.detail.retry"))
-                            .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
-                    ),
+                    material::notice(cx.theme().danger, cx)
+                        .flex_col()
+                        .items_start()
+                        .child(div().text_title(cx).child(title))
+                        .child(
+                            div()
+                                .id("pr-failure-reason")
+                                .text_secondary(self.compact(cx), cx)
+                                .child(reason(error))
+                                .tooltip({
+                                    let full = error.message.clone();
+                                    move |window, cx| Tooltip::new(full.clone()).build(window, cx)
+                                }),
+                        )
+                        .child(
+                            div().child(
+                                Button::new("pr-failure-retry")
+                                    .outline()
+                                    .xsmall()
+                                    .label(crate::tr!("pull_requests.detail.retry"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+                            ),
+                        ),
                 )
                 .into_any_element(),
         }

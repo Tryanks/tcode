@@ -96,22 +96,17 @@ impl Composer {
         Some(
             Button::new("voice-mic")
                 .ghost()
-                .compact()
-                .h(px(28.))
-                .rounded(crate::material::radius_chip(cx))
+                .chip()
                 .disabled(!available)
                 .tooltip(tooltip)
                 .child(if preparing {
-                    Spinner::new().small().color(color).into_any_element()
+                    Spinner::new().color(color).into_any_element()
                 } else {
-                    let icon = Icon::empty()
-                        .path("icons/mic.svg")
-                        .small()
-                        .text_color(color);
+                    let icon = Icon::empty().path("icons/mic.svg").text_color(color);
                     if status == SpeechStatus::Recording {
                         div()
                             .rounded_full()
-                            .p(px(2.))
+                            .p(cx.theme().tokens.spacing.xxs)
                             .bg(cx.theme().danger.opacity(0.08 + state.level() * 0.42))
                             .child(icon)
                             .into_any_element()

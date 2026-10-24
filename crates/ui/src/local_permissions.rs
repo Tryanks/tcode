@@ -13,15 +13,16 @@ use computer_use_mcp::permissions::{
 };
 use gpui::{
     AnyElement, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    Subscription, Window, div, px,
+    Subscription, Window, div,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use crate::icon::{Icon, IconName};
 use crate::shell::Quit;
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
 const KINDS: [PermissionKind; 2] = [
@@ -128,7 +129,12 @@ impl LocalPermissions {
         window.dispatch_action(Box::new(Quit), cx);
     }
 
-    fn permission_row(&self, kind: PermissionKind, cx: &mut Context<Self>) -> AnyElement {
+    fn permission_row(
+        &self,
+        kind: PermissionKind,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let granted = self.status.granted(kind);
         let grant_label = match self.grant_flow.action(kind) {
             PermissionGrantAction::Request => crate::tr!("permissions.grant"),
@@ -184,53 +190,27 @@ impl LocalPermissions {
                 );
         }
         // No reset affordance: the grant lives in the OS, not in settings.json.
-        h_flex()
-            .w_full()
-            .min_h(px(44.))
-            .px_3()
-            .py_2p5()
-            .gap_3()
-            .items_center()
+        crate::material::group_row(cx)
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
                     .gap_0p5()
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_medium()
-                            .child(crate::tr!(name_key)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!(why_key)),
-                    ),
+                    .child(div().text_body(compact, cx).child(crate::tr!(name_key)))
+                    .child(div().text_secondary(compact, cx).child(crate::tr!(why_key))),
             )
             .child(controls)
             .into_any_element()
     }
 
-    fn restart_banner(&self, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .w_full()
+    fn restart_banner(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+        crate::material::notice(cx.theme().warning, cx)
             .items_center()
-            .gap_3()
-            .rounded(crate::material::radius_card(cx))
-            .bg(cx.theme().warning.opacity(0.12))
-            .px_3()
-            .py_2p5()
-            .child(
-                Icon::new(IconName::Info)
-                    .small()
-                    .text_color(cx.theme().warning_foreground),
-            )
+            .text_body(compact, cx)
+            .child(Icon::new(IconName::Info).text_color(cx.theme().warning_foreground))
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(13.))
                     .child(crate::tr!("permissions.restart_banner")),
             )
             .child(
@@ -245,15 +225,16 @@ impl LocalPermissions {
 }
 
 impl Render for LocalPermissions {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let rows: Vec<AnyElement> = KINDS
             .iter()
-            .map(|kind| self.permission_row(*kind, cx))
+            .map(|kind| self.permission_row(*kind, compact, cx))
             .collect();
         v_flex()
             .w_full()
             .gap_2()
             .child(crate::material::grouped(rows, cx))
-            .children(self.restart_hint.then(|| self.restart_banner(cx)))
+            .children(self.restart_hint.then(|| self.restart_banner(compact, cx)))
     }
 }

@@ -74,13 +74,15 @@ pub(crate) fn image_tiles(
                         120.,
                         80.,
                     );
+                    // The image is the control; a `Button` would add chrome
+                    // around a picture.
                     crate::material::accessible_clickable(
                         gpui::div()
                             .w(px(120.))
                             .h(px(80.))
                             .flex_shrink_0()
                             .cursor_pointer()
-                            .rounded_lg()
+                            .rounded(crate::material::radius_card(cx))
                             .overflow_hidden()
                             .bg(cx.theme().muted)
                             .child(

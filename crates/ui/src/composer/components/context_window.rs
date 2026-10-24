@@ -86,21 +86,16 @@ impl Render for ContextWindowDialog {
         let default_suffix = crate::tr!("composer.option_default").into_owned();
 
         let row = |id: gpui::SharedString, label: String, checked: bool, cx: &App| {
-            h_flex()
+            crate::material::menu_item_frame(compact, cx)
                 .id(id)
-                .when(compact, |row| row.min_h(px(44.)))
                 .w_full()
-                .px_2()
-                .py_1p5()
-                .gap_2()
                 .items_center()
-                .rounded(cx.theme().tokens.radius.sm)
                 .cursor_pointer()
-                .text_size(px(13.))
+                .text_body(compact, cx)
                 .hover(|style| style.bg(cx.theme().muted))
                 .child(div().flex_1().min_w_0().child(label))
                 .when(checked, |row| {
-                    row.child(Icon::new(IconName::Check).xsmall().text_color(primary))
+                    row.child(Icon::new(IconName::Check).text_color(primary))
                 })
         };
 
@@ -153,7 +148,7 @@ impl Render for ContextWindowDialog {
                 .when(self.invalid, |this| {
                     this.child(
                         div()
-                            .text_size(px(11.))
+                            .text_secondary(compact, cx)
                             .text_color(cx.theme().danger)
                             .child(crate::tr!(
                                 "composer.context_window_invalid",
@@ -191,30 +186,22 @@ fn largest_window(store: &Entity<WorkspaceStore>, cx: &App) -> u64 {
 /// Open the context-window dialog for the active model.
 pub(in super::super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut App) {
     let dialog = cx.new(|cx| ContextWindowDialog::new(store, window, cx));
-    window.open_dialog(cx, move |builder, _, cx| {
+    window.open_dialog(cx, move |builder, _, _| {
         let content = dialog.clone();
         let apply = dialog.clone();
         builder
-            .w(px(360.))
-            .rounded(crate::material::radius_overlay(cx))
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
             .title(crate::tr!("composer.context_window_title").into_owned())
             .content(move |content_el, _, _| content_el.child(content.clone()))
             .footer(
                 DialogActions::new()
                     .child(
                         Button::new("context-window-cancel")
-                            .rounded(crate::material::radius_button(cx))
                             .label(crate::tr!("composer.cancel"))
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
                         Button::new("context-window-apply")
                             .primary()
-                            .rounded(crate::material::radius_button(cx))
                             .label(crate::tr!("composer.context_window_apply"))
                             .on_click(move |_, window, cx| {
                                 apply.update(cx, |dialog, cx| dialog.apply_custom(window, cx));

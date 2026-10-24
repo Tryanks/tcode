@@ -21,6 +21,7 @@ use crate::{
     overlay::{Notification, OverlayExt as _},
     sizing::Sizable as _,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         button::{Button, ButtonVariants as _},
         input::{InputEvent, InputState, Textarea, TextareaState},
@@ -850,12 +851,12 @@ impl PullRequestView {
         let (submit_view, submit_slot) = (view.clone(), slot.clone());
         let (escape_view, escape_slot) = (view.clone(), slot.clone());
         let cancellable = spec.cancel;
-        let muted = cx.theme().muted_foreground;
+        let compact = this.compact(cx);
         Some(
             v_flex()
                 .w_full()
                 .gap_2()
-                .text_size(px(12.))
+                .text_token(&cx.theme().tokens.typography.xs)
                 .font_family(cx.theme().font_family.clone())
                 .on_action(move |_: &gpui_base::actions::Cancel, _, cx| {
                     // Escape cancels only an editor with nothing new in it.
@@ -863,13 +864,10 @@ impl PullRequestView {
                         escape_view.update(cx, |view, cx| view.close_editor(&escape_slot, cx));
                     }
                 })
-                .children(spec.context.map(|context| {
-                    div()
-                        .text_size(px(11.))
-                        .text_color(muted)
-                        .truncate()
-                        .child(context)
-                }))
+                .children(
+                    spec.context
+                        .map(|context| div().text_secondary(compact, cx).truncate().child(context)),
+                )
                 .child(
                     Textarea::new(&input)
                         .disabled(submitting)
@@ -878,7 +876,7 @@ impl PullRequestView {
                 .when(conflict, |editor| {
                     editor.child(
                         div()
-                            .text_size(px(11.))
+                            .text_secondary(compact, cx)
                             .text_color(cx.theme().warning)
                             .child(crate::tr!(
                                 "pull_requests.compose.edit_conflict",
@@ -888,7 +886,7 @@ impl PullRequestView {
                 })
                 .children(notice.map(|notice| {
                     div()
-                        .text_size(px(11.))
+                        .text_secondary(compact, cx)
                         .text_color(cx.theme().warning)
                         .child(notice)
                 }))
@@ -979,7 +977,7 @@ impl PullRequestView {
                 Button::new(SharedString::from(format!("pr-editor-row-{slot:?}")))
                     .outline()
                     .w_full()
-                    .h(px(material::TOUCH_TARGET))
+                    .with_size(px(material::TOUCH_TARGET))
                     .disabled(read_only)
                     .label(if read_only {
                         crate::tr!("pull_requests.compose.read_only").into_owned()

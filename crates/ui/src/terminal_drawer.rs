@@ -11,6 +11,7 @@ use std::{
 use web_time::Instant;
 
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _};
 use crate::{
@@ -1516,11 +1517,11 @@ impl Render for TerminalDrawer {
                     }))
                     .trailing(
                         h_flex()
-                            .gap(px(2.))
+                            .gap(cx.theme().tokens.spacing.xxs)
                             .when(*bell, |this| {
                                 this.child(
                                     div()
-                                        .text_size(px(11.))
+                                        .text_token(&cx.theme().tokens.typography.xs)
                                         .text_color(cx.theme().warning)
                                         .child("●"),
                                 )
@@ -1595,19 +1596,11 @@ impl Render for TerminalDrawer {
         } else {
             crate::tr!("terminal.new")
         };
-        let mut header = h_flex()
-            .flex_none()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .h(px(if compact { material::TOUCH_TARGET } else { 40. }))
-            .px(px(if compact {
-                material::COMPACT_PAGE_INSET
-            } else {
-                8.
-            }))
-            .gap_1()
-            .items_center()
-            .child(tab_strip);
+        let mut header = material::bar_divider_below(
+            material::bar("terminal-toolbar", material::Bar::Toolbar, compact, cx),
+            cx,
+        )
+        .child(tab_strip);
         if compact {
             header = header
                 .child(
@@ -1715,17 +1708,17 @@ impl Render for TerminalDrawer {
                         })),
                 )
                 .child(
-                    Button::new("terminal-close-drawer")
-                        .flex_none()
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::Close)
-                        .tooltip(crate::tr!("terminal.close"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.workspace_store
-                                .update(cx, |store, cx| store.close_terminal_panel(cx));
-                        })),
+                    material::toolbar_icon_button(
+                        "terminal-close-drawer",
+                        IconName::Close,
+                        crate::tr!("terminal.close"),
+                        false,
+                    )
+                    .flex_none()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace_store
+                            .update(cx, |store, cx| store.close_terminal_panel(cx));
+                    })),
                 );
         }
 
@@ -1776,7 +1769,7 @@ impl Render for TerminalDrawer {
             }
             (Some(id), None) => self.render_terminal(id, cx),
             _ => div()
-                .p_3()
+                .p(cx.theme().tokens.spacing.md)
                 .child(crate::tr!("terminal.starting"))
                 .into_any_element(),
         };
