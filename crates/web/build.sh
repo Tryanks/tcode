@@ -4,16 +4,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DIST_DIR="${SCRIPT_DIR}/dist"
 cd "${REPO_ROOT}"
-if [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.127" ]]; then
-  echo 'Install matching CLI: cargo install wasm-bindgen-cli --version 0.2.127 --locked' >&2
+WASM_BINDGEN="$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q;}' Cargo.lock)"
+if [[ "$(wasm-bindgen --version)" != "wasm-bindgen ${WASM_BINDGEN}" ]]; then
+  echo "Install matching CLI: cargo install wasm-bindgen-cli --version ${WASM_BINDGEN} --locked" >&2
   exit 1
 fi
-cargo build -p tcode-web --target wasm32-unknown-unknown --release
+cargo build -p tcode-web --target wasm32-unknown-unknown --release --locked
 mkdir -p "${DIST_DIR}"
 wasm-bindgen --target web --out-dir "${DIST_DIR}" --out-name tcode_web \
   "${CARGO_TARGET_DIR:-${REPO_ROOT}/target}/wasm32-unknown-unknown/release/tcode_web.wasm"
 if command -v wasm-opt >/dev/null 2>&1; then
   wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
+    --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue \
     "${DIST_DIR}/tcode_web_bg.wasm" -o "${DIST_DIR}/tcode_web_bg.optimized.wasm"
   mv "${DIST_DIR}/tcode_web_bg.optimized.wasm" "${DIST_DIR}/tcode_web_bg.wasm"
 else

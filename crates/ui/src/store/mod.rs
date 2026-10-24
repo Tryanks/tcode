@@ -4052,6 +4052,7 @@ pub(crate) mod tests {
                                             invite: None,
                                             devices: vec![],
                                             traverse: vec![],
+                                            group: None,
                                         },
                                     )),
                                 }
@@ -4441,6 +4442,7 @@ pub(crate) mod tests {
             relay: None,
             addrs: vec!["192.168.31.5:47420".into()],
             last_connected_unix: None,
+            group_id: None,
             space_id: None,
             space_name: None,
         };

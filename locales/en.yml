@@ -1368,6 +1368,7 @@ hosts:
   forget: "Remove"
   actions: "Actions for %{name}"
   pair_again: "Pair again"
+  in_group: "In a machine group"
   local:
     unavailable: "Could not start: %{reason}"
     default_settings: "%{reason}. Its settings could not be read, so the default language and theme are in use."
@@ -1530,6 +1531,52 @@ spaces:
     show_qr: "Show QR"
     hide_qr: "Hide QR"
     resume: "Turn on link"
+
+group:
+  section: "MACHINE GROUP"
+  intro: "A group links this machine with your other machines. A device paired with any machine in the group can open every machine in it, and the group carries on when any one machine leaves."
+  risk: "Every machine in the group can let devices into all the others. Join only machines you trust; a group is off until you create or join one."
+  failed: "Could not update the group: %{error}"
+  leave: "Leave group"
+  leave_title: "Leave «%{name}»?"
+  leave_description: "The other machines stop admitting devices through this one. Devices paired here stay paired with this machine."
+  detail_note: "To add a device or another machine, use this machine's invitation: every machine in the group admits a device that pairs with it, and removing a device on any machine removes it from all of them."
+  invitation_note: "This machine is in «%{name}»: a device that pairs with this invitation can open every machine in the group, and another machine can join the group with it."
+  summary:
+    machine_one: "1 machine"
+    machines: "%{count} machines"
+  create:
+    action: "Create group"
+    title: "Create a machine group"
+    placeholder: "Group name"
+    confirm: "Create group"
+  join:
+    action: "Join group"
+    title: "Join a machine group"
+    description: "Paste the invitation of a machine in the group, from its Machines page or Settings → Remote. Like a device pairing, it works once and for five minutes."
+    placeholder: "tcode://pair?…"
+    address: "Machine's IP address (optional)"
+    address_placeholder: "Only when nothing finds the machine, e.g. 192.168.1.20"
+    confirm: "Join group"
+    not_a_group_link: "That is not the invitation of a machine in a group."
+    joined: "Joined «%{name}»"
+  brought:
+    title: "Every machine in the group will admit these devices, which are paired with this machine now:"
+    none: "No devices are paired with this machine yet, so none are brought into the group."
+  machines:
+    title: "Machines"
+    this: "This machine"
+    remove: "Remove"
+    remove_title: "Remove %{name} from the group?"
+    remove_description: "The other machines stop syncing with it and stop admitting the devices it brings from now on. Devices it already brought keep their access."
+  declined:
+    title: "Waiting for this machine"
+    description: "Other machines admitted these devices while this machine was not accepting new devices."
+    admit: "Admit"
+  remove_device:
+    title: "Remove %{name} from the group?"
+    description: "The device is disconnected and unpaired from every machine in «%{group}», not only this one. It can come back only by pairing again."
+    action: "Remove everywhere"
 
 member:
   connection: "Space «%{space}» · %{machine}"
