@@ -43,15 +43,24 @@ fn capabilities(spec: &ModelSpec) -> Vec<ModelCapability> {
 }
 
 /// A model's fast-mode switch: Claude's `fastMode` boolean or a Codex
-/// `serviceTier` select offering a fast tier. `None` when the model has
-/// neither. The composer's bolt and the Orchestrate Fast switch both key on it.
+/// `serviceTier` select offering a fast tier, and above it an ultrafast tier
+/// when the select offers one. `None` when the model has neither. The
+/// composer's bolt and the Orchestrate Fast switch both key on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FastMode {
     /// The option id the switch writes.
     pub option_id: String,
-    on: Value,
     off: Value,
-    default_on: bool,
+    fast: Value,
+    ultra: Option<Value>,
+    default_level: FastLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastLevel {
+    Off,
+    Fast,
+    Ultra,
 }
 
 impl FastMode {
@@ -61,9 +70,14 @@ impl FastMode {
                 id, default_value, ..
             } if id == "fastMode" => Some(Self {
                 option_id: id.clone(),
-                on: Value::Bool(true),
                 off: Value::Bool(false),
-                default_on: *default_value,
+                fast: Value::Bool(true),
+                ultra: None,
+                default_level: if *default_value {
+                    FastLevel::Fast
+                } else {
+                    FastLevel::Off
+                },
             }),
             OptionDescriptor::Select {
                 id,
@@ -72,15 +86,27 @@ impl FastMode {
                 ..
             } if id == "serviceTier" => {
                 let fast = options.iter().find(|choice| Self::is_fast_tier(choice))?;
-                let off = default_value
-                    .clone()
-                    .filter(|tier| tier != &fast.value)
-                    .unwrap_or_else(|| "default".into());
+                let ultra = options
+                    .iter()
+                    .find(|choice| Self::is_ultrafast_tier(choice));
+                let default = default_value.as_deref();
+                let default_level = if default == Some(fast.value.as_str()) {
+                    FastLevel::Fast
+                } else if ultra.is_some_and(|ultra| default == Some(ultra.value.as_str())) {
+                    FastLevel::Ultra
+                } else {
+                    FastLevel::Off
+                };
+                let off = match (default_level, default) {
+                    (FastLevel::Off, Some(tier)) => tier.to_owned(),
+                    _ => "default".into(),
+                };
                 Some(Self {
                     option_id: id.clone(),
-                    default_on: default_value.as_deref() == Some(fast.value.as_str()),
-                    on: Value::String(fast.value.clone()),
                     off: Value::String(off),
+                    fast: Value::String(fast.value.clone()),
+                    ultra: ultra.map(|ultra| Value::String(ultra.value.clone())),
+                    default_level,
                 })
             }
             _ => None,
@@ -93,19 +119,43 @@ impl FastMode {
         choice.value == "fast" || choice.label.eq_ignore_ascii_case("fast")
     }
 
-    pub fn enabled(&self, selections: &[OptionSelection]) -> bool {
-        selections
-            .iter()
-            .find(|selection| selection.id == self.option_id)
-            .map_or(self.default_on, |selection| selection.value == self.on)
+    /// Whether a service-tier choice is Codex's `ultrafast` tier.
+    pub fn is_ultrafast_tier(choice: &SelectOption) -> bool {
+        choice.value == "ultrafast" || choice.label.eq_ignore_ascii_case("ultrafast")
     }
 
-    /// The option value that switches fast mode on or off.
-    pub fn value(&self, on: bool) -> Value {
-        if on {
-            self.on.clone()
+    pub fn level(&self, selections: &[OptionSelection]) -> FastLevel {
+        let Some(selection) = selections
+            .iter()
+            .find(|selection| selection.id == self.option_id)
+        else {
+            return self.default_level;
+        };
+        if selection.value == self.fast {
+            FastLevel::Fast
+        } else if self.ultra.as_ref() == Some(&selection.value) {
+            FastLevel::Ultra
         } else {
-            self.off.clone()
+            FastLevel::Off
+        }
+    }
+
+    /// The level a press of the switch moves to: off, fast, then ultrafast
+    /// when the model offers it, then off again.
+    pub fn next(&self, level: FastLevel) -> FastLevel {
+        match level {
+            FastLevel::Off => FastLevel::Fast,
+            FastLevel::Fast if self.ultra.is_some() => FastLevel::Ultra,
+            FastLevel::Fast | FastLevel::Ultra => FastLevel::Off,
+        }
+    }
+
+    /// The option value that selects a level.
+    pub fn value(&self, level: FastLevel) -> Value {
+        match level {
+            FastLevel::Off => self.off.clone(),
+            FastLevel::Fast => self.fast.clone(),
+            FastLevel::Ultra => self.ultra.clone().unwrap_or_else(|| self.fast.clone()),
         }
     }
 }
@@ -317,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_mode_keys_on_claude_boolean_and_codex_fast_tier() {
+    fn fast_mode_keys_on_claude_boolean_and_codex_fast_tiers() {
         let claude = ModelSpec {
             options: vec![OptionDescriptor::Boolean {
                 role: Default::default(),
@@ -331,14 +381,16 @@ mod tests {
             ..spec("opus", "Opus")
         };
         let fast = FastMode::of(&claude).unwrap();
-        assert!(!fast.enabled(&[]));
+        assert_eq!(fast.level(&[]), FastLevel::Off);
         let on = OptionSelection {
             id: "fastMode".into(),
-            value: fast.value(true),
+            value: fast.value(fast.next(FastLevel::Off)),
         };
         assert_eq!(on.value, serde_json::json!(true));
-        assert!(fast.enabled(&[on]));
-        assert_eq!(fast.value(false), serde_json::json!(false));
+        assert_eq!(fast.level(&[on]), FastLevel::Fast);
+        // No ultrafast tier: a second press turns fast mode off.
+        assert_eq!(fast.next(FastLevel::Fast), FastLevel::Off);
+        assert_eq!(fast.value(FastLevel::Off), serde_json::json!(false));
 
         // The app-server model list names the fast tier `priority` / "Fast".
         let codex = ModelSpec {
@@ -362,19 +414,33 @@ mod tests {
                         label: "Fast".into(),
                         description: None,
                     },
+                    SelectOption {
+                        unavailable: None,
+                        value: "ultrafast".into(),
+                        label: "Ultrafast".into(),
+                        description: None,
+                    },
                 ],
                 default_value: Some("default".into()),
             }],
             ..spec("gpt-6-astra", "GPT-6 Astra")
         };
         let fast = FastMode::of(&codex).unwrap();
-        assert!(!fast.enabled(&[]));
-        assert_eq!(fast.value(true), serde_json::json!("priority"));
-        assert_eq!(fast.value(false), serde_json::json!("default"));
-        assert!(fast.enabled(&[OptionSelection {
-            id: "serviceTier".into(),
-            value: serde_json::json!("priority"),
-        }]));
+        let select = |value: &str| {
+            [OptionSelection {
+                id: "serviceTier".into(),
+                value: serde_json::json!(value),
+            }]
+        };
+        assert_eq!(fast.level(&[]), FastLevel::Off);
+        assert_eq!(fast.value(FastLevel::Fast), serde_json::json!("priority"));
+        assert_eq!(fast.level(&select("priority")), FastLevel::Fast);
+        // With an ultrafast tier the presses run off → fast → ultrafast → off.
+        assert_eq!(fast.next(FastLevel::Fast), FastLevel::Ultra);
+        assert_eq!(fast.value(FastLevel::Ultra), serde_json::json!("ultrafast"));
+        assert_eq!(fast.level(&select("ultrafast")), FastLevel::Ultra);
+        assert_eq!(fast.next(FastLevel::Ultra), FastLevel::Off);
+        assert_eq!(fast.value(FastLevel::Off), serde_json::json!("default"));
 
         // Neither descriptor shape: no fast mode (Fable / Sonnet catalogs).
         let plain = ModelSpec {
