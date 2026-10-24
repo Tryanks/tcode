@@ -528,6 +528,7 @@ impl AppState {
             | AgentEvent::ContextCompacted(_)
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::PlanUpdated { .. }
+            | AgentEvent::GoalUpdated { .. }
             | AgentEvent::ProposedPlanDelta { .. }
             | AgentEvent::ProposedPlan { .. }
             | AgentEvent::ProviderStartFailed { .. } => {}

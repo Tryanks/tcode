@@ -592,6 +592,18 @@ impl WorkspaceStore {
             session_id: self.active_session_id().unwrap_or_default(),
         });
     }
+    pub fn set_goal(&mut self, objective: Option<String>, status: Option<agent::GoalStatus>) {
+        self.dispatch(Command::SetGoal {
+            session_id: self.active_session_id().unwrap_or_default(),
+            objective,
+            status,
+        });
+    }
+    pub fn clear_goal(&mut self) {
+        self.dispatch(Command::ClearGoal {
+            session_id: self.active_session_id().unwrap_or_default(),
+        });
+    }
     pub fn respond_approval(&mut self, request_id: String, decision: ApprovalDecision) {
         if self.approval_delivery_pending(&request_id) {
             return;
