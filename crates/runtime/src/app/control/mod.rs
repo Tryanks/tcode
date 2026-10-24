@@ -27,6 +27,13 @@ pub(super) struct ControlState {
     review_records: Vec<tcode_core::control::ReviewRecord>,
 }
 
+/// A tool's answer: ready on the host thread, or computed on the background executor because
+/// it runs git or reads the store, which would stall every client if done on the host thread.
+pub(super) enum ControlAnswer {
+    Now(serde_json::Value),
+    Later(HostTask<Result<serde_json::Value, String>>),
+}
+
 /// The thread behind a `tcode_control` call, with the grant in force when it arrived.
 pub(super) struct Caller {
     pub(super) thread_id: String,
@@ -192,7 +199,17 @@ impl AppState {
             }
             _ => Err("unknown thread".into()),
         };
-        let _ = reply.try_send(result);
+        match result {
+            Ok(ControlAnswer::Later(task)) => HostCx::spawn_detached(cx, async move {
+                let _ = reply.try_send(task.await);
+            }),
+            Ok(ControlAnswer::Now(value)) => {
+                let _ = reply.try_send(Ok(value));
+            }
+            Err(error) => {
+                let _ = reply.try_send(Err(error));
+            }
+        }
     }
 
     /// The grant check every call passes host-side, however the connection listed its tools:
@@ -252,15 +269,8 @@ impl AppState {
             let in_scope = grant
                 .scope
                 .reaches(caller.project_id.as_deref(), meta.project_id.as_deref());
-            let readable = op.reads_content()
-                && (target == caller.thread_id
-                    || meta.parent_session_id.as_deref() == Some(caller.thread_id.as_str())
-                    || caller_meta.as_ref().is_some_and(|caller_meta| {
-                        caller_meta
-                            .references
-                            .iter()
-                            .any(|reference| reference.thread_id == target)
-                    }));
+            let readable =
+                op.reads_content() && related_to_caller(caller, caller_meta.as_ref(), &meta);
             if !in_scope && !readable {
                 return Err(format!(
                     "refused: thread {target} is outside your grant's scope ({})",
@@ -276,22 +286,22 @@ impl AppState {
         caller: &Caller,
         op: ControlOp,
         cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
-        match op {
+    ) -> Result<ControlAnswer, String> {
+        let now = match op {
+            ControlOp::ListThreads(p) => return self.op_list_threads(caller, p, cx),
+            ControlOp::Search(p) => return self.op_search(caller, p, cx),
+            ControlOp::GetGit(p) => return self.op_get_git(caller, p, cx),
+            ControlOp::ReviewCandidates(p) => return self.op_review_candidates(caller, p, cx),
             ControlOp::ListProjects(p) => self.op_list_projects(caller, p, cx),
-            ControlOp::ListThreads(p) => self.op_list_threads(caller, p, cx),
             ControlOp::GetThread(p) => self.op_get_thread(caller, p, cx),
-            ControlOp::Search(p) => self.op_search(caller, p, cx),
             ControlOp::Outline(p) => self.op_outline(caller, p, cx),
             ControlOp::Read(p) => self.op_read(caller, p, cx),
             ControlOp::SearchInItem(p) => self.op_search_in_item(caller, p, cx),
             ControlOp::FileHistory(p) => self.op_file_history(caller, p, cx),
-            ControlOp::GetGit(p) => self.op_get_git(caller, p, cx),
             ControlOp::GetPullRequest(p) => self.op_get_pull_request(caller, p, cx),
             ControlOp::ListProviders(p) => self.op_list_providers(caller, p, cx),
             ControlOp::GetSettings(p) => self.op_get_settings(caller, p, cx),
             ControlOp::ReadTerminal(p) => self.op_read_terminal(caller, p, cx),
-            ControlOp::ReviewCandidates(p) => self.op_review_candidates(caller, p, cx),
             ControlOp::UpdateThreads(p) => self.op_update_threads(caller, p, cx),
             ControlOp::RecordReview(p) => self.op_record_review(caller, p, cx),
             ControlOp::SettleSelf(p) => self.op_settle_self(caller, p, cx),
@@ -310,7 +320,8 @@ impl AppState {
             ControlOp::Rewind(p) => self.op_rewind(caller, p, cx),
             ControlOp::PatchSettings(p) => self.op_patch_settings(caller, p, cx),
             ControlOp::RequestGrant(p) => self.op_request_grant(caller, p, cx),
-        }
+        };
+        now.map(ControlAnswer::Now)
     }
 
     /// Record a write in the target thread, as the actor's thread, and in the activity list.
@@ -368,6 +379,23 @@ impl AppState {
         }
         self.persist_meta(&meta, cx);
     }
+}
+
+/// Threads whose content the caller may read whatever its scope: itself, its orchestrated
+/// children and the threads it references.
+pub(super) fn related_to_caller(
+    caller: &Caller,
+    caller_meta: Option<&SessionMeta>,
+    target: &SessionMeta,
+) -> bool {
+    target.id == caller.thread_id
+        || target.parent_session_id.as_deref() == Some(caller.thread_id.as_str())
+        || caller_meta.is_some_and(|caller_meta| {
+            caller_meta
+                .references
+                .iter()
+                .any(|reference| reference.thread_id == target.id)
+        })
 }
 
 /// Whether a call may ask for `requested` under `granted`, from a caller in `caller_project`.

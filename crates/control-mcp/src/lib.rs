@@ -265,6 +265,7 @@ impl ControlOp {
         matches!(
             self,
             Self::GetThread(_)
+                | Self::Search(_)
                 | Self::Outline(_)
                 | Self::Read(_)
                 | Self::SearchInItem(_)
