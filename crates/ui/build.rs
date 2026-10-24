@@ -62,7 +62,10 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(preview_backend)");
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if env::var_os("CARGO_FEATURE_NATIVE_PREVIEW").is_some()
-        && matches!(os.as_str(), "macos" | "windows" | "android" | "ios")
+        && matches!(
+            os.as_str(),
+            "macos" | "windows" | "linux" | "android" | "ios"
+        )
     {
         println!("cargo::rustc-cfg=preview_backend");
     }

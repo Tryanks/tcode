@@ -1219,8 +1219,6 @@ preview:
   close: "关闭预览并释放页面"
   copy_url: "复制网址"
   starting: "预览正在启动…"
-  no_backend: "这台设备没有内嵌浏览器。"
-  no_backend_hint: "请在系统浏览器中打开该页面，或复制其网址。"
   unsupported_client: "这台设备没有内嵌浏览器，预览工具在这里不可用"
   unavailable: "预览浏览器无法启动。"
   unavailable_hint: "它需要系统的 webview 组件。Tcode 的其他功能不受影响。"

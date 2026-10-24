@@ -4,21 +4,19 @@
 //! copy-URL, the per-conversation URL/canvas state and the loading/error copy
 //! are ordinary replicated-store UI. What is native is the embedded browser —
 //! creating a `gpui-webview` child view, driving its history and JS, and snapshotting
-//! it — and that lives behind [`PREVIEW_BACKEND`].
+//! it — and that lives behind [`preview_backend`].
 //!
 //! ## Where a backend exists
 //!
-//! macOS, Windows, Android and iOS, and only with the `native-preview` feature
-//! (`cfg(preview_backend)`, set by the build script). Tcode's Linux client uses
-//! GPUI's calloop backend on Wayland or X11, while `gpui-webview` requires the
-//! application to start in X11 windowing mode and drives GTK from GPUI. Tcode
-//! does not opt into that setup, so Linux is excluded. Android hosts
-//! activity-owned WebViews through JNI; iOS adds a `gpui-webview` child to the
-//! GPUI host view and places it itself (see [`ios`]). Linux renders the same
-//! panel with open-externally and copy-URL, and answers every automation
-//! request with an explicit "unsupported" rather than timing out. The browser
-//! client does not offer the tab at all
-//! ([`WorkspaceStore::offers_preview`](crate::store::WorkspaceStore::offers_preview)).
+//! macOS, Windows, Linux, Android and iOS, and only with the `native-preview`
+//! feature (`cfg(preview_backend)`, set by the build script). On Linux
+//! `gpui-webview` embeds WebKitGTK as an X11 child and drives GTK from GPUI, so
+//! the backend exists only when GPUI runs on X11 (see [`preview_backend`]).
+//! Android hosts activity-owned WebViews through JNI; iOS adds a `gpui-webview`
+//! child to the GPUI host view and places it itself (see [`ios`]). A client
+//! without a backend — the browser, Linux on Wayland — neither offers the tab
+//! ([`WorkspaceStore::offers_preview`](crate::store::WorkspaceStore::offers_preview))
+//! nor subscribes to the agent's preview requests.
 //!
 //! Windows creation is deliberately asynchronous. WebView2 construction is
 //! asynchronous underneath, but wry's synchronous `build_as_child` waits by
@@ -65,9 +63,24 @@ use crate::window_caption;
 use crate::window_state::{Route, WindowState};
 use crate::{icon::IconName, sizing::Sizable as _};
 
-/// Whether this build can embed a browser. Views ask before offering an action
+/// Whether this client can embed a browser. Views ask before offering an action
 /// that needs one, so nothing renders an enabled control that cannot work.
-pub(crate) const PREVIEW_BACKEND: bool = cfg!(preview_backend);
+///
+/// On Linux `gpui-webview` parents WebKitGTK to an X11 window, so a client that
+/// GPUI connected to Wayland has none. GPUI picks Wayland whenever
+/// `WAYLAND_DISPLAY` names one, and `guess_compositor` reports that same choice;
+/// a window cannot change display server once open.
+pub fn preview_backend() -> bool {
+    #[cfg(all(preview_backend, target_os = "linux"))]
+    {
+        static ON_X11: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON_X11.get_or_init(|| gpui::GraphicalEnvironment::detect().guess_compositor() == "X11")
+    }
+    #[cfg(not(all(preview_backend, target_os = "linux")))]
+    {
+        cfg!(preview_backend)
+    }
+}
 
 #[cfg(preview_backend)]
 pub(crate) mod lifecycle;
@@ -326,7 +339,7 @@ impl PreviewPanel {
         // rather than offering the user a list of their own dev servers as if
         // they were the host's. A host URL typed into the field still works.
         let offer_ports = !cfg!(any(target_os = "android", target_os = "ios"))
-            && PREVIEW_BACKEND
+            && preview_backend()
             && !self.store.read(cx).is_remote();
         // Compact: one toolbar row on the page inset, with 44pt touch targets.
         // Close is a right-panel affordance — the Panel page's Back leaves it —
@@ -465,6 +478,7 @@ impl PreviewPanel {
         }
     }
 
+    #[cfg(preview_backend)]
     fn render_note(&self, title: String, detail: Option<String>, cx: &Context<Self>) -> AnyElement {
         v_flex()
             .flex_1()
@@ -578,20 +592,14 @@ mod portable {
 
         pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
 
+        /// Unreachable: without a backend the store never offers the tab.
         pub(super) fn render_body(
             &mut self,
-            active: Option<&str>,
+            _active: Option<&str>,
             _window: &mut Window,
-            cx: &mut Context<Self>,
+            _cx: &mut Context<Self>,
         ) -> AnyElement {
-            if active.is_none() {
-                return self.render_note(crate::tr!("preview.no_session").into_owned(), None, cx);
-            }
-            self.render_note(
-                crate::tr!("preview.no_backend").into_owned(),
-                Some(crate::tr!("preview.no_backend_hint").into_owned()),
-                cx,
-            )
+            div().into_any_element()
         }
 
         /// Nothing here can drive a page. Answer immediately and explicitly:
@@ -780,7 +788,12 @@ mod ios;
 
 #[cfg(all(
     preview_backend,
-    any(target_os = "macos", target_os = "windows", target_os = "ios")
+    any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "ios"
+    )
 ))]
 mod proxy;
 

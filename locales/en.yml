@@ -1226,8 +1226,6 @@ preview:
   close: "Close preview and release the page"
   copy_url: "Copy URL"
   starting: "Preview is starting…"
-  no_backend: "This device has no embedded browser."
-  no_backend_hint: "Open the page in your system browser, or copy its URL."
   unsupported_client: "this device has no embedded browser, so the preview tools are unavailable here"
   unavailable: "The preview browser could not start."
   unavailable_hint: "It needs the system webview component. Everything else in Tcode works without it."

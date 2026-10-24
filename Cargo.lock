@@ -11540,6 +11540,7 @@ dependencies = [
  "criterion",
  "futures",
  "futures-lite",
+ "gdk",
  "gpui-android",
  "gpui-base",
  "gpui-fast",
@@ -11586,6 +11587,7 @@ dependencies = [
  "unicode-width 0.2.2",
  "url",
  "web-time",
+ "webkit2gtk",
  "webview2-com",
  "windows-core 0.61.2",
 ]

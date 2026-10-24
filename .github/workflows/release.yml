@@ -108,7 +108,8 @@ jobs:
           "${apt_get[@]}" install -y --no-install-recommends \
             build-essential clang cmake pkg-config libssl-dev libzstd-dev \
             libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
-            libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev
+            libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev
 
       - name: Build release binary
         if: matrix.platform != 'ios'
@@ -370,7 +371,7 @@ jobs:
             `xattr -dr com.apple.quarantine /Applications/Tcode.app`
 
           - **Windows 11+**: the embedded preview uses the WebView2 runtime that ships with Windows.
-          - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
+          - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, a working Vulkan ICD/graphics driver, GTK 3 and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`). The embedded preview runs when Tcode runs on X11; on a Wayland session start it with `WAYLAND_DISPLAY` unset to use XWayland.
           - **Android**: the arm64 APK is signed with the project's release key and installs over previous releases signed with it. A build signed with a different key (a local build, or a release from before the key existed) must be uninstalled first.
           - **iOS / iPadOS 27+**: the arm64 IPA is unsigned. Re-sign it with your own Apple ID, or install it with a sideloading tool such as AltStore or Sideloadly, before it runs on a device.
 

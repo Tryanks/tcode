@@ -136,7 +136,7 @@ impl SettingsCapabilities {
         #[cfg(not(feature = "remote-hosting"))]
         let hosting = cfg!(target_family = "wasm");
         Self {
-            preview_backend: crate::preview_panel::PREVIEW_BACKEND,
+            preview_backend: crate::preview_panel::preview_backend(),
             hosting,
             local_permissions: cfg!(all(feature = "local-permissions", target_os = "macos")),
             remote_attachment: store.is_remote(),

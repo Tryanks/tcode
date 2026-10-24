@@ -137,7 +137,7 @@ pub struct BrowserLifecycle {
     creator: Creator,
     proxy: Option<tcode_traverse::preview::ProxyEntry>,
     endpoint: Option<tcode_traverse::preview::PreviewEndpoint>,
-    #[cfg(any(target_os = "windows", target_os = "android"))]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
     _native_proxy: Option<tcode_traverse::preview::NativeProxy>,
 }
 
@@ -156,15 +156,19 @@ impl BrowserLifecycle {
                 tcode_traverse::preview::PreviewEndpoint::new(host, tunnels.clone())
             })
         });
-        #[cfg(any(target_os = "windows", target_os = "android"))]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
         let mut native_proxy = None;
-        // The browser engine is pointed at a loopback bridge; macOS maps
-        // URLs per route instead and needs no entry.
+        // The browser engine is pointed at a loopback bridge; macOS and iOS
+        // map URLs per route instead and need no entry.
         let proxy: Result<Option<tcode_traverse::preview::ProxyEntry>, String> =
             proxy.and_then(|target| {
                 target
                     .map(|_target| {
-                        #[cfg(any(target_os = "windows", target_os = "android"))]
+                        #[cfg(any(
+                            target_os = "windows",
+                            target_os = "linux",
+                            target_os = "android"
+                        ))]
                         {
                             let bridge = tcode_traverse::preview::NativeProxy::new(
                                 endpoint.clone().unwrap(),
@@ -173,7 +177,7 @@ impl BrowserLifecycle {
                             native_proxy = Some(bridge);
                             Ok(entry)
                         }
-                        #[cfg(not(any(target_os = "windows", target_os = "android")))]
+                        #[cfg(any(target_os = "macos", target_os = "ios"))]
                         Ok(tcode_traverse::preview::ProxyEntry {
                             origin: String::new(),
                         })
@@ -198,7 +202,7 @@ impl BrowserLifecycle {
             owner,
             proxy: proxy.ok().flatten(),
             endpoint,
-            #[cfg(any(target_os = "windows", target_os = "android"))]
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
             _native_proxy: native_proxy,
             slots: HashMap::new(),
             warm: HashSet::new(),
@@ -751,6 +755,8 @@ mod platform {
             }
         };
         load_error::install(webview.read(cx).raw());
+        #[cfg(target_os = "linux")]
+        trap_gdk_x_errors();
         #[cfg(target_os = "ios")]
         super::super::ios::adopt(webview.read(cx).raw());
         webview.update(cx, |view, _| set_webview_visible(view, false));
@@ -769,6 +775,19 @@ mod platform {
         );
         Availability::Ready(webview)
     }
+}
+
+/// gpui-webview 0.8 releases a webview by destroying its X11 composition
+/// surface through GPUI's xcb connection while GDK's Xlib connection still
+/// holds unsent requests for the WebKit windows inside it. Those requests then
+/// fail with `BadWindow`, which GDK's default handler turns into `exit(1)` —
+/// on closing a page, deleting its thread, or quitting. GDK's connection
+/// carries only the embedded WebKit windows, so its X errors are trapped for
+/// the rest of the process once GTK is up.
+#[cfg(target_os = "linux")]
+fn trap_gdk_x_errors() {
+    static TRAPPED: std::sync::Once = std::sync::Once::new();
+    TRAPPED.call_once(gdk::error_trap_push);
 }
 
 #[cfg(target_os = "windows")]

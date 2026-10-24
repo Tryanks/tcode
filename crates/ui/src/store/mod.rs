@@ -594,11 +594,11 @@ impl WorkspaceStore {
         &self.scope
     }
 
-    /// Whether this client shows the Preview tab at all. A browser tab already
-    /// reaches the machine by address, so a dev server listening on the LAN
-    /// opens in a new tab there instead of inside Tcode.
+    /// Whether this client shows the Preview tab at all: only where it can
+    /// embed a browser. A browser tab already reaches the machine by address,
+    /// so a dev server listening on the LAN opens in a new tab there instead.
     pub(crate) fn offers_preview(&self) -> bool {
-        self.scope.is_full() && !cfg!(target_family = "wasm")
+        self.scope.is_full() && crate::preview_panel::preview_backend()
     }
 
     fn index_topic(&self) -> Topic {
@@ -717,7 +717,7 @@ impl WorkspaceStore {
                 // owner of the preview: it would win requests it can only
                 // refuse. It still answers `unsupported` for anything that
                 // reaches it through an already-open subscription.
-                if crate::preview_panel::PREVIEW_BACKEND {
+                if crate::preview_panel::preview_backend() {
                     let _ = self.host.subscribe(Subscription {
                         known_index: None,
                         topic: Topic::Preview,
