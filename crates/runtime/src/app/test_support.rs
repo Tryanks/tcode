@@ -79,6 +79,10 @@ impl TestAppContext {
         HostCx::new(self.mailbox_tx.clone(), self.outgoing_tx.clone())
     }
 
+    /// Run what is already queued for the host, and what that queues in turn,
+    /// until the mailbox is empty. Work running off the host (thread-pool
+    /// hops, timers) reports only when it finishes; a test that needs its
+    /// result waits for that state with [`Self::run_until`].
     pub(super) fn run_until_parked(&mut self) {
         let state = self
             .state
@@ -86,11 +90,13 @@ impl TestAppContext {
             .and_then(Weak::upgrade)
             .expect("test state must outlive its context");
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut idle_passes = 0_u32;
-        let mut saw_work = false;
         let mut store_flushed = false;
 
-        while Instant::now() < deadline {
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "test host failed to park within five seconds"
+            );
             let mut had_work = false;
             while let Ok(message) = self.mailbox_rx.try_recv() {
                 had_work = true;
@@ -104,44 +110,30 @@ impl TestAppContext {
                 had_work = true;
             }
             if had_work {
-                idle_passes = 0;
-                saw_work = true;
                 store_flushed = false;
-            } else {
-                idle_passes += 1;
-                // Loaded CI runners (notably Windows) can take well past 50ms
-                // to schedule a background completion; calls that processed
-                // work get a wider idle window before declaring parked.
-                let threshold = if saw_work && !store_flushed { 250 } else { 50 };
-                if idle_passes >= threshold {
-                    if !store_flushed {
-                        // Barrier the store-writer task so persisted state is
-                        // visible before callers assert on it. Its failure
-                        // path can enqueue more work, so keep draining.
-                        store_flushed = true;
-                        if self.flush_store_writer(&state, deadline) {
-                            idle_passes = 0;
-                            continue;
-                        }
-                    }
-                    let mut host_cx = self.host_cx();
-                    state.borrow().sync_terminal_handles();
-                    self.domain_diff
-                        .as_mut()
-                        .expect("test domain diff must be initialized")
-                        .emit_changes(&mut state.borrow_mut(), &mut host_cx);
-                    return;
+                continue;
+            }
+            if !store_flushed {
+                // Barrier the store-writer task so persisted state is
+                // visible before callers assert on it. Its failure path can
+                // enqueue more work, so keep draining.
+                store_flushed = true;
+                if self.flush_store_writer(&state, deadline) {
+                    continue;
                 }
             }
-            std::thread::sleep(Duration::from_millis(1));
+            break;
         }
-        panic!("test host failed to park within five seconds");
+        let mut host_cx = self.host_cx();
+        state.borrow().sync_terminal_handles();
+        self.domain_diff
+            .as_mut()
+            .expect("test domain diff must be initialized")
+            .emit_changes(&mut state.borrow_mut(), &mut host_cx);
     }
 
     /// Park repeatedly until `done` observes the state a background chain
-    /// must reach. `run_until_parked` only watches the mailbox, so a chain
-    /// that hops through `unblock` (thread-pool filesystem work) between the
-    /// last event and its completion can look idle longer than the window.
+    /// must reach.
     pub(super) fn run_until(&mut self, mut done: impl FnMut(&TestClientState) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -158,6 +150,7 @@ impl TestAppContext {
                 Instant::now() < deadline,
                 "test host condition not reached within five seconds"
             );
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 

@@ -8,7 +8,7 @@ use tcode_protocol::{
     CommandResponse, ProtocolError, PullRequestAction, PullRequestActionResult, PullRequestRead,
     PullRequestReadResponse, QueryResponse,
 };
-use tcode_services::forge::{Forge, ForgeError, ForgeErrorKind, Summary};
+use tcode_services::forge::{Checkout, Forge, ForgeError, ForgeErrorKind, Summary};
 
 pub(super) struct PullRequestRuntime {
     pub(super) forge: Arc<dyn Forge>,
@@ -170,7 +170,7 @@ fn resolve_reference(
         message: format!("This project has no {hosts} repository. Use a full PR URL."),
     };
     let key = forge
-        .checkout_repository(cwd)
+        .checkout_repository(&Checkout::new(cwd))
         .ok_or_else(no_repository)?
         .key(number);
     let url = forge.url(&key).ok_or_else(no_repository)?;
@@ -431,7 +431,11 @@ impl AppState {
                     let name = target.repository.ok_or_else(missing)?;
                     let host = target
                         .host
-                        .or_else(|| forge.checkout_repository(&cwd).map(|r| r.host))
+                        .or_else(|| {
+                            forge
+                                .checkout_repository(&Checkout::new(&cwd))
+                                .map(|r| r.host)
+                        })
                         .ok_or_else(|| "Pass host or a full PR URL.".to_owned())?;
                     let invalid = || format!("Invalid {hosts} repository.");
                     let key = forge
@@ -1485,7 +1489,9 @@ impl AppState {
                         metas,
                         cwd,
                         root,
-                        host.unblock(move || forge.discover(&read_cwd, &read_root, refresh)),
+                        host.unblock(move || {
+                            forge.discover(&read_cwd, &Checkout::new(&read_root), refresh)
+                        }),
                     ));
                 }
                 for (metas, cwd, root, task) in tasks {

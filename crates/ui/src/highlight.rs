@@ -543,9 +543,10 @@ mod tests {
         assert!(SYNTAX_SET.find_syntax_by_name("Plain Text").is_some());
     }
 
-    /// Mirror of syntect's private `substitute_backrefs_in_regex` with the
-    /// placeholder substituter its YAML loader validates patterns with; kept
-    /// in sync with `examples/sanitize_syntaxes.rs`.
+    /// syntect keeps `substitute_backrefs_in_regex` private, so the probe
+    /// substitutes back-references with the placeholder its YAML loader
+    /// validates patterns with, as `examples/sanitize_syntaxes.rs` does when it
+    /// regenerates the dump.
     fn substitute_backrefs(regex_str: &str) -> String {
         let mut result = String::with_capacity(regex_str.len());
         let mut last_was_escape = false;
@@ -581,8 +582,11 @@ mod tests {
             syntect::dumps::from_uncompressed_data(include_bytes!("../assets/syntaxes.bin"))
                 .expect("load shipped dump");
         let mut failures = Vec::new();
+        // Compilation depends only on the pattern, which many syntaxes share.
+        let mut checked = HashSet::new();
         for syntax in set.into_builder().syntaxes() {
             if let Some(first_line) = &syntax.first_line_match
+                && checked.insert(first_line.clone())
                 && let Some(err) = Regex::try_compile(first_line)
             {
                 failures.push(format!("{}: first_line_match: {err}", syntax.name));
@@ -597,7 +601,9 @@ mod tests {
                     } else {
                         pattern.regex.regex_str().to_string()
                     };
-                    if let Some(err) = Regex::try_compile(&probe) {
+                    if checked.insert(probe.clone())
+                        && let Some(err) = Regex::try_compile(&probe)
+                    {
                         failures.push(format!("{}: {err}", syntax.name));
                     }
                 }

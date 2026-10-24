@@ -21,33 +21,70 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  desktop:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+  # Not a matrix: a job can only wait for a whole matrix, and each platform's
+  # required check must wait for that platform's Clippy and tests alone.
+  linux-clippy:
+    name: Linux x64 / clippy
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x64
-            os: ubuntu-24.04
-          - name: macOS arm64
-            os: macos-26
-          - name: Windows x64
-            os: windows-2022
-    steps:
-      - uses: actions/checkout@v7
+    steps: &clippy-steps
+      - &checkout
+        uses: actions/checkout@v7
 
-      - name: Disable Windows Defender real-time scanning
+      - &disable-defender
+        name: Disable Windows Defender real-time scanning
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
         run: Set-MpPreference -DisableRealtimeMonitoring $true
 
-      - name: Install stable Rust
+      - &install-rust
+        name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      # Clippy restores the test jobs' cache but never saves its own: it already
+      # finishes before the tests, and a second cache per platform would overflow
+      # the repository's Actions cache quota and evict the test caches.
+      - name: Restore Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-${{ runner.arch }}
+          save-if: false
+
+      - &install-linux-dependencies
+        name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          # The Azure mirror has delivered packages at ~65 kB/s on these runners.
+          for source in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/apt-mirrors.txt; do
+            if [[ -f "$source" ]]; then
+              sudo sed -i 's|http://azure\.archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$source"
+            fi
+          done
+          apt_get=(sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3)
+          "${apt_get[@]}" update
+          "${apt_get[@]}" install -y --no-install-recommends \
+            build-essential clang cmake pkg-config libssl-dev libzstd-dev \
+            libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev \
+            libvulkan-dev xvfb
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  linux-tests:
+    name: Linux x64 / tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps: &test-steps
+      - *checkout
+      - *disable-defender
+      - *install-rust
 
       # Only main writes the cache so pull requests share one warm copy per
       # platform instead of evicting each other from the repository quota.
@@ -73,26 +110,15 @@ jobs:
           Expand-Archive -Path $archive -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
           cargo nextest --version
 
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
+      - *install-linux-dependencies
+
+      # Two slots per CPU: most tests wait on child processes rather than compute.
+      - name: Set nextest test concurrency
+        shell: python
         run: |
-          apt_get=(sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3)
-          "${apt_get[@]}" update
-          "${apt_get[@]}" install -y --no-install-recommends \
-            build-essential clang cmake pkg-config libssl-dev libzstd-dev \
-            libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
-            libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev \
-            libvulkan-dev xvfb
-          if cargo tree -e normal -i glib-sys >/dev/null 2>&1; then
-            "${apt_get[@]}" install -y --no-install-recommends \
-              libgtk-3-dev libwebkit2gtk-4.1-dev
-          fi
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+          import os
+          with open(os.environ["GITHUB_ENV"], "a") as env_file:
+              env_file.write(f"NEXTEST_TEST_THREADS={os.cpu_count() * 2}\n")
 
       - name: Run tests
         if: runner.os != 'Linux'
@@ -105,6 +131,60 @@ jobs:
       - name: Run tests under Xvfb
         if: runner.os == 'Linux'
         run: xvfb-run -a cargo nextest run --workspace --locked
+
+  macos-clippy:
+    name: macOS arm64 / clippy
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps: *clippy-steps
+
+  macos-tests:
+    name: macOS arm64 / tests
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps: *test-steps
+
+  windows-clippy:
+    name: Windows x64 / clippy
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps: *clippy-steps
+
+  windows-tests:
+    name: Windows x64 / tests
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps: *test-steps
+
+  # The required checks keep their platform names. A skipped or cancelled job
+  # must not let its platform's check pass.
+  linux:
+    name: Linux x64
+    needs: [linux-clippy, linux-tests]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps: &require-platform
+      - name: Require the platform's Clippy and tests
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: test "$RESULTS" = "success success"
+
+  macos:
+    name: macOS arm64
+    needs: [macos-clippy, macos-tests]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps: *require-platform
+
+  windows:
+    name: Windows x64
+    needs: [windows-clippy, windows-tests]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps: *require-platform
 
   dependencies:
     name: Dependency hygiene

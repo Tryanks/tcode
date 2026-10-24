@@ -100,6 +100,8 @@ fn linked_meta(id: &str, settled: bool) -> SessionMeta {
     meta
 }
 fn sweep(state: &TestEntity, cx: &mut TestAppContext) {
+    // A sweep that finds a sync still running is skipped; let that one finish.
+    cx.run_until(|state| !state.pull_requests.syncing);
     state.update(cx, |state, cx| {
         state.sweep_pull_requests(false, cx).detach()
     });
@@ -1045,7 +1047,11 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
         .events
         .try_send(AgentEvent::TurnAccepted { delivery_id })
         .unwrap();
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state
+            .resident("thread")
+            .is_some_and(|session| session.delivery_in_flight.is_none())
+    });
     let stored = store
         .read_events("thread")
         .unwrap()
@@ -1091,9 +1097,11 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
         .events
         .try_send(AgentEvent::McpServersNotAttached)
         .unwrap();
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        let tools = state.session_status_snapshot("thread").unwrap();
+        !tools.pull_request_tools.unwrap().attached
+    });
     let tools = disclosed(&state);
-    assert!(!tools.attached);
     assert!(tools.instructions.is_empty());
     assert!(!tools.tools.is_empty());
 }
@@ -2316,7 +2324,10 @@ fn a_partly_posted_review_keeps_only_unposted_drafts_for_the_next_submission() {
         fn pull_request_url(&self, _: &str) -> Option<(PullRequestKey, String)> {
             unreachable!()
         }
-        fn checkout_repository(&self, _: &Path) -> Option<Repository> {
+        fn checkout_repository(
+            &self,
+            _: &tcode_services::forge::Checkout<'_>,
+        ) -> Option<Repository> {
             unreachable!()
         }
         fn repository(&self, _: &str, _: &str) -> Option<Repository> {
@@ -2325,7 +2336,12 @@ fn a_partly_posted_review_keeps_only_unposted_drafts_for_the_next_submission() {
         fn url(&self, _: &PullRequestKey) -> Option<String> {
             unreachable!()
         }
-        fn discover(&self, _: &Path, _: &Path, _: bool) -> Result<Option<Discovered>, ForgeError> {
+        fn discover(
+            &self,
+            _: &Path,
+            _: &tcode_services::forge::Checkout<'_>,
+            _: bool,
+        ) -> Result<Option<Discovered>, ForgeError> {
             unreachable!()
         }
         fn summary(&self, _: &PullRequestKey) -> Result<Summary, ForgeError> {
