@@ -14,10 +14,11 @@
 //! application to start in X11 windowing mode and drives GTK from GPUI. Tcode
 //! does not opt into that setup, so Linux is excluded. Android hosts
 //! activity-owned WebViews through JNI; iOS adds a `gpui-webview` child to the
-//! GPUI host view and places it itself (see [`ios`]). The browser client has no
-//! child-view seam. It renders the same panel with open-externally and
-//! copy-URL, and answers every automation request with an explicit
-//! "unsupported" rather than timing out.
+//! GPUI host view and places it itself (see [`ios`]). Linux renders the same
+//! panel with open-externally and copy-URL, and answers every automation
+//! request with an explicit "unsupported" rather than timing out. The browser
+//! client does not offer the tab at all
+//! ([`WorkspaceStore::offers_preview`](crate::store::WorkspaceStore::offers_preview)).
 //!
 //! Windows creation is deliberately asynchronous. WebView2 construction is
 //! asynchronous underneath, but wry's synchronous `build_as_child` waits by

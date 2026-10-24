@@ -2050,7 +2050,7 @@ impl AppShell {
                 || panel.right_tab == RightTab::Agents
                 || selected_panel == Some("agents")
         });
-        let show_preview = store.scope().is_full();
+        let show_preview = store.offers_preview();
         attachment.preview.update(cx, |preview, cx| {
             preview.set_compact_panel_selected(
                 self.pending_navigation_restore.is_none()

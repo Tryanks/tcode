@@ -2949,10 +2949,7 @@ impl ChatView {
                                         }),
                                 )
                             })
-                            // The Preview tab is a product view now: it always
-                            // offers open-externally and copy-URL, and says so
-                            // where there is no embedded browser to drive.
-                            .when(self.workspace_store.read(cx).scope().is_full(), |row| {
+                            .when(self.workspace_store.read(cx).offers_preview(), |row| {
                                 row.child(
                                     Button::new("preview-panel")
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
