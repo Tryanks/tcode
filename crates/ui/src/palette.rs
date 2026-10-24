@@ -797,7 +797,8 @@ impl Render for CommandPalette {
                     // does not expose, and the row's bottom gap.
                     .child(crate::scroll::list_height_hint(
                         &self.list_state,
-                        px(if compact { 56. } else { 48. }) + cx.theme().tokens.spacing.xs,
+                        px(crate::material::selectable_row_two_line_height(compact))
+                            + cx.theme().tokens.spacing.xs,
                     )),
             )
             .into_any_element()

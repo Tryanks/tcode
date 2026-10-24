@@ -48,9 +48,6 @@ use arrange::{DraggedThread, DropZone, ThreadDrag};
 /// sized to the row height minus this vertical inset so it sits inside the row.
 const PROVIDER_MARK_ALPHA: f32 = 0.32;
 const PROVIDER_MARK_INSET: f32 = 8.;
-/// Right inset of provider marks: `selectable_row`'s desktop inset, which
-/// material does not expose.
-const THREAD_ROW_PADDING_X: f32 = 10.;
 /// A project's threads indent beneath its header's chevron and artwork;
 /// `selectable_row` has no indent.
 const THREAD_INDENT: f32 = 30.;
@@ -68,11 +65,8 @@ fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static,
     })
 }
 
-/// The desktop height `selectable_row_two_line` draws; material exposes no
-/// accessor for it, and the flat list's scroll math needs it.
-const FLAT_ROW_INNER_HEIGHT: f32 = 48.;
-/// Each flat slot: the row and the 2pt gap reserved below it.
-const FLAT_ROW_HEIGHT: f32 = FLAT_ROW_INNER_HEIGHT + 2.;
+/// Each flat slot: the desktop two-line row and the 2pt gap reserved below it.
+const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(false) + 2.;
 
 /// A critically damped spring keeps reordering legible without bouncing rows
 /// past their destinations. GPUI also makes this snap to the target when the
@@ -2745,7 +2739,7 @@ impl SessionsSidebar {
             .child(self.provider_mark(
                 meta,
                 crate::material::selectable_row_height(false),
-                THREAD_ROW_PADDING_X,
+                crate::material::selectable_row_inset(false).into(),
                 cx,
             ))
             .when_some(
@@ -2914,7 +2908,12 @@ impl SessionsSidebar {
             .justify_center()
             // First child so the row's content paints over the mark.
             .relative()
-            .child(self.provider_mark(meta, FLAT_ROW_INNER_HEIGHT, THREAD_ROW_PADDING_X, cx));
+            .child(self.provider_mark(
+                meta,
+                crate::material::selectable_row_two_line_height(false),
+                crate::material::selectable_row_inset(false).into(),
+                cx,
+            ));
 
         let row = {
             let title_or_input = self.thread_title_or_input(meta, &state, true, cx);
@@ -4290,7 +4289,9 @@ impl Render for SessionsSidebar {
                                 .as_ref()
                                 .is_some_and(|drag| drag.session_id == meta.id)
                             {
-                                row.child(Self::render_drag_gap(FLAT_ROW_INNER_HEIGHT))
+                                row.child(Self::render_drag_gap(
+                                    crate::material::selectable_row_two_line_height(false),
+                                ))
                             } else {
                                 let project_name = meta
                                     .project_id

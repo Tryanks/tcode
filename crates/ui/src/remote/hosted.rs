@@ -12,7 +12,7 @@ use crate::{
 };
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, IntoElement as _, ParentElement as _, Render,
-    SharedString, Styled as _, Task, Window, div, px,
+    SharedString, Styled as _, Task, Window, div,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{HostingAction, HostingState};

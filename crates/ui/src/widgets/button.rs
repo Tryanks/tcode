@@ -265,7 +265,7 @@ impl StatefulInteractiveElement for Button {
 }
 
 impl RenderOnce for Button {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let transparent = theme.background.opacity(0.);
         let (bg, fg, hover, border) = match self.variant {
@@ -325,10 +325,15 @@ impl RenderOnce for Button {
             ButtonRounded::Corners(corners) => corners,
         };
         let icon_only = self.label.is_none() && self.children.is_empty();
+        // A custom size sets the hit box, not the glyph: a 44pt touch control
+        // keeps the medium icon rather than a 33pt one.
         let icon_size = match self.size {
-            Size::Size(v) => Size::Size(v * 0.75),
+            Size::Size(_) => Size::Medium,
             size => size,
         };
+        // A caller that colours the button's text (a muted disclosure label)
+        // keeps that colour; the variant supplies the default.
+        let fg = self.base.style().text.color.unwrap_or(fg);
         let accessibility_label = self.aria_label.clone().or_else(|| self.label.clone());
         let ring = crate::material::focus_ring(cx);
         let press = self

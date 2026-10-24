@@ -90,9 +90,6 @@ use self::residency::{
 pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
 };
-/// [`window_caption::traffic_light_inset`] outside full screen on macOS:
-/// [`header_extra_width`] budgets widths with no window to ask.
-const TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// Below this header width the git and Open split buttons drop their text and
 /// keep their icon and chevron. The header with its longest git label, five
 /// panel toggles and a title kept to a few words beside a "+10" pull request
@@ -127,7 +124,7 @@ fn parent_session(store: &WorkspaceStore) -> Option<(String, String)> {
 /// inset, not its excess over the bar's, which leaves the widths a little slack.
 fn traffic_light_clearance(sidebar_collapsed: bool, fullscreen: bool) -> f32 {
     if cfg!(target_os = "macos") && sidebar_collapsed && !fullscreen {
-        TRAFFIC_LIGHT_INSET
+        crate::window_caption::TRAFFIC_LIGHT_INSET
     } else {
         0.
     }

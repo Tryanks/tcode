@@ -454,12 +454,28 @@ where
     selectable_surface(el, selectable_row_height(compact), selected, compact, cx)
 }
 
+/// The height of a [`selectable_row_two_line`].
+pub const fn selectable_row_two_line_height(compact: bool) -> f32 {
+    if compact { 56. } else { 48. }
+}
+
+/// The desktop inset of a [`selectable_row`].
+pub fn selectable_row_inset(compact: bool) -> Pixels {
+    if compact { px(12.) } else { px(10.) }
+}
+
 /// A [`selectable_row`] holding two lines of text.
 pub fn selectable_row_two_line<E>(el: E, selected: bool, compact: bool, cx: &App) -> E
 where
     E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
 {
-    selectable_surface(el, if compact { 56. } else { 48. }, selected, compact, cx)
+    selectable_surface(
+        el,
+        selectable_row_two_line_height(compact),
+        selected,
+        compact,
+        cx,
+    )
 }
 
 /// The desktop rail's 10pt inset and 6pt gap sit between gpui-base's spacing
@@ -470,12 +486,12 @@ where
 {
     let theme = cx.theme();
     let (active, hover) = (theme.list_active, theme.list_hover);
-    let spacing = &theme.tokens.spacing;
-    let (gap, inset) = if compact {
-        (spacing.sm, spacing.md)
+    let gap = if compact {
+        theme.tokens.spacing.sm
     } else {
-        (px(6.), px(10.))
+        px(6.)
     };
+    let inset = selectable_row_inset(compact);
     el.h(px(height))
         .flex()
         .items_center()
@@ -585,20 +601,24 @@ pub fn empty_state(
                 .font_semibold()
                 .child(title.into()),
         )
-        .child(
-            div()
-                .max_w(px(280.))
-                .text_center()
-                .text_token(&typography.sm)
-                .text_color(theme.muted_foreground)
-                .child(body.into()),
-        )
+        .map(|state| {
+            let body = body.into();
+            if body.is_empty() {
+                return state;
+            }
+            state.child(
+                div()
+                    .max_w(px(280.))
+                    .text_center()
+                    .text_token(&typography.sm)
+                    .text_color(theme.muted_foreground)
+                    .child(body),
+            )
+        })
 }
 
-/// A panel toolbar's icon control. Compact toolbars owe a finger a
-/// [`TOUCH_TARGET`] square, so the icon is passed as a *child*: `Button` scales
-/// whatever `icon()` receives from its own size, which would blow a 44pt button
-/// up to a 33pt glyph. The desktop keeps its dense control.
+/// A panel toolbar's icon control: a dense ghost button on the desktop, a
+/// [`TOUCH_TARGET`] square on a touch layout.
 pub fn toolbar_icon_button(
     id: impl Into<ElementId>,
     icon: impl Into<crate::icon::Icon>,
@@ -606,21 +626,15 @@ pub fn toolbar_icon_button(
     compact: bool,
 ) -> Button {
     let tooltip = tooltip.into();
+    let button = Button::new(id)
+        .ghost()
+        .aria_label(tooltip.clone())
+        .tooltip(tooltip)
+        .icon(icon);
     if compact {
-        Button::new(id)
-            .ghost()
-            .aria_label(tooltip.clone())
-            .tooltip(tooltip)
-            .with_size(px(TOUCH_TARGET))
-            .size(px(TOUCH_TARGET))
-            .child(crate::icon::Icon::new(icon).size(px(20.)))
+        button.with_size(px(TOUCH_TARGET)).touch(true)
     } else {
-        Button::new(id)
-            .ghost()
-            .small()
-            .compact()
-            .icon(icon)
-            .tooltip(tooltip)
+        button.small().compact()
     }
 }
 
@@ -645,9 +659,25 @@ pub fn rail_detail(content: impl IntoElement, cx: &App) -> Div {
 
 /// A status badge in one semantic fill.
 pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla, cx: &App) -> Div {
+    chip_surface(bg, fg, cx).child(label.into())
+}
+
+/// A [`semantic_chip`] led by a glyph, sized by the chip's text.
+pub fn semantic_chip_with_icon(
+    icon: crate::icon::Icon,
+    label: impl Into<SharedString>,
+    bg: Hsla,
+    fg: Hsla,
+    cx: &App,
+) -> Div {
+    chip_surface(bg, fg, cx).child(icon).child(label.into())
+}
+
+fn chip_surface(bg: Hsla, fg: Hsla, cx: &App) -> Div {
     let theme = cx.theme();
-    div()
+    gpui_base::h_flex()
         .flex_none()
+        .gap(theme.tokens.spacing.xs)
         .px(theme.tokens.spacing.sm)
         .py(px(1.))
         .rounded(radius_chip(cx))
@@ -655,7 +685,6 @@ pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla, cx: &Ap
         .text_token(&theme.tokens.typography.xs)
         .font_medium()
         .text_color(fg)
-        .child(label.into())
 }
 
 /// A [`semantic_chip`] with no semantic tone.
