@@ -884,12 +884,17 @@ with **Pair again**; protocol mismatches stop with **Update the app**.
   keeps updating, while scrollback catches up after scrolling has stopped for
   100 ms. This avoids repeatedly sending the whole retained ring between PTY reads.
 - Android and iOS have an embedded preview with history, JavaScript automation,
-  navigation errors and visible-page PNG capture. The browser client retains
-  URL/open/copy actions without an embedded preview backend.
+  navigation errors and visible-page PNG capture.
+- The browser client has no Preview tab. It already reaches the machine by
+  address, so start the dev server listening on the LAN (for example
+  `npm run dev -- --host`) and open `http://<machine-ip>:<port>/` in a new
+  browser tab. The agent's preview tools are answered by a native client
+  attached to the same machine.
 - Phones, tablets and browsers do not run providers, terminals or project files
   locally; the machine does. Every product view is present on them — threads,
-  chat, approvals, the terminal, diff, plan, preview, search, import and export —
-  and what differs is which *operations* the device can perform. A native file
+  chat, approvals, the terminal, diff, plan, preview (except in the browser),
+  search, import and export — and what differs is which *operations* the device
+  can perform. A native file
   dialog, an embedded preview browser, macOS permission grants, dictation and
   "open in editor" need a capability the device either has or does not; where it
   does not, the view says which machine can do it and offers what it can (open

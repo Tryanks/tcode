@@ -594,6 +594,13 @@ impl WorkspaceStore {
         &self.scope
     }
 
+    /// Whether this client shows the Preview tab at all. A browser tab already
+    /// reaches the machine by address, so a dev server listening on the LAN
+    /// opens in a new tab there instead of inside Tcode.
+    pub(crate) fn offers_preview(&self) -> bool {
+        self.scope.is_full() && !cfg!(target_family = "wasm")
+    }
+
     fn index_topic(&self) -> Topic {
         match &self.scope {
             WorkspaceScope::Full => Topic::Index,
@@ -1967,7 +1974,7 @@ impl WorkspaceStore {
     }
 
     pub fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
-        if tab == RightTab::Preview && !self.scope.is_full() {
+        if tab == RightTab::Preview && !self.offers_preview() {
             return;
         }
         if let Some(ui) = self.active_conversation_ui_mut() {
@@ -2005,7 +2012,7 @@ impl WorkspaceStore {
     }
 
     pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.scope.is_full() {
+        if !self.offers_preview() {
             return;
         }
         self.toggle_tab_panel(RightTab::Preview, cx);
@@ -2025,7 +2032,7 @@ impl WorkspaceStore {
     }
 
     pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.scope.is_full() {
+        if !self.offers_preview() {
             return;
         }
         if let Some(ui) = self.active_conversation_ui_mut()
@@ -2038,7 +2045,7 @@ impl WorkspaceStore {
     }
 
     pub fn open_tab_for(&mut self, session_id: &str, tab: RightTab, cx: &mut Context<Self>) {
-        if tab == RightTab::Preview && !self.scope.is_full() {
+        if tab == RightTab::Preview && !self.offers_preview() {
             return;
         }
         let destination = if self
