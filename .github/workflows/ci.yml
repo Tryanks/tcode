@@ -122,7 +122,7 @@ jobs:
 
       - name: Run tests
         if: runner.os != 'Linux'
-        run: cargo nextest run --workspace --locked
+        run: cargo nextest run --workspace --locked --no-fail-fast
 
       - name: Test iOS text input on the host
         if: runner.os == 'macOS'
@@ -130,7 +130,7 @@ jobs:
 
       - name: Run tests under Xvfb
         if: runner.os == 'Linux'
-        run: xvfb-run -a cargo nextest run --workspace --locked
+        run: xvfb-run -a cargo nextest run --workspace --locked --no-fail-fast
 
   macos-clippy:
     name: macOS arm64 / clippy
