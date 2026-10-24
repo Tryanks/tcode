@@ -17,6 +17,7 @@ parking_lot = "0.12"
 futures = "0.3"
 raw-window-handle = "0.6"
 smallvec = "1"
+unicode-segmentation = "1"
 
 [dev-dependencies]
 gpui = { package = "gpui-fast", version = "0.1.10", features = ["test-support"], default-features = false }

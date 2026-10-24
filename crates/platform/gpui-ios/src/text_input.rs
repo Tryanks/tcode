@@ -1,5 +1,6 @@
-use gpui::PlatformInputHandler;
+use gpui::{Bounds, Pixels, PlatformInputHandler, Point};
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const NOT_FOUND: usize = isize::MAX as usize;
 
@@ -113,10 +114,63 @@ pub fn commit_marked_text(handler: &mut PlatformInputHandler) {
     }
 }
 
+/// The caret offset nearest `target`, walking one grapheme at a time from the
+/// caret at `from`.
+///
+/// gpui-base 0.8.0's `character_index_for_point` tests the point against every
+/// line as if that line began at the top of the input, so it finds no index
+/// below the first line, and none past a line's last glyph. Caret bounds are
+/// right for every visible offset, so the walk follows those.
+pub fn caret_toward(
+    handler: &mut PlatformInputHandler,
+    from: usize,
+    target: Point<Pixels>,
+) -> Option<usize> {
+    let length = text_length(handler)?;
+    let text = read_text(handler, 0..length)?;
+    let mut stops = vec![0];
+    stops.extend(text.graphemes(true).scan(0, |end, grapheme| {
+        *end += grapheme.encode_utf16().count();
+        Some(*end)
+    }));
+    let mut caret = |index: usize| handler.bounds_for_range(stops[index]..stops[index]);
+    let mut at = stops.iter().rposition(|stop| *stop <= from)?;
+    let mut here = caret(at)?;
+    loop {
+        let next = if target.y >= here.bottom() {
+            (at + 1..stops.len()).find_map(|index| {
+                Some((index, caret(index)?)).filter(|(_, b)| b.top() >= here.bottom())
+            })
+        } else if target.y < here.top() {
+            (0..at).rev().find_map(|index| {
+                Some((index, caret(index)?)).filter(|(_, b)| b.bottom() <= here.top())
+            })
+        } else {
+            None
+        };
+        let Some((index, bounds)) = next else { break };
+        (at, here) = (index, bounds);
+    }
+    let distance = |bounds: &Bounds<Pixels>| (bounds.origin.x - target.x).abs();
+    let row = here.top();
+    for step in [1, -1] {
+        while let Some(index) = at
+            .checked_add_signed(step)
+            .filter(|index| *index < stops.len())
+            && let Some(bounds) = caret(index)
+            && bounds.top() == row
+            && distance(&bounds) < distance(&here)
+        {
+            (at, here) = (index, bounds);
+        }
+    }
+    Some(stops[at])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{ElementInputHandler, Entity, TestAppContext, VisualTestContext};
+    use gpui::{ElementInputHandler, Entity, TestAppContext, VisualTestContext, point, px};
     use gpui_base::input::{InputEvent, TextareaState};
     use std::{cell::Cell, rc::Rc};
 
@@ -220,6 +274,33 @@ mod tests {
             "ctrl-z"
         });
         assert_eq!(input.read_with(cx, |input, _| input.value()), "你好");
+    }
+
+    #[gpui::test]
+    fn caret_toward_reaches_later_lines_and_line_ends(cx: &mut TestAppContext) {
+        let (input, cx, mut handler) = textarea(cx);
+        cx.simulate_input("前😀e\u{301}");
+        cx.simulate_keystrokes("shift-enter");
+        cx.simulate_input("second");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            input.read_with(cx, |input, _| input.value()),
+            "前😀e\u{301}\nsecond"
+        );
+        fn caret(handler: &mut PlatformInputHandler, offset: usize) -> Bounds<Pixels> {
+            handler.bounds_for_range(offset..offset).unwrap()
+        }
+        let (first_end, second) = (caret(&mut handler, 5), caret(&mut handler, 9));
+        assert!(second.top() >= first_end.bottom());
+        let below_and_beyond = point(second.right() + px(1000.), second.center().y);
+        assert_eq!(caret_toward(&mut handler, 0, second.center()), Some(9));
+        assert_eq!(caret_toward(&mut handler, 0, below_and_beyond), Some(12));
+        let first_line_end = point(first_end.right() + px(1000.), first_end.center().y);
+        assert_eq!(caret_toward(&mut handler, 12, first_line_end), Some(5));
+        for offset in [0, 1, 3, 5] {
+            let target = caret(&mut handler, offset).center();
+            assert_eq!(caret_toward(&mut handler, 12, target), Some(offset));
+        }
     }
 
     #[test]

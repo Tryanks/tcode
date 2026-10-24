@@ -30,6 +30,7 @@ final class GPUITextInput: UIView, UITextInput {
     var returnKeyType: UIReturnKeyType = .default
     var enablesReturnKeyAutomatically = false
     var isSecureTextEntry = false
+    private var floatingCursorOffset: CGPoint?
     private var pasteGeneration: UInt64 = 0
     private var inputOwner: UInt64 = 0
 
@@ -285,6 +286,18 @@ final class GPUITextInput: UIView, UITextInput {
         guard let position = closestPosition(to: point) else { return nil }
         return tokenizer.rangeEnclosingPosition(position, with: .character, inDirection: UITextDirection.storage(.forward))
     }
+
+    // Keep the drag relative to the caret, so it does not jump when the spacebar is first held.
+    func beginFloatingCursor(at point: CGPoint) {
+        guard let caret = selectedTextRange?.end else { return }
+        let rect = caretRect(for: caret)
+        floatingCursorOffset = CGPoint(x: rect.midX - point.x, y: rect.midY - point.y)
+    }
+    func updateFloatingCursor(at point: CGPoint) {
+        guard let offset = floatingCursorOffset else { return }
+        edit { gpui_ios_move_caret_toward(point.x + offset.x, point.y + offset.y) }
+    }
+    func endFloatingCursor() { floatingCursorOffset = nil }
 
     private func unhandledPresses(_ presses: Set<UIPress>, down: Bool, repeatKey: Bool) -> Set<UIPress> {
         // Candidate navigation and confirmation belong to UIKit during composition.

@@ -5607,7 +5607,8 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
     });
 
     assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
-    cx.run_until_parked();
+    // The session's records reach clients once its log has been read.
+    cx.run_until(|state| state.log_hydrations.is_empty());
     let outgoing = cx.drain_outgoing();
     assert!(outgoing.iter().any(|message| matches!(
         message,

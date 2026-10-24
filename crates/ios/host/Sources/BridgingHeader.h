@@ -72,6 +72,7 @@ void gpui_ios_select_text(TextRange range);
 void gpui_ios_unmark_text(void);
 TextRect gpui_ios_text_rect(TextRange range);
 size_t gpui_ios_character_at_point(double x, double y);
+void gpui_ios_move_caret_toward(double x, double y);
 void gpui_ios_delete_backward(void);
 void gpui_ios_paste_text(const uint8_t *bytes, size_t length);
 uint8_t gpui_ios_key_event(const uint8_t *key_bytes, size_t key_length,
