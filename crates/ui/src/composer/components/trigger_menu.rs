@@ -230,7 +230,7 @@ impl Composer {
             })
             .filter_map(|meta| Some((fuzzy_score(query, &meta.title)?, meta)))
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         scored
             .into_iter()
             .take(THREAD_MENU_ROW_CAP)
