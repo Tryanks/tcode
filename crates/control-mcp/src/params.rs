@@ -687,3 +687,40 @@ pub struct RequestGrantParams {
     #[schemars(description = "Why, shown to the user with the request.")]
     pub reason: String,
 }
+
+// ---- observe responses ----
+
+/// The keys `get_thread` and `review_candidates` name in a settlement explanation, one per
+/// fact that keeps automatic settlement from applying.
+pub mod settlement_reason {
+    pub const ARCHIVED: &str = "archived";
+    pub const SETTLED: &str = "settled";
+    /// `settled_override` is Active: left by an unsettle or by pinning a settled thread.
+    pub const OVERRIDE_ACTIVE: &str = "override_active";
+    /// The per-thread auto-settle toggle is off ("keep").
+    pub const KEEP: &str = "keep";
+    pub const PINNED: &str = "pinned";
+    pub const ORCHESTRATE_CHILD: &str = "orchestrate_child";
+    pub const AUTOMATION_OFF: &str = "automation_off";
+    pub const AUTOMATION_SUGGEST_ONLY: &str = "automation_suggest_only";
+    pub const FOLLOW_UP: &str = "follow_up";
+    pub const PARKED: &str = "parked";
+    /// The user dismissed a settle suggestion and nothing happened in the thread since.
+    pub const SUGGESTION_DISMISSED: &str = "suggestion_dismissed";
+    /// A queued agent or server message that settling would drop.
+    pub const PENDING_AGENT_MESSAGE: &str = "pending_agent_message";
+    pub const PENDING_APPROVAL: &str = "pending_approval";
+    pub const PENDING_INPUT: &str = "pending_input";
+    pub const LIVE_RUN: &str = "live_run";
+    pub const BACKGROUND_WORK: &str = "background_work";
+    pub const UNSETTLED_CHILDREN: &str = "unsettled_children";
+    pub const PULL_REQUEST_WATCHES: &str = "pull_request_watches";
+    pub const PENDING_HUMAN_MESSAGE: &str = "pending_human_message";
+    pub const SCHEDULED_WAKE: &str = "scheduled_wake";
+    /// No inactivity rule applies (the settings turn it off) and no linked pull request ended.
+    pub const TIME_RULE_OFF: &str = "time_rule_off";
+    /// As [`TIME_RULE_OFF`], turned off by the thread's project override.
+    pub const PROJECT_TIME_RULE_OFF: &str = "project_time_rule_off";
+    /// The host has not loaded the thread's activity yet.
+    pub const ACTIVITY_UNKNOWN: &str = "activity_unknown";
+}
