@@ -19,7 +19,9 @@ use super::lifecycle::{Availability, BrowserLifecycle};
 use super::{
     PreviewPanel, ReplyTx, preview_key_for_session, unavailable_message, visible_preview_key,
 };
+use crate::icon::IconName;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 
 const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
 
@@ -235,34 +237,33 @@ impl PreviewPanel {
     }
 
     pub(super) fn history_controls(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        use crate::icon::IconName;
-        use crate::sizing::Sizable as _;
-        use crate::widgets::button::{Button, ButtonVariants as _};
+        use crate::material::toolbar_icon_button;
+        let compact = self.window_state.read(cx).compact;
         vec![
-            Button::new("preview-back")
-                .ghost()
-                .small()
-                .compact()
-                .icon(IconName::ArrowLeft)
-                .tooltip(crate::tr!("preview.back"))
-                .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx)))
-                .into_any_element(),
-            Button::new("preview-forward")
-                .ghost()
-                .small()
-                .compact()
-                .icon(IconName::ArrowRight)
-                .tooltip(crate::tr!("preview.forward"))
-                .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx)))
-                .into_any_element(),
-            Button::new("preview-reload")
-                .ghost()
-                .small()
-                .compact()
-                .icon(IconName::Replace)
-                .tooltip(crate::tr!("preview.reload"))
-                .on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
-                .into_any_element(),
+            toolbar_icon_button(
+                "preview-back",
+                IconName::ArrowLeft,
+                crate::tr!("preview.back"),
+                compact,
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx)))
+            .into_any_element(),
+            toolbar_icon_button(
+                "preview-forward",
+                IconName::ArrowRight,
+                crate::tr!("preview.forward"),
+                compact,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx)))
+            .into_any_element(),
+            toolbar_icon_button(
+                "preview-reload",
+                IconName::Replace,
+                crate::tr!("preview.reload"),
+                compact,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
+            .into_any_element(),
         ]
     }
 
@@ -309,9 +310,9 @@ impl PreviewPanel {
         let mut row = gpui_base::h_flex()
             .flex_none()
             .w_full()
-            .gap_1()
-            .px_1()
-            .pb_1()
+            .gap(cx.theme().tokens.spacing.xs)
+            .px(cx.theme().tokens.spacing.xs)
+            .pb(cx.theme().tokens.spacing.xs)
             .flex_wrap();
         for port in self.dev_ports.clone() {
             row = row.child(
@@ -363,7 +364,12 @@ impl PreviewPanel {
             && self.store.read(cx).preview_url(key).is_none()
             && self.lifecycle_entity().read(cx).ready_view(key).is_none()
         {
-            return self.render_note(crate::tr!("preview.url_placeholder").into_owned(), None, cx);
+            return self.render_note(
+                IconName::Globe,
+                crate::tr!("preview.url_placeholder").into_owned(),
+                None,
+                cx,
+            );
         }
         #[cfg(target_os = "android")]
         if let Some(key) = active {
@@ -418,16 +424,14 @@ impl PreviewPanel {
                         div().flex_1().min_h_0().child(view).into_any_element()
                     }
                 }
-                Availability::Starting(_) => v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .px_8()
-                    .text_center()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("preview.starting"))
-                    .into_any_element(),
+                Availability::Starting(_) => self.render_note(
+                    IconName::Globe,
+                    crate::tr!("preview.starting").into_owned(),
+                    None,
+                    cx,
+                ),
                 Availability::Unavailable => self.render_note(
+                    IconName::TriangleAlert,
                     crate::tr!("preview.unavailable").into_owned(),
                     Some(
                         self.lifecycle_entity()
@@ -439,7 +443,12 @@ impl PreviewPanel {
                     cx,
                 ),
             },
-            None => self.render_note(crate::tr!("preview.no_session").into_owned(), None, cx),
+            None => self.render_note(
+                IconName::Globe,
+                crate::tr!("preview.no_session").into_owned(),
+                None,
+                cx,
+            ),
         };
         // `ensure_webview` creates children hidden; make the owning
         // conversation visible only after the current layout owns it.
@@ -452,9 +461,9 @@ impl PreviewPanel {
                 .child(
                     div()
                         .flex_none()
-                        .px_2()
-                        .py_1()
-                        .text_size(px(12.))
+                        .px(cx.theme().tokens.spacing.sm)
+                        .py(cx.theme().tokens.spacing.xs)
+                        .text_token(&cx.theme().tokens.typography.xs)
                         .text_color(cx.theme().danger)
                         .child(
                             crate::tr!(
@@ -476,10 +485,9 @@ impl PreviewPanel {
                 .child(
                     div()
                         .flex_none()
-                        .px_2()
-                        .py_1()
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
+                        .px(cx.theme().tokens.spacing.sm)
+                        .py(cx.theme().tokens.spacing.xs)
+                        .text_secondary(false, cx)
                         .child(crate::tr!("preview.remote_forwarding").into_owned()),
                 )
                 .child(body)

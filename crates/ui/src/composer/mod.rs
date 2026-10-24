@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{
     BrowserPaste, Input, InputEvent, InputState, Paste, Textarea, TextareaState,
@@ -59,7 +60,7 @@ enum ComposerMenu {
     ImageOpen(usize),
     ImageRemove(usize),
 }
-use gpui_base::{ElementExt as _, StyledExt as _, h_flex, v_flex};
+use gpui_base::{ElementExt as _, h_flex, v_flex};
 
 use crate::attachments::attach_error_message;
 use crate::composer_trigger::{
@@ -83,8 +84,9 @@ use crate::usage::{METER_BLUE, METER_RED};
 /// capped and instead use the trigger menu's scrolling viewport.
 const FILE_MENU_ROW_CAP: usize = 50;
 
-/// Stop-button red-orange.
-const STOP_TINT: u32 = 0xF4562E;
+/// The desktop send and stop square: as tall as the control row's chips
+/// ([`Button::chip`]), which carry no square form.
+const SEND_SIZE: f32 = 28.;
 /// Below this measured control-row width the row collapses its context /
 /// permission / mode chips into a "⋯" overflow popover so nothing spills past
 /// the card edge (diff panel open, or a small window).
@@ -714,8 +716,7 @@ impl Composer {
         {
             let composer = cx.entity();
             let input = input.clone();
-            window.open_alert_dialog(cx, move |alert, _, cx| {
-                let alert = alert.bg(cx.theme().popover);
+            window.open_alert_dialog(cx, move |alert, _, _| {
                 let composer = composer.clone();
                 let input = input.clone();
                 let sent_text = sent_text.clone();
@@ -811,11 +812,11 @@ impl Composer {
             .preparing_worktree
         {
             return div()
-                .size(px(44.))
+                .size(px(crate::material::TOUCH_TARGET))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(Spinner::new().small().color(cx.theme().primary))
+                .child(Spinner::new().color(cx.theme().primary))
                 .into_any_element();
         }
         let stopping = (turn_running || self.watching(cx)) && !has_text;
@@ -830,45 +831,25 @@ impl Composer {
         } else {
             (crate::tr!("composer.send"), "send-message")
         };
-        let (bg, fg) = if stopping {
-            (rgb(STOP_TINT).into(), gpui::white())
-        } else if has_text {
-            (cx.theme().primary, cx.theme().primary_foreground)
-        } else {
-            (cx.theme().muted, cx.theme().muted_foreground)
-        };
-        // Keep the touch target larger than the visible circle.
-        let button = crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
+        let touch = px(crate::material::TOUCH_TARGET);
+        let button = Button::new(id)
             .debug_selector(move || id.into())
-            .size(px(44.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .when(stopping && (!interactive || stop_pending), |el| {
-                el.opacity(0.4)
+            .with_size(touch)
+            .rounded(touch / 2.)
+            .aria_label(label)
+            .map(|button| {
+                if stopping {
+                    // A filled stop square; the icon set's square is an outline.
+                    // A child is not an icon, so the button's width is set too.
+                    button
+                        .danger()
+                        .w(touch)
+                        .disabled(!interactive || stop_pending)
+                        .child(div().size(px(13.)).rounded(px(2.)).bg(cx.theme().danger))
+                } else {
+                    button.primary().disabled(!has_text).icon(IconName::ArrowUp)
+                }
             })
-            .child(
-                div()
-                    .size(px(40.))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(bg)
-                    .child(if stopping {
-                        div()
-                            .size(px(13.))
-                            .rounded(px(2.))
-                            .bg(gpui::white())
-                            .into_any_element()
-                    } else {
-                        Icon::new(IconName::ArrowUp)
-                            .size(px(18.))
-                            .text_color(fg)
-                            .into_any_element()
-                    }),
-            )
             .on_click(cx.listener(move |this, _, window, cx| {
                 if stopping {
                     if this.interactive(cx) {
@@ -879,20 +860,23 @@ impl Composer {
                 }
                 let input = this.input.clone();
                 this.submit(&input, false, window, cx);
-            }))
+            }));
+        let button = div()
+            .relative()
+            .flex_none()
+            .child(button)
             .when(steerable || self.steer_gesture.is_some(), |el| {
                 el.child(self.render_steer_gesture(cx))
             });
         v_flex()
             .flex_none()
             .items_center()
-            .gap(px(1.))
+            .gap(cx.theme().tokens.spacing.xxs)
             .child(button)
             .when(turn_running && has_text, |el| {
                 el.child(
                     div()
-                        .text_size(px(10.))
-                        .line_height(px(12.))
+                        .text_secondary(false, cx)
                         .text_color(if armed {
                             cx.theme().primary
                         } else {
@@ -928,35 +912,27 @@ impl Composer {
         })
     }
 
-    fn render_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        crate::material::accessible_clickable(
-            div(),
-            "stop-turn",
-            Role::Button,
-            self.stop_label(turn_running),
-            cx,
-        )
-        .debug_selector(|| "stop-turn".into())
-        .size(px(28.))
-        .rounded(crate::material::radius_input(cx))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgb(STOP_TINT))
-        .when(
-            !self.interactive(cx) || self.workspace_store.read(cx).composer_state().stopping,
-            |el| el.opacity(0.4),
-        )
-        .cursor_pointer()
-        .hover(|s| s.opacity(0.9))
-        .child(div().size(px(11.)).rounded(px(2.)).bg(gpui::white()))
-        .on_click(cx.listener(|this, _, _, cx| {
-            if !this.interactive(cx) {
-                return;
-            }
-            this.workspace_store
-                .update(cx, |store, _cx| store.interrupt());
-        }))
+    fn render_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> Button {
+        let size = px(SEND_SIZE);
+        // A filled stop square; the icon set's square is an outline. A child is
+        // not an icon, so the button's width is set too.
+        Button::new("stop-turn")
+            .debug_selector(|| "stop-turn".into())
+            .danger()
+            .with_size(size)
+            .w(size)
+            .aria_label(self.stop_label(turn_running))
+            .disabled(
+                !self.interactive(cx) || self.workspace_store.read(cx).composer_state().stopping,
+            )
+            .child(div().size(px(11.)).rounded(px(2.)).bg(cx.theme().danger))
+            .on_click(cx.listener(|this, _, _, cx| {
+                if !this.interactive(cx) {
+                    return;
+                }
+                this.workspace_store
+                    .update(cx, |store, _cx| store.interrupt());
+            }))
     }
 
     fn render_send_or_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -975,42 +951,26 @@ impl Composer {
             let mut row = h_flex()
                 .gap_2()
                 .items_center()
-                .child(Spinner::new().small().color(cx.theme().primary));
+                .child(Spinner::new().color(cx.theme().primary));
             if steers {
                 let queue_hint = crate::tr!(
                     "composer.queue_hint",
                     shortcut = format_secondary_shortcut("enter")
                 )
                 .into_owned();
-                let (bg, fg) = if has_text {
-                    (cx.theme().primary, cx.theme().primary_foreground)
-                } else {
-                    (cx.theme().muted, cx.theme().muted_foreground)
-                };
                 row = row.child(
-                    crate::material::accessible_clickable(
-                        div(),
-                        "steer-turn",
-                        Role::Button,
-                        crate::tr!("composer.steer_tooltip"),
-                        cx,
-                    )
-                    .size(px(28.))
-                    .rounded(crate::material::radius_input(cx))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(bg)
-                    .cursor_pointer()
-                    .when(has_text, |s| s.hover(|s| s.opacity(0.9)))
-                    .tooltip(move |window, cx| {
-                        crate::widgets::tooltip::Tooltip::new(queue_hint.clone()).build(window, cx)
-                    })
-                    .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let input = this.input.clone();
-                        this.submit(&input, false, window, cx);
-                    })),
+                    Button::new("steer-turn")
+                        .debug_selector(|| "steer-turn".into())
+                        .primary()
+                        .with_size(px(SEND_SIZE))
+                        .icon(IconName::ArrowUp)
+                        .aria_label(crate::tr!("composer.steer_tooltip"))
+                        .tooltip(queue_hint)
+                        .disabled(!has_text)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let input = this.input.clone();
+                            this.submit(&input, false, window, cx);
+                        })),
                 );
             }
             return row
@@ -1028,11 +988,10 @@ impl Composer {
             return h_flex()
                 .gap_2()
                 .items_center()
-                .child(Spinner::new().small().color(cx.theme().primary))
+                .child(Spinner::new().color(cx.theme().primary))
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
+                        .text_secondary(false, cx)
                         .child(crate::tr!("composer.preparing_worktree")),
                 )
                 .into_any_element();
@@ -1042,33 +1001,18 @@ impl Composer {
         if !has_text && self.watching(cx) {
             return self.render_stop(turn_running, cx).into_any_element();
         }
-        let (bg, fg) = if has_text {
-            (cx.theme().primary, cx.theme().primary_foreground)
-        } else {
-            (cx.theme().muted, cx.theme().muted_foreground)
-        };
-        crate::material::accessible_clickable(
-            div(),
-            "send-message",
-            Role::Button,
-            crate::tr!("composer.send"),
-            cx,
-        )
-        .debug_selector(|| "send-message".into())
-        .size(px(28.))
-        .rounded(crate::material::radius_input(cx))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(bg)
-        .cursor_pointer()
-        .when(has_text, |s| s.hover(|s| s.opacity(0.9)))
-        .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
-        .on_click(cx.listener(|this, _, window, cx| {
-            let input = this.input.clone();
-            this.submit(&input, false, window, cx);
-        }))
-        .into_any_element()
+        Button::new("send-message")
+            .debug_selector(|| "send-message".into())
+            .primary()
+            .with_size(px(SEND_SIZE))
+            .icon(IconName::ArrowUp)
+            .aria_label(crate::tr!("composer.send"))
+            .disabled(!has_text)
+            .on_click(cx.listener(|this, _, window, cx| {
+                let input = this.input.clone();
+                this.submit(&input, false, window, cx);
+            }))
+            .into_any_element()
     }
 
     fn render_primary_action(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1081,11 +1025,14 @@ impl Composer {
             return Button::new("send-message")
                 .debug_selector(|| "send-message".into())
                 .ghost()
-                .compact()
                 .disabled(true)
                 .aria_label(crate::tr!("composer.send").into_owned())
-                .size(px(if self.compact { 44. } else { 28. }))
-                .child(Icon::new(IconName::ArrowUp).small())
+                .with_size(px(if self.compact {
+                    crate::material::TOUCH_TARGET
+                } else {
+                    SEND_SIZE
+                }))
+                .icon(IconName::ArrowUp)
                 .into_any_element();
         }
         if turn_running {
@@ -1221,10 +1168,8 @@ impl Render for Composer {
                     Button::new(("terminal-context-chip", id))
                         .ghost()
                         .small()
-                        .h(px(22.))
-                        .rounded(crate::material::radius_chip(cx))
-                        .text_size(px(11.5))
-                        .font_family(cx.theme().mono_font_family.clone())
+                        .chip()
+                        .text_meta_mono(self.compact, cx)
                         .label(format!("{} · {}  ×", context.terminal_label, range))
                         .tooltip(context.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1259,10 +1204,8 @@ impl Render for Composer {
                     Button::new(("review-comment-chip", index))
                         .ghost()
                         .small()
-                        .h(px(22.))
-                        .rounded(crate::material::radius_chip(cx))
-                        .text_size(px(11.5))
-                        .font_family(cx.theme().mono_font_family.clone())
+                        .chip()
+                        .text_meta_mono(self.compact, cx)
                         .label(format!("{} {}  ×", comment.file, range))
                         .tooltip(comment.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1393,7 +1336,7 @@ impl Render for Composer {
             .w_full()
             .items_center()
             .px(px(if self.compact {
-                16.
+                crate::material::COMPACT_PAGE_INSET
             } else {
                 crate::chat::CONTENT_MIN_PADDING
             }))

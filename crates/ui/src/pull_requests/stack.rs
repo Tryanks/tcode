@@ -10,7 +10,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 use tcode_core::pull_request::{
     self as core_pr, GITHUB, PullRequestKey, PullRequestMergeMethod, PullRequestStackOperation,
     PullRequestState, StackBlocker, StackLayerCondition, StackLayerRole, StackMap,
@@ -36,6 +36,7 @@ use crate::{
     sizing::Sizable as _,
     store::WorkspaceStore,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::Popover,
     widgets::{
         button::{Button, ButtonVariants as _},
@@ -350,14 +351,14 @@ pub(super) fn operation_chip(
             .gap_1()
             .items_center()
             .px_2()
-            .py(px(2.))
+            .py_0p5()
             .rounded(material::radius_chip(cx))
             .bg(color.opacity(0.1))
+            .text_secondary(compact, cx)
             .text_color(color)
-            .text_size(px(if compact { 13. } else { 12. }))
             .child(match operation.kind {
-                StackOperationKind::Rebasing { .. } => Spinner::new().xsmall().into_any_element(),
-                _ => Icon::new(icon).size(px(14.)).into_any_element(),
+                StackOperationKind::Rebasing { .. } => Spinner::new().into_any_element(),
+                _ => Icon::new(icon).into_any_element(),
             })
             .child(label.clone())
     };
@@ -374,16 +375,21 @@ pub(super) fn operation_chip(
         ..
     }) = &operation.kind
     else {
-        let chip = chip().tooltip({
-            let tooltip = tooltip.clone();
-            move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)
-        });
         return match target {
-            Some(target) => chip
-                .cursor_pointer()
-                .on_click(move |_, window, cx| open_progress(target.clone(), window, cx))
+            Some(target) => Button::new(SharedString::from(format!(
+                "pr-stack-operation-progress-{}",
+                operation.stack
+            )))
+            .text()
+            .rounded(material::radius_chip(cx))
+            .aria_label(label.clone())
+            .tooltip(tooltip.clone())
+            .on_click(move |_, window, cx| open_progress(target.clone(), window, cx))
+            .child(chip())
+            .into_any_element(),
+            None => chip()
+                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                 .into_any_element(),
-            None => chip.into_any_element(),
         };
     };
     let id = id.clone();
@@ -417,14 +423,14 @@ pub(super) fn operation_chip(
             "pr-stack-operation-trigger-{}",
             operation.stack
         )))
-        .ghost()
-        .compact()
+        .text()
+        .rounded(material::radius_chip(cx))
         .aria_label(format!(
             "{label}, {}",
             tr_with("operation_id", &[("id", id.clone())])
         ))
         .tooltip(tooltip.clone())
-        .child(chip().cursor_pointer()),
+        .child(chip()),
     );
     let popover = if compact {
         popover.bottom_sheet(tr("popover_title"))
@@ -436,10 +442,11 @@ pub(super) fn operation_chip(
             let muted = cx.theme().muted_foreground;
             let mono = cx.theme().mono_font_family.clone();
             v_flex()
+                // Popover sizes to its content; the titles truncate, so the width is fixed here.
                 .when(!compact, |content| content.w(px(340.)))
                 .p_3()
                 .gap_2()
-                .text_size(px(12.))
+                .text_token(&cx.theme().tokens.typography.xs)
                 .child(div().child(tooltip.clone()))
                 .child(
                     v_flex()
@@ -491,11 +498,6 @@ pub(super) fn operation_chip(
                         .on_click(move |_, _, cx| cx.open_url(&url))
                 }))
         })
-        .bg(cx.theme().popover)
-        .border_1()
-        .border_color(cx.theme().border)
-        .shadow_xl()
-        .rounded(material::radius_overlay(cx))
         .into_any_element()
 }
 
@@ -627,8 +629,8 @@ pub(super) fn map_selector(
             h_flex()
                 .gap_1p5()
                 .items_center()
-                .text_size(px(13.))
-                .child(Icon::new(IconName::Layers).size(px(14.)))
+                .text_body(compact, cx)
+                .child(Icon::new(IconName::Layers))
                 .child(
                     crate::tr!(
                         "pull_requests.layer_position",
@@ -637,10 +639,8 @@ pub(super) fn map_selector(
                     )
                     .into_owned(),
                 )
-                .children(
-                    status.map(|(icon, color, _)| Icon::new(icon).size(px(12.)).text_color(color)),
-                )
-                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+                .children(status.map(|(icon, color, _)| Icon::new(icon).text_color(color)))
+                .child(Icon::new(IconName::ChevronDown).text_color(muted)),
         );
     let popover = Popover::new("pr-layer-popover").trigger(trigger);
     let popover = if compact {
@@ -661,11 +661,6 @@ pub(super) fn map_selector(
                 cx,
             )
         })
-        .bg(cx.theme().popover)
-        .border_1()
-        .border_color(cx.theme().border)
-        .shadow_xl()
-        .rounded(material::radius_overlay(cx))
         .into_any_element()
 }
 
@@ -690,9 +685,8 @@ fn map_content(
         .py_1()
         .gap_1()
         .items_center()
-        .text_size(px(11.))
-        .text_color(muted)
-        .child(Icon::new(IconName::Layers).size(px(12.)))
+        .text_secondary(compact, cx)
+        .child(Icon::new(IconName::Layers))
         .child(div().flex_1().min_w_0().truncate().child(tr_with(
             "head",
             &[
@@ -725,8 +719,7 @@ fn map_content(
             .pb_1()
             .gap_1()
             .items_start()
-            .text_size(px(11.))
-            .text_color(muted)
+            .text_secondary(compact, cx)
             .child(tr("note"))
             .child(
                 Button::new("pr-stack-docs")
@@ -764,7 +757,7 @@ fn map_content(
         let state = state_lower(row.layer.state, row.draft == Some(true));
         let (trailing, role_label): (AnyElement, String) = match row.role {
             StackLayerRole::Selected => (
-                Icon::new(IconName::Check).size(px(12.)).into_any_element(),
+                Icon::new(IconName::Check).into_any_element(),
                 tr("role_label_selected"),
             ),
             StackLayerRole::Above => (
@@ -797,7 +790,7 @@ fn map_content(
                         .gap_1()
                         .items_center()
                         .text_color(color)
-                        .child(Icon::new(IconName::Lock).size(px(12.)))
+                        .child(Icon::new(IconName::Lock))
                         .child(label)
                         .into_any_element(),
                     tr_with(
@@ -841,48 +834,39 @@ fn map_content(
         let rail = matches!(row.role, StackLayerRole::Selected | StackLayerRole::InScope);
         let view = view.clone();
         let popover = popover.clone();
-        material::accessible_clickable(
-            h_flex(),
-            ("pr-layer", number as usize),
-            gpui::Role::MenuItem,
-            label,
+        material::selectable_row(
+            material::accessible_clickable(
+                h_flex(),
+                ("pr-layer", number as usize),
+                gpui::Role::MenuItem,
+                label,
+                cx,
+            ),
+            selected,
+            compact,
             cx,
         )
         .aria_selected(selected)
         .w_full()
-        .h(px(if compact { 44. } else { 36. }))
-        .px_2()
-        .gap_2()
-        .items_center()
-        .text_size(px(11.))
-        .rounded(theme.tokens.radius.sm)
+        .text_secondary(compact, cx)
+        .text_color(theme.foreground)
         .cursor_pointer()
-        .hover(|row| row.bg(theme.list_hover))
-        .when(selected, |row| row.bg(theme.list_active))
-        // The merge scope reads as one bar down the rows that land together.
+        // The merge scope reads as one bar down the rows that land together; 2pt is the bar,
+        // not a spacing step.
         .child(
             div()
                 .w(px(2.))
                 .h_full()
                 .when(rail, |bar| bar.bg(theme.primary.opacity(0.6))),
         )
-        .child(
-            Icon::new(glyph)
-                .size(px(14.))
-                .text_color(if linked { color } else { muted }),
-        )
-        .child(
-            div()
-                .font_family(mono.clone())
-                .text_size(px(12.))
-                .child(format!("#{number}")),
-        )
+        .child(Icon::new(glyph).text_color(if linked { color } else { muted }))
+        .child(div().text_code(cx).child(format!("#{number}")))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(13.))
+                .text_body(compact, cx)
                 .when(title.is_none(), |text| {
                     text.font_family(mono.clone()).text_color(muted)
                 })
@@ -897,23 +881,20 @@ fn map_content(
     });
     let base = h_flex()
         .px_2()
-        .h(px(24.))
+        .py_1()
         .gap_1()
         .items_center()
-        .text_size(px(11.))
-        .text_color(muted)
-        .font_family(mono.clone())
-        .child(Icon::new(IconName::CornerDownRight).size(px(12.)))
+        .text_meta_mono(compact, cx)
+        .child(Icon::new(IconName::CornerDownRight))
         .child(map.stack.base.clone());
     let summary = v_flex()
         .px_2()
         .py_1()
         .gap_0p5()
-        .child(div().text_size(px(12.)).child(summary(&map)))
+        .child(div().text_body(compact, cx).child(summary(&map)))
         .child(
             div()
-                .text_size(px(11.))
-                .text_color(muted)
+                .text_secondary(compact, cx)
                 .child(tr("summary_source")),
         );
     let read_only = target.is_none();
@@ -946,7 +927,7 @@ fn map_content(
                 }
             });
         Some(if compact {
-            button.w_full().h(px(44.)).into_any_element()
+            button.w_full().touch(true).into_any_element()
         } else {
             button.xsmall().into_any_element()
         })
@@ -986,8 +967,8 @@ fn map_content(
         .id("pr-layer-list")
         .role(gpui::Role::Menu)
         .when(compact, |list| list.w_full())
+        // Popover sizes to its content; the rows truncate, so the menu's extent is fixed here.
         .when(!compact, |list| list.w(px(380.)).max_h(px(480.)))
-        .p_1()
         .gap_0p5()
         .overflow_y_scroll()
         .child(head)
@@ -1009,16 +990,14 @@ pub(super) fn caption(
     compact: bool,
     cx: &App,
 ) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
     v_flex()
         .px_3()
         .py_1()
         .gap_0p5()
-        .text_size(px(11.))
-        .text_color(muted)
+        .text_secondary(compact, cx)
         .child(
             h_flex()
-                .font_medium()
+                .text_caption(cx)
                 .id(SharedString::from(format!("pr-stack-{}", stack.id)))
                 .gap_2()
                 .items_center()
@@ -1026,7 +1005,7 @@ pub(super) fn caption(
                     Tooltip::new(crate::tr!("pull_requests.stack_tooltip").into_owned())
                         .build(window, cx)
                 })
-                .child(Icon::new(IconName::Layers).xsmall())
+                .child(Icon::new(IconName::Layers))
                 .child(
                     div().flex_1().min_w_0().truncate().child(
                         crate::tr!(
@@ -1492,51 +1471,40 @@ fn machine_label(store: Option<&WorkspaceStore>) -> String {
         .unwrap_or_else(|| tr("this_machine"))
 }
 
-fn dialog_width(target: &Target, window: &Window, cx: &App) -> gpui::Pixels {
-    if target.window_state.read(cx).compact {
-        (window.viewport_size().width - px(2. * material::COMPACT_PAGE_INSET)).min(px(480.))
-    } else {
-        px(480.)
-    }
-}
-
 fn fact(label: String, value: impl IntoElement, cx: &App) -> AnyElement {
     h_flex()
         .gap_2()
         .items_start()
         .child(
-            div()
-                .w(px(104.))
-                .flex_none()
-                .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground)
-                .child(label),
+            // One label column so the facts' values line up; no token is a column width.
+            div().w(px(104.)).flex_none().text_caption(cx).child(label),
         )
-        .child(div().flex_1().min_w_0().text_size(px(13.)).child(value))
+        .child(div().flex_1().min_w_0().text_body(false, cx).child(value))
         .into_any_element()
 }
 
+/// One note line; the list holding it sets the text role the glyph takes its size from.
 fn line(icon: IconName, color: Hsla, text: String) -> AnyElement {
     h_flex()
         .gap_1p5()
         .items_start()
-        .text_size(px(12.))
-        .child(
-            div()
-                .pt(px(2.))
-                .child(Icon::new(icon).size(px(12.)).text_color(color)),
-        )
+        .child(div().pt_0p5().child(Icon::new(icon).text_color(color)))
         .child(div().flex_1().min_w_0().child(text))
         .into_any_element()
 }
 
-fn warning_wash(cx: &App) -> gpui::Div {
+/// The text role of a confirmation's notes.
+fn notes(cx: &App) -> gpui::Div {
     v_flex()
         .gap_1()
-        .p_2()
-        .rounded(cx.theme().tokens.radius.md)
-        .bg(cx.theme().warning.opacity(0.1))
-        .text_size(px(12.))
+        .text_token(&cx.theme().tokens.typography.xs)
+}
+
+fn warning_wash(cx: &App) -> gpui::Div {
+    material::notice(cx.theme().warning, cx)
+        .flex_col()
+        .items_start()
+        .text_token(&cx.theme().tokens.typography.xs)
 }
 
 /// One fresh layer of a confirmation, with its tag.
@@ -1559,34 +1527,19 @@ fn layer_row(
         cx,
     );
     let head = layer.head.clone();
-    h_flex()
+    material::group_row(cx)
         .id(SharedString::from(format!(
             "pr-stack-layer-{}",
             layer.number
         )))
-        .min_h(px(40.))
-        .px_2()
-        .gap_2()
-        .items_center()
         .when(muted_row, |row| row.text_color(theme.muted_foreground))
-        .children(index.map(|index| {
-            div()
-                .w(px(14.))
-                .text_size(px(11.))
-                .text_color(theme.muted_foreground)
-                .child((index + 1).to_string())
-        }))
-        .child(Icon::new(glyph).size(px(14.)).text_color(if muted_row {
+        .children(index.map(|index| step_number(index, cx)))
+        .child(Icon::new(glyph).text_color(if muted_row {
             theme.muted_foreground
         } else {
             color
         }))
-        .child(
-            div()
-                .font_family(theme.mono_font_family.clone())
-                .text_size(px(12.))
-                .child(format!("#{}", layer.number)),
-        )
+        .child(div().text_code(cx).child(format!("#{}", layer.number)))
         .child(
             v_flex()
                 .flex_1()
@@ -1594,16 +1547,14 @@ fn layer_row(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(13.))
+                        .text_body(false, cx)
                         .child(layer.title.clone()),
                 )
                 .when(branch, |text| {
                     text.child(
                         div()
                             .truncate()
-                            .text_size(px(11.))
-                            .font_family(theme.mono_font_family.clone())
-                            .text_color(theme.muted_foreground)
+                            .text_meta_mono(false, cx)
                             .child(layer.head_branch.clone()),
                     )
                 }),
@@ -1615,29 +1566,33 @@ fn layer_row(
                         "pr-stack-head-{}",
                         layer.number
                     )))
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(px(12.))
-                    .text_color(theme.muted_foreground)
+                    .text_meta_mono(false, cx)
                     .child(head.as_deref().map(short).unwrap_or_else(|| "—".into()))
                     .when_some(head, |cell, head| {
                         cell.tooltip(move |window, cx| Tooltip::new(head.clone()).build(window, cx))
                     }),
             )
         })
-        .child(div().flex_none().text_size(px(11.)).child(tag))
+        .child(div().flex_none().text_secondary(false, cx).child(tag))
         .into_any_element()
 }
 
+/// A scope row's position, in a column fixed so the numbers line up down the rows; no token
+/// is a column width.
+fn step_number(index: usize, cx: &App) -> gpui::Div {
+    div()
+        .w(px(14.))
+        .flex_none()
+        .text_secondary(false, cx)
+        .child((index + 1).to_string())
+}
+
+/// The layers a confirmation covers, in one grouped list that scrolls past six rows or so.
 fn scope_box(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
-    v_flex()
+    material::grouped(rows, cx)
         .id("pr-stack-scope")
         .max_h(px(240.))
         .overflow_y_scroll()
-        .rounded(material::radius_card(cx))
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().muted.opacity(0.5))
-        .children(rows)
         .into_any_element()
 }
 
@@ -1871,7 +1826,7 @@ impl Render for MergeStackDialog {
             }
             (Some(_), Some(chosen)) => div().child(method_label(chosen)).into_any_element(),
             (Some(_), None) => div().into_any_element(),
-            (None, _) => Spinner::new().small().into_any_element(),
+            (None, _) => Spinner::new().into_any_element(),
         };
         let default_box = self
             .method
@@ -1904,8 +1859,7 @@ impl Render for MergeStackDialog {
                 .gap_2()
                 .child(
                     div()
-                        .text_size(px(12.))
-                        .text_color(muted)
+                        .text_caption(cx)
                         .child(crate::tr!("pull_requests.merge.method").into_owned()),
                 )
                 .child(method)
@@ -1922,30 +1876,15 @@ impl Render for MergeStackDialog {
                         .filter(|row| row.layer.state != PullRequestState::Merged)
                         .enumerate()
                         .map(|(index, row)| {
-                            h_flex()
-                                .min_h(px(40.))
-                                .px_2()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .w(px(14.))
-                                        .text_size(px(11.))
-                                        .text_color(muted)
-                                        .child((index + 1).to_string()),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(theme.mono_font_family.clone())
-                                        .text_size(px(12.))
-                                        .child(format!("#{}", row.layer.number)),
-                                )
+                            material::group_row(cx)
+                                .child(step_number(index, cx))
+                                .child(div().text_code(cx).child(format!("#{}", row.layer.number)))
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
                                         .truncate()
-                                        .text_size(px(13.))
+                                        .text_body(false, cx)
                                         .child(
                                             row.link
                                                 .and_then(|link| link.snapshot.as_ref())
@@ -1953,7 +1892,7 @@ impl Render for MergeStackDialog {
                                                 .unwrap_or_else(|| row.layer.head_branch.clone()),
                                         ),
                                 )
-                                .child(Spinner::new().xsmall())
+                                .child(Spinner::new())
                                 .into_any_element()
                         })
                         .collect();
@@ -1964,7 +1903,7 @@ impl Render for MergeStackDialog {
                 body = body.child(
                     v_flex()
                         .gap_1()
-                        .text_size(px(12.))
+                        .text_secondary(false, cx)
                         .text_color(theme.danger)
                         .child(
                             crate::tr!(
@@ -2009,7 +1948,7 @@ impl Render for MergeStackDialog {
                             h_flex()
                                 .gap_1()
                                 .text_color(color)
-                                .child(Icon::new(IconName::Lock).size(px(12.)))
+                                .child(Icon::new(IconName::Lock))
                                 .child(tr(if layer.draft {
                                     "blocks_draft"
                                 } else {
@@ -2028,14 +1967,13 @@ impl Render for MergeStackDialog {
                 body = body.child(
                     v_flex()
                         .gap_1()
-                        .child(div().text_size(px(12.)).text_color(muted).child(tr_with(
+                        .child(div().text_caption(cx).child(tr_with(
                             "scope_label",
                             &[("count", scope.len().to_string())],
                         )))
                         .children(merged_below.iter().map(|number| {
                             div()
-                                .text_size(px(11.))
-                                .text_color(muted)
+                                .text_secondary(false, cx)
                                 .child(tr_with("already_merged", &[("number", number.to_string())]))
                         }))
                         .child(scope_box(rows, cx)),
@@ -2048,7 +1986,7 @@ impl Render for MergeStackDialog {
                     body = body.child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_size(px(12.)).text_color(muted).child(tr_with(
+                            .child(div().text_caption(cx).child(tr_with(
                                 "above_label",
                                 &[("count", above.len().to_string())],
                             )))
@@ -2117,7 +2055,6 @@ impl Render for MergeStackDialog {
                 if failing.len() > 3 {
                     notes.push(
                         div()
-                            .text_size(px(12.))
                             .child(tr_with(
                                 "summary_more",
                                 &[("count", (failing.len() - 3).to_string())],
@@ -2155,7 +2092,7 @@ impl Render for MergeStackDialog {
                         ),
                     ));
                 }
-                body = body.child(v_flex().gap_1().children(notes));
+                body = body.child(self::notes(cx).children(notes));
                 let changed = self.notice.clone();
                 if let Some(changed) = &changed {
                     body = body.child(
@@ -2237,7 +2174,6 @@ pub(super) fn open_merge_dialog(target: Target, window: &mut Window, cx: &mut Ap
         tr_with("merge_title", &[("number", number)])
     };
     let store = target.store.clone();
-    let width_target = target.clone();
     let dialog = cx.new(|cx| {
         let mut dialog = MergeStackDialog {
             target,
@@ -2253,10 +2189,9 @@ pub(super) fn open_merge_dialog(target: Target, window: &mut Window, cx: &mut Ap
         dialog.load(cx);
         dialog
     });
-    window.open_dialog(cx, move |base, window, cx| {
+    window.open_dialog(cx, move |base, _, cx| {
         let sending = dialog.read(cx).sending;
         base.title(title.clone())
-            .w(dialog_width(&width_target, window, cx))
             .keyboard(!sending)
             .close_button(!sending)
             .overlay_closable(!sending)
@@ -2460,12 +2395,12 @@ impl RebaseStackDialog {
         let mut ready = false;
         let mut count = 0;
         match &self.state {
-            None => body = body.child(h_flex().justify_center().child(Spinner::new().small())),
+            None => body = body.child(h_flex().justify_center().child(Spinner::new())),
             Some(Err(reason)) => {
                 body = body.child(
                     v_flex()
                         .gap_1()
-                        .text_size(px(12.))
+                        .text_secondary(false, cx)
                         .text_color(theme.danger)
                         .child(
                             crate::tr!(
@@ -2495,17 +2430,17 @@ impl RebaseStackDialog {
                             Some(PullRequestStackPushAccess::Write) => h_flex()
                                 .gap_1()
                                 .text_color(muted)
-                                .child(Icon::new(IconName::Check).size(px(12.)))
+                                .child(Icon::new(IconName::Check))
                                 .child(tr("access_write")),
                             Some(PullRequestStackPushAccess::MaintainerCanModify) => h_flex()
                                 .gap_1()
                                 .text_color(muted)
-                                .child(Icon::new(IconName::Check).size(px(12.)))
+                                .child(Icon::new(IconName::Check))
                                 .child(tr("access_maintainer")),
                             _ => h_flex()
                                 .gap_1()
                                 .text_color(theme.danger)
-                                .child(Icon::new(IconName::Lock).size(px(12.)))
+                                .child(Icon::new(IconName::Lock))
                                 .child(tr("access_denied")),
                         };
                         layer_row(Some(index), layer, tag.into_any_element(), true, false, cx)
@@ -2520,22 +2455,20 @@ impl RebaseStackDialog {
                 body = body.child(
                     v_flex()
                         .gap_1()
-                        .child(div().text_size(px(12.)).text_color(muted).child(tr_with(
+                        .child(div().text_caption(cx).child(tr_with(
                             "rebase_layers_label",
                             &[("count", count.to_string())],
                         )))
                         .children(merged.iter().map(|number| {
                             div()
-                                .text_size(px(11.))
-                                .text_color(muted)
+                                .text_secondary(false, cx)
                                 .child(tr_with("merged_skipped", &[("number", number.to_string())]))
                         }))
                         .child(scope_box(rows, cx)),
                 );
                 body = body
                     .child(
-                        v_flex()
-                            .gap_1()
+                        notes(cx)
                             .child(line(IconName::RefreshCw, muted, tr("rebase_step_own")))
                             .child(line(IconName::Upload, muted, tr("rebase_step_lease")))
                             .child(line(
@@ -2545,7 +2478,7 @@ impl RebaseStackDialog {
                             ))
                             .child(line(IconName::GitBranch, muted, tr("rebase_step_local"))),
                     )
-                    .child(div().text_size(px(11.)).text_color(muted).child(tr_with(
+                    .child(div().text_secondary(false, cx).child(tr_with(
                         "rebase_no_promise",
                         &[("machine", machine.clone())],
                     )));
@@ -2553,7 +2486,7 @@ impl RebaseStackDialog {
                 if !blockers.is_empty() {
                     body =
                         body.child(
-                            v_flex().gap_1().children(blockers.iter().map(|blocker| {
+                            notes(cx).children(blockers.iter().map(|blocker| {
                                 line(IconName::Lock, theme.danger, blocker.clone())
                             })),
                         );
@@ -2672,32 +2605,26 @@ fn progress_view(
             let (icon, text): (AnyElement, String) = match &layer.step {
                 StackRebaseStep::Waiting => (
                     Icon::new(IconName::CircleDashed)
-                        .size(px(14.))
                         .text_color(muted)
                         .into_any_element(),
                     tr("step_waiting"),
                 ),
                 StackRebaseStep::Rebasing => (
-                    Spinner::new().xsmall().into_any_element(),
+                    Spinner::new().into_any_element(),
                     match below {
                         Some(below) => tr_with("step_rebasing", &[("number", below.to_string())]),
                         None => tr_with("step_rebasing_base", &[("base", base.clone())]),
                     },
                 ),
-                StackRebaseStep::Pushing => (
-                    Spinner::new().xsmall().into_any_element(),
-                    tr("step_pushing"),
-                ),
+                StackRebaseStep::Pushing => (Spinner::new().into_any_element(), tr("step_pushing")),
                 StackRebaseStep::Pushed { from, to } => (
                     Icon::new(IconName::CircleCheck)
-                        .size(px(14.))
                         .text_color(theme.success)
                         .into_any_element(),
                     tr_with("step_pushed", &[("from", short(from)), ("to", short(to))]),
                 ),
                 StackRebaseStep::AlreadyCurrent => (
                     Icon::new(IconName::Check)
-                        .size(px(14.))
                         .text_color(muted)
                         .into_any_element(),
                     tr("step_current"),
@@ -2707,7 +2634,6 @@ fn progress_view(
                         StackRebaseFailure::PushUnconfirmed => IconName::CircleQuestionMark,
                         _ => IconName::CircleX,
                     })
-                    .size(px(14.))
                     .text_color(match reason {
                         StackRebaseFailure::PushUnconfirmed => theme.warning,
                         _ => theme.danger,
@@ -2724,51 +2650,35 @@ fn progress_view(
                 ),
                 StackRebaseStep::NotStarted => (
                     Icon::new(IconName::Minus)
-                        .size(px(14.))
                         .text_color(muted)
                         .into_any_element(),
                     tr("step_not_started"),
                 ),
             };
-            h_flex()
+            material::group_row(cx)
                 .id(SharedString::from(format!(
                     "pr-stack-progress-{}",
                     layer.number
                 )))
-                .h(px(36.))
-                .px_2()
-                .gap_2()
-                .items_center()
-                .text_size(px(12.))
-                .child(
-                    div()
-                        .w(px(14.))
-                        .text_size(px(11.))
-                        .text_color(muted)
-                        .child((index + 1).to_string()),
-                )
+                .text_token(&theme.tokens.typography.xs)
+                .child(step_number(index, cx))
                 .child(icon)
-                .child(
-                    div()
-                        .font_family(theme.mono_font_family.clone())
-                        .child(format!("#{}", layer.number)),
-                )
+                .child(div().text_code(cx).child(format!("#{}", layer.number)))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_color(muted)
+                        .text_meta_mono(false, cx)
                         .child(layer.branch.clone()),
                 )
-                .child(div().flex_none().text_size(px(11.)).child(text))
+                .child(div().flex_none().child(text))
                 .into_any_element()
         })
         .collect();
     let mut body = v_flex().gap_2().child(scope_box(rows, cx));
     if let Some(started) = started_at {
-        body = body.child(div().text_size(px(11.)).text_color(muted).child(tr_with(
+        body = body.child(div().text_secondary(false, cx).child(tr_with(
             "progress_started",
             &[("ago", super::detail::ago(started)), ("machine", machine)],
         )));
@@ -2895,7 +2805,6 @@ pub(super) fn open_rebase_dialog(target: Target, window: &mut Window, cx: &mut A
         .map(|offer| offer.map().stack.number)
         .unwrap_or_default();
     let store = target.store.clone();
-    let width_target = target.clone();
     let dialog = cx.new(|cx| {
         let mut dialog = RebaseStackDialog {
             target,
@@ -2909,7 +2818,7 @@ pub(super) fn open_rebase_dialog(target: Target, window: &mut Window, cx: &mut A
         dialog.load(cx);
         dialog
     });
-    window.open_dialog(cx, move |base, window, cx| {
+    window.open_dialog(cx, move |base, _, cx| {
         let dialog_state = dialog.read(cx);
         let sending = dialog_state.sending;
         let title = if dialog_state.started {
@@ -2918,7 +2827,6 @@ pub(super) fn open_rebase_dialog(target: Target, window: &mut Window, cx: &mut A
             tr_with("rebase_title", &[("stack", stack.to_string())])
         };
         base.title(title)
-            .w(dialog_width(&width_target, window, cx))
             .keyboard(!sending)
             .close_button(!sending)
             .overlay_closable(!sending)
@@ -2939,7 +2847,6 @@ fn open_progress(target: Target, window: &mut Window, cx: &mut App) {
         .map(|offer| offer.map().stack.number)
         .unwrap_or_default();
     let store = target.store.clone();
-    let width_target = target.clone();
     let dialog = cx.new(|cx| RebaseStackDialog {
         target,
         state: None,
@@ -2949,9 +2856,8 @@ fn open_progress(target: Target, window: &mut Window, cx: &mut App) {
         last: None,
         _observe: cx.observe(&store, |_, _, cx| cx.notify()),
     });
-    window.open_dialog(cx, move |base, window, cx| {
+    window.open_dialog(cx, move |base, _, _| {
         base.title(tr_with("progress_title", &[("stack", stack.to_string())]))
-            .w(dialog_width(&width_target, window, cx))
             .footer(crate::overlay::DialogActions::new())
             .content({
                 let dialog = dialog.clone();

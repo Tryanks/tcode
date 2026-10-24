@@ -20,7 +20,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Toggled, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::{InteractiveElementExt as _, StyledExt as _, v_flex};
+use gpui_base::{InteractiveElementExt as _, v_flex};
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::orchestrate_settings::OrchestrateSettingsPanel;
@@ -31,19 +31,16 @@ use crate::settings::{ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, 
 use crate::store::WorkspaceStore;
 use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
 use crate::time::{humanize_ago, now_secs};
+use crate::typography::TextRole as _;
 use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::WindowState;
 use tcode_core::project::SessionMeta;
 use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
 
-/// Left inset so branding clears the native macOS traffic lights near x=72.
-#[cfg(target_os = "macos")]
-const TRAFFIC_LIGHT_INSET: f32 = 80.;
-#[cfg(not(target_os = "macos"))]
-const TRAFFIC_LIGHT_INSET: f32 = 8.;
-
 const NAV_WIDTH: f32 = 255.;
+/// The width of a text field beside its row's label; gpui-base has no form-field width token.
+const FIELD_WIDTH: f32 = 240.;
 /// Archived rows rendered per page. Each row carries two buttons with click
 /// listeners, so the whole list is unaffordable once thousands are archived.
 const ARCHIVED_PER_PAGE: usize = 50;
@@ -57,8 +54,7 @@ fn page_bounds(total: usize, page: usize, per_page: usize) -> (usize, usize, usi
     (page, start, start.saturating_add(per_page).min(total))
 }
 
-/// Max width of the settings content column — matches the chat timeline column
-/// (`chat::CONTENT_MAX_WIDTH`) so the reading measure is identical across routes.
+/// Max width of the settings content column, a reading measure for its forms.
 const CONTENT_MAX_WIDTH: f32 = 768.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -803,15 +799,15 @@ impl SettingsPage {
         self.acp_panel
             .update(cx, |panel, cx| panel.prepare_to_open(cx));
         let panel = self.acp_panel.clone();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, _, _| {
             let panel = panel.clone();
             dialog
-                .w(px(620.))
-                .bg(cx.theme().popover)
-                .shadow_xl()
+                .wide()
                 .title(crate::tr!("providers.acp.add_agent").into_owned())
                 .content(move |content, _, _| {
-                    content.h(px(456.)).child(
+                    // The catalog is a GPUI `list`, which needs a definite height, and the
+                    // dialog's flex height is not readable from its builder.
+                    content.h(px(crate::overlay::DIALOG_LIST_HEIGHT)).child(
                         div()
                             .debug_selector(|| "add-agent-body".into())
                             .size_full()
@@ -929,14 +925,8 @@ impl SettingsPage {
                 (label, "settings-machine-caption")
             }
         };
-        div()
+        crate::material::group_caption(label, cx)
             .debug_selector(move || selector.into())
-            .pl_3()
-            .pb(px(6.))
-            .text_size(px(11.))
-            .font_medium()
-            .text_color(cx.theme().muted_foreground)
-            .child(label)
             .into_any_element()
     }
 
@@ -950,73 +940,58 @@ impl SettingsPage {
     /// chevron that opens it.
     fn advanced_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let expanded = self.advanced_expanded();
-        crate::material::accessible_clickable(
-            gpui_base::h_flex(),
-            "settings-advanced-toggle",
-            Role::Button,
-            crate::tr!("settings.advanced"),
-            cx,
-        )
-        .aria_expanded(expanded)
-        .debug_selector(|| "settings-advanced-toggle".into())
-        .pl_3()
-        .pt_2()
-        .pb(px(6.))
-        .gap_1()
-        .items_center()
-        .cursor_pointer()
-        .text_size(px(11.))
-        .font_medium()
-        .text_color(cx.theme().muted_foreground)
-        .child(
-            Icon::new(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
-            .size(px(12.)),
-        )
-        .child(crate::tr!("settings.advanced"))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.advanced_expanded = Some(!this.advanced_expanded());
-            cx.notify();
-        }))
-        .into_any_element()
+        let spacing = &cx.theme().tokens.spacing;
+        div()
+            .pl(px(crate::material::CARD_INSET))
+            .pt(spacing.sm)
+            .pb(spacing.sm)
+            .child(
+                Button::new("settings-advanced-toggle")
+                    .text()
+                    .xsmall()
+                    .text_caption(cx)
+                    .icon(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .label(crate::tr!("settings.advanced"))
+                    .aria_expanded(expanded)
+                    .debug_selector(|| "settings-advanced-toggle".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.advanced_expanded = Some(!this.advanced_expanded());
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
     }
 
     /// The wide rail's way out of Settings. Compact has no such row: there, the
     /// shell's nav bar carries Back like it does on every other page.
     fn back_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::material::accessible_clickable(
-            gpui_base::h_flex(),
-            "settings-back",
-            Role::Button,
-            crate::tr!("settings.back"),
+        crate::material::bar(
+            "settings-back-bar",
+            crate::material::Bar::Toolbar,
+            false,
             cx,
         )
-        .h(px(40.))
-        .items_center()
-        .gap_2()
-        .px_3()
-        .cursor_pointer()
-        .hover(|s| s.bg(cx.theme().sidebar_accent))
-        .text_size(px(13.))
-        .text_color(cx.theme().sidebar_foreground)
+        .text_body(false, cx)
         .child(
-            Icon::new(IconName::ArrowLeft)
-                .size_4()
-                .text_color(cx.theme().muted_foreground),
+            Button::new("settings-back")
+                .ghost()
+                .icon(IconName::ArrowLeft)
+                .label(crate::tr!("settings.back"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.window_state
+                        .update(cx, |state, cx| state.close_settings(cx));
+                })),
         )
-        .child(crate::tr!("settings.back"))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.window_state
-                .update(cx, |state, cx| state.close_settings(cx));
-        }))
         .into_any_element()
     }
 
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut tabs = v_flex().flex_1().min_h_0().px_2().gap(px(2.));
+        let spacing = cx.theme().tokens.spacing;
+        let mut tabs = v_flex().flex_1().min_h_0().px(spacing.sm).gap(spacing.xxs);
         for (index, group) in [SectionGroup::Device, SectionGroup::Machine]
             .into_iter()
             .enumerate()
@@ -1030,7 +1005,7 @@ impl SettingsPage {
             }
             tabs = tabs.child(
                 div()
-                    .when(index > 0, |caption| caption.pt_3())
+                    .when(index > 0, |caption| caption.pt(spacing.md))
                     .child(self.group_caption(group, cx)),
             );
             let plain = sections
@@ -1078,13 +1053,13 @@ impl SettingsPage {
             .child(
                 window_drag_area(
                     "settings-nav-drag",
-                    gpui_base::h_flex()
-                        .h(px(52.))
-                        .flex_none()
-                        .items_center()
-                        .gap_2()
-                        .pl(px(TRAFFIC_LIGHT_INSET))
-                        .pr_2(),
+                    crate::material::bar(
+                        "settings-nav-strip",
+                        crate::material::Bar::Strip,
+                        false,
+                        cx,
+                    )
+                    .pl(window_caption::traffic_light_inset(window).max(spacing.sm)),
                     window,
                     cx,
                 )
@@ -1101,7 +1076,10 @@ impl SettingsPage {
     /// the shell's one nav bar (`crate::shell`).
     pub(crate) fn render_compact_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let advanced_expanded = self.advanced_expanded();
-        let mut column = v_flex().w_full().p_3().gap_4();
+        let mut column = v_flex()
+            .w_full()
+            .p(px(crate::material::COMPACT_PAGE_INSET))
+            .gap(crate::material::section_gap(cx));
         for group in [SectionGroup::Device, SectionGroup::Machine] {
             let rows = |advanced: bool, cx: &mut Context<Self>| {
                 SECTIONS
@@ -1152,34 +1130,14 @@ impl SettingsPage {
     /// One tappable section row of the compact list.
     fn compact_section_row(&self, section: Section, cx: &mut Context<Self>) -> AnyElement {
         let label = section.label();
-        crate::material::accessible_clickable(
-            gpui_base::h_flex(),
-            section.id(),
-            Role::Button,
-            label.clone(),
-            cx,
-        )
-        .debug_selector(move || section.id().into())
-        .w_full()
-        .min_h(px(48.))
-        .px_3()
-        .gap_3()
-        .items_center()
-        .cursor_pointer()
-        .hover(|s| s.bg(cx.theme().list_hover))
-        .child(
-            Icon::new(section.icon())
-                .size_4()
-                .text_color(cx.theme().muted_foreground),
-        )
-        .child(div().flex_1().text_size(px(15.)).child(label))
-        .child(
-            Icon::new(IconName::ChevronRight)
-                .xsmall()
-                .text_color(cx.theme().muted_foreground),
-        )
-        .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
-        .into_any_element()
+        crate::material::list_row(section.id(), label.clone(), cx)
+            .debug_selector(move || section.id().into())
+            .text_body(true, cx)
+            .child(Icon::new(section.icon()).text_color(cx.theme().muted_foreground))
+            .child(div().flex_1().child(label))
+            .child(Icon::new(IconName::ChevronRight).text_color(cx.theme().muted_foreground))
+            .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
+            .into_any_element()
     }
 
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1199,13 +1157,10 @@ impl SettingsPage {
         // Align the header title and actions with the centered content column.
         window_drag_area(
             "settings-header-drag",
-            gpui_base::h_flex()
-                .flex_none()
-                .h(px(52.))
-                .w_full()
-                .px_6()
+            crate::material::bar("settings-header", crate::material::Bar::Strip, false, cx)
+                // The body's inset, so the title stays over the content column at every width.
+                .px(cx.theme().tokens.spacing.xl)
                 .justify_center()
-                .items_center()
                 .when(hosts_caption, |strip| strip.relative()),
             window,
             cx,
@@ -1217,18 +1172,12 @@ impl SettingsPage {
                 .when(hosts_caption, |column| {
                     column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
                 })
-                .items_center()
-                .gap_3()
-                // The strip carries no controls at all (restoring defaults now
-                // lives at the foot of the General page), so the whole title
-                // doubles as the window's native drag handle.
-                .child(window_caption::drag_region(
-                    div()
-                        .flex_1()
-                        .text_size(px(15.))
-                        .font_medium()
-                        .child(crate::tr!("settings.title")),
-                )),
+                // The strip carries no controls, so the whole title doubles as
+                // the window's native drag handle.
+                .child(window_caption::drag_region(crate::material::bar_title(
+                    crate::tr!("settings.title"),
+                    cx,
+                ))),
         )
         // Painted last so the cluster stays on top of the strip.
         .children(hosts_caption.then(|| {
@@ -1245,8 +1194,7 @@ impl SettingsPage {
     fn confirm_restore(&self, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let page = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let alert = alert.bg(cx.theme().popover);
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let store = store.clone();
             let page = page.clone();
             alert
@@ -1341,10 +1289,21 @@ impl SettingsPage {
         } else {
             &self.content_scroll
         };
-        self.render_content_column(column, scroll)
+        self.render_content_column(column, scroll, cx)
     }
 
-    fn render_content_column(&self, column: gpui::Div, scroll: &ScrollHandle) -> AnyElement {
+    fn render_content_column(
+        &self,
+        column: gpui::Div,
+        scroll: &ScrollHandle,
+        cx: &App,
+    ) -> AnyElement {
+        let spacing = &cx.theme().tokens.spacing;
+        let inset = if self.window_state.read(cx).compact {
+            px(crate::material::COMPACT_PAGE_INSET)
+        } else {
+            spacing.xl
+        };
         crate::scroll::page_viewport(
             "settings-scroll-bounce",
             scroll,
@@ -1359,8 +1318,8 @@ impl SettingsPage {
                     gpui_base::h_flex()
                         .w_full()
                         .justify_center()
-                        .px_6()
-                        .py_6()
+                        .px(inset)
+                        .py(spacing.xl)
                         // Keep this width definite before capping it. Reversing
                         // these constraints makes nested multiline inputs resolve
                         // their percentage width to zero when the cap applies.
@@ -1401,9 +1360,12 @@ impl SettingsPage {
             self.remote_attachment_limit_row(attachment_limit_overridden, cx),
         ];
         if !self.store.read(cx).scope().is_full() {
-            return v_flex().gap(px(24.)).child(
+            return v_flex().gap(crate::material::section_gap(cx)).child(
                 v_flex()
-                    .child(self.section_label(crate::tr!("settings.appearance_section"), cx))
+                    .child(crate::material::group_caption(
+                        crate::tr!("settings.appearance_section"),
+                        cx,
+                    ))
                     .child(self.grouped_plain(appearance, cx)),
             );
         }
@@ -1568,15 +1530,21 @@ impl SettingsPage {
             ),
         ];
         v_flex()
-            .gap(px(24.))
+            .gap(crate::material::section_gap(cx))
             .child(
                 v_flex()
-                    .child(self.section_label(crate::tr!("settings.appearance_section"), cx))
+                    .child(crate::material::group_caption(
+                        crate::tr!("settings.appearance_section"),
+                        cx,
+                    ))
                     .child(self.grouped_plain(appearance, cx)),
             )
             .child(
                 v_flex()
-                    .child(self.section_label(crate::tr!("settings.conversation_section"), cx))
+                    .child(crate::material::group_caption(
+                        crate::tr!("settings.conversation_section"),
+                        cx,
+                    ))
                     .child(self.grouped_plain(conversation, cx)),
             )
             .when(
@@ -1585,12 +1553,18 @@ impl SettingsPage {
             )
             .child(
                 v_flex()
-                    .child(self.section_label(crate::tr!("settings.workspace_section"), cx))
+                    .child(crate::material::group_caption(
+                        crate::tr!("settings.workspace_section"),
+                        cx,
+                    ))
                     .child(self.grouped_plain(workspace, cx)),
             )
             .child(
                 v_flex()
-                    .child(self.section_label(crate::tr!("settings.reset_section"), cx))
+                    .child(crate::material::group_caption(
+                        crate::tr!("settings.reset_section"),
+                        cx,
+                    ))
                     .child(self.grouped_plain(vec![self.restore_all_row(cx)], cx)),
             )
     }
@@ -1694,7 +1668,7 @@ impl SettingsPage {
             .child(
                 div()
                     .when(compact, |field| field.w_full())
-                    .when(!compact, |field| field.w(px(240.)))
+                    .when(!compact, |field| field.w(px(FIELD_WIDTH)))
                     .child(
                         Input::new(&self.device_name_input.state)
                             .placeholder(crate::tr!("settings.device_name.placeholder")),
@@ -1751,21 +1725,19 @@ impl SettingsPage {
                     .tooltip(crate::tr!("providers.tcode_update_aria")),
             )
             .content(move |_, _, cx| {
-                let muted = cx.theme().muted_foreground;
                 let release_url = release_url.clone();
                 v_flex()
+                    // A reading measure for the message; gpui-base has no popover width.
                     .w(px(320.))
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .font_semibold()
+                            .text_title(cx)
                             .child(crate::tr!("providers.tcode_update_title")),
                     )
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .text_color(muted)
+                            .text_secondary(false, cx)
                             .child(crate::tr!("providers.tcode_update_message")),
                     )
                     .child(
@@ -1805,7 +1777,7 @@ impl SettingsPage {
         let checking = self.store.read(cx).providers_checking();
         let run = self.store.read(cx).provider_update_run();
         let automatic = self.store.read(cx).automatic_provider_updates();
-        let muted = cx.theme().muted_foreground;
+        let compact = self.window_state.read(cx).compact;
 
         let mut header = gpui_base::h_flex()
             .w_full()
@@ -1815,18 +1787,15 @@ impl SettingsPage {
             .child(
                 div()
                     .flex_1()
-                    .pl_3()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(muted)
+                    .pl(px(crate::material::CARD_INSET))
+                    .text_caption(cx)
                     .child(crate::tr!("settings.providers_section")),
             );
         if let Some(checked_at) = checked_at {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
             header = header.child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(muted)
+                    .text_secondary(compact, cx)
                     .child(crate::tr!("providers.checked", when = ago).into_owned()),
             );
         }
@@ -1883,9 +1852,9 @@ impl SettingsPage {
                 v_flex()
                     .w_full()
                     .gap_2()
-                    .px_3()
+                    .px(px(crate::material::CARD_INSET))
                     .child(
-                        div().text_size(px(12.)).text_color(muted).child(
+                        div().text_secondary(compact, cx).child(
                             crate::tr!(
                                 "providers.update_progress",
                                 provider = run
@@ -1937,23 +1906,20 @@ impl SettingsPage {
             .filter_map(|(_, _, _, usage, _)| usage.as_ref().map(|usage| usage.fetched_at))
             .max();
         let checking = rows.iter().any(|(_, _, _, _, checking)| *checking);
-        let muted = cx.theme().muted_foreground;
+        let compact = self.window_state.read(cx).compact;
 
         let mut header = gpui_base::h_flex().w_full().items_center().gap_2().child(
             div()
                 .flex_1()
-                .pl_3()
-                .text_size(px(11.))
-                .font_medium()
-                .text_color(muted)
+                .pl(px(crate::material::CARD_INSET))
+                .text_caption(cx)
                 .child(crate::tr!("usage.section")),
         );
         if let Some(updated_at) = updated_at {
             let ago = humanize_ago(now_secs().saturating_sub(updated_at));
             header = header.child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(muted)
+                    .text_secondary(compact, cx)
                     .child(crate::tr!("usage.updated", when = ago).into_owned()),
             );
         }
@@ -2029,22 +1995,11 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        self.row_frame(cx)
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(16.))
-                    .child(crate::provider_card::provider_glyph(kind).small()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(13.))
-                    .font_medium()
-                    .child(name.to_owned()),
-            )
+        let compact = self.window_state.read(cx).compact;
+        crate::material::group_row(cx)
+            .text_body(compact, cx)
+            .child(crate::provider_card::provider_glyph(kind))
+            .child(div().flex_1().child(name.to_owned()))
             .when_some(plan, |row, plan| {
                 row.child(crate::material::semantic_chip(
                     crate::usage::plan_label(&plan),
@@ -2062,12 +2017,10 @@ impl SettingsPage {
         now: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
+        let compact = self.window_state.read(cx).compact;
         let fill = crate::usage::bar_color(window.used_percent, cx);
-        self.row_frame(cx)
-            .flex_col()
-            .items_start()
-            .gap_2()
+        let label = crate::usage::window_label(window);
+        crate::material::group_row_stacked(cx)
             .child(
                 gpui_base::h_flex()
                     .w_full()
@@ -2076,40 +2029,29 @@ impl SettingsPage {
                     .gap_3()
                     .child(
                         v_flex()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .font_medium()
-                                    .child(crate::usage::window_label(window)),
-                            )
+                            .gap_0p5()
+                            .child(div().text_caption(cx).child(label.clone()))
                             .when_some(
                                 crate::usage::resets_label(window.resets_at, now),
                                 |col, label| {
-                                    col.child(
-                                        div().text_size(px(11.)).text_color(muted).child(label),
-                                    )
+                                    col.child(div().text_secondary(compact, cx).child(label))
                                 },
                             ),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.5))
-                            .text_color(muted)
+                            .text_meta_mono(compact, cx)
                             .child(crate::usage::percent_label(window.used_percent)),
                     ),
             )
             .child(
-                div()
-                    .w_full()
-                    .h(px(6.))
-                    .rounded_full()
-                    .bg(cx.theme().muted)
-                    .child(div().h_full().rounded_full().bg(fill).w(gpui::relative(
-                        window.used_percent.clamp(0.0, 100.0) / 100.0,
-                    ))),
+                crate::widgets::progress::Progress::new(SharedString::from(format!(
+                    "usage-window-{label}"
+                )))
+                .small()
+                .color(fill)
+                .value(window.used_percent),
             )
             .into_any_element()
     }
@@ -2120,16 +2062,11 @@ impl SettingsPage {
         detail: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        self.row_frame(cx)
-            .flex_col()
-            .items_start()
-            .gap(px(2.))
-            .text_color(muted)
-            .child(div().text_size(px(11.5)).child(label))
-            .when_some(detail, |col, detail| {
-                col.child(div().text_size(px(11.)).child(detail))
-            })
+        let compact = self.window_state.read(cx).compact;
+        crate::material::group_row_stacked(cx)
+            .text_secondary(compact, cx)
+            .child(label)
+            .children(detail)
             .into_any_element()
     }
 
@@ -2140,37 +2077,21 @@ impl SettingsPage {
         if groups.is_empty() {
             let loading = self.store.read(cx).archived_loading();
             return v_flex()
-                .gap(px(20.))
-                .child(self.section_label(crate::tr!("settings.archived_section"), cx))
-                .child(
-                    v_flex()
-                        .py(px(48.))
-                        .gap_1()
-                        .items_center()
-                        .when(loading, |empty| {
-                            empty.child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(crate::tr!("settings.archived_loading")),
-                            )
-                        })
-                        .when(!loading, |empty| {
-                            empty
-                                .child(
-                                    div()
-                                        .text_size(px(15.))
-                                        .font_medium()
-                                        .child(crate::tr!("settings.archived_empty")),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(crate::tr!("settings.archived_empty_desc")),
-                                )
-                        }),
-                );
+                .gap(crate::material::section_gap(cx))
+                .child(crate::material::group_caption(
+                    crate::tr!("settings.archived_section"),
+                    cx,
+                ))
+                .child(if loading {
+                    crate::material::empty_row(crate::tr!("settings.archived_loading"), cx)
+                } else {
+                    crate::material::empty_state(
+                        Icon::new(Section::Archived.icon()),
+                        crate::tr!("settings.archived_empty"),
+                        crate::tr!("settings.archived_empty_desc"),
+                        cx,
+                    )
+                });
         }
 
         let flat: Vec<(SharedString, SessionMeta)> = groups
@@ -2189,15 +2110,14 @@ impl SettingsPage {
 
         let now = now_secs();
         let mut col = v_flex()
-            .gap(px(20.))
+            .gap(crate::material::section_gap(cx))
             .child(
                 gpui_base::h_flex()
                     .items_center()
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
+                            .text_secondary(self.window_state.read(cx).compact, cx)
                             .child(crate::tr!(
                                 "settings.archived_range",
                                 from = start + 1,
@@ -2240,7 +2160,10 @@ impl SettingsPage {
                         )
                     }),
             )
-            .child(self.section_label(crate::tr!("settings.archived_section"), cx));
+            .child(crate::material::group_caption(
+                crate::tr!("settings.archived_section"),
+                cx,
+            ));
         {
             let mut group_name: Option<SharedString> = None;
             let mut rows: Vec<AnyElement> = Vec::new();
@@ -2250,7 +2173,7 @@ impl SettingsPage {
                 {
                     col = col.child(
                         v_flex()
-                            .child(self.section_label(previous, cx))
+                            .child(crate::material::group_caption(previous, cx))
                             .child(self.grouped_plain(std::mem::take(&mut rows), cx)),
                     );
                 }
@@ -2305,7 +2228,7 @@ impl SettingsPage {
             if let Some(previous) = group_name {
                 col = col.child(
                     v_flex()
-                        .child(self.section_label(previous, cx))
+                        .child(crate::material::group_caption(previous, cx))
                         .child(self.grouped_plain(rows, cx)),
                 );
             }
@@ -2358,8 +2281,7 @@ impl SettingsPage {
             )
         };
         let store = self.store.clone();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let alert = alert.bg(cx.theme().popover);
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let store = store.clone();
             let deletion = deletion.clone();
             alert
@@ -2381,6 +2303,7 @@ impl SettingsPage {
     }
 
     fn render_computer_use(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let compact = self.window_state.read(cx).compact;
         let settings = self.store.read(cx).settings();
         let enabled_reset = self.reset_action(
             "reset-cu-enabled",
@@ -2455,10 +2378,13 @@ impl SettingsPage {
             ),
         ];
         v_flex()
-            .gap(px(24.))
+            .gap(crate::material::section_gap(cx))
             .child(
                 v_flex()
-                    .child(self.section_label(crate::tr!("computer_use.section"), cx))
+                    .child(crate::material::group_caption(
+                        crate::tr!("computer_use.section"),
+                        cx,
+                    ))
                     .child(self.grouped_plain(rows, cx))
                     .children(
                         agent::ProviderKind::NATIVE
@@ -2467,10 +2393,9 @@ impl SettingsPage {
                             .filter(|kind| kind.caps().native_computer_use)
                             .map(|kind| {
                                 div()
-                                    .pt_2()
-                                    .pl_3()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
+                                    .pt(cx.theme().tokens.spacing.sm)
+                                    .pl(px(crate::material::CARD_INSET))
+                                    .text_secondary(compact, cx)
                                     .child(crate::tr!(
                                         "providers.native_computer_use",
                                         name = kind.display_name()
@@ -2518,9 +2443,12 @@ impl SettingsPage {
                 WorkspaceStore::set_browser_allow_evaluate,
             ),
         ];
-        v_flex().gap(px(24.)).child(
+        v_flex().gap(crate::material::section_gap(cx)).child(
             v_flex()
-                .child(self.section_label(crate::tr!("browser.section"), cx))
+                .child(crate::material::group_caption(
+                    crate::tr!("browser.section"),
+                    cx,
+                ))
                 .child(self.grouped_plain(rows, cx)),
         )
     }
@@ -2547,7 +2475,7 @@ impl SettingsPage {
             .child(
                 div()
                     .when(compact, |field| field.w_full())
-                    .when(!compact, |field| field.w(px(240.)))
+                    .when(!compact, |field| field.w(px(FIELD_WIDTH)))
                     .child(
                         Input::new(&self.home_url_input.state)
                             .placeholder(crate::tr!("browser.home_url.placeholder")),
@@ -2621,8 +2549,10 @@ impl SettingsPage {
 
     /// Status belongs to the attached host; native grant controls stay local.
     fn permissions_group(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let column =
-            v_flex().child(self.section_label(crate::tr!("computer_use.permissions_section"), cx));
+        let column = v_flex().child(crate::material::group_caption(
+            crate::tr!("computer_use.permissions_section"),
+            cx,
+        ));
         if self.capabilities.can_manage_local_permissions()
             && let Some(rows) = self.local_permission_rows()
         {
@@ -2646,17 +2576,6 @@ impl SettingsPage {
         None
     }
 
-    fn section_label(&self, label: impl Into<SharedString>, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .pl_3()
-            .pb(px(6.))
-            .text_size(px(11.))
-            .font_medium()
-            .text_color(cx.theme().muted_foreground)
-            .child(label.into())
-            .into_any_element()
-    }
-
     /// Group sparse settings rows with spacing between them.
     fn grouped_plain(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
         let mut group = crate::material::group(cx);
@@ -2677,6 +2596,7 @@ impl SettingsPage {
         reset: Option<AnyElement>,
         cx: &Context<Self>,
     ) -> gpui::Div {
+        let compact = self.window_state.read(cx).compact;
         v_flex()
             .flex_1()
             .min_w_0()
@@ -2685,15 +2605,10 @@ impl SettingsPage {
                 gpui_base::h_flex()
                     .items_center()
                     .gap_1()
-                    .child(div().text_size(px(15.)).font_medium().child(title.into()))
+                    .child(div().text_body(compact, cx).child(title.into()))
                     .children(reset),
             )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(desc.into()),
-            )
+            .child(div().text_secondary(compact, cx).child(desc.into()))
     }
 
     /// The per-item "restore default" button: icon-only, ghost, and rendered
@@ -2727,34 +2642,15 @@ impl SettingsPage {
         )
     }
 
-    /// A single group row. Wide puts the label left and the control right; a
-    /// compact window has no room for a label column beside a control, so the
-    /// label and its description sit above a full-width control and the prose
-    /// wraps instead of overflowing. The group container owns fill and border.
+    /// A row whose control can squeeze its label: stacked on a compact window.
+    /// A row whose control is a fixed affordance (a switch) uses
+    /// [`crate::material::group_row`] at both widths.
     fn row_frame(&self, cx: &Context<Self>) -> gpui::Div {
         if self.window_state.read(cx).compact {
-            v_flex()
-                .w_full()
-                .min_h(px(44.))
-                .px_3()
-                .py_2p5()
-                .gap_2()
-                .items_start()
+            crate::material::group_row_stacked(cx)
         } else {
-            self.control_frame()
+            crate::material::group_row(cx)
         }
-    }
-
-    /// A row whose control is a fixed 44pt affordance (a switch): it never
-    /// squeezes the label, so it stays beside it at both widths.
-    fn control_frame(&self) -> gpui::Div {
-        gpui_base::h_flex()
-            .w_full()
-            .min_h(px(44.))
-            .px_3()
-            .py_2p5()
-            .gap_3()
-            .items_center()
     }
 
     fn render_source_control(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -2777,7 +2673,7 @@ impl SettingsPage {
             WorkspaceStore::set_remove_agent_credits_on_merge,
         );
         v_flex()
-            .gap(px(24.))
+            .gap(crate::material::section_gap(cx))
             .child(self.source_control_panel.clone())
             .child(self.grouped_plain(vec![row], cx))
     }
@@ -2805,7 +2701,7 @@ impl SettingsPage {
             .clone();
         let row_focus = focus.clone();
         crate::material::accessible_clickable(
-            self.control_frame(),
+            crate::material::group_row(cx),
             SharedString::from(format!("{id}-row")),
             Role::Switch,
             title.clone(),
@@ -2856,17 +2752,14 @@ impl SettingsPage {
     ) -> Button {
         Button::new(id).ghost().outline().compact().child(
             gpui_base::h_flex()
+                // One width for every select trigger, so a column of them lines up; gpui-base's
+                // Select is not adopted yet.
                 .w(px(160.))
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .text_size(px(13.))
                 .child(label.into())
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .xsmall()
-                        .text_color(cx.theme().muted_foreground),
-                ),
+                .child(Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground)),
         )
     }
 
@@ -2889,6 +2782,7 @@ impl SettingsPage {
         let page = cx.entity();
         let on_select = Rc::new(on_select);
         let menu_label = title.clone();
+        let compact = self.window_state.read(cx).compact;
         let dropdown = crate::material::overlay_popover(popover_id, cx)
             .trigger(trigger)
             .content(move |_, _, cx| {
@@ -2897,6 +2791,8 @@ impl SettingsPage {
                     .role(Role::Menu)
                     .aria_label(menu_label.clone())
                     .p_1()
+                    // Each menu names its own floor so its longest option fits; gpui-base's
+                    // Select is not adopted yet.
                     .min_w(px(menu_width))
                     .gap_0p5()
                     .children(options.clone().into_iter().map(|option| {
@@ -2905,7 +2801,7 @@ impl SettingsPage {
                         let on_select = on_select.clone();
                         let label = option.label.clone();
                         let item = crate::material::accessible_clickable(
-                            gpui_base::h_flex(),
+                            crate::material::menu_item_frame(compact, cx),
                             option.id,
                             Role::MenuItem,
                             label.clone(),
@@ -2913,32 +2809,21 @@ impl SettingsPage {
                         )
                         .aria_selected(option.selected)
                         .w_full()
-                        .px_2()
-                        .gap_2()
-                        .rounded(crate::material::radius_button(cx))
+                        .text_body(compact, cx)
                         .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().accent));
-                        let item = if let Some(description) = option.description {
-                            item.py_1p5().items_start().child(
-                                v_flex()
-                                    .flex_1()
-                                    .gap_0p5()
-                                    .child(div().text_size(px(13.)).child(label))
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(description),
+                        .hover(|s| s.bg(cx.theme().muted));
+                        let item =
+                            if let Some(description) = option.description {
+                                item.items_start().child(
+                                    v_flex().flex_1().gap_0p5().child(div().child(label)).child(
+                                        div().text_secondary(compact, cx).child(description),
                                     ),
-                            )
-                        } else {
-                            item.py_1()
-                                .items_center()
-                                .text_size(px(13.))
-                                .child(div().flex_1().child(label))
-                        };
+                                )
+                            } else {
+                                item.child(div().flex_1().child(label))
+                            };
                         item.when(option.selected, |item| {
-                            item.child(Icon::new(IconName::Check).xsmall())
+                            item.child(Icon::new(IconName::Check))
                         })
                         .on_click(move |_, window, cx| {
                             on_select(option.value.clone(), &page, window, cx);
@@ -3077,7 +2962,7 @@ impl SettingsPage {
                 == crate::window_state::Destination::SettingsThreadRules
         {
             let column = self.render_thread_behavior(cx);
-            return self.render_content_column(column, &self.content_scroll);
+            return self.render_content_column(column, &self.content_scroll, cx);
         }
         if self.section == Section::ProjectThreadRules
             && self.window_state.read(cx).destination()

@@ -1,8 +1,9 @@
 use std::path::Path;
 
 use crate::icon::{Icon, IconName};
-use crate::sizing::Sizable as _;
+use crate::material::{Bar, TOUCH_TARGET, bar_height};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::spinner::Spinner;
 use agent::TurnStatus;
 use gpui::{
@@ -10,7 +11,7 @@ use gpui::{
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use tcode_core::session::{TimelineEntry, TurnMeta};
 
@@ -56,6 +57,8 @@ pub(crate) fn work_log(
         rows,
     } = data;
     let muted = cx.theme().muted_foreground;
+    // Not a `Button`: on a touch layout the label wraps, and `Button` lays its
+    // content out on one line.
     let header = crate::material::accessible_clickable(
         h_flex(),
         SharedString::from(format!("worklog-header-{index}-{segment_id}")),
@@ -69,23 +72,22 @@ pub(crate) fn work_log(
     })
     .aria_expanded(expanded)
     .self_start()
-    .h(px(28.))
-    .when(compact, |row| row.h_auto().min_h(px(44.)))
+    .h(px(bar_height(Bar::Section, false)))
+    .when(compact, |row| row.h_auto().min_h(px(TOUCH_TARGET)))
     .when(compact, |row| row.max_w_full().flex_wrap())
     .px_1p5()
     .gap_1p5()
     .items_center()
     .rounded(crate::material::radius_button(cx))
-    .text_size(px(12.5))
-    .font_medium()
+    .text_body(false, cx)
     .text_color(muted)
     .cursor_pointer()
     .hover(|row| row.bg(cx.theme().accent))
     .on_click(on_toggle)
-    .child(Icon::new(chevron(expanded)).size(px(12.)).text_color(muted))
+    .child(Icon::new(chevron(expanded)).text_color(muted))
     .child(capsule_label)
     .when(running, |row| {
-        row.child(Spinner::new().xsmall().color(cx.theme().primary))
+        row.child(Spinner::new().color(cx.theme().primary))
     })
     .when(!running, |row| {
         // A settled run needs no badge; only a bad ending is called out.
@@ -95,28 +97,19 @@ pub(crate) fn work_log(
             TurnStatus::Interrupted => Some(crate::tr!("chat.work_log_interrupted")),
         };
         row.when_some(failure, |row, label| {
-            row.child(
-                h_flex()
-                    .flex_none()
-                    .h(px(22.))
-                    .px_2()
-                    .gap_1()
-                    .items_center()
-                    .rounded(crate::material::radius_chip(cx))
-                    .bg(cx.theme().danger.opacity(0.12))
-                    .text_color(cx.theme().danger)
-                    .text_size(px(11.5))
-                    .child(Icon::new(IconName::CircleX).size(px(12.)))
-                    .child(label),
-            )
+            row.child(crate::material::semantic_chip(
+                label,
+                cx.theme().danger.opacity(0.12),
+                cx.theme().danger,
+                cx,
+            ))
         })
         .child(
             div()
                 .flex_none()
-                .font_family(cx.theme().mono_font_family.clone())
-                .text_size(px(11.))
+                .text_meta_mono(false, cx)
                 // Baseline compensation: flex can't baseline-align text boxes,
-                // and the 11px digits sit visibly high beside the 12.5px label.
+                // and the smaller digits sit visibly high beside the label.
                 .relative()
                 .top(px(1.))
                 .child(duration),
@@ -135,9 +128,10 @@ pub(crate) fn work_log(
 
 /// Folded activity rows under an expanded header.
 pub(crate) fn work_log_body(rows: Vec<AnyElement>) -> Div {
-    // Rows line up under the header label: 6px header padding + 12px chevron
-    // + 6px gap, minus the 4px an activity row keeps for its hover pill.
-    v_flex().w_full().gap_1().pl(px(20.)).children(rows)
+    // Rows line up under the header label: 6px header padding + 14px chevron
+    // (the body text size) + 6px gap, minus the 4px an activity row keeps for
+    // its hover pill.
+    v_flex().w_full().gap_1().pl(px(22.)).children(rows)
 }
 
 fn chevron(open: bool) -> IconName {

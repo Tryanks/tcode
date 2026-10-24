@@ -28,10 +28,12 @@ pub(super) fn beside_qr(
         h_flex()
             .flex_wrap()
             .items_start()
+            // The narrowest the text column gets before the QR wraps under it;
+            // a layout breakpoint, not a size any owner supplies.
             .child(div().flex_1().min_w(px(200.)).child(text))
             .children(qr)
     };
-    layout.w_full().gap_4()
+    layout.w_full().gap(crate::material::section_gap(cx))
 }
 
 /// Paint the matrix as one flex row per module row, collapsing consecutive
@@ -39,7 +41,6 @@ pub(super) fn beside_qr(
 /// thousands of nodes repainting every countdown tick.
 pub(super) fn qr_element(payload: &str, cx: &App) -> Option<AnyElement> {
     const MODULE: f32 = 4.;
-    const QUIET: f32 = 12.;
     let (width, modules) = qr_modules(payload)?;
     // A QR is scanned by a camera, not read by a human: it must stay black on
     // white in both themes, so neither colour comes from the palette.
@@ -67,7 +68,7 @@ pub(super) fn qr_element(payload: &str, cx: &App) -> Option<AnyElement> {
     Some(
         div()
             .flex_none()
-            .p(px(QUIET))
+            .p(px(crate::material::CARD_INSET))
             .rounded(crate::material::radius_card(cx))
             .bg(gpui::white())
             .child(grid)

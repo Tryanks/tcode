@@ -1,6 +1,10 @@
 use super::super::*;
 use crate::scroll::ScrollableElement as _;
 
+/// How tall a request's detail grows before it scrolls inside the card, so the
+/// options stay on screen; no owner sizes a card's scrolling body.
+const DETAIL_MAX_HEIGHT: f32 = 240.;
+
 impl Composer {
     pub(in super::super) fn render_approval_panel(
         &self,
@@ -45,10 +49,10 @@ impl Composer {
             div()
                 .id("approval-detail-scroll")
                 .w_full()
-                .max_h(px(240.))
+                .max_h(px(DETAIL_MAX_HEIGHT))
                 .overflow_y_scroll_area()
                 .p_2()
-                .rounded(cx.theme().tokens.radius.md)
+                .rounded(crate::material::radius_card(cx))
                 .bg(detail_bg)
                 .child(content)
                 .into_any_element()
@@ -57,17 +61,11 @@ impl Composer {
             ApprovalKind::ExecCommand { command, cwd, .. } => detail_area(
                 v_flex()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .child(command.clone()),
-                    )
+                    .child(div().text_code(cx).child(command.clone()))
                     .when_some(cwd.clone(), |this, cwd| {
                         this.child(
                             div()
-                                .text_size(px(11.))
-                                .text_color(muted)
+                                .text_secondary(self.compact, cx)
                                 .child(crate::tr!("approval.in_directory", cwd = cwd)),
                         )
                     })
@@ -79,7 +77,7 @@ impl Composer {
                 div()
                     .debug_selector(|| "approval-detail".into())
                     .w_full()
-                    .rounded(cx.theme().tokens.radius.md)
+                    .rounded(crate::material::radius_card(cx))
                     .bg(detail_bg)
                     .child(
                         crate::scroll::VirtualList::measured(
@@ -90,8 +88,7 @@ impl Composer {
                                 div()
                                     .debug_selector(move || format!("approval-change-{index}"))
                                     .when(index < last, |row| row.pb_0p5())
-                                    .text_size(px(13.))
-                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_code(cx)
                                     .child(format!(
                                         "{} {}",
                                         file_change_kind_label(change.kind),
@@ -100,18 +97,14 @@ impl Composer {
                             },
                         )
                         .w_full()
-                        .max_h(px(240.))
+                        .max_h(px(DETAIL_MAX_HEIGHT))
                         .p_2(),
                     )
                     .into_any_element()
             }
-            ApprovalKind::FileRead { detail } => detail_area(
-                div()
-                    .text_size(px(13.))
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .child(detail.clone())
-                    .into_any_element(),
-            ),
+            ApprovalKind::FileRead { detail } => {
+                detail_area(div().text_code(cx).child(detail.clone()).into_any_element())
+            }
             ApprovalKind::ToolUse {
                 name,
                 input,
@@ -123,14 +116,11 @@ impl Composer {
                         .gap_1()
                         .when(
                             !detail.is_empty() && *detail != *name && *detail != input,
-                            |this| this.child(div().text_size(px(13.)).child(detail.clone())),
+                            |this| {
+                                this.child(div().text_body(self.compact, cx).child(detail.clone()))
+                            },
                         )
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .child(format!("{name} {input}")),
-                        )
+                        .child(div().text_code(cx).child(format!("{name} {input}")))
                         .into_any_element(),
                 )
             }
@@ -143,17 +133,10 @@ impl Composer {
         let expanded = self.approval_expanded;
         let cancel_id = request.id.clone();
 
-        v_flex()
+        crate::material::card_raised(cx)
             .w_full()
-            .gap_2()
-            .p(px(14.))
-            .rounded(crate::material::radius_card(cx))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .shadow_sm()
             .when(pending, |card| {
-                card.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
+                card.child(div().text_secondary(self.compact, cx).child(crate::tr!(
                     if self
                         .workspace_store
                         .read(cx)
@@ -169,58 +152,51 @@ impl Composer {
             .when(self.compact && !self.interactive(cx), |card| {
                 card.child(
                     div()
-                        .text_size(px(13.))
+                        .text_body(self.compact, cx)
                         .text_color(muted)
                         .child(crate::tr!("mobile.offline_action")),
                 )
             })
             .child(
-                h_flex()
-                    .id("approval-header")
-                    .when(self.compact, |header| header.min_h(px(44.)))
-                    .w_full()
-                    .gap_2()
-                    .items_center()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.approval_expanded = !this.approval_expanded;
-                        cx.notify();
-                    }))
-                    .child(
+                crate::material::accessible_clickable(
+                    h_flex(),
+                    "approval-header",
+                    Role::Button,
+                    summary.clone(),
+                    cx,
+                )
+                .when(self.compact, |header| {
+                    header.min_h(px(crate::material::TOUCH_TARGET))
+                })
+                .w_full()
+                .gap_2()
+                .items_center()
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.approval_expanded = !this.approval_expanded;
+                    cx.notify();
+                }))
+                .child(div().text_caption(cx).child(if self.compact {
+                    crate::tr!("mobile.approval")
+                } else {
+                    crate::tr!("approval.pending")
+                }))
+                .child(div().flex_1().text_title(cx).child(summary))
+                .when(count > 1, |this| {
+                    this.child(
                         div()
-                            .text_size(px(11.))
-                            .font_medium()
-                            .text_color(muted)
-                            .child(if self.compact {
-                                crate::tr!("mobile.approval")
-                            } else {
-                                crate::tr!("approval.pending")
-                            }),
+                            .text_secondary(self.compact, cx)
+                            .child(format!("1/{count}")),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(13.))
-                            .font_medium()
-                            .child(summary),
-                    )
-                    .when(count > 1, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(muted)
-                                .child(format!("1/{count}")),
-                        )
+                })
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
                     })
-                    .child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .xsmall()
-                        .text_color(muted),
-                    ),
+                    .text_color(muted),
+                ),
             )
             .when(expanded, |this| this.child(detail))
             .child({
@@ -241,11 +217,9 @@ impl Composer {
                         "approval-option-{}",
                         option.id
                     )))
-                    .small()
-                    .h(px(28.))
-                    .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
+                    .chip()
+                    .touch(self.compact)
                     .disabled(!self.interactive(cx) || pending)
-                    .rounded(crate::material::radius_input(cx))
                     .label(option.label.clone())
                     .when(rejects, |button| button.danger().outline())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -265,11 +239,9 @@ impl Composer {
                     .child(
                         Button::new("approval-cancel")
                             .ghost()
-                            .small()
-                            .h(px(28.))
-                            .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
+                            .chip()
+                            .touch(self.compact)
                             .disabled(!self.interactive(cx) || pending)
-                            .rounded(crate::material::radius_input(cx))
                             .label(crate::tr!("approval.cancel_turn"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);

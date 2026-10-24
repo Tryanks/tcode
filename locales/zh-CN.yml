@@ -308,7 +308,7 @@ migration:
   quitting: "正在停止。数据不会丢失，下次启动 Tcode 时会继续升级。"
   failed: "升级未能完成：%{reason}"
 settings:
-  threads_section: "对话"
+  threads_section: "对话行为"
   thread_behavior: "对话行为"
   auto_settle:
     title: "自动收尾不活跃的对话"

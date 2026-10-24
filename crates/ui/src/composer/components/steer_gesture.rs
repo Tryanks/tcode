@@ -145,11 +145,11 @@ impl Composer {
                         crate::material::overlay_contour(div(), cx)
                             .absolute()
                             .right(px(52.))
-                            .px(px(10.))
-                            .py(px(6.))
+                            .px(cx.theme().tokens.spacing.sm)
+                            .py(cx.theme().tokens.spacing.xs)
                             .rounded(crate::material::radius_chip(cx))
                             .whitespace_nowrap()
-                            .text_size(px(12.))
+                            .text_token(&cx.theme().tokens.typography.xs)
                             .text_color(if selected {
                                 cx.theme().primary
                             } else {

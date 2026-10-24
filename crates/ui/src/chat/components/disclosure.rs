@@ -2,20 +2,22 @@ use crate::scroll::ScrollableElement as _;
 use std::borrow::Cow;
 
 use crate::icon::{Icon, IconName};
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::{
     AnyElement, App, ClickEvent, Div, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, px,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    px,
 };
-use gpui_base::{h_flex, v_flex};
+use gpui_base::{Link, h_flex, v_flex};
 
 use tcode_core::notice::{CallbackEvent, HostNotice, OrchestrateCallback};
 
 use super::super::model::one_line;
 
 const CALLBACK_TITLE_MAX_CHARS: usize = 24;
-const DISCLOSURE_LINE_HEIGHT: f32 = 20.;
 const DISCLOSURE_CARD_MAX_HEIGHT: f32 = 320.;
 
 /// One line naming a notice. A row per callback names only its callback.
@@ -63,25 +65,18 @@ pub(crate) fn callback_row(
         callback.body.clone()
     };
     let open = on_open.map(|on_open| {
-        crate::material::accessible_clickable(
-            h_flex(),
-            SharedString::from(format!("callback-open-{key}")),
-            Role::Link,
-            SharedString::from(crate::tr!("agents.open").into_owned()),
-            cx,
-        )
-        .flex_none()
-        .h(px(24.))
-        .px_1p5()
-        .items_center()
-        .rounded(crate::material::radius_button(cx))
-        .text_size(px(11.))
-        .text_color(cx.theme().primary)
-        .cursor_pointer()
-        .hover(|link| link.bg(cx.theme().accent))
-        .on_click(on_open)
-        .child(crate::tr!("agents.open_child"))
-        .into_any_element()
+        let ring = crate::material::focus_ring(cx);
+        Link::new(SharedString::from(format!("callback-open-{key}")))
+            .accessibility_label(SharedString::from(crate::tr!("agents.open").into_owned()))
+            .on_activate(on_open)
+            .flex_none()
+            .text_token(&cx.theme().tokens.typography.xs)
+            .text_color(cx.theme().primary)
+            .cursor_pointer()
+            .hover(|link| link.underline())
+            .focus_visible(move |style| style.shadow(vec![ring]))
+            .child(crate::tr!("agents.open_child"))
+            .into_any_element()
     });
     disclosure_with(key, label, &body, expanded, on_toggle, open, cx)
 }
@@ -111,31 +106,21 @@ fn disclosure_with(
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let toggle = crate::material::accessible_clickable(
-        h_flex(),
-        SharedString::from(format!("disclosure-{key}")),
-        Role::Button,
-        label.clone(),
-        cx,
-    )
-    .aria_expanded(expanded)
-    .flex_none()
-    .h(px(24.))
-    .px_1p5()
-    .gap_1p5()
-    .items_center()
-    .rounded(crate::material::radius_button(cx))
-    .text_size(px(11.))
-    .text_color(muted)
-    .cursor_pointer()
-    .hover(|row| row.bg(cx.theme().accent))
-    .on_click(on_toggle)
-    .debug_selector({
-        let selector = format!("disclosure-{key}");
-        move || selector
-    })
-    .child(Icon::new(chevron(expanded)).size(px(12.)).text_color(muted))
-    .child(label);
+    // The label is a child rather than `.label()`: the divider grammar keeps it
+    // muted, and `Button` paints its label in the variant's foreground.
+    let toggle = Button::new(SharedString::from(format!("disclosure-{key}")))
+        .ghost()
+        .small()
+        .aria_label(label.clone())
+        .aria_expanded(expanded)
+        .text_token(&cx.theme().tokens.typography.xs)
+        .icon(Icon::new(chevron(expanded)).text_color(muted))
+        .child(div().text_color(muted).child(label))
+        .on_click(on_toggle)
+        .debug_selector({
+            let selector = format!("disclosure-{key}");
+            move || selector
+        });
 
     let row = h_flex()
         .w_full()
@@ -156,14 +141,11 @@ fn disclosure_with(
 
 pub(crate) fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
     let muted = cx.theme().muted_foreground;
-    div()
+    crate::material::card(cx)
         .w_full()
-        .rounded(crate::material::radius_card(cx))
-        .bg(cx.theme().muted)
         // The card keeps clicks to itself, but a pan that its body cannot use
         // must still reach the timeline behind it.
         .block_mouse_except_scroll()
-        .p_3()
         .child(
             div()
                 .id(SharedString::from(format!("disclosure-body-{key}")))
@@ -173,8 +155,7 @@ pub(crate) fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
                 .child(
                     div()
                         .w_full()
-                        .text_size(px(13.))
-                        .line_height(px(DISCLOSURE_LINE_HEIGHT))
+                        .text_body(false, cx)
                         .text_color(muted)
                         .child(full_text.to_string()),
                 ),

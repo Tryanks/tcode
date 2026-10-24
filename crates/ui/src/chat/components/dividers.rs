@@ -1,4 +1,5 @@
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use agent::ProviderKind;
 use gpui::{
     AnyElement, App, Div, Hsla, InteractiveElement as _, IntoElement as _, ParentElement as _,
@@ -16,7 +17,7 @@ pub(crate) fn divider_stub(cx: &App) -> Div {
     div().h(px(1.)).w(px(STUB_WIDTH)).bg(cx.theme().border)
 }
 
-/// The one divider grammar: a centered 11px label between two hairline stubs.
+/// The one divider grammar: a centered small label between two hairline stubs.
 /// `tint` colors the label alone — the rules stay border-quiet no matter what
 /// the event is, so no divider can shout louder than another.
 fn divider(id: SharedString, label: String, tint: Hsla, cx: &App) -> AnyElement {
@@ -33,7 +34,7 @@ fn divider(id: SharedString, label: String, tint: Hsla, cx: &App) -> AnyElement 
                 .min_w_0()
                 .flex_shrink_1()
                 .text_center()
-                .text_size(px(11.))
+                .text_token(&cx.theme().tokens.typography.xs)
                 .text_color(tint)
                 .child(label),
         )

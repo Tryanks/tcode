@@ -1,4 +1,5 @@
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
@@ -118,7 +119,7 @@ pub(crate) fn error_card(
             .items_center()
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_secondary(false, cx)
                     .text_color(cx.theme().danger_foreground)
                     .child(crate::tr!(
                         "chat.limit_resume.resumes_in",
@@ -140,16 +141,12 @@ pub(crate) fn error_card(
         .flex_1()
         .min_w_0()
         .gap_2()
-        .p_3()
         .child(
             h_flex()
                 .gap_2()
                 .items_center()
-                .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .xsmall()
-                        .text_color(cx.theme().danger_foreground),
-                )
+                .text_token(&cx.theme().tokens.typography.xs)
+                .child(Icon::new(IconName::TriangleAlert).text_color(cx.theme().danger_foreground))
                 .child(
                     div()
                         .text_size(px(10.5))
@@ -165,30 +162,17 @@ pub(crate) fn error_card(
         .child(
             div()
                 .w_full()
-                .text_size(px(13.))
-                .line_height(px(20.))
+                .text_body(false, cx)
                 .text_color(cx.theme().danger_foreground)
                 .whitespace_normal()
                 .child(message.to_string()),
         )
         .when_some(resume_row, |content, row| content.child(row));
-    h_flex()
-        .w_full()
+    crate::material::notice(danger, cx)
         .items_stretch()
-        .rounded(crate::material::radius_card(cx))
         .overflow_hidden()
-        .border_1()
-        .border_color(danger.opacity(0.22))
-        .bg(danger.opacity(0.12))
-        .child(
-            div()
-                .flex_none()
-                .w(px(2.))
-                .ml(px(8.))
-                .my(px(8.))
-                .rounded_full()
-                .bg(danger),
-        )
+        // The danger rail is a hairline accent, not a spacing step.
+        .child(div().flex_none().w(px(2.)).rounded_full().bg(danger))
         .child(content)
         .context_menu({
             let message = message.to_string();

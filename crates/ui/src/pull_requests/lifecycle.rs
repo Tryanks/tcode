@@ -28,6 +28,7 @@ use crate::{
     sizing::Sizable as _,
     store::WorkspaceStore,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         button::{Button, ButtonVariant, ButtonVariants as _},
         checkbox::Checkbox,
@@ -814,11 +815,10 @@ impl Target {
             description.into_owned(),
             confirm.into_owned(),
         );
-        window.open_alert_dialog(cx, move |alert, _, cx| {
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let target = self.clone();
             let action = action.clone();
             alert
-                .bg(cx.theme().popover)
                 .title(title.clone())
                 .description(description.clone())
                 .button_props(
@@ -1213,18 +1213,19 @@ impl MergeDialog {
     }
 
     fn fact(&self, label: &str, value: impl IntoElement, cx: &App) -> AnyElement {
+        let compact = self.target.window_state.read(cx).compact;
         h_flex()
             .gap_2()
             .items_start()
             .child(
+                // One label column so the values align; no owner carries a label-column width.
                 div()
                     .w(px(104.))
                     .flex_none()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_secondary(compact, cx)
                     .child(crate::tr!(label).into_owned()),
             )
-            .child(div().flex_1().min_w_0().text_size(px(13.)).child(value))
+            .child(div().flex_1().min_w_0().text_body(compact, cx).child(value))
             .into_any_element()
     }
 }
@@ -1277,12 +1278,13 @@ impl Render for MergeDialog {
                             .font_family(mono.clone())
                             .child(short(head))
                             .into_any_element(),
-                        None => Spinner::new().small().into_any_element(),
+                        None => Spinner::new().into_any_element(),
                     },
                     cx,
                 ),
             );
         let view = cx.entity();
+        let compact = target.window_state.read(cx).compact;
         let method = match (state, self.method) {
             (Some(state), Some(chosen)) if state.merge_methods.len() >= 2 => {
                 let segments = state.merge_methods.iter().map(|method| {
@@ -1301,18 +1303,18 @@ impl Render for MergeDialog {
                     })
                 });
                 ChoiceGroup::new("pr-merge-method")
-                    .compact(target.window_state.read(cx).compact)
+                    .compact(compact)
                     .aria_label(crate::tr!("pull_requests.merge.method"))
                     .w_full()
                     .choices(segments)
                     .into_any_element()
             }
             (Some(_), Some(chosen)) => div()
-                .text_size(px(13.))
+                .text_body(compact, cx)
                 .child(method_label(chosen))
                 .into_any_element(),
             (Some(_), None) => div().into_any_element(),
-            (None, _) => Spinner::new().small().into_any_element(),
+            (None, _) => Spinner::new().into_any_element(),
         };
         let default_box = self
             .method
@@ -1357,7 +1359,7 @@ impl Render for MergeDialog {
                                 })
                             }),
                     )
-                    .child(div().text_size(px(11.)).text_color(muted).child(
+                    .child(div().text_secondary(compact, cx).child(
                         crate::tr!("pull_requests.merge.remove_credits_caption").into_owned(),
                     ))
             });
@@ -1365,11 +1367,13 @@ impl Render for MergeDialog {
             h_flex()
                 .gap_1p5()
                 .items_start()
-                .text_size(px(12.))
+                .text_secondary(compact, cx)
+                .text_color(cx.theme().foreground)
                 .child(
+                    // Centres the font-sized icon on the first line's taller line box.
                     div()
-                        .pt(px(2.))
-                        .child(Icon::new(icon).size(px(12.)).text_color(color)),
+                        .pt(cx.theme().tokens.spacing.xxs)
+                        .child(Icon::new(icon).text_color(color)),
                 )
                 .child(div().flex_1().min_w_0().child(text))
         };
@@ -1452,7 +1456,7 @@ impl Render for MergeDialog {
             Some(Err(reason)) => Some(
                 v_flex()
                     .gap_1()
-                    .text_size(px(12.))
+                    .text_secondary(compact, cx)
                     .text_color(cx.theme().danger)
                     .child(
                         crate::tr!("pull_requests.merge.load_failed", number = number).into_owned(),
@@ -1477,8 +1481,7 @@ impl Render for MergeDialog {
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(12.))
-                            .text_color(muted)
+                            .text_caption(cx)
                             .child(crate::tr!("pull_requests.merge.method").into_owned()),
                     )
                     .child(method)
@@ -1521,7 +1524,6 @@ fn open_merge_dialog(target: Target, auto: bool, window: &mut Window, cx: &mut A
         .settings()
         .remove_agent_credits_on_merge;
     let number = target.number();
-    let compact = target.window_state.read(cx).compact;
     let dialog = cx.new(|cx| {
         let mut dialog = MergeDialog {
             target,
@@ -1544,15 +1546,9 @@ fn open_merge_dialog(target: Target, auto: bool, window: &mut Window, cx: &mut A
         number = number
     )
     .into_owned();
-    window.open_dialog(cx, move |base, window, cx| {
+    window.open_dialog(cx, move |base, _, cx| {
         let sending = dialog.read(cx).sending;
-        let width = if compact {
-            (window.viewport_size().width - px(2. * material::COMPACT_PAGE_INSET)).min(px(480.))
-        } else {
-            px(480.)
-        };
         base.title(title.clone())
-            .w(width)
             .keyboard(!sending)
             .close_button(!sending)
             .overlay_closable(!sending)
@@ -1582,13 +1578,13 @@ pub(super) fn primary_element(
             .flex_none()
             .gap_1()
             .items_center()
-            .px_2()
-            .py(px(2.))
+            .px(cx.theme().tokens.spacing.sm)
+            .py(cx.theme().tokens.spacing.xxs)
             .rounded(material::radius_chip(cx))
             .bg(gpui::Hsla::opacity(&color, 0.1))
+            .text_secondary(compact, cx)
             .text_color(color)
-            .text_size(px(if compact { 13. } else { 12. }))
-            .child(Icon::new(icon).size(px(14.)))
+            .child(Icon::new(icon))
             .child(label);
         match tooltip {
             Some(tooltip) => chip

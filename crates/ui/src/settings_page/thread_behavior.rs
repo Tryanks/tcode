@@ -153,38 +153,26 @@ impl SettingsPage {
                 let edit = project.clone();
                 rows.push(
                     crate::material::accessible_clickable(
-                        gpui_base::h_flex(),
+                        crate::material::group_row(cx),
                         SharedString::from(format!("project-rules-{}", project.id)),
                         Role::Button,
                         SharedString::from(project.name.clone()),
                         cx,
                     )
-                    .w_full()
-                    .min_h(px(44.))
-                    .px_3()
-                    .gap_2()
-                    .items_center()
                     .cursor_pointer()
                     .hover(|row| row.bg(cx.theme().list_hover))
+                    .text_body(true, cx)
                     .child(crate::project_icon::artwork(&project, 16.))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(15.))
                             .child(project.name.clone()),
                     )
-                    .children(summary.map(|summary| {
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(summary)
-                    }))
+                    .children(summary.map(|summary| div().text_secondary(true, cx).child(summary)))
                     .child(
-                        Icon::new(IconName::ChevronRight)
-                            .xsmall()
-                            .text_color(cx.theme().muted_foreground),
+                        Icon::new(IconName::ChevronRight).text_color(cx.theme().muted_foreground),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.edit_project_rules(edit.clone(), window, cx)
@@ -240,23 +228,15 @@ impl SettingsPage {
                 let edit = project.clone();
                 let id = project.id.clone();
                 rows.push(
-                    gpui_base::h_flex()
-                        .min_h(px(44.))
-                        .px_3()
-                        .gap_2()
+                    crate::material::group_row(cx)
+                        .text_body(false, cx)
                         .child(crate::project_icon::artwork(&project, 16.))
-                        .child(div().flex_1().text_size(px(15.)).child(project.name))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(summary),
-                        )
+                        .child(div().flex_1().child(project.name))
+                        .child(div().text_secondary(false, cx).child(summary))
                         .child(
                             Button::new(SharedString::from(format!("edit-rules-{id}")))
                                 .ghost()
                                 .xsmall()
-                                .text_size(px(13.))
                                 .label(crate::tr!("settings.auto_settle.edit"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.edit_project_rules(edit.clone(), window, cx)
@@ -279,15 +259,18 @@ impl SettingsPage {
                 );
             }
         }
+        let compact = self.window_state.read(cx).compact;
         v_flex()
-            .child(self.section_label(crate::tr!("settings.threads_section"), cx))
+            .child(crate::material::group_caption(
+                crate::tr!("settings.threads_section"),
+                cx,
+            ))
             .child(self.grouped_plain(rows, cx))
             .child(
                 div()
-                    .pl_3()
-                    .pt_2()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
+                    .pl(px(crate::material::CARD_INSET))
+                    .pt(cx.theme().tokens.spacing.sm)
+                    .text_secondary(compact, cx)
                     .child(crate::tr!("settings.auto_settle.footnote")),
             )
     }
@@ -477,7 +460,7 @@ impl Render for ProjectRulesEditor {
             .gap_3()
             .child(
                 div()
-                    .text_size(px(15.))
+                    .text_body(compact, cx)
                     .child(crate::tr!("settings.auto_settle.title")),
             )
             .child(rule_selector(
@@ -492,8 +475,7 @@ impl Render for ProjectRulesEditor {
             content = content
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
+                        .text_caption(cx)
                         .child(crate::tr!("settings.auto_settle.days")),
                 )
                 .child(
@@ -504,7 +486,7 @@ impl Render for ProjectRulesEditor {
         content = content
             .child(
                 div()
-                    .text_size(px(15.))
+                    .text_body(compact, cx)
                     .child(crate::tr!("settings.auto_settle.on_merge")),
             )
             .child(rule_selector(
@@ -557,27 +539,19 @@ fn rule_selector<T: Clone + 'static>(
                 let checked = index == selected;
                 let editor = editor.clone();
                 crate::material::accessible_clickable(
-                    gpui_base::h_flex(),
+                    crate::material::group_row(cx),
                     (SharedString::from(format!("{id}-choice")), index),
                     Role::Button,
                     SharedString::from(label.clone()),
                     cx,
                 )
                 .aria_selected(checked)
-                .w_full()
-                .min_h(px(44.))
-                .px_3()
-                .gap_2()
-                .items_center()
                 .cursor_pointer()
                 .hover(|row| row.bg(cx.theme().list_hover))
-                .child(div().flex_1().text_size(px(15.)).child(label))
+                .text_body(true, cx)
+                .child(div().flex_1().child(label))
                 .when(checked, |row| {
-                    row.child(
-                        Icon::new(IconName::Check)
-                            .size_4()
-                            .text_color(cx.theme().primary),
-                    )
+                    row.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
                 })
                 .on_click(move |_, _, cx| {
                     editor.update(cx, |editor, cx| {
@@ -595,7 +569,6 @@ fn rule_selector<T: Clone + 'static>(
         .map(|(_, label)| label.clone())
         .unwrap_or_default();
     crate::material::overlay_popover(id, cx)
-        // The same trigger as the settings page's dropdown rows.
         .trigger(
             Button::new(SharedString::from(format!("{id}-choice")))
                 .ghost()
@@ -607,17 +580,16 @@ fn rule_selector<T: Clone + 'static>(
                         .items_center()
                         .justify_between()
                         .gap_2()
-                        .text_size(px(13.))
                         .child(trigger_label)
                         .child(
                             Icon::new(IconName::ChevronDown)
-                                .xsmall()
                                 .text_color(cx.theme().muted_foreground),
                         ),
                 ),
         )
         .content(move |_, _, cx| {
             let popover = cx.entity();
+            // The menu is at least as wide as its trigger; gpui-base's Select is not adopted yet.
             v_flex().p_1().min_w(px(240.)).gap_0p5().children(
                 choices
                     .clone()
@@ -628,7 +600,7 @@ fn rule_selector<T: Clone + 'static>(
                         let popover = popover.clone();
                         let checked = index == selected;
                         crate::material::accessible_clickable(
-                            gpui_base::h_flex(),
+                            crate::material::menu_item_frame(false, cx),
                             (SharedString::from(format!("{id}-option")), index),
                             Role::MenuItem,
                             SharedString::from(label.clone()),
@@ -636,18 +608,11 @@ fn rule_selector<T: Clone + 'static>(
                         )
                         .aria_selected(checked)
                         .w_full()
-                        .px_2()
-                        .py_1()
-                        .gap_2()
-                        .items_center()
-                        .text_size(px(13.))
-                        .rounded(crate::material::radius_button(cx))
+                        .text_body(false, cx)
                         .cursor_pointer()
-                        .hover(|item| item.bg(cx.theme().accent))
+                        .hover(|item| item.bg(cx.theme().muted))
                         .child(div().flex_1().child(label))
-                        .when(checked, |item| {
-                            item.child(Icon::new(IconName::Check).xsmall())
-                        })
+                        .when(checked, |item| item.child(Icon::new(IconName::Check)))
                         .on_click(move |_, window, cx| {
                             editor.update(cx, |editor, cx| {
                                 pick(editor, value.clone());

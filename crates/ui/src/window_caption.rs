@@ -51,11 +51,14 @@ pub(crate) const RIGHT_PANEL_CAPTION_WIDTH: f32 = if CLIENT_DECORATED {
     0.
 };
 
+/// What [`traffic_light_inset`] reserves, for width budgets with no window to ask.
+pub(crate) const TRAFFIC_LIGHT_INSET: f32 = 80.;
+
 /// Left inset a top strip keeps clear of the native macOS traffic lights,
 /// which the system draws over the window's top-left outside full screen.
 pub(crate) fn traffic_light_inset(window: &Window) -> Pixels {
     if cfg!(target_os = "macos") && !window.is_fullscreen() {
-        px(80.)
+        px(TRAFFIC_LIGHT_INSET)
     } else {
         Pixels::ZERO
     }

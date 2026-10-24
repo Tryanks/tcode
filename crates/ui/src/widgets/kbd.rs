@@ -1,4 +1,5 @@
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use gpui::{
     Action, AsKeystroke, IntoElement, KeyContext, Keystroke, ParentElement as _, RenderOnce,
     StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, relative,
@@ -144,9 +145,9 @@ impl RenderOnce for Kbd {
             .px_1()
             .min_w_5()
             .text_center()
-            .rounded(cx.theme().tokens.radius.sm)
+            .rounded(crate::material::radius_chip(cx))
+            .text_token(&cx.theme().tokens.typography.xs)
             .line_height(relative(1.))
-            .text_xs()
             .whitespace_normal()
             .flex_shrink_0()
             .refine_style(&self.style)

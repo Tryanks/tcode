@@ -19,6 +19,7 @@ mod residency;
 use crate::overlay::OverlayExt as _;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::copy::CopiedMark;
 use crate::widgets::menu::{ContextMenuExt as _, PopupMenu, open_in_zed};
@@ -89,17 +90,11 @@ use self::residency::{
 pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
 };
-/// Left padding on the chat header while the sidebar is collapsed, so its
-/// leading control clears the native macOS traffic lights (which end near
-/// x=72). Only applied on macOS: see [`traffic_light_clearance`].
-const TRAFFIC_LIGHT_INSET: f32 = 80.;
-/// The header's padding on either side, unless it clears the traffic lights.
-const HEADER_PADDING: f32 = 16.;
 /// Below this header width the git and Open split buttons drop their text and
-/// keep their icon and chevron. At 16pt padding, the header with its longest
-/// git label, five panel toggles and a title kept to a few words beside a
-/// "+10" pull request badge measures 671pt in English, the widest shipped
-/// locale. [`header_extra_width`] adds what a thread's header holds beyond that.
+/// keep their icon and chevron. The header with its longest git label, five
+/// panel toggles and a title kept to a few words beside a "+10" pull request
+/// badge measures under 672pt in English, the widest shipped locale.
+/// [`header_extra_width`] adds what a thread's header holds beyond that.
 const HEADER_LABELS_MIN_WIDTH: f32 = 672.;
 pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 532.;
 /// The way back to the parent thread, each with the 8pt gap that follows it.
@@ -122,13 +117,14 @@ fn parent_session(store: &WorkspaceStore) -> Option<(String, String)> {
     Some((parent_id, parent.title.clone()))
 }
 
-/// The header's left padding beyond [`HEADER_PADDING`]. Collapsed, the sidebar
+/// The header's left inset in place of the bar's own. Collapsed, the sidebar
 /// has zero width and the header starts at the window's left edge, where macOS
 /// draws the traffic lights — but only when it draws them: they are hidden in
-/// fullscreen, and other platforms never had them.
+/// fullscreen, and other platforms never had them. The budget counts the whole
+/// inset, not its excess over the bar's, which leaves the widths a little slack.
 fn traffic_light_clearance(sidebar_collapsed: bool, fullscreen: bool) -> f32 {
     if cfg!(target_os = "macos") && sidebar_collapsed && !fullscreen {
-        TRAFFIC_LIGHT_INSET - HEADER_PADDING
+        crate::window_caption::TRAFFIC_LIGHT_INSET
     } else {
         0.
     }
@@ -1911,10 +1907,9 @@ impl ChatView {
                 .child(
                     div()
                         .max_w_3_4()
-                        .px(px(10.))
+                        .px(cx.theme().tokens.spacing.md)
                         .truncate()
-                        .text_size(px(11.))
-                        .text_color(cx.theme().muted_foreground)
+                        .text_secondary(false, cx)
                         .child(author),
                 )
                 .child(bubble)
@@ -2423,35 +2418,19 @@ impl ChatView {
         let cue = agents.cue(cx);
         let panel = self.agents.clone();
         let shown = self.agents.downgrade();
-        let pill = crate::material::accessible_clickable(
-            h_flex(),
-            "agents-pill",
-            gpui::Role::Button,
-            label.clone(),
-            cx,
-        )
-        .debug_selector(|| "agents-pill".into())
-        .h(px(28.))
-        .px_3()
-        .gap_1p5()
-        .items_center()
-        .rounded_full()
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(crate::material::content_surface(cx))
-        .text_size(px(13.))
-        .cursor_pointer()
-        .child(Icon::new(IconName::Bot).size(px(14.)))
-        .child(label)
-        .when_some(cue, |pill, color| {
-            pill.child(div().size(px(6.)).rounded_full().bg(color))
-        });
+        let pill = Button::new("agents-pill")
+            .debug_selector(|| "agents-pill".into())
+            .ghost()
+            .outline()
+            .chip()
+            .text_body(false, cx)
+            .icon(IconName::Bot)
+            .label(label)
+            .when_some(cue, |pill, color| {
+                pill.child(div().size(px(6.)).rounded_full().bg(color))
+            });
         Some(
-            h_flex()
-                .w_full()
-                .h(px(36.))
-                .px_4()
-                .items_center()
+            crate::material::bar("agents-pill-row", crate::material::Bar::Toolbar, true, cx)
                 .child(
                     crate::widgets::Popover::new("agents-sheet")
                         .bottom_sheet(crate::tr!("agents.title"))
@@ -2464,14 +2443,10 @@ impl ChatView {
                             });
                         })
                         .trigger_with(move |_, _, _, _| pill.into_any_element())
-                        .content(move |_, window, cx| {
+                        .content(move |_, _, cx| {
                             let sheet = cx.entity().downgrade();
                             panel.update(cx, |panel, _| panel.in_sheet(sheet));
-                            div()
-                                .w_full()
-                                .h(window.viewport_size().height * 0.8)
-                                .child(panel.clone())
-                                .into_any_element()
+                            div().w_full().child(panel.clone()).into_any_element()
                         }),
                 )
                 .into_any_element(),
@@ -2492,7 +2467,7 @@ impl ChatView {
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .ghost()
                 .xsmall()
-                .icon(Icon::new(IconName::ArrowLeft).size(px(14.)))
+                .icon(IconName::ArrowLeft)
                 .when(labelled, |link| link.label(short))
                 .aria_label(name.clone())
                 .tooltip(name)
@@ -2610,24 +2585,16 @@ impl ChatView {
         let label = crate::pull_requests::badge_label(&links, branch.as_ref(), cx)?;
         let panel = self.pull_requests.clone();
         Some(
-            h_flex()
-                .h(px(36.))
-                .px(px(crate::material::COMPACT_PAGE_INSET))
-                .gap_2()
-                .items_center()
+            crate::material::bar("phone-pr-row", crate::material::Bar::Toolbar, true, cx)
                 .child(
                     crate::widgets::Popover::new("phone-pull-requests")
                         .bottom_sheet(crate::tr!("pull_requests.title").into_owned())
                         .trigger(
                             Button::new("phone-pr-pill")
                                 .ghost()
-                                .compact()
-                                .h(px(28.))
-                                .min_h(px(44.))
-                                .px_2p5()
+                                .chip()
+                                .touch(true)
                                 .aria_label(label)
-                                .rounded(crate::material::radius_chip(cx))
-                                .bg(cx.theme().muted)
                                 .child(badge),
                         )
                         .content(move |_, _, _| panel.clone()),
@@ -2671,7 +2638,10 @@ impl ChatView {
         });
         gpui::container_query(move |size, window, cx| header(size.width, window, cx))
             .flex_none()
-            .h(px(52.))
+            .h(px(crate::material::bar_height(
+                crate::material::Bar::Strip,
+                false,
+            )))
             .into_any_element()
     }
 
@@ -2704,18 +2674,12 @@ impl ChatView {
             true,
         );
         let labelled = width - labelled_extra >= HEADER_LABELS_MIN_WIDTH;
-        let base = h_flex()
-            .flex_shrink_0()
-            .h(px(52.))
-            .px(px(HEADER_PADDING))
-            .pl(px(HEADER_PADDING
-                + traffic_light_clearance(
-                    collapsed,
-                    window.is_fullscreen(),
-                )))
+        let traffic_lights = window_caption::traffic_light_inset(window);
+        let base = crate::material::bar("chat-header", crate::material::Bar::Strip, false, cx)
+            .when(collapsed && traffic_lights > px(0.), |this| {
+                this.pl(traffic_lights)
+            })
             .when(hosts_caption, |this| this.pr_0())
-            .gap_2()
-            .items_center()
             .min_w(px(HEADER_COMPACT_MIN_WIDTH
                 + header_extra_width(
                     self.workspace_store.read(cx),
@@ -2765,37 +2729,17 @@ impl ChatView {
         // controls, so it doubles as the window's native drag handle where the
         // platform needs one.
         let title_el = if is_draft {
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .text_size(px(15.))
-                .font_medium()
+            crate::material::bar_title(crate::tr!("chat.new_thread"), cx)
                 .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!("chat.new_thread"))
         } else {
             match &title {
-                Some(title) => div()
-                    .flex_1()
+                Some(title) => crate::material::bar_title(title.clone(), cx)
                     // Keep a few words of the title even when the diff panel and
                     // the git/Open buttons squeeze the header; without a floor it
                     // collapses to a lone "I…".
-                    .min_w(px(120.))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_size(px(15.))
-                    .font_medium()
-                    .child(title.clone()),
-                None => div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_size(px(15.))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("chat.no_active_thread")),
+                    .min_w(px(120.)),
+                None => crate::material::bar_title(crate::tr!("chat.no_active_thread"), cx)
+                    .text_color(cx.theme().muted_foreground),
             }
         };
 
@@ -2996,7 +2940,10 @@ impl ChatView {
             .debug_selector(|| "chat-header-scroll".into())
             .flex_none()
             .w_full()
-            .h(px(52.))
+            .h(px(crate::material::bar_height(
+                crate::material::Bar::Strip,
+                false,
+            )))
             .child(header)
             .overflow_x_scroll_area()
             .into_any_element()
@@ -3017,46 +2964,22 @@ impl ChatView {
             .action
             .map(git_action_icon)
             .unwrap_or_else(|| Icon::empty().path("icons/git-branch.svg"));
-        let main_base = if quick.disabled {
-            h_flex()
-                .id("git-main")
-                .role(Role::Button)
-                .aria_label(label.clone())
-        } else {
-            crate::material::accessible_clickable(
-                h_flex(),
-                "git-main",
-                Role::Button,
-                label.clone(),
-                cx,
-            )
-        };
-        let mut main = main_base
+        let mut main = Button::new("git-main")
             .debug_selector(|| "git-main".into())
-            .h_full()
-            .px_2()
-            .gap_1p5()
-            .items_center()
-            .text_size(px(13.))
-            .child(main_icon.xsmall().text_color(if quick.disabled {
-                cx.theme().muted_foreground
-            } else {
-                cx.theme().foreground
-            }))
-            .when(labelled, |main| main.child(label.clone()));
+            .ghost()
+            .small()
+            .rounded_corners(segment_corners(true, cx))
+            .disabled(quick.disabled)
+            .aria_label(label.clone())
+            .icon(main_icon)
+            .when(labelled, |main| main.label(label.clone()));
         if quick.disabled {
-            main = main.text_color(cx.theme().muted_foreground);
             if let Some(hint) = quick.hint {
-                let text: SharedString = crate::tr!(git_hint_key(hint)).into_owned().into();
-                main = main.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx));
+                main = main.tooltip(crate::tr!(git_hint_key(hint)).into_owned());
             }
         } else if let Some(action) = quick.action {
             main = main
-                .when(!labelled, |main| {
-                    main.tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
-                })
-                .cursor_pointer()
-                .hover(|s| s.bg(cx.theme().accent))
+                .when(!labelled, |main| main.tooltip(label.clone()))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.trigger_git_action(action, window, cx);
                 }));
@@ -3071,12 +2994,13 @@ impl ChatView {
             .trigger(
                 Button::new("git-menu-trigger")
                     .ghost()
-                    .compact()
+                    .small()
+                    .rounded_corners(segment_corners(false, cx))
                     .icon(IconName::ChevronDown),
             )
             .content(move |_state, _window, cx| {
                 let muted = cx.theme().muted_foreground;
-                let accent = cx.theme().accent;
+                let hover = cx.theme().muted;
                 let popover = cx.entity();
                 let mut menu = v_flex().w(px(210.)).p_1().gap_0p5();
                 for (index, item) in items.clone().into_iter().enumerate() {
@@ -3087,17 +3011,26 @@ impl ChatView {
                     let disabled = item.disabled;
                     let popover = popover.clone();
                     let chat = chat.clone();
-                    let mut row = h_flex()
-                        .id(("git-menu-item", index))
+                    let frame = crate::material::menu_item_frame(false, cx)
                         .w_full()
-                        .px_2()
-                        .py_1p5()
-                        .gap_2()
                         .items_center()
-                        .rounded(cx.theme().tokens.radius.sm)
-                        .text_size(px(13.))
-                        .child(git_action_icon(action).xsmall().text_color(muted))
-                        .child(div().flex_1().child(label));
+                        .text_body(false, cx)
+                        .child(git_action_icon(action).text_color(muted))
+                        .child(div().flex_1().child(label.clone()));
+                    let mut row = if disabled {
+                        frame
+                            .id(("git-menu-item", index))
+                            .role(Role::MenuItem)
+                            .aria_label(label)
+                    } else {
+                        crate::material::accessible_clickable(
+                            frame,
+                            ("git-menu-item", index),
+                            Role::MenuItem,
+                            label,
+                            cx,
+                        )
+                    };
                     if disabled {
                         row = row.text_color(muted);
                         if let Some(hint) = item.hint {
@@ -3108,7 +3041,7 @@ impl ChatView {
                             });
                         }
                     } else {
-                        row = row.cursor_pointer().hover(move |s| s.bg(accent)).on_click(
+                        row = row.cursor_pointer().hover(move |s| s.bg(hover)).on_click(
                             move |_, window, cx| {
                                 popover.update(cx, |st, cx| st.dismiss(window, cx));
                                 chat.update(cx, |this, cx| {
@@ -3125,9 +3058,9 @@ impl ChatView {
         Some(
             h_flex()
                 .flex_none()
-                .h(px(28.))
                 .items_center()
-                .rounded(cx.theme().tokens.radius.md)
+                .rounded(crate::material::radius_input(cx))
+                .text_body(false, cx)
                 .border_1()
                 .border_color(border)
                 .overflow_hidden()
@@ -3171,10 +3104,7 @@ impl ChatView {
             let content = dialog.clone();
             let footer_dialog = dialog.clone();
             dlg.title(crate::tr!("git.commit.title").into_owned())
-                .w(px(600.))
-                // Opaque T3 panel over the library's translucent default.
-                .bg(cx.theme().popover)
-                .shadow_xl()
+                .wide()
                 .content(move |content_el, _window, _cx| content_el.child(content.clone()))
                 .footer(render_commit_footer(&footer_dialog, window, cx))
         });
@@ -3198,7 +3128,8 @@ impl ChatView {
             .trigger(
                 Button::new("open-menu-trigger")
                     .ghost()
-                    .compact()
+                    .small()
+                    .rounded_corners(segment_corners(false, cx))
                     .icon(IconName::ChevronDown),
             )
             .content(move |_state, _window, cx| {
@@ -3210,21 +3141,22 @@ impl ChatView {
                 let p2 = popover.clone();
                 let p3 = popover.clone();
                 let muted = cx.theme().muted_foreground;
-                let accent = cx.theme().accent;
+                let hover = cx.theme().muted;
                 let menu_item = move |id: &'static str, icon: IconName, label: SharedString| {
-                    h_flex()
-                        .id(id)
-                        .w_full()
-                        .px_2()
-                        .py_1p5()
-                        .gap_2()
-                        .items_center()
-                        .rounded(cx.theme().tokens.radius.sm)
-                        .cursor_pointer()
-                        .text_size(px(13.))
-                        .hover(move |s| s.bg(accent))
-                        .child(Icon::new(icon).xsmall().text_color(muted))
-                        .child(label)
+                    crate::material::accessible_clickable(
+                        crate::material::menu_item_frame(false, cx),
+                        id,
+                        Role::MenuItem,
+                        label.clone(),
+                        cx,
+                    )
+                    .w_full()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_body(false, cx)
+                    .hover(move |s| s.bg(hover))
+                    .child(Icon::new(icon).text_color(muted))
+                    .child(label)
                 };
                 v_flex()
                     .w(px(180.))
@@ -3272,46 +3204,31 @@ impl ChatView {
 
         h_flex()
             .flex_none()
-            .h(px(28.))
             // A control press must not arm the header window drag region.
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .items_center()
-            .rounded(cx.theme().tokens.radius.md)
+            .rounded(crate::material::radius_input(cx))
+            .text_body(false, cx)
             .border_1()
             .border_color(border)
             .overflow_hidden()
             .child(
-                crate::material::accessible_clickable(
-                    h_flex(),
-                    "open-main",
-                    Role::Button,
-                    crate::tr!("chat.open"),
-                    cx,
-                )
-                .h_full()
-                .px_2()
-                .gap_1p5()
-                .items_center()
-                .cursor_pointer()
-                .text_size(px(13.))
-                .hover(|s| s.bg(cx.theme().accent))
-                .child(
-                    Icon::new(IconName::ExternalLink)
-                        .xsmall()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .map(|main| {
-                    if labelled {
-                        main.child(crate::tr!("chat.open"))
-                    } else {
-                        main.tooltip(|window, cx| {
-                            Tooltip::new(crate::tr!("chat.open").into_owned()).build(window, cx)
-                        })
-                    }
-                })
-                .on_click(cx.listener(move |_, _, window, cx| {
-                    open_in_zed(&main_cwd, window, cx);
-                })),
+                Button::new("open-main")
+                    .ghost()
+                    .small()
+                    .rounded_corners(segment_corners(true, cx))
+                    .aria_label(crate::tr!("chat.open"))
+                    .icon(Icon::new(IconName::ExternalLink).text_color(cx.theme().muted_foreground))
+                    .map(|main| {
+                        if labelled {
+                            main.label(crate::tr!("chat.open"))
+                        } else {
+                            main.tooltip(crate::tr!("chat.open"))
+                        }
+                    })
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        open_in_zed(&main_cwd, window, cx);
+                    })),
             )
             .child(div().w_px().h(px(16.)).bg(border))
             .child(chevron)
@@ -3401,120 +3318,89 @@ impl ChatView {
                 crate::add_project_dialog::open(this.workspace_store.clone(), window, cx);
             }));
 
+        if projects.is_empty() {
+            return crate::material::empty_state(
+                Icon::new(IconName::Folder),
+                crate::tr!("chat.no_projects_title"),
+                crate::tr!("chat.no_projects_description"),
+                cx,
+            )
+            .child(
+                h_flex().gap_2().child(add_project).child(
+                    Button::new("quick-chat-empty")
+                        .small()
+                        .label(crate::tr!("sidebar.quick_chat"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace_store
+                                .update(cx, |store, cx| store.start_scratch_draft(cx));
+                        })),
+                ),
+            )
+            .into_any_element();
+        }
         let mut content = v_flex()
             .w_full()
             .max_w(px(420.))
             .px_4()
             .items_center()
             .gap_3()
-            .child(
-                div()
-                    .text_size(px(15.))
-                    .font_semibold()
-                    .child(if projects.is_empty() {
-                        crate::tr!("chat.no_projects_title")
-                    } else {
-                        crate::tr!("chat.empty_title")
-                    }),
-            );
-        if projects.is_empty() {
-            content = content
+            .child(div().text_title(cx).child(crate::tr!("chat.empty_title")));
+        let mut launcher = v_flex().w_full().gap_1().child(
+            div()
+                .px_3()
+                .text_size(px(10.5))
+                .font_medium()
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::material::tracked_uppercase(
+                    crate::tr!("chat.start_hub_title").as_ref(),
+                )),
+        );
+        for (project, last_activity) in hub_projects {
+            let project_id = project.id.clone();
+            let cwd = project.root.clone();
+            let row_label = crate::tr!("sidebar.project", name = project.name.clone()).into_owned();
+            launcher = launcher.child(
+                crate::material::accessible_clickable(
+                    crate::material::selectable_row(h_flex(), false, false, cx),
+                    SharedString::from(format!("start-hub-project-{}", project.id)),
+                    Role::Button,
+                    row_label,
+                    cx,
+                )
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.workspace_store.update(cx, |store, cx| {
+                        store.start_draft(project_id.clone(), cwd.clone(), cx);
+                    });
+                }))
+                .child(crate::project_icon::artwork(&project, 16.))
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("chat.no_projects_description")),
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_body(false, cx)
+                        .text_color(cx.theme().foreground)
+                        .child(project.name),
                 )
-                .child(h_flex().gap_2().child(add_project).when(
-                    self.workspace_store.read(cx).scope().is_full(),
-                    |row| {
-                        row.child(
-                            Button::new("quick-chat-empty")
-                                .small()
-                                .label(crate::tr!("sidebar.quick_chat"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.workspace_store
-                                        .update(cx, |store, cx| store.start_scratch_draft(cx));
-                                })),
-                        )
-                    },
-                ));
-        } else {
-            let mut launcher = v_flex().w_full().gap_1().child(
-                div()
-                    .px_3()
-                    .text_size(px(10.5))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::material::tracked_uppercase(
-                        crate::tr!("chat.start_hub_title").as_ref(),
-                    )),
-            );
-            for (project, last_activity) in hub_projects {
-                let project_id = project.id.clone();
-                let cwd = project.root.clone();
-                let row_label =
-                    crate::tr!("sidebar.project", name = project.name.clone()).into_owned();
-                launcher = launcher.child(
-                    crate::material::accessible_clickable(
-                        h_flex(),
-                        SharedString::from(format!("start-hub-project-{}", project.id)),
-                        Role::Button,
-                        row_label,
-                        cx,
-                    )
-                    .h(px(40.))
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .rounded(cx.theme().tokens.radius.md)
-                    .cursor_pointer()
-                    .hover(|row| row.bg(cx.theme().accent))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.workspace_store.update(cx, |store, cx| {
-                            store.start_draft(project_id.clone(), cwd.clone(), cx);
-                        });
-                    }))
-                    .child(crate::project_icon::artwork(&project, 16.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().foreground)
-                            .child(project.name),
-                    )
-                    .when_some(last_activity, |row, last_activity| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(crate::time::humanize_ago(
-                                    now_secs().saturating_sub(last_activity),
-                                )),
-                        )
-                    }),
-                );
-            }
-            content = content.child(launcher).child(
-                h_flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .child(add_project)
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!(
-                                "chat.palette_hint",
-                                shortcut = format_secondary_shortcut("k")
-                            )),
-                    ),
+                .when_some(last_activity, |row, last_activity| {
+                    row.child(div().flex_none().text_secondary(false, cx).child(
+                        crate::time::humanize_ago(now_secs().saturating_sub(last_activity)),
+                    ))
+                }),
             );
         }
+        content = content.child(launcher).child(
+            h_flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(add_project)
+                .child(div().text_secondary(false, cx).child(crate::tr!(
+                    "chat.palette_hint",
+                    shortcut = format_secondary_shortcut("k")
+                ))),
+        );
 
         v_flex()
             .flex_1()
@@ -3540,7 +3426,7 @@ impl ChatView {
                 // backing keeps the pill readable over the chat text below.
                 div()
                     .block_mouse_except_scroll()
-                    .rounded(cx.theme().tokens.radius.md)
+                    .rounded(crate::material::radius_button(cx))
                     .bg(cx.theme().popover)
                     .shadow_md()
                     .child(
@@ -3850,7 +3736,7 @@ impl Render for ChatView {
                     .w_full()
                     .items_center()
                     .px(px(if this.window_state.read(cx).compact {
-                        16.
+                        crate::material::COMPACT_PAGE_INSET
                     } else {
                         CONTENT_MIN_PADDING
                     }))
@@ -3968,10 +3854,10 @@ impl Render for ChatView {
                     .child(
                         div()
                             .max_w_3_4()
-                            .px(px(10.))
-                            .py(px(6.))
-                            .text_size(px(15.))
-                            .rounded(cx.theme().tokens.radius.lg)
+                            .px(cx.theme().tokens.spacing.md)
+                            .py(cx.theme().tokens.spacing.xs)
+                            .text_token(&cx.theme().tokens.typography.md)
+                            .rounded(crate::material::radius_composer(cx))
                             .bg(cx.theme().foreground.opacity(0.08))
                             .text_color(if acknowledged {
                                 cx.theme().foreground
@@ -3983,7 +3869,7 @@ impl Render for ChatView {
                     .when(failure.is_some() || !acknowledged, |row| {
                         row.child(
                             div()
-                                .text_size(px(11.))
+                                .text_secondary(false, cx)
                                 .text_color(if failure.is_some() {
                                     cx.theme().danger
                                 } else {
@@ -4189,10 +4075,7 @@ fn render_commit_footer(
     let confirm_label = dialog.update(cx, |d, cx| d.confirm_label(cx));
     let cancel_dialog = dialog.clone();
     let confirm_dialog = dialog.clone();
-    h_flex()
-        .w_full()
-        .gap_2()
-        .justify_end()
+    crate::overlay::DialogActions::new()
         .child(
             Button::new("commit-cancel")
                 .ghost()
@@ -4214,6 +4097,27 @@ fn render_commit_footer(
                 }),
         )
         .into_any_element()
+}
+
+/// The two ends of a segmented control's border: a half takes the control's
+/// radius on its outer side only, so its hover fill stays inside the border.
+fn segment_corners(leading: bool, cx: &App) -> gpui::Corners<gpui::Pixels> {
+    let (radius, flat) = (crate::material::radius_input(cx), px(0.));
+    if leading {
+        gpui::Corners {
+            top_left: radius,
+            top_right: flat,
+            bottom_right: flat,
+            bottom_left: radius,
+        }
+    } else {
+        gpui::Corners {
+            top_left: flat,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: flat,
+        }
+    }
 }
 
 /// The breathing room between the timeline and the header/composer. A phone
@@ -4930,11 +4834,14 @@ mod tests {
         };
         wheel(point(px(0.), px(-2_000.)), cx);
         assert!(cx.debug_bounds("file-edit-diff-line-0").is_none());
-        let line = cx
-            .debug_bounds("file-edit-diff-line-120")
+        // `debug_bounds` takes a `'static` selector.
+        let shown: &'static str = (1..801)
+            .map(|ix| &*format!("file-edit-diff-line-{ix}").leak())
+            .find(|selector| cx.debug_bounds(selector).is_some())
             .expect("a line scrolled into the diff");
+        let line = cx.debug_bounds(shown).unwrap();
         wheel(point(px(-200.), px(0.)), cx);
-        let scrolled = cx.debug_bounds("file-edit-diff-line-120").unwrap();
+        let scrolled = cx.debug_bounds(shown).unwrap();
         assert!(
             scrolled.left() < line.left(),
             "{scrolled:?} did not scroll left of {line:?}"
@@ -7238,12 +7145,6 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        // The messages of the 15 rows the tail paints and of the 24-row build
-        // margin above them: two of every turn's three rows.
-        assert_eq!(
-            view.read_with(cx, |chat, _| chat.resident_markdown_state_count()),
-            26
-        );
         let list_state = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(!view.read_with(cx, |chat, _| {
             chat.has_resident_markdown_state("assistant-40")

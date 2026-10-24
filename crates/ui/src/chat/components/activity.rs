@@ -1,10 +1,8 @@
+use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::widgets::spinner::Spinner;
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
 use gpui::{
     AnyElement, App, ClickEvent, Div, HighlightStyle, InteractiveElement as _, IntoElement,
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -144,16 +142,19 @@ pub(crate) fn activity_row(
 
     let row = h_flex()
         .w_full()
-        .min_h(px(28.))
+        .min_h(px(crate::material::bar_height(
+            crate::material::Bar::Section,
+            false,
+        )))
         .px_1()
         .gap_2()
         .items_center()
         .when(!compact, |row| row.py_0p5())
-        .text_size(px(12.5))
+        .text_body(false, cx)
         .child(activity_status_icon(icon, status, cx))
         .child(summary)
         .when(expandable, |row| {
-            row.child(Icon::new(chevron(expanded)).size(px(13.)).text_color(muted))
+            row.child(Icon::new(chevron(expanded)).text_color(muted))
         });
 
     let row: AnyElement = if expandable {
@@ -251,8 +252,7 @@ fn activity_summary(
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_size(px(11.5))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_secondary(false, cx)
                     .when(monospace, |text| {
                         text.font_family(cx.theme().mono_font_family.clone())
                     })
@@ -282,7 +282,6 @@ fn activity_detail(
     elided_output: Option<ElidedOutput>,
     cx: &App,
 ) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
     let detail = match &entry.content {
         EntryContent::Item(ItemContent::CommandExecution {
             command, output, ..
@@ -326,9 +325,7 @@ fn activity_detail(
         }
         EntryContent::Item(ItemContent::Reasoning { text }) => div()
             .w_full()
-            .text_size(px(11.5))
-            .line_height(px(18.))
-            .text_color(muted)
+            .text_secondary(false, cx)
             .whitespace_normal()
             .child(text.clone())
             .into_any_element(),
@@ -336,7 +333,7 @@ fn activity_detail(
     };
     crate::material::rail_detail(detail, cx)
         .debug_selector(|| "activity-detail".into())
-        .text_size(px(11.5))
+        .text_token(&cx.theme().tokens.typography.xs)
         .into_any_element()
 }
 
@@ -345,13 +342,9 @@ fn activity_detail(
 /// the badge stays legible over whatever it overlaps.
 fn activity_status_icon(icon: Icon, status: ItemStatus, cx: &App) -> AnyElement {
     if matches!(status, ItemStatus::InProgress) {
-        return Spinner::new()
-            .xsmall()
-            .color(cx.theme().primary)
-            .into_any_element();
+        return Spinner::new().color(cx.theme().primary).into_any_element();
     }
     let icon = icon
-        .size(px(13.))
         .text_color(cx.theme().muted_foreground)
         .into_any_element();
     if matches!(status, ItemStatus::Completed) {
@@ -392,9 +385,7 @@ fn activity_detail_section(label: String, text: String, monospace: bool, cx: &Ap
         .child(
             div()
                 .w_full()
-                .line_height(px(18.))
-                .text_size(px(11.5))
-                .text_color(muted)
+                .text_secondary(false, cx)
                 .when(monospace, |body| {
                     body.font_family(cx.theme().mono_font_family.clone())
                 })
@@ -432,9 +423,7 @@ fn full_output_section(full: SharedString, entry: &TimelineEntry, cx: &App) -> D
                 .w_full()
                 .max_h(px(360.))
                 .overflow_y_scroll()
-                .line_height(px(18.))
-                .text_size(px(11.5))
-                .text_color(muted)
+                .text_secondary(false, cx)
                 .font_family(cx.theme().mono_font_family.clone())
                 .whitespace_normal()
                 .child(shown),
@@ -446,12 +435,10 @@ fn elided_output_control(
     entry: &TimelineEntry,
     cx: &App,
 ) -> Option<AnyElement> {
-    let muted = cx.theme().muted_foreground;
     let id = SharedString::from(format!("load-output-{}", entry.id));
     let note = |text: String| {
         div()
-            .text_size(px(11.))
-            .text_color(muted)
+            .text_secondary(false, cx)
             .child(text)
             .into_any_element()
     };

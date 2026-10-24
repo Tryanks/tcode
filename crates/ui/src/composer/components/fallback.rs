@@ -65,29 +65,20 @@ impl Composer {
             .w_full()
             .gap_2()
             .items_center()
-            .child(Icon::new(IconName::Info).small().text_color(muted))
-            .child(div().flex_1().text_size(px(13.)).font_medium().child(title))
+            .text_title(cx)
+            .child(Icon::new(IconName::Info).text_color(muted))
+            .child(div().flex_1().child(title))
             .child(
-                crate::material::accessible_clickable(
-                    div(),
-                    "fallback-dismiss",
-                    Role::Button,
-                    crate::tr!("fallback.dismiss"),
-                    cx,
-                )
-                .size(px(22.))
-                .rounded(crate::material::radius_input(cx))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|this| this.bg(cx.theme().muted))
-                .child(Icon::new(IconName::Close).xsmall().text_color(muted))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.workspace_store
-                        .update(cx, |store, _cx| store.dismiss_fallback_block());
-                    cx.notify();
-                })),
+                Button::new("fallback-dismiss")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .aria_label(crate::tr!("fallback.dismiss"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace_store
+                            .update(cx, |store, _cx| store.dismiss_fallback_block());
+                        cx.notify();
+                    })),
             );
 
         let retry_text = refused.as_ref().map(|(_, text)| text.clone());
@@ -102,9 +93,7 @@ impl Composer {
                 this.child(
                     Button::new("fallback-edit-retry")
                         .outline()
-                        .small()
-                        .h(px(28.))
-                        .rounded(crate::material::radius_input(cx))
+                        .chip()
                         .label(crate::tr!("fallback.edit_retry"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
@@ -119,9 +108,7 @@ impl Composer {
                 this.child(
                     Button::new("fallback-retry-opus")
                         .primary()
-                        .small()
-                        .h(px(28.))
-                        .rounded(crate::material::radius_input(cx))
+                        .chip()
                         .label(crate::tr!("fallback.retry_on", model = model.clone()))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
@@ -137,23 +124,15 @@ impl Composer {
                 )
             });
 
-        v_flex()
+        crate::material::card_raised(cx)
             .w_full()
-            .gap_2()
-            .p(px(14.))
-            .rounded(crate::material::radius_card(cx))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .shadow_sm()
             .child(header)
-            .child(div().text_size(px(13.)).child(reason))
-            .child(div().text_size(px(11.)).text_color(muted).child(outcome))
+            .child(div().text_body(self.compact, cx).child(reason))
+            .child(div().text_secondary(self.compact, cx).child(outcome))
             .when(!block.detail.trim().is_empty(), |this| {
                 this.child(
                     div()
-                        .text_size(px(11.))
-                        .text_color(muted)
+                        .text_secondary(self.compact, cx)
                         .child(block.detail.clone()),
                 )
             })
@@ -198,40 +177,25 @@ impl Composer {
             .w_full()
             .gap_2()
             .items_center()
-            .child(Icon::new(IconName::Info).small().text_color(muted))
+            .text_title(cx)
+            .child(Icon::new(IconName::Info).text_color(muted))
+            .child(div().flex_1().child(crate::tr!("fallback.review_title")))
             .child(
-                div()
-                    .flex_1()
-                    .text_size(px(13.))
-                    .font_medium()
-                    .child(crate::tr!("fallback.review_title")),
-            )
-            .child(
-                crate::material::accessible_clickable(
-                    div(),
-                    "fallback-review-dismiss",
-                    Role::Button,
-                    crate::tr!("fallback.dismiss"),
-                    cx,
-                )
-                .size(px(22.))
-                .rounded(crate::material::radius_input(cx))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|this| this.bg(cx.theme().muted))
-                .child(Icon::new(IconName::Close).xsmall().text_color(muted))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.workspace_store
-                        .update(cx, |store, _cx| store.dismiss_fallback_review());
-                    cx.notify();
-                })),
+                Button::new("fallback-review-dismiss")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .aria_label(crate::tr!("fallback.dismiss"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace_store
+                            .update(cx, |store, _cx| store.dismiss_fallback_review());
+                        cx.notify();
+                    })),
             );
 
         // Model-authored text, rendered as plain text.
         let assessment = div()
-            .text_size(px(13.))
+            .text_body(self.compact, cx)
             .text_color(muted)
             .child(review.assessment.clone());
 
@@ -241,7 +205,7 @@ impl Composer {
             .gap_2()
             .px_2()
             .py_1()
-            .rounded(cx.theme().tokens.radius.md)
+            .rounded(crate::material::radius_input(cx))
             .border_1()
             .border_color(cx.theme().input)
             .bg(cx.theme().popover)
@@ -253,58 +217,29 @@ impl Composer {
                 ),
             )
             .child(
-                crate::material::accessible_clickable(
-                    div(),
-                    "fallback-review-send",
-                    Role::Button,
-                    crate::tr!("fallback.review_send"),
-                    cx,
-                )
-                .size(px(28.))
-                .rounded(crate::material::radius_input(cx))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(if can_send {
-                    cx.theme().primary
-                } else {
-                    cx.theme().muted
-                })
-                .cursor_pointer()
-                .when(can_send, |this| this.hover(|this| this.opacity(0.9)))
-                .child(
-                    Icon::new(IconName::ArrowUp)
-                        .xsmall()
-                        .text_color(if can_send {
-                            cx.theme().primary_foreground
-                        } else {
-                            cx.theme().muted_foreground
-                        }),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    let text = input.read(cx).value().trim().to_string();
-                    if text.is_empty() {
-                        return;
-                    }
-                    this.workspace_store.update(cx, |store, _cx| {
-                        store.send_turn(text, Vec::new());
-                        store.dismiss_fallback_review();
-                    });
-                    input.update(cx, |state, cx| state.set_value(String::new(), window, cx));
-                    this.fallback_review_seeded = None;
-                    cx.notify();
-                })),
+                Button::new("fallback-review-send")
+                    .primary()
+                    .with_size(px(SEND_SIZE))
+                    .icon(IconName::ArrowUp)
+                    .aria_label(crate::tr!("fallback.review_send"))
+                    .disabled(!can_send)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let text = input.read(cx).value().trim().to_string();
+                        if text.is_empty() {
+                            return;
+                        }
+                        this.workspace_store.update(cx, |store, _cx| {
+                            store.send_turn(text, Vec::new());
+                            store.dismiss_fallback_review();
+                        });
+                        input.update(cx, |state, cx| state.set_value(String::new(), window, cx));
+                        this.fallback_review_seeded = None;
+                        cx.notify();
+                    })),
             );
 
-        v_flex()
+        crate::material::card_raised(cx)
             .w_full()
-            .gap_2()
-            .p(px(14.))
-            .rounded(crate::material::radius_card(cx))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .shadow_sm()
             .child(header)
             .child(assessment)
             // No draft means the reviewer did not call it a false positive:
@@ -312,8 +247,7 @@ impl Composer {
             .when(has_draft, |this| {
                 this.child(
                     div()
-                        .text_size(px(11.))
-                        .text_color(muted)
+                        .text_secondary(self.compact, cx)
                         .child(crate::tr!("fallback.review_hint")),
                 )
                 .child(draft_row)

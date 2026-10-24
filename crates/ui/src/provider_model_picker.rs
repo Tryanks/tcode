@@ -8,6 +8,7 @@
 use std::rc::Rc;
 
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::tabs::{TabBar, TabItem};
 use crate::{
@@ -204,12 +205,11 @@ impl ProviderModelPicker {
                             .w(px(230.))
                             .items_center()
                             .gap_2()
-                            .text_size(px(13.))
-                            .child(glyph.small())
+                            .text_body(false, cx)
+                            .child(glyph)
                             .child(div().flex_1().min_w_0().child(display))
                             .child(
                                 Icon::new(IconName::ChevronDown)
-                                    .xsmall()
                                     .text_color(cx.theme().muted_foreground),
                             ),
                     )
@@ -260,13 +260,10 @@ impl Render for ProviderModelPicker {
                         .w_full()
                         .h(catalog)
                         .p_1()
-                        .child(
-                            div()
-                                .p_4()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(crate::tr!("model_picker.no_models")),
-                        )
+                        .child(crate::material::empty_row(
+                            crate::tr!("model_picker.no_models"),
+                            cx,
+                        ))
                         .into_any_element()
                 } else {
                     let picker = picker.clone();
@@ -369,55 +366,54 @@ fn option_row(
     let picker = picker.clone();
     let popover = popover.clone();
     let selected = option.clone();
-    h_flex()
-        .id(("settings-model-option", index))
-        .flex_none()
-        .w_full()
-        .px_2()
-        .py_1p5()
-        .gap_2()
-        .items_center()
-        .rounded(crate::material::radius_button(cx))
-        .cursor_pointer()
-        .hover(|style| style.bg(cx.theme().accent))
-        .child(tinted_glyph(store, option.provider, option.profile_id.as_deref(), cx).small())
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(13.))
-                        .child(option.name.clone()),
-                )
-                .child(
-                    div()
-                        .truncate()
-                        .font_family("monospace")
-                        .text_size(px(11.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(option.id.clone()),
-                ),
-        )
-        .when(is_selected, |row| {
-            row.child(Icon::new(IconName::Check).xsmall())
-        })
-        .on_click(move |_, window, cx| {
-            picker.update(cx, |picker, cx| {
-                picker.selected_profile = option_profile_id(&selected);
-                if matches!(picker.trigger_kind, TriggerKind::Selection) {
-                    picker.selected = Some((
-                        selected.provider,
-                        selected.id.clone(),
-                        selected.profile_id.clone(),
-                    ));
-                }
-                cx.emit(ModelSelected(selected.clone()));
-            });
-            popover.update(cx, |state, cx| state.dismiss(window, cx));
-        })
-        .into_any_element()
+    crate::material::accessible_clickable(
+        crate::material::menu_item_frame(false, cx),
+        ("settings-model-option", index),
+        gpui::Role::MenuItem,
+        option.name.clone(),
+        cx,
+    )
+    .aria_selected(is_selected)
+    .flex_none()
+    .w_full()
+    .items_center()
+    .text_body(false, cx)
+    .cursor_pointer()
+    .hover(|style| style.bg(cx.theme().muted))
+    .child(tinted_glyph(
+        store,
+        option.provider,
+        option.profile_id.as_deref(),
+        cx,
+    ))
+    .child(
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .child(div().truncate().child(option.name.clone()))
+            .child(
+                div()
+                    .truncate()
+                    .text_meta_mono(false, cx)
+                    .child(option.id.clone()),
+            ),
+    )
+    .when(is_selected, |row| row.child(Icon::new(IconName::Check)))
+    .on_click(move |_, window, cx| {
+        picker.update(cx, |picker, cx| {
+            picker.selected_profile = option_profile_id(&selected);
+            if matches!(picker.trigger_kind, TriggerKind::Selection) {
+                picker.selected = Some((
+                    selected.provider,
+                    selected.id.clone(),
+                    selected.profile_id.clone(),
+                ));
+            }
+            cx.emit(ModelSelected(selected.clone()));
+        });
+        popover.update(cx, |state, cx| state.dismiss(window, cx));
+    })
+    .into_any_element()
 }
 
 /// The provider glyph tinted with the profile's own accent (falling back to the

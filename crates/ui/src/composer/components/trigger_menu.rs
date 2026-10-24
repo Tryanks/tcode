@@ -267,25 +267,19 @@ impl Composer {
             return None;
         }
         let (rows, empty_text, loading) = self.menu_rows(cx);
-        let muted = cx.theme().muted_foreground;
         let highlight = self.menu_highlight.min(rows.len().saturating_sub(1));
 
+        let compact = self.compact;
         let list = if rows.is_empty() {
-            div()
-                .p_1()
-                .child(
-                    div()
-                        .px_3()
-                        .py_2p5()
-                        .text_size(px(13.))
-                        .text_color(muted)
-                        .child(if loading {
-                            crate::tr!("composer.searching").into_owned()
-                        } else {
-                            empty_text
-                        }),
-                )
-                .into_any_element()
+            crate::material::empty_row(
+                if loading {
+                    crate::tr!("composer.searching").into_owned()
+                } else {
+                    empty_text
+                },
+                cx,
+            )
+            .into_any_element()
         } else {
             // Group headers are not selectable: each opens the row that starts
             // its group, so keyboard selection indexes `rows` directly.
@@ -306,7 +300,6 @@ impl Composer {
                 "composer-trigger-rows",
                 count,
                 cx.processor(move |_, index: usize, _, cx| {
-                    let muted = cx.theme().muted_foreground;
                     div().when(index + 1 < count, |row| row.pb_0p5()).child(
                         v_flex()
                             .gap_0p5()
@@ -316,35 +309,37 @@ impl Composer {
                                         .px_2()
                                         .pt_1p5()
                                         .pb_0p5()
-                                        .text_size(px(11.))
-                                        .font_medium()
-                                        .text_color(muted)
+                                        .text_caption(cx)
                                         .child(crate::tr!(group).into_owned()),
                                 )
                             })
-                            .child(render_menu_row(&rows[index], index, index == highlight, cx)),
+                            .child(render_menu_row(
+                                &rows[index],
+                                index,
+                                index == highlight,
+                                compact,
+                                cx,
+                            )),
                     )
                 }),
             )
             .reveal(Some(highlight))
             .w_full()
-            // The menu's border sits outside this cap.
+            // About ten rows before the list scrolls, so the menu never
+            // covers the conversation; no owner sizes an in-flow menu. The
+            // menu's border sits outside this cap.
             .max_h(px(286.))
             .p_1()
             .into_any_element()
         };
 
         Some(
-            div()
+            crate::material::overlay_contour(div(), cx)
+                .rounded(crate::material::radius_overlay(cx))
                 .id("composer-trigger-menu")
                 .role(Role::ListBox)
                 .aria_label(crate::tr!("composer.trigger_results"))
                 .w_full()
-                .rounded(crate::material::radius_overlay(cx))
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().popover)
-                .shadow_xl()
                 .child(list)
                 .with_animation(
                     "composer-trigger-menu-pop-in",
@@ -360,6 +355,7 @@ fn render_menu_row(
     row: &MenuRow,
     index: usize,
     is_active: bool,
+    compact: bool,
     cx: &mut Context<Composer>,
 ) -> impl IntoElement + use<> {
     let muted = cx.theme().muted_foreground;
@@ -375,7 +371,7 @@ fn render_menu_row(
         secondary = row.secondary.clone()
     )
     .into_owned();
-    h_flex()
+    crate::material::menu_item_frame(compact, cx)
         .id(("menu-row", index))
         .debug_selector(move || format!("menu-row-{index}"))
         .role(Role::ListBoxOption)
@@ -384,22 +380,13 @@ fn render_menu_row(
         .when(is_active, |row| row.aria_active_descendant())
         .flex_none()
         .w_full()
-        .h(px(28.))
-        .px_2()
-        .gap_2()
         .items_center()
-        .rounded(crate::material::radius_chip(cx))
+        .text_body(compact, cx)
         .cursor_pointer()
         .when(is_active, |s| s.bg(cx.theme().list_active))
         .hover(|s| s.bg(cx.theme().muted))
-        .child(icon.small().text_color(muted))
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(13.))
-                .font_medium()
-                .child(row.primary.clone()),
-        )
+        .child(icon.text_color(muted))
+        .child(div().flex_none().child(row.primary.clone()))
         .when(!row.secondary.is_empty(), |this| {
             this.child(
                 div()
@@ -407,7 +394,6 @@ fn render_menu_row(
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_size(px(13.))
                     .text_color(muted)
                     .child(row.secondary.clone()),
             )

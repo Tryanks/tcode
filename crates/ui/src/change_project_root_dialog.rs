@@ -7,12 +7,13 @@ use std::path::PathBuf;
 
 use crate::overlay::{DialogActions, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::checkbox::Checkbox;
 use crate::widgets::input::{Input, InputState};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -50,16 +51,11 @@ pub(super) fn open(
         cx.new(|cx| ChangeProjectRootDialog::new(store, project_id, current_root, window, cx));
     let content = dialog.clone();
     let footer = dialog.clone();
-    window.open_dialog(cx, move |builder, window, cx| {
+    window.open_dialog(cx, move |builder, _, _| {
         let dialog_content = content.clone();
         let confirm = content.clone();
         builder
-            .w(px(560.))
-            .rounded(crate::material::radius_overlay(cx))
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
+            .wide()
             .title(
                 crate::tr!(
                     "sidebar.change_project_root_title",
@@ -68,7 +64,7 @@ pub(super) fn open(
                 .into_owned(),
             )
             .content(move |content_el, _, _| content_el.child(dialog_content.clone()))
-            .footer(render_footer(&footer, window, cx))
+            .footer(render_footer(&footer))
             .on_ok(move |_, window, cx| {
                 confirm.update(cx, |dialog, cx| dialog.submit(window, cx));
                 // The host result owns dismissal, including validation failures.
@@ -90,35 +86,26 @@ pub(super) fn open_missing_directory(
         return;
     };
     let cwd = cwd.to_string_lossy().into_owned();
-    window.open_dialog(cx, move |builder, _window, cx| {
+    window.open_dialog(cx, move |builder, _window, _cx| {
         let change_store = store.clone();
         let change_id = project_id.clone();
         let remove_store = store.clone();
         let remove_id = project_id.clone();
         builder
-            .w(px(480.))
-            .rounded(crate::material::radius_overlay(cx))
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
             .title(crate::tr!("sidebar.missing_directory_title").into_owned())
             .content({
                 let project_name = project_name.clone();
                 let cwd = cwd.clone();
                 move |content_el, _, cx| {
                     content_el.child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                crate::tr!(
-                                    "sidebar.missing_directory_description",
-                                    project = project_name.clone(),
-                                    path = cwd.clone()
-                                )
-                                .into_owned(),
-                            ),
+                        div().text_secondary(false, cx).child(
+                            crate::tr!(
+                                "sidebar.missing_directory_description",
+                                project = project_name.clone(),
+                                path = cwd.clone()
+                            )
+                            .into_owned(),
+                        ),
                     )
                 }
             })
@@ -126,7 +113,6 @@ pub(super) fn open_missing_directory(
                 DialogActions::new()
                     .child(
                         Button::new("missing-directory-cancel")
-                            .rounded(crate::material::radius_button(cx))
                             .label(crate::tr!("sidebar.cancel"))
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
@@ -134,7 +120,6 @@ pub(super) fn open_missing_directory(
                     )
                     .child(
                         Button::new("missing-directory-remove")
-                            .rounded(crate::material::radius_button(cx))
                             .danger()
                             .label(crate::tr!("sidebar.remove_project"))
                             .on_click(move |_, window, cx| {
@@ -149,7 +134,6 @@ pub(super) fn open_missing_directory(
                     )
                     .child(
                         Button::new("missing-directory-change")
-                            .rounded(crate::material::radius_button(cx))
                             .primary()
                             .label(crate::tr!("sidebar.change_project_root"))
                             .on_click(move |_, window, cx| {
@@ -266,7 +250,6 @@ impl ChangeProjectRootDialog {
 
 impl Render for ChangeProjectRootDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
         let can_browse = self.can_browse(cx);
         let path_hint = self
             .store
@@ -277,15 +260,14 @@ impl Render for ChangeProjectRootDialog {
             .gap_4()
             .child(
                 div()
-                    .text_size(px(13.))
-                    .text_color(muted)
+                    .text_secondary(false, cx)
                     .child(crate::tr!("sidebar.change_project_root_description")),
             )
             .child(
                 v_flex()
                     .gap_1()
                     .child(
-                        div().text_size(px(11.)).text_color(muted).child(
+                        div().text_secondary(false, cx).child(
                             crate::tr!(
                                 "sidebar.change_project_root_current",
                                 path = self.current_root.to_string_lossy().into_owned()
@@ -301,7 +283,6 @@ impl Render for ChangeProjectRootDialog {
                             .when(can_browse, |row| {
                                 row.child(
                                     Button::new("browse-project-root")
-                                        .rounded(crate::material::radius_button(cx))
                                         .label(crate::tr!("sidebar.browse"))
                                         .on_click(cx.listener(|dialog, _, window, cx| {
                                             dialog.browse(window, cx);
@@ -310,7 +291,7 @@ impl Render for ChangeProjectRootDialog {
                             }),
                     )
                     .when_some(path_hint, |column, hint| {
-                        column.child(div().text_size(px(11.)).text_color(muted).child(hint))
+                        column.child(div().text_secondary(false, cx).child(hint))
                     }),
             )
             .child(
@@ -328,23 +309,21 @@ impl Render for ChangeProjectRootDialog {
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .text_color(muted)
+                            .text_secondary(false, cx)
                             .child(crate::tr!("sidebar.change_project_root_move_help")),
                     ),
             )
             .when(self.busy, |column| {
                 column.child(
                     div()
-                        .text_size(px(11.))
-                        .text_color(muted)
+                        .text_secondary(false, cx)
                         .child(crate::tr!("sidebar.change_project_root_working")),
                 )
             })
             .when_some(self.error.clone(), |column, error| {
                 column.child(
                     div()
-                        .text_size(px(11.))
+                        .text_secondary(false, cx)
                         .text_color(cx.theme().danger)
                         .child(error),
                 )
@@ -352,16 +331,11 @@ impl Render for ChangeProjectRootDialog {
     }
 }
 
-fn render_footer(
-    dialog: &Entity<ChangeProjectRootDialog>,
-    _window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
+fn render_footer(dialog: &Entity<ChangeProjectRootDialog>) -> AnyElement {
     let submit = dialog.clone();
     DialogActions::new()
         .child(
             Button::new("change-project-root-cancel")
-                .rounded(crate::material::radius_button(cx))
                 .label(crate::tr!("sidebar.cancel"))
                 .on_click(move |_, window, cx| {
                     window.close_dialog(cx);
@@ -369,7 +343,6 @@ fn render_footer(
         )
         .child(
             Button::new("change-project-root-apply")
-                .rounded(crate::material::radius_button(cx))
                 .primary()
                 .label(crate::tr!("sidebar.change_project_root_action"))
                 .on_click(move |_, window, cx| {

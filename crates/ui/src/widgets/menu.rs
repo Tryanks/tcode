@@ -8,15 +8,14 @@ use gpui::{
     Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
     Window, deferred, div, prelude::FluentBuilder, px,
 };
-use gpui_base::StyledExt as _;
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use serde::Deserialize;
 
 use crate::overlay::{Notification, OverlayExt as _};
+use crate::typography::TextRole as _;
 use crate::{
     icon::{Icon, IconName},
     scroll::ScrollableElement as _,
-    sizing::Sizable as _,
     theme::ActiveTheme as _,
 };
 
@@ -317,7 +316,8 @@ impl Render for PopupMenu {
             // rather than a bare strip for its final frame.
             return div().id("tcode-popup-menu");
         }
-        let root = div()
+        let root = crate::material::overlay_contour(div(), cx)
+            .rounded(crate::material::radius_overlay(cx))
             .id("tcode-popup-menu")
             .debug_selector(|| "tcode-popup-menu".into())
             .key_context(CONTEXT)
@@ -337,13 +337,10 @@ impl Render for PopupMenu {
             .on_action(|action: &RevealPath, _, cx| cx.reveal_path(Path::new(&action.0)))
             .flex()
             .flex_col()
+            // The menu's own width bounds: wide enough for a label and its
+            // shortcut, narrow enough to stay a menu beside its anchor.
             .min_w(px(160.))
             .max_w(px(420.))
-            .rounded(crate::material::radius_overlay(cx))
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
             .occlude();
         let insets = crate::window_seam::content_insets(window);
         // Both anchors keep up to 8px from each window edge; the border is
@@ -362,15 +359,7 @@ impl Render for PopupMenu {
                     items = items.child(div().h(px(1.)).mx_1().my_1().bg(cx.theme().border))
                 }
                 MenuItem::Label(label) => {
-                    items = items.child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .text_size(px(11.))
-                            .font_medium()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(label.clone()),
-                    );
+                    items = items.child(crate::material::list_caption(label.clone(), false, cx));
                 }
                 MenuItem::Item {
                     label,
@@ -384,19 +373,12 @@ impl Render for PopupMenu {
                     let disabled = *disabled;
                     let content = render.as_ref().map(|render| render(window, cx));
                     items = items.child(
-                        div()
+                        crate::material::menu_item_frame(self.touch, cx)
+                            .text_body(self.touch, cx)
                             .id(("menu-item", index))
                             .debug_selector(move || format!("menu-item-{index}"))
                             .role(Role::MenuItem)
                             .when_some(label.clone(), |el, label| el.aria_label(label))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_2()
-                            .py_1()
-                            .when(self.touch, |el| el.min_h(px(44.)))
-                            .rounded(crate::material::radius_button(cx))
-                            .text_sm()
                             .when(selected, |el| el.bg(cx.theme().muted))
                             .when(disabled, |el| el.text_color(cx.theme().muted_foreground))
                             .when(!disabled, |el| {
@@ -407,8 +389,8 @@ impl Render for PopupMenu {
                             })
                             .child(div().flex_none().w_4().flex().justify_center().children(
                                 match (*checked, icon.clone()) {
-                                    (true, _) => Some(Icon::new(IconName::Check).xsmall()),
-                                    (false, Some(icon)) => Some(Icon::new(icon).small()),
+                                    (true, _) => Some(Icon::new(IconName::Check)),
+                                    (false, Some(icon)) => Some(Icon::new(icon)),
                                     (false, None) => None,
                                 },
                             ))

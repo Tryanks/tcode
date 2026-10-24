@@ -217,7 +217,7 @@ impl Composer {
                         // by Escape or the backdrop releases the slot too.
                         let prepared = Rc::new(RefCell::new(Some(prepared)));
                         let session_id = session_id.clone();
-                        window.open_alert_dialog(cx, move |alert, _, cx| {
+                        window.open_alert_dialog(cx, move |alert, _, _| {
                             let composer = composer_entity.clone();
                             let release_entity = composer_entity.clone();
                             let prepared = prepared.clone();
@@ -234,7 +234,6 @@ impl Composer {
                             };
                             let on_cancel = release.clone();
                             alert
-                                .bg(cx.theme().popover)
                                 .title(crate::tr!("attach.tunnel_title"))
                                 .description(crate::tr!(
                                     "attach.tunnel_body",
@@ -471,19 +470,16 @@ impl Composer {
             let menu_path = path.to_string_lossy().into_owned();
             let name = image.name.clone();
             row = row.child(
-                h_flex()
-                    .id(("thumb", index))
-                    .flex_none()
-                    .h(px(22.))
+                Button::new(("thumb", index))
+                    .secondary()
+                    .small()
+                    .chip()
+                    .aria_label(name.clone())
+                    // A long file name truncates rather than taking the strip.
                     .max_w(px(220.))
-                    .gap_1()
-                    .items_center()
-                    .pl(px(2.))
-                    .pr_1()
-                    .rounded(crate::material::radius_chip(cx))
                     .overflow_hidden()
-                    .bg(cx.theme().secondary)
-                    .cursor_pointer()
+                    // The thumbnail is decoded at the size it draws, inside the
+                    // chip's height; no owner sizes a chip's leading image.
                     .child(
                         img(crate::store::image_preview(path, 18., false))
                             .id("attachment-image")
@@ -495,29 +491,18 @@ impl Composer {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.5))
-                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_meta_mono(self.compact, cx)
                             .child(name),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_image_preview(index, window, cx);
                     }))
                     .child(
-                        div()
-                            .id(("thumb-x", index))
-                            .flex_none()
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(crate::material::radius_chip(cx))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().muted))
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .xsmall()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
+                        Button::new(("thumb-x", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .aria_label(crate::tr!("composer.remove_image"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 crate::widgets::stop_click_propagation(window, cx);
                                 this.remove_image(index, cx);
