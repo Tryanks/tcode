@@ -25,6 +25,14 @@ const CONTROL_ACTIVITY_LIMIT: usize = 200;
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,
     review_records: Vec<tcode_core::control::ReviewRecord>,
+    /// Answers to recent calls that carried a `request_id`, so a retry does not act twice.
+    answered: VecDeque<(String, serde_json::Value)>,
+}
+
+/// A call's answer: ready now, or when host-side work the call started finishes.
+pub(super) enum Answer {
+    Now(Result<serde_json::Value, String>),
+    Later(HostTask<Result<serde_json::Value, String>>),
 }
 
 /// The thread behind a `tcode_control` call, with the grant in force when it arrived.
@@ -177,22 +185,45 @@ impl AppState {
         authored_cx.origin = Some(MessageOrigin::Agent);
         authored_cx.author = None;
         let cx = &mut authored_cx;
-        let result = match self.find_meta(&thread_id) {
-            _ if !self.settings.control.enabled => {
-                Err("tcode_control is turned off in Settings → Control".into())
-            }
+        let answer = match self.find_meta(&thread_id) {
+            _ if !self.settings.control.enabled => Answer::Now(Err(
+                "tcode_control is turned off in Settings → Control".into(),
+            )),
             Some(meta) if meta.archived_at.is_none() => {
                 let caller = Caller {
                     thread_id,
                     project_id: meta.project_id.clone(),
                     grant: self.caller_grant(&meta).0,
                 };
-                self.authorize_control(&caller, &op)
-                    .and_then(|()| self.dispatch_control_op(&caller, op, cx))
+                match self.authorize_control(&caller, &op) {
+                    Ok(()) => self.dispatch_control_op(&caller, op, cx),
+                    Err(refusal) => Answer::Now(Err(refusal)),
+                }
             }
-            _ => Err("unknown thread".into()),
+            _ => Answer::Now(Err("unknown thread".into())),
         };
-        let _ = reply.try_send(result);
+        match answer {
+            Answer::Now(result) => {
+                let _ = reply.try_send(result);
+            }
+            Answer::Later(task) => HostCx::spawn_detached(cx, async move {
+                let _ = reply.send(task.await).await;
+            }),
+        }
+    }
+
+    /// The answer an earlier call with this `key` got, if it is still remembered.
+    pub(super) fn answered(&self, key: &str) -> Option<serde_json::Value> {
+        self.control
+            .answered
+            .iter()
+            .find(|(answered, _)| answered == key)
+            .map(|(_, value)| value.clone())
+    }
+
+    pub(super) fn remember_answer(&mut self, key: String, value: serde_json::Value) {
+        self.control.answered.push_front((key, value));
+        self.control.answered.truncate(CONTROL_ACTIVITY_LIMIT);
     }
 
     /// The grant check every call passes host-side, however the connection listed its tools:
@@ -271,13 +302,8 @@ impl AppState {
         Ok(())
     }
 
-    fn dispatch_control_op(
-        &mut self,
-        caller: &Caller,
-        op: ControlOp,
-        cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
-        match op {
+    fn dispatch_control_op(&mut self, caller: &Caller, op: ControlOp, cx: &mut HostCx) -> Answer {
+        Answer::Now(match op {
             ControlOp::ListProjects(p) => self.op_list_projects(caller, p, cx),
             ControlOp::ListThreads(p) => self.op_list_threads(caller, p, cx),
             ControlOp::GetThread(p) => self.op_get_thread(caller, p, cx),
@@ -298,8 +324,8 @@ impl AppState {
             ControlOp::StartThread(p) => self.op_start_thread(caller, p, cx),
             ControlOp::SendMessage(p) => self.op_send_message(caller, p, cx),
             ControlOp::ControlThread(p) => self.op_control_thread(caller, p, cx),
-            ControlOp::PullRequest(p) => self.op_pull_request(caller, p, cx),
-            ControlOp::Git(p) => self.op_git(caller, p, cx),
+            ControlOp::PullRequest(p) => return self.op_pull_request(caller, p, cx),
+            ControlOp::Git(p) => return self.op_git(caller, p, cx),
             ControlOp::CreateProject(p) => self.op_create_project(caller, p, cx),
             ControlOp::NotifyWhen(p) => self.op_notify_when(caller, p, cx),
             ControlOp::CancelNotify(p) => self.op_cancel_notify(caller, p, cx),
@@ -310,7 +336,7 @@ impl AppState {
             ControlOp::Rewind(p) => self.op_rewind(caller, p, cx),
             ControlOp::PatchSettings(p) => self.op_patch_settings(caller, p, cx),
             ControlOp::RequestGrant(p) => self.op_request_grant(caller, p, cx),
-        }
+        })
     }
 
     /// Record a write in the target thread, as the actor's thread, and in the activity list.
