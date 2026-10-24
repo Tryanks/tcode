@@ -28,7 +28,7 @@ desktop = [
 # GPUI's platform file dialogs (`prompt_for_paths` / `prompt_for_new_path`).
 # Guards only the Browse and Save-to-disk actions.
 native-dialogs = []
-# Embedded webview preview backend. Available on macOS, Windows, Android and iOS; the panel,
+# Embedded webview preview backend. Available on macOS, Windows, Linux (X11), Android and iOS; the panel,
 # its URL field, open-externally and copy-URL are always compiled.
 native-preview = [
     "dep:tcode-traverse",
@@ -47,6 +47,8 @@ native-preview = [
     "dep:block2",
     "dep:objc2-foundation",
     "dep:webview2-com",
+    "dep:webkit2gtk",
+    "dep:gdk",
     "dep:windows-core",
     "dep:tempfile",
 ]
@@ -103,7 +105,7 @@ reqwest = { package = "gpui-pre-reqwest", version = "=0.12.15", default-features
 
 # The preview backend exists only where a system webview can be embedded as a
 # child of the GPUI window, so its whole dependency set is target-scoped.
-[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "ios"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "ios"))'.dependencies]
 gpui-kit = { version = "0.8.0", default-features = false, features = ["gpui-fast"], optional = true }
 gpui-webview = { version = "0.8.0", features = ["gpui-fast"], optional = true }
 wry = { version = "0.53.3", package = "lb-wry", features = ["mac-proxy"], optional = true }
@@ -142,6 +144,13 @@ version = "0.3.2"
 features = ["WKNavigationDelegate", "WKNavigationAction", "WKFrameInfo", "WKSnapshotConfiguration", "WKWebView"]
 optional = true
 
+# The WebKitGTK load-failure signals behind `preview_status.load_error`. Pinned
+# to the version lb-wry resolves, so both drive the same WebKit objects.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "=2.0.1", optional = true }
+# The X error trap that keeps a released webview from exiting the process.
+gdk = { version = "0.18.2", optional = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 tempfile = { version = "3", optional = true }
 # Pinned to the version lb-wry resolves, so both drive the same WebView2 objects.
@@ -168,7 +177,7 @@ tcode-services = { path = "../services" }
 name = "markdown_perf"
 harness = false
 
-[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "android", target_os = "ios"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "android", target_os = "ios"))'.dependencies]
 preview-mcp = { path = "../preview-mcp", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]

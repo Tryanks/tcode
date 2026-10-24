@@ -627,7 +627,7 @@ Nothing is configured on devices; they take the URL from the invitation.
 
 ## Remote Preview routing
 
-Windows and Android embedded previews use the connected machine's network for
+Windows, Linux and Android embedded previews use the connected machine's network for
 all HTTP and HTTPS traffic. `http://localhost:5173/app` opens the dev server on
 the machine, even when it listens only on loopback. The URL stays unchanged in
 the address bar, redirects, scripts and `preview_status`. No dev-server port
@@ -708,7 +708,9 @@ surface and automation errors. Local macOS Preview retains ordinary direct
 networking and its existing store.
 
 Windows uses WebView2's proxy configuration with implicit loopback bypass
-disabled; Android uses the WebView proxy override. Both point the engine at
+disabled; Linux gives WebKitGTK's ephemeral context a custom proxy with no
+ignored hosts; Android uses the WebView proxy override. All three point the
+engine at
 an attachment-owned loopback HTTP proxy that speaks `CONNECT host:port` and
 absolute-form requests. The proxy opens one tunnel per browser connection,
 rewrites an absolute-form request line to origin form, drops its own

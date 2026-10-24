@@ -135,8 +135,10 @@ Platform prerequisites:
 - **macOS** — Xcode command-line tools.
 - **Windows** — MSVC toolchain.
 - **Linux** — a Vulkan driver plus the usual GPUI build deps (`libxkbcommon-dev`,
-  `libwayland-dev`, `libxcb*`, `libssl-dev`, `libasound2-dev`, `libfontconfig-dev`).
-  The embedded preview browser is compiled out on Linux.
+  `libwayland-dev`, `libxcb*`, `libssl-dev`, `libasound2-dev`, `libfontconfig-dev`)
+  and WebKitGTK for the embedded preview (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`).
+  The preview embeds only into an X11 window: on a Wayland session run
+  `WAYLAND_DISPLAY= cargo run` to get it through XWayland.
 
 Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`,
 `cursor-agent`, `grok`) and can be overridden in **Settings → Providers**.
