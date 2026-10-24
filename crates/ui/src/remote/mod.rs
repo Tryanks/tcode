@@ -43,6 +43,8 @@ use crate::window_state::{Destination, WindowState};
 #[cfg(feature = "remote-hosting")]
 mod hosting;
 
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+mod group;
 #[cfg(target_family = "wasm")]
 pub(crate) mod hosted;
 mod qr;
@@ -55,7 +57,7 @@ pub use hosting::{HostingPanel, RemoteController, machine_name};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachmentTarget {
     Local,
-    Remote(PairedHost),
+    Remote(Box<PairedHost>),
 }
 
 pub type SwitchAttachment = Rc<dyn Fn(AttachmentTarget, &mut Window, &mut App)>;
@@ -315,7 +317,7 @@ impl RemotePanel {
             let attachment = cx.global::<ClientAttachment>();
             attachment.save_host(host.clone());
             let switch = attachment.switcher();
-            switch(AttachmentTarget::Remote(host), window, cx);
+            switch(AttachmentTarget::Remote(Box::new(host)), window, cx);
         }
         cx.notify();
     }
@@ -495,6 +497,18 @@ impl RemotePanel {
                             .child(crate::tr!("member.space", space = space).into_owned()),
                     )
                 })
+                .when(
+                    host.space_name.is_none() && host.group_id.is_some(),
+                    |column| {
+                        column.child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(crate::tr!("hosts.in_group")),
+                        )
+                    },
+                )
                 .when_some(reason, |column, reason| {
                     column.child(
                         div()
@@ -521,7 +535,11 @@ impl RemotePanel {
         .when(!needs_pairing, |row| {
             row.on_click(move |_, window, cx| {
                 let switch = cx.global::<ClientAttachment>().switcher();
-                switch(AttachmentTarget::Remote(connect_host.clone()), window, cx);
+                switch(
+                    AttachmentTarget::Remote(Box::new(connect_host.clone())),
+                    window,
+                    cx,
+                );
             })
         })
         // The row must keep its hover fill while the child menu is hovered.
@@ -632,7 +650,11 @@ impl RemotePanel {
             InvitationOffer::Live {
                 invitation,
                 remaining,
-            } => hosting::invitation_card(&invitation, remaining, compact, PAGE_PADDING, cx),
+            } => {
+                let group = spaces::local(cx)
+                    .and_then(|spaces| spaces.read(cx).group().map(|group| group.name.clone()));
+                hosting::invitation_card(&invitation, remaining, group, compact, PAGE_PADDING, cx)
+            }
             InvitationOffer::Expired => hosting::expired_invitation_row(PAGE_PADDING, cx),
             InvitationOffer::NotHosting | InvitationOffer::PairingOff => {
                 let note = if offer == InvitationOffer::PairingOff {
@@ -1264,6 +1286,7 @@ mod tests {
                     relay: None,
                     addrs: Vec::new(),
                     last_connected_unix: None,
+                    group_id: None,
                     space_id: None,
                     space_name: None,
                 }]
@@ -1407,6 +1430,7 @@ mod tests {
             host_id: "ab".repeat(32),
             secret: "AAECAwQFBgcICQoLDA0ODw".into(),
             space: None,
+            group: None,
             traverse: Vec::new(),
             relay: None,
             port: 47420,
@@ -1598,6 +1622,7 @@ mod tests {
             relay: None,
             addrs: vec!["192.168.1.10:47420".into()],
             last_connected_unix: None,
+            group_id: None,
             space_id: None,
             space_name: None,
         };

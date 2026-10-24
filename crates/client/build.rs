@@ -25,7 +25,7 @@ fn build_mac_dictation() {
         "aarch64" => "arm64".to_string(),
         arch => arch.to_string(),
     };
-    let deployment = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "12.0".into());
+    let deployment = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "27.0".into());
     let sdk = xcrun(&["--sdk", "macosx", "--show-sdk-path"]);
     let swiftc = PathBuf::from(xcrun(&["--sdk", "macosx", "--find", "swiftc"]));
 

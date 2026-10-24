@@ -1,7 +1,8 @@
 //! What crosses a QUIC connection before and around the NDJSON protocol.
 //!
-//! Two ALPNs. `tcode/pair/1` carries one bi stream with a `pair` line and its
-//! `paired`/`pair_rejected` answer. `tcode/1` is accepted only from a paired
+//! Three ALPNs. `tcode/pair/1` carries one bi stream with a `pair` line and its
+//! `paired`/`pair_rejected` answer. `tcode/group/1` connects the machines of a
+//! group; see [`crate::group`]. `tcode/1` is accepted only from a paired
 //! `EndpointId`; its first bi stream opens with `hello` and, after `hello_ok`,
 //! carries `ClientMessage`/`HostMessage` lines. Every control line is JSON
 //! terminated by `\n`, at most [`MAX_CONTROL_LINE`] bytes, and must arrive
@@ -154,6 +155,8 @@ pub enum HostLine {
         host_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<crate::group::Roster>,
     },
     PairRejected {
         reason: PairRejection,
@@ -161,6 +164,9 @@ pub enum HostLine {
     HelloOk {
         host_name: String,
         protocol_version: u32,
+        /// The group's machines, for a full device of a group's machine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<crate::group::Roster>,
     },
     HelloRejected {
         reason: HelloRejection,
@@ -225,7 +231,16 @@ pub async fn read_line(reader: &mut LineReader, max: usize) -> io::Result<Option
 pub async fn read_control<T: serde::de::DeserializeOwned>(
     reader: &mut LineReader,
 ) -> io::Result<T> {
-    let line = tokio::time::timeout(CONTROL_TIMEOUT, read_line(reader, MAX_CONTROL_LINE))
+    read_control_within(reader, MAX_CONTROL_LINE).await
+}
+
+/// [`read_control`] for a line that may be longer: a reply carrying a
+/// group's machines, or a `tcode/group/1` line.
+pub async fn read_control_within<T: serde::de::DeserializeOwned>(
+    reader: &mut LineReader,
+    max: usize,
+) -> io::Result<T> {
+    let line = tokio::time::timeout(CONTROL_TIMEOUT, read_line(reader, max))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "control line timed out"))??
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no control line"))?;
@@ -428,7 +443,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(HostLine::HelloOk {
                 host_name: "Desk".into(),
-                protocol_version: 5
+                protocol_version: 5,
+                group: None,
             })
             .unwrap(),
             serde_json::json!({"type":"hello_ok","host_name":"Desk","protocol_version":5})

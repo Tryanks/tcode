@@ -49,10 +49,7 @@ use crate::diff::DiffPanel;
 use crate::icon::{Icon, IconName};
 use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
-#[cfg(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows", target_os = "android")
-))]
+#[cfg(preview_backend)]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::remote::{AttachmentTarget, RemotePanel};
 use crate::runtime_event::{
@@ -376,7 +373,7 @@ impl AppShell {
                 host.load_hosts()
                     .into_iter()
                     .find(|saved| Some(&saved.host_id) == snapshot.host_id.as_ref())
-                    .map(AttachmentTarget::Remote)
+                    .map(|host| AttachmentTarget::Remote(Box::new(host)))
             });
             if setup.initial.is_none() {
                 snapshot.without_host();
@@ -390,7 +387,7 @@ impl AppShell {
                     .is_some_and(|entries| !entries.is_empty())
             })
         }) {
-            setup.initial = Some(AttachmentTarget::Remote(host));
+            setup.initial = Some(AttachmentTarget::Remote(Box::new(host)));
             restored = None;
         }
         // Seed the layout from the window before any child view exists, so the
@@ -507,10 +504,7 @@ impl AppShell {
             .map(|attachment| attachment.link.link())
     }
 
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     #[allow(private_interfaces)]
     #[doc(hidden)]
     pub fn preview_lifecycle(&self, cx: &App) -> Option<Entity<BrowserLifecycle>> {
@@ -2056,7 +2050,7 @@ impl AppShell {
                 || panel.right_tab == RightTab::Agents
                 || selected_panel == Some("agents")
         });
-        let show_preview = store.scope().is_full();
+        let show_preview = store.offers_preview();
         attachment.preview.update(cx, |preview, cx| {
             preview.set_compact_panel_selected(
                 self.pending_navigation_restore.is_none()
@@ -3416,6 +3410,7 @@ mod tests {
                 relay: None,
                 addrs: vec!["127.0.0.1:47503".into()],
                 last_connected_unix: Some(1),
+                group_id: None,
                 space_id: None,
                 space_name: None,
             },
@@ -3506,7 +3501,11 @@ mod tests {
         client.transports.borrow_mut().push(fresh_transport());
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.switch_to(AttachmentTarget::Remote(saved.clone()), window, cx)
+                shell.switch_to(
+                    AttachmentTarget::Remote(Box::new(saved.clone())),
+                    window,
+                    cx,
+                )
             });
         });
         cx.run_until_parked();
@@ -3522,7 +3521,11 @@ mod tests {
         // The working link to the same machine is kept...
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.switch_to(AttachmentTarget::Remote(saved.clone()), window, cx)
+                shell.switch_to(
+                    AttachmentTarget::Remote(Box::new(saved.clone())),
+                    window,
+                    cx,
+                )
             });
         });
         cx.run_until_parked();
@@ -3536,7 +3539,7 @@ mod tests {
         };
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.switch_to(AttachmentTarget::Remote(member), window, cx)
+                shell.switch_to(AttachmentTarget::Remote(Box::new(member)), window, cx)
             });
         });
         cx.run_until_parked();
@@ -3584,6 +3587,7 @@ mod tests {
                 relay: None,
                 addrs: vec!["127.0.0.1:48442".into()],
                 last_connected_unix: None,
+                group_id: None,
                 space_id: None,
                 space_name: None,
             },
@@ -4282,7 +4286,7 @@ mod tests {
         let saved = client.saved.clone();
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.switch_to(AttachmentTarget::Remote(saved), window, cx)
+                shell.switch_to(AttachmentTarget::Remote(Box::new(saved)), window, cx)
             });
         });
         draw(cx);
@@ -5245,6 +5249,7 @@ mod tests {
             relay: None,
             addrs: vec!["127.0.0.1:47503".into()],
             last_connected_unix: None,
+            group_id: None,
             space_id: None,
             space_name: None,
         };
@@ -5271,7 +5276,7 @@ mod tests {
                         client_host: Some(desk),
                         local: Some(local),
                         local_failure: Some(busy.to_owned()),
-                        initial: Some(AttachmentTarget::Remote(saved)),
+                        initial: Some(AttachmentTarget::Remote(Box::new(saved))),
                         ..Default::default()
                     },
                     window,
@@ -6310,10 +6315,7 @@ mod tests {
     /// The one Back chain: overlays first, then one step of the window's
     /// history, and `false` only at the root — where the platform closes the
     /// app. Leaving a page never touches the attachment.
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     #[gpui::test]
     fn compact_preview_release_and_navigation(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();

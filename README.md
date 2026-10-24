@@ -132,6 +132,9 @@ tcode-headless serve --name build-server   # prints the machine id, invitation l
 tcode-headless pair      # reprints the current invitation while it is valid
 ```
 
+For a NAS or homelab, [Docker images and a Compose template](docs/docker.md)
+provide Linux amd64/arm64 deployment with selectable CLIs and persistent logins.
+
 `serve --traverse off` or `--traverse https://your.instance` changes the
 Traverse mode. Headless release builds also serve the browser app, on
 `http://127.0.0.1:47420/` by default; `--browser-listen` binds it to a LAN
@@ -162,14 +165,14 @@ guide.
 ## Getting started
 
 **1. Install Tcode.** Download a build for your platform from
-[Releases](https://github.com/Tryanks/tcode/releases) — macOS (Apple Silicon /
-Intel), Windows (x64 / ARM64), Linux (x64 / ARM64) — and run it. Check the release
-notes for runtime requirements and signing status. Windows preview uses
-WebView2; Linux needs the listed system libraries and a Vulkan driver.
+[Releases](https://github.com/Tryanks/tcode/releases) — macOS 27+ (Apple
+silicon), Windows 11+ (x64 / ARM64), Linux (x64 / ARM64) — and run it. Check the
+release notes for runtime requirements and signing status. Linux needs the listed
+system libraries and a Vulkan driver.
 
 For an unsigned macOS build, remove quarantine after installing the app with
 `xattr -dr com.apple.quarantine /Applications/Tcode.app`. The embedded preview
-browser is available on macOS, Windows and Android; voice input requires macOS 26 or later.
+browser is available on macOS, Windows, Android and iOS.
 
 Each release uses the native application icon format for its platform: `.icns`
 inside the macOS app bundle, an `.ico` resource embedded directly in the Windows
@@ -182,7 +185,7 @@ also include a `SHA256SUMS.txt` file.
 | Windows, x64 / arm64 | Desktop or headless `.zip` |
 | Linux, x64 / arm64 | Desktop or headless `.tar.gz` |
 | Android, arm64 | `tcode-<version>-android-arm64.apk` — signed with the project's release key; install with adb |
-| iOS / iPadOS, arm64 | Not published yet; build from source with `crates/ios/host/build.sh` |
+| iOS / iPadOS 27+, arm64 | `tcode-<version>-ios-arm64-unsigned.ipa` — unsigned; re-sign with your own Apple ID or install with a sideloading tool such as AltStore or Sideloadly |
 | Browser | Embedded in the headless release; open the HTTP link it prints (HTTPS only through your own tunnel). No separate signed app package |
 
 **2. Have an agent installed.** Tcode drives the CLIs, it doesn't bundle them.

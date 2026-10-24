@@ -718,6 +718,7 @@ impl Shared {
                     invite: None,
                     devices: Vec::new(),
                     traverse: Vec::new(),
+                    group: None,
                 }
             }
         };

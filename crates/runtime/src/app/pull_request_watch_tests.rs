@@ -313,17 +313,36 @@ impl Harness {
 
     /// The provider takes the turn and finishes it.
     fn accept(&mut self, delivery_id: u64) {
-        for event in [
-            AgentEvent::TurnAccepted { delivery_id },
-            AgentEvent::TurnCompleted {
+        self.events
+            .try_send(AgentEvent::TurnAccepted { delivery_id })
+            .unwrap();
+        self.finish_turn();
+    }
+
+    /// The provider finishes the running turn.
+    fn finish_turn(&mut self) {
+        self.events
+            .try_send(AgentEvent::TurnCompleted {
                 turn_id: "turn".into(),
                 status: TurnStatus::Completed,
                 usage: None,
-            },
-        ] {
-            self.events.try_send(event).unwrap();
-        }
+            })
+            .unwrap();
+        // The host's event pump queues each event for the host as it takes it,
+        // whether or not the host still acts on it.
+        let events = self.events.clone();
+        self.cx.run_until(|_| events.is_empty());
         self.cx.run_until_parked();
+    }
+
+    /// The text of the next wake steered into the running turn.
+    fn steered(&mut self) -> String {
+        let commands = self.commands.clone();
+        self.cx.run_until(|_| !commands.is_empty());
+        match commands.try_recv() {
+            Ok(SessionCommand::Steer { text, .. }) => text,
+            other => panic!("expected a steered wake, got {other:?}"),
+        }
     }
 
     /// The user presses Stop on the thread; the host's answer.
@@ -368,7 +387,12 @@ impl Harness {
             .expect("the index reports thread activity")
     }
 
+    /// The user's next turn, which resumes the paused watches and is left running. A real
+    /// agent is still on that turn when the catch-up read lands, where the scripted one would
+    /// already have finished it, so the read waits until the turn runs.
     fn resume(&mut self) {
+        let (release, gate) = mpsc::channel();
+        self.host().gate = Some(gate);
         self.state.update(&mut self.cx, |state, cx| {
             state.select_session("thread", cx);
         });
@@ -381,8 +405,18 @@ impl Harness {
                 attachment_paths: Vec::new(),
             },
         );
-        let (delivery, _) = self.delivered();
-        self.accept(delivery);
+        let (delivery_id, _) = self.delivered();
+        self.events
+            .try_send(AgentEvent::TurnAccepted { delivery_id })
+            .unwrap();
+        self.cx.run_until(|state| {
+            state.resident("thread").is_some_and(|session| {
+                session.delivery_in_flight.is_none() && session.turn_in_flight
+            })
+        });
+        drop(release);
+        self.cx
+            .run_until(|state| !state.pull_request_watches.passing);
     }
 
     /// Hold the next pull request read and start a pass; send on the returned channel to answer it.
@@ -837,7 +871,11 @@ fn a_wake_steers_into_a_running_turn_and_is_not_repeated() {
         .events
         .try_send(AgentEvent::TurnAccepted { delivery_id })
         .unwrap();
-    harness.cx.run_until_parked();
+    harness.cx.run_until(|state| {
+        state
+            .resident("thread")
+            .is_some_and(|session| session.delivery_in_flight.is_none() && session.turn_in_flight)
+    });
 
     harness.pass();
     let commands = harness.commands.clone();
@@ -942,14 +980,11 @@ fn interrupt_pauses_an_idle_watch_and_resume_catches_up_once_after_restart() {
         assert!(!harness.activity().waiting);
 
         harness.resume();
-        harness
-            .cx
-            .run_until(|state| !state.pull_request_watches.passing);
         if change == "unchanged" {
             assert!(harness.commands.is_empty(), "resume without news is silent");
             assert!(harness.notices().is_empty());
         } else {
-            let (delivery, text) = harness.delivered();
+            let text = harness.steered();
             let expected = match change {
                 "FAILURE" => "Checks failed",
                 "SUCCESS" => "passed",
@@ -961,8 +996,8 @@ fn interrupt_pauses_an_idle_watch_and_resume_catches_up_once_after_restart() {
             };
             assert!(text.contains(expected), "{change}: {text}");
             assert_eq!(harness.notices().len(), 1, "one catch-up per PR");
-            harness.accept(delivery);
         }
+        harness.finish_turn();
         harness.pass();
         assert!(
             harness.commands.is_empty(),
@@ -1037,13 +1072,13 @@ fn interrupt_blocks_an_in_flight_read_and_accepts_agent_watches_while_paused() {
         "new registrations inherit the pause"
     );
     harness.resume();
-    let (delivery, text) = harness.delivered();
+    let text = harness.steered();
     assert!(text.contains("Checks failed"));
     assert_eq!(
         harness.watch("thread").unwrap().started_at,
         registered.started_at
     );
-    harness.accept(delivery);
+    harness.finish_turn();
     harness.pass();
     assert!(harness.commands.is_empty());
 }
@@ -1079,9 +1114,8 @@ fn a_late_turn_acceptance_cannot_resume_watches_after_interrupt() {
         "accepting a pre-Stop turn cannot resume monitoring"
     );
     harness.resume();
-    let (delivery, text) = harness.delivered();
-    assert!(text.contains("Checks failed"));
-    harness.accept(delivery);
+    assert!(harness.steered().contains("Checks failed"));
+    harness.finish_turn();
 }
 
 #[test]
@@ -1100,13 +1134,13 @@ fn resume_combines_pending_news_with_changes_from_the_pause() {
     harness.pass();
     assert!(harness.requests().is_empty());
     harness.resume();
-    let (delivery, text) = harness.delivered();
+    let text = harness.steered();
     assert!(text.contains("Checks failed"), "undelivered news survives");
     assert!(
         text.contains("passed") && text.contains("note paused"),
         "resume refreshes despite pending news: {text}"
     );
-    harness.accept(delivery);
+    harness.finish_turn();
     harness.pass();
     assert!(
         harness.commands.is_empty(),

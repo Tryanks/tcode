@@ -312,8 +312,54 @@ pub enum HostingAction {
     /// Mint an invitation, replacing the current one.
     #[serde(alias = "new_code")]
     NewInvitation,
+    /// Remove a device; from every machine of the group when it is a group
+    /// member.
     RevokeDevice(String),
     Spaces(SpaceAction),
+    Group(GroupAction),
+}
+
+/// Machine groups: machines that admit the devices any member admits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum GroupAction {
+    /// Start a group with this machine and every full-access device paired
+    /// with it.
+    Create {
+        name: String,
+    },
+    /// Join the group of another member with that machine's invitation,
+    /// bringing every full-access device. `address` is one the user typed
+    /// for that machine after an attempt found no path.
+    Join {
+        link: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+    },
+    Leave,
+    RemoveMachine(String),
+    /// Admit here a group member declined while new devices were refused.
+    Admit(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupInfo {
+    pub id: String,
+    pub name: String,
+    /// Every member machine, this one included.
+    pub machines: Vec<GroupMachineInfo>,
+    /// Group members this machine has not admitted because new devices were
+    /// refused when they arrived.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declined: Vec<HostedDevice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMachineInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub this_machine: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +441,8 @@ pub struct HostingState {
     /// configured order; empty with none.
     #[serde(default)]
     pub traverse: Vec<TraverseSourceStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupInfo>,
 }
 
 /// One Traverse source a hosting machine publishes to, as it stands now.

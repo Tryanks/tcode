@@ -170,6 +170,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "ureq",
  "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -4301,6 +4302,7 @@ dependencies = [
  "pathfinder_geometry",
  "raw-window-handle",
  "smallvec",
+ "unicode-segmentation",
  "uuid",
  "zed-font-kit",
 ]
@@ -7929,6 +7931,7 @@ dependencies = [
  "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
 ]
@@ -11357,11 +11360,13 @@ dependencies = [
 name = "tcode-headless"
 version = "0.1.0"
 dependencies = [
+ "agent",
  "env_logger",
  "qrcode",
  "serde",
  "serde_json",
  "tcode-client",
+ "tcode-core",
  "tcode-protocol",
  "tcode-runtime",
  "tcode-services",
@@ -11554,8 +11559,10 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-image-io",
+ "objc2-ui-kit",
  "objc2-web-kit",
  "percent-encoding",
  "preview-mcp",

@@ -1230,11 +1230,18 @@ fn real_git_fork_heads_follow_gh_default_without_mistaking_the_base_for_a_publis
     git(&["config", "branch.topic.merge", "refs/heads/main"]);
     let subdirectory = cwd.join("nested");
     std::fs::create_dir(&subdirectory).unwrap();
-    assert_eq!(repository::resolve(&subdirectory).unwrap().owner, "sample");
+    assert_eq!(
+        repository::resolve(&tcode_services::forge::Checkout::new(&subdirectory))
+            .unwrap()
+            .owner,
+        "sample"
+    );
     git(&["config", "--unset", "remote.upstream.gh-resolved"]);
     git(&["config", "remote.origin.gh-resolved", "base"]);
     assert_eq!(
-        repository::resolve(&subdirectory).unwrap().owner,
+        repository::resolve(&tcode_services::forge::Checkout::new(&subdirectory))
+            .unwrap()
+            .owner,
         "sample",
         "mixed hosts and SSH aliases reject the strict gh mark and use the host-ranked remote"
     );

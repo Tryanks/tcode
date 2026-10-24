@@ -119,10 +119,7 @@ pub enum WorkspaceAttachment {
 
 /// Where a remote attachment's Preview goes: the paired machine and the
 /// tunnels the attachment's transport opens to it.
-#[cfg(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows", target_os = "android")
-))]
+#[cfg(preview_backend)]
 pub(crate) type PreviewTarget = (
     tcode_client::pairing::PairedHost,
     std::sync::Arc<dyn tcode_client::host::TunnelOpener>,
@@ -157,13 +154,7 @@ pub struct WorkspaceStore {
     /// The transport's live view of the attached machine: its authenticated
     /// pairing and how the connection is carried. `None` locally and in a
     /// browser.
-    #[cfg_attr(
-        not(all(
-            feature = "native-preview",
-            any(target_os = "macos", target_os = "windows", target_os = "android")
-        )),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(preview_backend), allow(dead_code))]
     current_host: Option<LiveHost>,
     client_preferences: ClientPreferences,
     image_namespace: u64,
@@ -582,10 +573,7 @@ impl WorkspaceStore {
     }
 
     /// The paired machine Preview reaches and the tunnels that reach it.
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     pub(crate) fn preview_proxy(&self) -> Result<Option<PreviewTarget>, String> {
         if !self.is_remote() {
             return Ok(None);
@@ -604,6 +592,13 @@ impl WorkspaceStore {
 
     pub fn scope(&self) -> &WorkspaceScope {
         &self.scope
+    }
+
+    /// Whether this client shows the Preview tab at all. A browser tab already
+    /// reaches the machine by address, so a dev server listening on the LAN
+    /// opens in a new tab there instead of inside Tcode.
+    pub(crate) fn offers_preview(&self) -> bool {
+        self.scope.is_full() && !cfg!(target_family = "wasm")
     }
 
     fn index_topic(&self) -> Topic {
@@ -1979,7 +1974,7 @@ impl WorkspaceStore {
     }
 
     pub fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
-        if tab == RightTab::Preview && !self.scope.is_full() {
+        if tab == RightTab::Preview && !self.offers_preview() {
             return;
         }
         if let Some(ui) = self.active_conversation_ui_mut() {
@@ -2017,7 +2012,7 @@ impl WorkspaceStore {
     }
 
     pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.scope.is_full() {
+        if !self.offers_preview() {
             return;
         }
         self.toggle_tab_panel(RightTab::Preview, cx);
@@ -2037,7 +2032,7 @@ impl WorkspaceStore {
     }
 
     pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.scope.is_full() {
+        if !self.offers_preview() {
             return;
         }
         if let Some(ui) = self.active_conversation_ui_mut()
@@ -2050,7 +2045,7 @@ impl WorkspaceStore {
     }
 
     pub fn open_tab_for(&mut self, session_id: &str, tab: RightTab, cx: &mut Context<Self>) {
-        if tab == RightTab::Preview && !self.scope.is_full() {
+        if tab == RightTab::Preview && !self.offers_preview() {
             return;
         }
         let destination = if self
@@ -4052,6 +4047,7 @@ pub(crate) mod tests {
                                             invite: None,
                                             devices: vec![],
                                             traverse: vec![],
+                                            group: None,
                                         },
                                     )),
                                 }
@@ -4424,10 +4420,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     #[gpui::test]
     fn preview_reads_the_attachment_route_when_saved_hosts_are_stale(cx: &mut TestAppContext) {
         use std::rc::Rc;
@@ -4441,6 +4434,7 @@ pub(crate) mod tests {
             relay: None,
             addrs: vec!["192.168.31.5:47420".into()],
             last_connected_unix: None,
+            group_id: None,
             space_id: None,
             space_name: None,
         };

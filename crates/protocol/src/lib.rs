@@ -48,13 +48,13 @@ pub use event::{
     Topic,
 };
 pub use query::{
-    DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice,
-    HostingAction, HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES,
-    MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query,
-    QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_COLS,
-    STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction, SpaceInfo, TraverseLookupState,
-    TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus,
-    TraverseSourceStatus,
+    DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
+    GroupMachineInfo, HostedDevice, HostingAction, HostingState, IconImageEntry,
+    MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo,
+    PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
+    STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction, SpaceInfo,
+    TraverseLookupState, TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus,
+    TraverseRelayStatus, TraverseSourceStatus,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -182,11 +182,28 @@ pub use wire::{
 // CompactContext command, which asks a provider with a native compaction
 // operation to compact now.
 //
-// Unreleased: ReadImagePreview's crop_to_square becomes cover, and image
-// previews keep the source's shape instead of being cropped to the tile; an
-// original's metadata, the OriginalReady reply and the browser /original
-// response (X-Image-Dimensions) carry the image's displayed size.
-pub const PROTOCOL_VERSION: u32 = 15;
+// Version 16 (v0.3.0-rc.1) adds machine groups: HostingAction gains Group
+// with GroupAction (create, join, leave, regenerate and pause the group link,
+// remove a machine, admit a declined device); HostingState carries the group
+// with its link, machines and declined devices; HostedDevice marks group
+// members; and RevokeDevice removes a group member from every machine of the
+// group.
+//
+// Version 17 (v0.3.0-rc.2): a machine in a group pairs devices and machines
+// with its one-time invitation alone, so GroupAction loses RegenerateLink and
+// SetLinkEnabled, Create and Join lose their device lists (every full-access
+// device is brought), GroupInfo loses its link fields and HostedDevice its
+// group mark.
+//
+// Version 18 (v0.3.0-rc.3): ReadImagePreview's crop_to_square becomes cover,
+// and image previews keep the source's shape instead of being cropped to the
+// tile.
+//
+// Unreleased: an original's metadata, the OriginalReady reply and the browser
+// /original response (X-Image-Dimensions) carry the image's displayed size;
+// the provider_relay event and timeline entry carry `prompt`, the handoff as
+// sent to the new provider.
+pub const PROTOCOL_VERSION: u32 = 18;
 
 #[cfg(test)]
 mod tests;

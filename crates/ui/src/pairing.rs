@@ -266,6 +266,7 @@ mod tests {
             relay: Some("https://relay.example/".into()),
             port: 47420,
             space: None,
+            group: None,
         }
     }
 

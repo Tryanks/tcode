@@ -88,8 +88,8 @@ pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
 };
 /// Left padding on the chat header while the sidebar is collapsed, so its
-/// leading control clears the native macOS traffic lights (which end near x=72
-/// on macOS 26). Only applied on macOS: see [`traffic_light_clearance`].
+/// leading control clears the native macOS traffic lights (which end near
+/// x=72). Only applied on macOS: see [`traffic_light_clearance`].
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// The header's padding on either side, unless it clears the traffic lights.
 const HEADER_PADDING: f32 = 16.;
@@ -1417,17 +1417,31 @@ impl ChatView {
                     let EntryContent::ProviderRelay {
                         from_provider,
                         to_provider,
+                        prompt,
                         ..
-                    } = entry.content
+                    } = &entry.content
                     else {
                         unreachable!();
                     };
                     column = column.child(components::dividers::relay_divider(
                         &entry.id,
-                        from_provider,
-                        to_provider,
+                        *from_provider,
+                        *to_provider,
                         cx,
                     ));
+                    if let Some(prompt) = prompt {
+                        column = column.child(
+                            self.compose_disclosure(
+                                index,
+                                format!("relay-handoff-{}", entry.id),
+                                crate::tr!("chat.relay_handoff", to = to_provider.display_name())
+                                    .into_owned()
+                                    .into(),
+                                prompt,
+                                cx,
+                            ),
+                        );
+                    }
                 }
                 Segment::ModelChange(entry) => {
                     let EntryContent::ModelChanged { from, to, reason } = &entry.content else {
@@ -2949,10 +2963,7 @@ impl ChatView {
                                         }),
                                 )
                             })
-                            // The Preview tab is a product view now: it always
-                            // offers open-externally and copy-URL, and says so
-                            // where there is no embedded browser to drive.
-                            .when(self.workspace_store.read(cx).scope().is_full(), |row| {
+                            .when(self.workspace_store.read(cx).offers_preview(), |row| {
                                 row.child(
                                     Button::new("preview-panel")
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {

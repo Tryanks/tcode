@@ -500,12 +500,14 @@ pub enum EntryContent {
     #[rustfmt::skip]
     ProviderStartError { error: String },
     /// A tcode-level conversation handoff, rendered as a divider before the
-    /// first user message sent to the new provider.
+    /// first user message sent to the new provider, with the handoff `prompt`
+    /// as sent disclosed under it.
     ProviderRelay {
         from_provider: agent::ProviderKind,
         from_model: Option<String>,
         to_provider: agent::ProviderKind,
         to_model: Option<String>,
+        prompt: Option<String>,
     },
     /// The provider changed the model actually serving this session.
     ModelChanged {
@@ -762,6 +764,7 @@ impl Timeline {
                 from_model,
                 to_provider,
                 to_model,
+                prompt,
             } => {
                 let turn = self.begin_user_turn();
                 let id = self.synthetic_id("relay", ts);
@@ -772,6 +775,7 @@ impl Timeline {
                         from_model: from_model.clone(),
                         to_provider: *to_provider,
                         to_model: to_model.clone(),
+                        prompt: prompt.clone(),
                     },
                     ts,
                     turn,
@@ -1722,6 +1726,7 @@ mod tests {
                 from_model: Some("opus".into()),
                 to_provider: agent::ProviderKind::Codex,
                 to_model: Some("gpt-5".into()),
+                prompt: None,
             },
             user_msg("u2", "after"),
         ]);

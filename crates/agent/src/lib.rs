@@ -38,6 +38,8 @@ pub mod pi;
 #[cfg(feature = "process")]
 mod process;
 #[cfg(feature = "process")]
+pub use process::keep_own_stdio_from_children;
+#[cfg(feature = "process")]
 mod subagent_tail;
 
 use std::path::PathBuf;
@@ -792,8 +794,12 @@ pub struct LaunchEnv {
     pub env: Vec<(String, String)>,
     /// Home-directory override. Provider-specific: Claude gets `HOME`, Codex
     /// gets `CODEX_HOME`, pi gets `PI_CODING_AGENT_DIR`, Cursor gets
-    /// `CURSOR_CONFIG_DIR` and Grok gets `GROK_HOME`. OpenCode has no
-    /// supported single-directory override, so its value is ignored.
+    /// `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` and Grok gets `GROK_HOME`.
+    /// OpenCode has no supported single-directory override, so its value is
+    /// ignored. Cursor reads its login from `$XDG_CONFIG_HOME/cursor` or
+    /// `~/.config/cursor` whatever these say; moving either would also move
+    /// the configuration of every tool the agent runs (`gh`, git), so Cursor
+    /// profiles share one login.
     pub home: Option<PathBuf>,
 }
 
@@ -804,19 +810,19 @@ impl LaunchEnv {
     pub fn pairs(&self, provider: ProviderKind) -> Vec<(String, String)> {
         let mut pairs = self.env.clone();
         if let Some(home) = &self.home {
-            let key = match provider {
-                ProviderKind::ClaudeCode => Some("HOME"),
-                ProviderKind::Codex => Some("CODEX_HOME"),
-                ProviderKind::Pi => Some("PI_CODING_AGENT_DIR"),
-                ProviderKind::Cursor => Some("CURSOR_CONFIG_DIR"),
-                ProviderKind::Grok => Some("GROK_HOME"),
-                ProviderKind::OpenCode => None,
+            let keys: &[&str] = match provider {
+                ProviderKind::ClaudeCode => &["HOME"],
+                ProviderKind::Codex => &["CODEX_HOME"],
+                ProviderKind::Pi => &["PI_CODING_AGENT_DIR"],
+                ProviderKind::Cursor => &["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"],
+                ProviderKind::Grok => &["GROK_HOME"],
+                ProviderKind::OpenCode => &[],
                 // ACP agents carry their own env in the launch recipe; there is
                 // no protocol-level home concept to override.
-                ProviderKind::Acp => None,
+                ProviderKind::Acp => &[],
             };
-            if let Some(key) = key {
-                pairs.push((key.to_string(), home.to_string_lossy().into_owned()));
+            for key in keys {
+                pairs.push(((*key).to_string(), home.to_string_lossy().into_owned()));
             }
         }
         pairs
@@ -1707,6 +1713,11 @@ pub enum AgentEvent {
         from_model: Option<String>,
         to_provider: ProviderKind,
         to_model: Option<String>,
+        /// The handoff as sent to `to_provider`: the transcript of the
+        /// conversation so far wrapped around the user's message. Records from
+        /// before it was kept carry `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
     /// History-only: retained to decode stored plan decisions; never emitted.
     PlanResolved {
