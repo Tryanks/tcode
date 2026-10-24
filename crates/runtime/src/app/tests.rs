@@ -6115,7 +6115,6 @@ fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() 
         assert_eq!(active.meta.updated_at, updated_at);
         assert_eq!(state.sessions[0].updated_at, updated_at);
         assert!(matches!(active.runtime, Runtime::Live(_)));
-        assert!(active.idle_since.is_none());
         assert!(!state.residents.parked.contains_key("idle-resident"));
         assert!(actor.try_recv().is_err(), "re-adoption sent Shutdown");
     });
@@ -6145,7 +6144,6 @@ fn subscribing_readopts_an_uncommitted_draft_before_its_idle_reaper() {
         state.subscribe(&subscription, cx);
         state.reap_idle_resident(&id, idle_since, cx);
         assert!(state.residents.live[&id].draft);
-        assert!(state.residents.live[&id].idle_since.is_none());
         assert!(!state.residents.parked.contains_key(&id));
         assert_eq!(state.residents.live.len(), 1);
     });
@@ -6174,30 +6172,56 @@ fn resident_idle_reaper_shuts_down_untouched_provider() {
 }
 
 #[test]
-fn resident_idle_reaper_ignores_readopted_session() {
+fn idle_grace_runs_from_the_last_turn_end_whether_viewed_or_parked() {
     let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-idle-resident-stale-timer-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
+    let test_store = TestStore::new("tcode-idle-grace-turn-end-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "idle-resident".into();
     let meta = session.meta.clone();
+    let complete_turn = |state: &mut AppState, turn: &str, cx: &mut HostCx| {
+        state.on_event(
+            "idle-resident",
+            AgentEvent::TurnStarted {
+                turn_id: turn.into(),
+            },
+            cx,
+        );
+        state.on_event(
+            "idle-resident",
+            AgentEvent::TurnCompleted {
+                turn_id: turn.into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+        state.residents.live["idle-resident"].idle_since.unwrap()
+    };
 
     state.update(cx, |state, cx| {
         state.sessions.push(meta);
         state.install_selected(session);
+        let first_turn_end = complete_turn(state, "first", cx);
         state.park_active(cx);
-        let idle_since = state.residents.parked["idle-resident"].idle_since.unwrap();
+        assert_eq!(
+            state.residents.parked["idle-resident"].idle_since,
+            Some(first_turn_end),
+            "parking restarted the grace"
+        );
         state.select_session("idle-resident", cx);
-        // Fire the grace timer that parking armed, now that its session has
-        // been re-adopted; the real timer would land identically but later.
-        state.reap_idle_resident("idle-resident", idle_since, cx);
+        let second_turn_end = complete_turn(state, "second", cx);
+        // Fire both grace timers now; the real ones would land identically
+        // but later. The first idle period ended with the second turn.
+        state.reap_idle_resident("idle-resident", first_turn_end, cx);
+        assert!(actor.try_recv().is_err(), "stale timer sent Shutdown");
+        state.reap_idle_resident("idle-resident", second_turn_end, cx);
 
         let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, "idle-resident");
-        assert!(matches!(active.runtime, Runtime::Live(_)));
-        assert!(actor.try_recv().is_err(), "stale timer sent Shutdown");
+        assert!(matches!(active.runtime, Runtime::Idle));
+        assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
     });
 }
 

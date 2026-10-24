@@ -193,8 +193,10 @@ pub struct ActiveSession {
     pub(super) background_task_count: usize,
     /// Cleared when the live provider took none of Tcode's MCP servers.
     pub(super) mcp_servers_attached: bool,
-    /// When this parked, fully idle provider became eligible for grace-period
-    /// retention and LRU eviction. Active or working sessions keep this clear.
+    /// When this resident last went fully idle: the end of its live provider's
+    /// last turn or background task, otherwise when it was parked. The idle
+    /// grace runs from here whether the thread is viewed or parked; working
+    /// sessions keep this clear.
     pub(super) idle_since: Option<Instant>,
     /// Provider-native commands / skills discovered at session start (Claude
     /// `slash_commands` + `skills`; Codex `skills/list`).
@@ -346,6 +348,14 @@ impl ActiveSession {
         permission_restart
             || model_selections(&self.meta.option_selections)
                 != model_selections(&self.live_option_selections)
+    }
+
+    /// No turn, delivery, queued message or provider background task is pending.
+    pub(super) fn fully_idle(&self) -> bool {
+        !self.turn_in_flight
+            && self.delivery_in_flight.is_none()
+            && self.queue.is_empty()
+            && self.background_task_count == 0
     }
 
     pub(super) fn launch_settings_changed_while_live(&self) -> bool {

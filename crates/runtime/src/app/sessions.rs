@@ -1911,7 +1911,6 @@ impl AppState {
             .map(|active| active.meta.id.clone());
         if let Some(session_id) = standing {
             if let Some(mut parked) = self.residents.adopt(&session_id) {
-                parked.idle_since = None;
                 self.restore_terminal_workspace(&mut parked);
                 if self.archived_sharing_affected(&parked.meta) {
                     self.archived_revision += 1;
@@ -2122,7 +2121,6 @@ impl AppState {
                 parked.turn_in_flight,
                 parked.queue.len()
             );
-            parked.idle_since = None;
             let terminal_preferences = self.terminal_preferences_for(&parked);
             let restored_terminal = self.restore_terminal_workspace(&mut parked);
             let mark_idle = !parked.draft
