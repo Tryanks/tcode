@@ -259,12 +259,13 @@ impl ControlOp {
         }
     }
 
-    /// Reads of a thread's content, allowed also on the caller itself, its references and
-    /// its orchestrated children.
+    /// Reads of a thread's content or state, allowed also on the caller itself, its
+    /// references and its orchestrated children.
     pub fn reads_content(&self) -> bool {
         matches!(
             self,
-            Self::GetThread(_)
+            Self::NotifyWhen(_)
+                | Self::GetThread(_)
                 | Self::Outline(_)
                 | Self::Read(_)
                 | Self::SearchInItem(_)

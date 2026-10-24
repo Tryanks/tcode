@@ -1,24 +1,209 @@
 use super::*;
+use crate::app::orchestrate::approval_request_summary;
 use control_mcp::{CancelNotifyParams, NotifyWhenParams};
+use tcode_core::control::{ControlWatch, WatchEvent};
+use tcode_core::notice::CONTROL_CALLBACK_PREFIX;
+
+/// How much of a question a callback quotes; the rest is one `get_thread` away.
+const QUESTION_HEAD_CHARS: usize = 120;
+
+#[derive(Serialize)]
+struct WatchAnswer<'a> {
+    id: &'a str,
+    thread_ids: &'a [String],
+    events: &'a BTreeSet<WatchEvent>,
+    once: bool,
+}
+
+impl<'a> From<&'a ControlWatch> for WatchAnswer<'a> {
+    fn from(watch: &'a ControlWatch) -> Self {
+        Self {
+            id: &watch.id,
+            thread_ids: &watch.thread_ids,
+            events: &watch.events,
+            once: watch.once,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CancelNotifyAnswer {
+    removed: Vec<String>,
+    unknown: Vec<String>,
+}
+
+fn wire_name(value: impl Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|name| name.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn one_line_head(text: &str, chars: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= chars {
+        return line;
+    }
+    let mut head: String = line.chars().take(chars).collect();
+    head.push('…');
+    head
+}
 
 impl AppState {
     pub(super) fn op_notify_when(
         &mut self,
-        _caller: &Caller,
-        _params: NotifyWhenParams,
-        _cx: &mut HostCx,
+        caller: &Caller,
+        params: NotifyWhenParams,
+        cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
-        // Phase 2
-        Err("not implemented yet".into())
+        if params.thread_ids.is_empty() {
+            return Err("notify_when needs at least one thread id".into());
+        }
+        if params.events.is_empty() {
+            return Err("notify_when needs at least one event".into());
+        }
+        let mut meta = self.find_meta(&caller.thread_id).ok_or("unknown thread")?;
+        // A retried call finds the watch its first attempt stored under the same key.
+        if let Some(watch) = params.request_id.as_deref().and_then(|request_id| {
+            meta.control_watches
+                .iter()
+                .find(|watch| watch.id == request_id)
+        }) {
+            return Ok(serde_json::json!(WatchAnswer::from(watch)));
+        }
+        let mut thread_ids = params.thread_ids;
+        thread_ids.sort();
+        thread_ids.dedup();
+        let watch = ControlWatch {
+            id: params
+                .request_id
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            thread_ids,
+            events: params.events.into_iter().collect(),
+            once: params.once.unwrap_or(false),
+        };
+        let answer = serde_json::json!(WatchAnswer::from(&watch));
+        let detail = format!(
+            "watch {} on {}: {}",
+            watch.id,
+            watch.thread_ids.join(", "),
+            watch
+                .events
+                .iter()
+                .map(wire_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        meta.control_watches.push(watch);
+        self.store_meta(meta, cx);
+        self.audit(caller, &caller.thread_id, "notify_when", Some(detail), cx);
+        Ok(answer)
     }
 
     pub(super) fn op_cancel_notify(
         &mut self,
-        _caller: &Caller,
-        _params: CancelNotifyParams,
-        _cx: &mut HostCx,
+        caller: &Caller,
+        params: CancelNotifyParams,
+        cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
-        // Phase 2
-        Err("not implemented yet".into())
+        let mut meta = self.find_meta(&caller.thread_id).ok_or("unknown thread")?;
+        let (removed, unknown): (Vec<String>, Vec<String>) = params
+            .ids
+            .into_iter()
+            .partition(|id| meta.control_watches.iter().any(|watch| &watch.id == id));
+        if !removed.is_empty() {
+            meta.control_watches
+                .retain(|watch| !removed.contains(&watch.id));
+            self.store_meta(meta, cx);
+            let detail = format!("removed {}", removed.join(", "));
+            self.audit(caller, &caller.thread_id, "cancel_notify", Some(detail), cx);
+        }
+        Ok(serde_json::json!(CancelNotifyAnswer { removed, unknown }))
+    }
+
+    /// Wake every thread that asked to hear `event` on `target_id`, once per watcher
+    /// however many of its watches match; a `once` watch is gone after it fires. A thread
+    /// hears its own events only when it named itself.
+    pub(in crate::app) fn fire_control_watches(
+        &mut self,
+        target_id: &str,
+        event: WatchEvent,
+        cx: &mut HostCx,
+    ) {
+        if event == WatchEvent::Idle && self.turn_running_for(target_id) {
+            return;
+        }
+        let fires = |watch: &ControlWatch| {
+            watch.events.contains(&event) && watch.thread_ids.iter().any(|id| id == target_id)
+        };
+        let watchers: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|meta| meta.control_watches.iter().any(fires))
+            .map(|meta| meta.id.clone())
+            .collect();
+        if watchers.is_empty() {
+            return;
+        }
+        let Some(target) = self.find_meta(target_id) else {
+            return;
+        };
+        let text = format!(
+            "{CONTROL_CALLBACK_PREFIX}thread {target_id} (\"{}\") {}{}",
+            target.title,
+            wire_name(event),
+            self.watch_event_detail(&target, event)
+        );
+        for watcher in watchers {
+            let Some(mut meta) = self.find_meta(&watcher) else {
+                continue;
+            };
+            let before = meta.control_watches.len();
+            meta.control_watches
+                .retain(|watch| !(watch.once && fires(watch)));
+            if meta.control_watches.len() != before {
+                self.store_meta(meta, cx);
+            }
+            self.deliver_orchestrate_callback_to_parent(&watcher, text.clone(), cx);
+        }
+    }
+
+    /// `: <what happened>`, read from the target as it stands when the event fires.
+    fn watch_event_detail(&self, target: &SessionMeta, event: WatchEvent) -> String {
+        let resident = self.resident(&target.id);
+        let detail = match event {
+            WatchEvent::Idle => None,
+            WatchEvent::TurnCompleted => resident
+                .and_then(|session| session.timeline.last_turn_status)
+                .map(wire_name),
+            WatchEvent::NeedsInput => resident
+                .and_then(|session| session.timeline.pending_user_input.as_ref())
+                .map(|pending| {
+                    let question = pending
+                        .questions
+                        .first()
+                        .map(|question| one_line_head(&question.question, QUESTION_HEAD_CHARS))
+                        .unwrap_or_default();
+                    format!("\"{question}\" (request_id: {})", pending.request_id)
+                }),
+            WatchEvent::NeedsApproval => self
+                .approval_requests(&target.id)
+                .last()
+                .map(approval_request_summary),
+            WatchEvent::Settled => target.settled_at.map(|at| format!("at {at}")),
+            WatchEvent::PrChanged => {
+                let states: Vec<String> = tcode_core::pull_request::watched(&target.pull_requests)
+                    .map(|link| {
+                        let state = link
+                            .snapshot
+                            .as_ref()
+                            .map_or_else(|| "unread".into(), |snapshot| wire_name(snapshot.state));
+                        format!("#{} {state}", link.key.number)
+                    })
+                    .collect();
+                (!states.is_empty()).then(|| states.join(", "))
+            }
+        };
+        detail.map_or_else(String::new, |detail| format!(": {detail}"))
     }
 }

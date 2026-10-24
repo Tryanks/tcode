@@ -1,4 +1,5 @@
 use super::*;
+use tcode_core::control::WatchEvent;
 use tcode_core::thread_sort::ThreadSection;
 
 /// Sessions viewed by clients and sessions retained for in-flight work or re-adoption.
@@ -1090,6 +1091,7 @@ impl AppState {
         self.persist_meta(&meta, cx);
         self.reschedule_scheduled_wake(cx);
         self.close_settled_idle_terminals(id, cx);
+        self.fire_control_watches(id, WatchEvent::Settled, cx);
     }
 
     pub fn unsettle_session(&mut self, id: &str, cx: &mut HostCx) {

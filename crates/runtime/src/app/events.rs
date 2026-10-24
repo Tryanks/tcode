@@ -1,4 +1,5 @@
 use super::*;
+use tcode_core::control::WatchEvent;
 
 impl AppState {
     /// Handle one canonical event from the live provider.
@@ -562,9 +563,11 @@ impl AppState {
         }
         if let AgentEvent::ApprovalRequested(request) = &event {
             self.deliver_child_approval_callback(session_id, &request.id, cx);
+            self.fire_control_watches(session_id, WatchEvent::NeedsApproval, cx);
         }
         if let AgentEvent::UserInputRequested { request_id, .. } = &event {
             self.deliver_child_user_input_callback(session_id, request_id, cx);
+            self.fire_control_watches(session_id, WatchEvent::NeedsInput, cx);
         }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
@@ -615,6 +618,8 @@ impl AppState {
         // describe what comes next, not the turn that just ended.
         if let AgentEvent::TurnCompleted { status, .. } = &event {
             self.settle_child_expectation(session_id, *status, cx);
+            self.fire_control_watches(session_id, WatchEvent::TurnCompleted, cx);
+            self.fire_control_watches(session_id, WatchEvent::Idle, cx);
         }
 
         if matches!(event, AgentEvent::RewindCompleted { .. })
