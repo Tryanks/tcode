@@ -185,7 +185,7 @@ also include a `SHA256SUMS.txt` file.
 | Windows, x64 / arm64 | Desktop or headless `.zip` |
 | Linux, x64 / arm64 | Desktop or headless `.tar.gz` |
 | Android, arm64 | `tcode-<version>-android-arm64.apk` — signed with the project's release key; install with adb |
-| iOS / iPadOS, arm64 | Not published yet; build from source with `crates/ios/host/build.sh` |
+| iOS / iPadOS 27+, arm64 | `tcode-<version>-ios-arm64-unsigned.ipa` — unsigned; re-sign with your own Apple ID or install with a sideloading tool such as AltStore or Sideloadly |
 | Browser | Embedded in the headless release; open the HTTP link it prints (HTTPS only through your own tunnel). No separate signed app package |
 
 **2. Have an agent installed.** Tcode drives the CLIs, it doesn't bundle them.
