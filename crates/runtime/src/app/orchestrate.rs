@@ -226,25 +226,47 @@ impl AppState {
                 }),
         );
         let mut tools = Vec::new();
+        let mut servers = Vec::new();
+        let mut offer = |name: &str, listed: Vec<(String, String)>| {
+            servers.push(tcode_protocol::InjectedServer {
+                name: name.to_owned(),
+                tools: listed.len(),
+            });
+            tools.extend(listed);
+        };
         if pull_requests {
-            tools.extend(pull_request_mcp::tool_descriptions(
-                &self.pull_request_tool_hosts(id),
-            ));
+            offer(
+                agent::McpRegistration::SERVER_NAME_PULL_REQUESTS,
+                pull_request_mcp::tool_descriptions(&self.pull_request_tool_hosts(id)),
+            );
         }
         if preview {
-            tools.extend(preview_mcp::tool_descriptions());
+            offer(
+                agent::McpRegistration::SERVER_NAME_PREVIEW,
+                preview_mcp::tool_descriptions(),
+            );
         }
         if orchestrate {
-            tools.extend(orchestrate_mcp::tool_descriptions());
+            offer(
+                agent::McpRegistration::SERVER_NAME_ORCHESTRATE,
+                orchestrate_mcp::tool_descriptions(),
+            );
         }
         if computer_use {
-            tools.extend(computer_use_mcp::tools::tool_descriptions());
+            offer(
+                agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
+                computer_use_mcp::tools::tool_descriptions(),
+            );
         }
         if control {
-            tools.extend(control_mcp::tool_descriptions(&self.caller_grant(meta).0));
+            offer(
+                agent::McpRegistration::SERVER_NAME_CONTROL,
+                control_mcp::tool_descriptions(&self.caller_grant(meta).0),
+            );
         }
         Some(tcode_protocol::InjectedTools {
             tools,
+            servers,
             attached,
             instructions,
         })

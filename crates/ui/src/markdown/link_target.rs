@@ -8,6 +8,16 @@ use std::{
 pub(super) enum LinkTarget {
     Web(String),
     Local(PathBuf),
+    /// `tcode-thread://<thread_id>#<position>`: an entry of a Tcode thread.
+    Thread(OpenThreadAnchor),
+}
+
+/// Open a thread at the entry its anchor names, as a cited anchor link does.
+#[derive(gpui::Action, Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_markdown, no_json)]
+pub struct OpenThreadAnchor {
+    pub thread_id: String,
+    pub position: Option<u64>,
 }
 
 impl LinkTarget {
@@ -15,6 +25,18 @@ impl LinkTarget {
         match self {
             Self::Web(url) => url.clone(),
             Self::Local(path) => path.display().to_string(),
+            Self::Thread(anchor) => match anchor.position {
+                Some(position) => format!("{}#{position}", anchor.thread_id),
+                None => anchor.thread_id.clone(),
+            },
+        }
+    }
+
+    pub(super) fn open(self, window: &mut gpui::Window, cx: &mut gpui::App) {
+        match self {
+            Self::Web(url) => cx.open_url(&url),
+            Self::Local(path) => cx.open_with_system(&path),
+            Self::Thread(anchor) => window.dispatch_action(Box::new(anchor), cx),
         }
     }
 }
@@ -42,6 +64,16 @@ impl LinkTargetCache {
 }
 
 pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>) -> LinkTarget {
+    if let Some(anchor) = url.strip_prefix("tcode-thread://") {
+        let (thread_id, position) = match anchor.split_once('#') {
+            Some((id, position)) => (id, position.parse().ok()),
+            None => (anchor, None),
+        };
+        return LinkTarget::Thread(OpenThreadAnchor {
+            thread_id: thread_id.trim_end_matches('/').to_owned(),
+            position,
+        });
+    }
     if let Some(path) = url.strip_prefix("file://") {
         return LinkTarget::Local(PathBuf::from(path));
     }
@@ -168,6 +200,19 @@ mod tests {
             resolve_link("file:///does-not-need-to-exist", None),
             LinkTarget::Local(PathBuf::from("/does-not-need-to-exist"))
         );
+        for (target, position) in [
+            ("tcode-thread://t-1#42", Some(42)),
+            ("tcode-thread://t-1", None),
+        ] {
+            assert_eq!(
+                resolve_link(target, None),
+                LinkTarget::Thread(OpenThreadAnchor {
+                    thread_id: "t-1".into(),
+                    position,
+                }),
+                "{target}"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }

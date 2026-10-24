@@ -18,7 +18,6 @@ use gpui::{
 
 use super::{
     inline::{Inline, InlineState},
-    link_target::LinkTarget,
     nodes::LinkMark,
     state::{MarkdownState, PendingContextTarget},
 };
@@ -201,10 +200,7 @@ impl InlineFlow {
             .on_click(move |_, window, cx| {
                 crate::widgets::stop_click_propagation(window, cx);
                 if let Some(link) = &link {
-                    match view.read(cx).resolve_link(&link.url) {
-                        LinkTarget::Web(url) => cx.open_url(&url),
-                        LinkTarget::Local(path) => cx.open_with_system(&path),
-                    }
+                    view.read(cx).resolve_link(&link.url).open(window, cx);
                 } else {
                     crate::image_viewer::open(opened.clone(), title.clone(), window, cx);
                 }

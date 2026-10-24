@@ -133,7 +133,7 @@ pub(crate) fn control_action_divider(
     let mut label = crate::tr!(
         "chat.control_action",
         actor = action.actor_title.as_str(),
-        action = action.action.as_str()
+        action = crate::control::action_label(&action.action)
     )
     .into_owned();
     if let Some(detail) = action.detail.as_deref().filter(|detail| !detail.is_empty()) {

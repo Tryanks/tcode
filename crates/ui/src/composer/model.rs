@@ -212,6 +212,7 @@ pub(super) enum MenuIcon {
     Command,
     /// Skill rows (`$`), populated from the provider's skills feed.
     Skill,
+    Thread,
 }
 
 #[derive(Clone)]
@@ -219,6 +220,8 @@ pub(super) enum MenuIcon {
 pub(super) enum MenuAccept {
     /// Insert the serialized `[basename](path)` mention for this relative path.
     InsertPath(String),
+    /// Reference this thread from the active one: a chip, not text.
+    ReferenceThread(String),
     /// Insert `$<name> ` for this provider skill.
     InsertSkill(String),
     /// Insert `/<name> ` for this provider slash command.
