@@ -50,7 +50,7 @@ jobs:
             cat "$RUNNER_TEMP/versions.txt"
             echo '```'
             echo
-            echo 'The Containers workflow installs each version in the full and slim images and runs the container smoke check. Merge once every check on the final commit passes.'
+            echo 'The release workflow installs each version in the full and slim images and runs the container smoke check before publishing. Merge once every check on the final commit passes.'
           } > "$RUNNER_TEMP/body.md"
           if [[ "$(gh pr view "$BRANCH" --json state --jq .state 2>/dev/null || true)" == OPEN ]]; then
             gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/body.md"
@@ -58,4 +58,3 @@ jobs:
             gh pr create --head "$BRANCH" --title 'container: update pinned agent CLIs' --body-file "$RUNNER_TEMP/body.md"
           fi
           gh workflow run ci.yml --ref "$BRANCH"
-          gh workflow run containers.yml --ref "$BRANCH"

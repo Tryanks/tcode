@@ -273,13 +273,10 @@ repository's Actions access. GHCR creates new packages as private; repository
 linking grants workflow access but does not make anonymous pulls available.
 See [GitHub's registry setup](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#pushing-container-images).
 The agent-version workflow needs **Settings → Actions → General → Allow GitHub
-Actions to create and approve pull requests**; it dispatches CI and Containers
-on its branch itself, because pull requests opened with `GITHUB_TOKEN` start
-no `pull_request` runs.
+Actions to create and approve pull requests**; it dispatches CI on its branch
+itself, because pull requests opened with `GITHUB_TOKEN` start no
+`pull_request` runs.
 
-The [container CI](../.github/workflows/containers.yml) runs the
-[smoke check](../crates/headless/container/smoke.mjs) on native amd64 and
-arm64 runners against images built from that commit's binaries, and builds the
-images from a plain checkout to keep the source path working. Release
-publishing repeats the smoke check against the actual release binaries before
-pushing either architecture.
+Release publishing runs the [smoke check](../crates/headless/container/smoke.mjs)
+on native amd64 and arm64 runners against images built from the release
+binaries before pushing either architecture.
