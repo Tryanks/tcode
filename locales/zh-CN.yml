@@ -1772,6 +1772,7 @@ pull_requests:
   channel_developer_context: "开发者上下文"
   channel_per_turn_block: "每轮附加块，位于你的消息之后"
   channel_mcp_server: "MCP 服务器指令 · %{name}"
+  agent_tools_server: "工具 · %{name}"
   channel_developer_instructions: "开发者指令"
   update_label: "拉取请求 #%{number} 更新 · %{kinds}"
   kind_checks_failed: "检查失败"

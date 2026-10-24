@@ -1338,7 +1338,7 @@ pub(crate) fn agent_sees_body(
                         .pt(cx.theme().tokens.spacing.xs)
                         .text_caption(cx)
                         .child(crate::tr!(
-                            "pull_requests.channel_mcp_server",
+                            "pull_requests.agent_tools_server",
                             name = server.name.as_str()
                         )),
                 )

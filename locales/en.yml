@@ -1779,6 +1779,7 @@ pull_requests:
   channel_developer_context: "Developer context"
   channel_per_turn_block: "Per-turn block, after your message"
   channel_mcp_server: "MCP server instructions · %{name}"
+  agent_tools_server: "Tools · %{name}"
   channel_developer_instructions: "Developer instructions"
   update_label: "Pull request #%{number} update · %{kinds}"
   kind_checks_failed: "checks failed"
