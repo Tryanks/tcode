@@ -17,8 +17,8 @@ concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
-# Tag-scoped Cargo caches cannot warm the next release and evict the main CI
-# caches from the shared Actions quota.
+# Tag-scoped caches, Cargo's or Docker's, cannot warm the next release and
+# evict the main CI caches from the shared Actions quota.
 jobs:
   setup:
     runs-on: ubuntu-24.04
@@ -692,10 +692,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-container-probe-${{ matrix.arch }}
-
       - name: Install pairing probe build dependencies
         run: |
           sudo apt-get update
@@ -729,7 +725,6 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ env.REVISION }}
-          cache-from: type=gha,scope=headless-${{ matrix.arch }}
 
       - name: Build full image
         uses: docker/build-push-action@v7
@@ -744,8 +739,6 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ env.REVISION }}
-          cache-from: type=gha,scope=headless-${{ matrix.arch }}
-          cache-to: type=gha,scope=headless-${{ matrix.arch }},mode=max
 
       - name: Build Traverse image
         uses: docker/build-push-action@v7
