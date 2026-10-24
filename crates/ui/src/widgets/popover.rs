@@ -1,5 +1,8 @@
+use crate::material;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
+use crate::widgets::{Button, ButtonVariants as _};
 use gpui::{
     Anchor, AnyElement, App, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
@@ -184,6 +187,11 @@ impl RenderOnce for Popover {
                 let popover = cx.entity();
                 let parent = window.current_view();
                 gpui_base::v_flex()
+                    .when(appearance, |el| {
+                        material::overlay_contour(el, cx)
+                            .p_1()
+                            .rounded(material::radius_overlay(cx))
+                    })
                     .id("tcode-popover-content")
                     .when(closable, |el| {
                         el.on_mouse_down_out(move |_, window, cx| {
@@ -193,14 +201,6 @@ impl RenderOnce for Popover {
                         })
                     })
                     .occlude()
-                    .when(appearance, |el| {
-                        el.p_1()
-                            .rounded(crate::material::radius_overlay(cx))
-                            .bg(cx.theme().popover)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .shadow_xl()
-                    })
                     .when_some(content, |el, builder| el.child(builder(state, window, cx)))
                     .children(children)
                     .refine_style(&style)
@@ -281,15 +281,18 @@ impl Popover {
         if presence.should_render() && (open || progress > 0.) {
             let viewport = window.viewport_size();
             let insets = crate::window_seam::content_insets(window);
+            // The sheet stops a window strip short of the top so the page it
+            // covers stays in view; no owner names that reserve yet.
             let max_height = (viewport.height - insets.top - px(52.) - insets.bottom).max(px(0.));
             // The grabber, the title row and the hairline above the content.
-            let chrome_height = px(16.) + px(48.) + px(1.);
+            let chrome_height =
+                px(material::SHEET_GRABBER_HEIGHT + material::SHEET_TITLE_HEIGHT + 1.);
             let close = state.clone();
             let focus = state.read(cx).focus_handle(cx);
             let content = self
                 .content
                 .map(|content| state.update(cx, |state, cx| content(state, window, cx)));
-            let surface = gpui_base::v_flex()
+            let surface = material::sheet_contour(gpui_base::v_flex(), cx)
                 .id("touch-picker-sheet")
                 .debug_selector(|| "touch-picker-sheet".into())
                 .role(Role::Group)
@@ -300,49 +303,35 @@ impl Popover {
                 .max_w(viewport.width)
                 .flex_none()
                 .max_h(max_height)
-                .rounded_t(crate::material::radius_overlay_sheet(cx))
-                .bg(cx.theme().popover)
-                .border_t_1()
-                .border_color(cx.theme().border)
-                .shadow_xl()
                 .text_color(cx.theme().foreground)
-                .child(crate::material::sheet_grabber(cx))
+                .child(material::sheet_grabber(cx))
                 .child(
                     gpui_base::h_flex()
-                        .h(px(48.))
+                        .h(px(material::SHEET_TITLE_HEIGHT))
                         .flex_none()
-                        .px(px(crate::material::COMPACT_PAGE_INSET))
+                        .px(px(material::COMPACT_PAGE_INSET))
                         .items_center()
+                        .text_body(true, cx)
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(17.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_title(cx)
                                 .children(self.sheet_title),
                         )
                         .child(
-                            div()
-                                .id("touch-picker-close")
-                                .role(Role::Button)
-                                .aria_label(crate::tr!("mobile.cancel"))
-                                .min_w(px(44.))
-                                .h(px(44.))
-                                .flex()
-                                .items_center()
-                                .justify_end()
-                                .cursor_pointer()
-                                .text_size(px(15.))
-                                .text_color(cx.theme().foreground)
-                                .child(crate::tr!("mobile.cancel"))
+                            Button::new("touch-picker-close")
+                                .text()
+                                .touch(true)
+                                .label(crate::tr!("mobile.cancel"))
                                 .on_click(move |_, window, cx| {
                                     close.update(cx, |state, cx| state.dismiss(window, cx));
                                     cx.notify(parent);
                                 }),
                         ),
                 )
-                .child(crate::material::faded_hairline(cx))
+                .child(material::faded_hairline(cx))
                 .child(
                     div()
                         .id("touch-picker-content")
@@ -353,7 +342,7 @@ impl Popover {
                         // axis, and an edge hands the gesture on.
                         .max_h((max_height - chrome_height).max(px(0.)))
                         .overflow_y_scroll_area()
-                        .p(px(crate::material::COMPACT_PAGE_INSET))
+                        .p(px(material::COMPACT_PAGE_INSET))
                         .children(content)
                         .children(self.children),
                 );
@@ -375,7 +364,7 @@ impl Popover {
                                 .absolute()
                                 .inset_0()
                                 .occlude()
-                                .bg(crate::material::scrim(progress * (1. - drag_progress), cx)),
+                                .bg(material::scrim(progress * (1. - drag_progress), cx)),
                         )
                         .surface(
                             div()

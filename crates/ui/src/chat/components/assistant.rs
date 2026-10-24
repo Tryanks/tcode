@@ -3,6 +3,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::copy::copy_button;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText, PopupMenu};
 use gpui::{
@@ -108,8 +110,7 @@ pub(crate) fn assistant(
     let message = v_flex().w_full().items_start().gap(px(2.)).child(
         div()
             .w_full()
-            .text_size(px(15.))
-            .line_height(px(26.))
+            .text_token(&cx.theme().tokens.typography.md)
             .child(content),
     );
     let margin_menu = move |menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
@@ -150,7 +151,7 @@ pub(crate) fn reserve_action_row(
 ) -> Div {
     div()
         .h(px(if compact {
-            44.
+            crate::material::TOUCH_TARGET
         } else {
             crate::material::CHAT_ACTION_ROW_HEIGHT
         }))

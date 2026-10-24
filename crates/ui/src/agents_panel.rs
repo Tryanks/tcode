@@ -7,10 +7,10 @@ use std::time::Duration;
 use agent::{ItemContent, ItemStatus, ProviderKind};
 use gpui::{
     Action, AnyElement, App, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
+use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::notice::HostNotice;
 use tcode_core::session::EntryContent;
@@ -23,6 +23,7 @@ use crate::overlay::{DialogButtons, OverlayExt as _};
 use crate::sizing::Sizable as _;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::menu::DropdownMenu as _;
 use crate::widgets::spinner::Spinner;
@@ -468,11 +469,10 @@ impl AgentsPanel {
     fn on_cancel(&mut self, action: &AgentCancel, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let id = action.0.clone();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let store = store.clone();
             let id = id.clone();
             alert
-                .bg(cx.theme().popover)
                 .title(crate::tr!("agents.cancel_title"))
                 .description(crate::tr!("agents.cancel_description"))
                 .button_props(
@@ -526,30 +526,20 @@ impl AgentsPanel {
     }
 
     fn badge(label: SharedString, style: BadgeStyle, cx: &App) -> gpui::Div {
-        let muted = cx.theme().muted_foreground;
-        h_flex()
-            .flex_none()
-            .h(px(18.))
-            .px(px(6.))
+        let theme = cx.theme();
+        let none = gpui::transparent_black();
+        let (bg, fg) = match style {
+            BadgeStyle::Plain | BadgeStyle::Outline => (none, theme.muted_foreground),
+            BadgeStyle::Warning => (theme.warning.opacity(0.12), theme.warning),
+            BadgeStyle::Danger => (theme.danger.opacity(0.12), theme.danger),
+        };
+        material::semantic_chip(label, bg, fg, cx)
+            .flex()
             .gap_1()
             .items_center()
-            .rounded(cx.theme().tokens.radius.sm)
-            .text_size(px(11.))
-            .font_medium()
-            .map(|badge| match style {
-                BadgeStyle::Plain => badge.text_color(muted),
-                BadgeStyle::Outline => badge
-                    .text_color(muted)
-                    .border_1()
-                    .border_color(cx.theme().border),
-                BadgeStyle::Warning => badge
-                    .text_color(cx.theme().warning)
-                    .bg(cx.theme().warning.opacity(0.1)),
-                BadgeStyle::Danger => badge
-                    .text_color(cx.theme().danger)
-                    .bg(cx.theme().danger.opacity(0.1)),
+            .when(matches!(style, BadgeStyle::Outline), |badge| {
+                badge.border_1().border_color(theme.border)
             })
-            .child(label)
     }
 
     fn delivery_badges(row: &AgentRow, cx: &App) -> Vec<AnyElement> {
@@ -562,7 +552,7 @@ impl AgentsPanel {
             ),
             Some(AgentDelivery::Settled) => badges.push(
                 Self::badge(label("agents.delivery_settled"), BadgeStyle::Plain, cx)
-                    .child(Icon::new(IconName::Check).size(px(10.)))
+                    .child(Icon::new(IconName::Check))
                     .into_any_element(),
             ),
             Some(AgentDelivery::NotDelivered) => badges.push(
@@ -578,7 +568,7 @@ impl AgentsPanel {
         match row.report {
             AgentReport::Reported => badges.push(
                 Self::badge(label("agents.report_reported"), BadgeStyle::Plain, cx)
-                    .child(Icon::new(IconName::Check).size(px(10.)))
+                    .child(Icon::new(IconName::Check))
                     .into_any_element(),
             ),
             AgentReport::Unreported => badges.push(
@@ -601,10 +591,10 @@ impl AgentsPanel {
 
     fn status_mark(row: &AgentRow, cx: &App) -> AnyElement {
         match row.execution {
-            Some(AgentExecution::Working) => Spinner::new()
-                .xsmall()
-                .color(cx.theme().primary)
-                .into_any_element(),
+            Some(AgentExecution::Working) => {
+                Spinner::new().color(cx.theme().primary).into_any_element()
+            }
+            // A status dot, drawn smaller than a glyph; no icon or token has it.
             execution => div()
                 .flex_none()
                 .size(px(8.))
@@ -645,8 +635,7 @@ impl AgentsPanel {
                             .justify_end()
                             .items_center()
                             .whitespace_nowrap()
-                            .text_size(px(if compact { 13. } else { 11. }))
-                            .text_color(muted)
+                            .text_secondary(compact, cx)
                             .when(inline_actions, |time| {
                                 time.group_hover(group.clone(), |time| time.invisible())
                             })
@@ -696,16 +685,9 @@ impl AgentsPanel {
             .min_w_0()
             .gap_2()
             .items_center()
+            .text_body(compact, cx)
             .child(Self::status_mark(row, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(if compact { 15. } else { 13. }))
-                    .font_medium()
-                    .child(title.clone()),
-            )
+            .child(div().flex_1().min_w_0().truncate().child(title.clone()))
             .children(Self::delivery_badges(row, cx))
             .children(trailing);
         let line_two = h_flex()
@@ -713,15 +695,13 @@ impl AgentsPanel {
             .min_w_0()
             .gap_1()
             .items_center()
-            .text_size(px(if compact { 13. } else { 11. }))
-            .text_color(muted)
+            .text_secondary(compact, cx)
             .when_some(row.provider, |line, provider| {
                 line.child(
                     match provider {
                         ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
                         kind => crate::provider_card::provider_glyph(kind),
                     }
-                    .size(px(12.))
                     .flex_none(),
                 )
             })
@@ -737,15 +717,14 @@ impl AgentsPanel {
         let content = v_flex()
             .flex_1()
             .min_w_0()
-            .gap(px(2.))
+            .gap_0p5()
             .child(line_one)
             .child(line_two)
             .when_some(row.preview.clone(), |content, preview| {
                 content.child(
                     div()
                         .w_full()
-                        .text_size(px(12.))
-                        .line_height(px(17.))
+                        .text_secondary(false, cx)
                         .line_clamp(2)
                         .text_ellipsis()
                         .text_color(if row.execution == Some(AgentExecution::Failed) {
@@ -765,54 +744,43 @@ impl AgentsPanel {
                 None => note,
             }
         });
-        let base =
-            if compact {
-                material::list_row(SharedString::from(format!("agent-{}", row.key)), label, cx)
-                    .min_h(px(64.))
-                    .child(content)
-                    .when(!actions.is_empty(), |row_el| {
-                        let actions: Vec<_> =
-                            row.open
-                                .iter()
-                                .map(|id| {
-                                    (
-                                        SharedString::from(crate::tr!("agents.open").into_owned()),
-                                        Box::new(AgentOpen(id.clone())) as Box<dyn Action>,
-                                    )
-                                })
-                                .chain(actions.iter().map(|(_, label, action)| {
-                                    (label.clone(), action.boxed_clone())
-                                }))
-                                .collect();
-                        row_el.child(
-                            Button::new(SharedString::from(format!("agent-more-{}", row.key)))
-                                .ghost()
-                                .icon(IconName::Ellipsis)
-                                .size(px(44.))
-                                .aria_label(crate::tr!("mobile.more_actions"))
-                                .dropdown_menu(move |menu, _, _| {
-                                    actions.iter().fold(menu, |menu, (label, action)| {
-                                        menu.menu(label.clone(), action.boxed_clone())
-                                    })
-                                }),
-                        )
-                    })
-            } else {
-                material::accessible_clickable(
-                    h_flex(),
-                    SharedString::from(format!("agent-{}", row.key)),
-                    Role::Button,
-                    label,
-                    cx,
+        let base = material::panel_row(
+            SharedString::from(format!("agent-{}", row.key)),
+            label,
+            compact,
+            cx,
+        )
+        .child(content)
+        .when(compact && !actions.is_empty(), |row_el| {
+            let actions: Vec<_> = row
+                .open
+                .iter()
+                .map(|id| {
+                    (
+                        SharedString::from(crate::tr!("agents.open").into_owned()),
+                        Box::new(AgentOpen(id.clone())) as Box<dyn Action>,
+                    )
+                })
+                .chain(
+                    actions
+                        .iter()
+                        .map(|(_, label, action)| (label.clone(), action.boxed_clone())),
                 )
-                .w_full()
-                .min_h(px(52.))
-                .px_3()
-                .py_2()
-                .rounded(cx.theme().tokens.radius.md)
-                .hover(|row| row.bg(cx.theme().sidebar_accent))
-                .child(content)
-            };
+                .collect();
+            row_el.child(
+                material::toolbar_icon_button(
+                    SharedString::from(format!("agent-more-{}", row.key)),
+                    IconName::Ellipsis,
+                    crate::tr!("mobile.more_actions"),
+                    true,
+                )
+                .dropdown_menu(move |menu, _, _| {
+                    actions.iter().fold(menu, |menu, (label, action)| {
+                        menu.menu(label.clone(), action.boxed_clone())
+                    })
+                }),
+            )
+        });
         base.group(group)
             .debug_selector({
                 let key = row.key.clone();
@@ -829,43 +797,14 @@ impl AgentsPanel {
             .into_any_element()
     }
 
-    fn render_caption(label: SharedString, compact: bool, cx: &App) -> AnyElement {
-        if compact {
-            material::list_caption(label, true, cx).into_any_element()
-        } else {
-            div()
-                .px_3()
-                .pt_3()
-                .pb_1()
-                .text_size(px(11.))
-                .font_medium()
-                .text_color(cx.theme().muted_foreground)
-                .child(label)
-                .into_any_element()
-        }
-    }
-
     fn render_empty(cx: &App) -> AnyElement {
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .p_6()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .child(
-                div()
-                    .text_size(px(15.))
-                    .font_medium()
-                    .child(crate::tr!("agents.empty_title")),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("agents.empty_desc")),
-            )
-            .into_any_element()
+        material::empty_state(
+            Icon::new(IconName::Users),
+            crate::tr!("agents.empty_title"),
+            crate::tr!("agents.empty_desc"),
+            cx,
+        )
+        .into_any_element()
     }
 }
 
@@ -894,12 +833,16 @@ impl Render for AgentsPanel {
         let inset = px(if compact {
             material::COMPACT_PAGE_INSET
         } else {
-            12.
+            material::CARD_INSET
         });
         let mut column = v_flex()
             .w_full()
             .min_w_0()
-            .px(px(if compact { 0. } else { 8. }))
+            .px(if compact {
+                px(0.)
+            } else {
+                cx.theme().tokens.spacing.sm
+            })
             .pb_3()
             .gap_0p5();
         let parent_id = self.store.read(cx).active_session_id();
@@ -914,7 +857,7 @@ impl Render for AgentsPanel {
                         .outline()
                         .small()
                         .label(crate::tr!("agents.settle_all"))
-                        .when(compact, |button| button.min_h(px(44.)))
+                        .touch(compact)
                         .disabled(agents.needs_settle.is_empty())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(id) = parent_id.clone() {
@@ -928,8 +871,7 @@ impl Render for AgentsPanel {
                 div()
                     .px(inset)
                     .py_2()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_secondary(compact, cx)
                     .debug_selector(|| "agents-summary".into())
                     .child(summary),
             );
@@ -938,7 +880,7 @@ impl Render for AgentsPanel {
             column = column.child(self.render_row(row, compact, cx));
         }
         if !agents.native.is_empty() {
-            column = column.child(Self::render_caption(
+            column = column.child(material::list_caption(
                 crate::tr!("agents.provider_subagents").into_owned().into(),
                 compact,
                 cx,
@@ -951,8 +893,7 @@ impl Render for AgentsPanel {
                     div()
                         .px(inset)
                         .py_1()
-                        .text_size(px(11.))
-                        .text_color(cx.theme().muted_foreground)
+                        .text_secondary(compact, cx)
                         .child(crate::tr!("agents.readonly", provider = provider)),
                 );
             }
@@ -967,13 +908,13 @@ impl Render for AgentsPanel {
                     .accessibility_label(label.clone())
                     .aria_expanded(expanded)
                     .w_full()
-                    .h(px(32.))
+                    .h(px(material::bar_height(material::Bar::Section, compact)))
                     .px(inset)
                     .flex()
                     .items_center()
-                    .rounded(cx.theme().tokens.radius.md)
+                    .rounded(material::radius_card(cx))
                     .when(!crate::window_seam::is_mobile(cx), |header| {
-                        header.hover(|header| header.bg(cx.theme().sidebar_accent))
+                        header.hover(|header| header.bg(cx.theme().list_hover))
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.done_expanded = !this.done_expanded;
@@ -984,17 +925,12 @@ impl Render for AgentsPanel {
                             .w_full()
                             .gap_1p5()
                             .items_center()
-                            .text_size(px(if compact { 13. } else { 11. }))
-                            .font_medium()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                Icon::new(if expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .size(px(12.)),
-                            )
+                            .text_caption(cx)
+                            .child(Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            }))
                             .child(label),
                     ),
             );

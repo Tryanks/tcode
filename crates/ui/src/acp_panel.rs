@@ -1,10 +1,12 @@
 //! First-class ACP provider cards and the modal agent marketplace.
 
-use crate::overlay::OverlayExt as _;
+use crate::overlay::{DialogActions, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::switch::Switch;
+use crate::widgets::tabs::{TabBar, TabItem};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -14,7 +16,7 @@ use gpui::{
     ListAlignment, ListState, ParentElement as _, Render, StatefulInteractiveElement as _,
     Styled as _, Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
+use gpui_base::{Scrollbar, h_flex, v_flex};
 use std::rc::Rc;
 
 use tcode_core::acp::InstalledAcpAgent;
@@ -65,7 +67,6 @@ impl AcpAgentCard {
         let id = agent.id.clone();
         let toggle_id = id.clone();
         let name = agent.name.clone();
-        let muted = cx.theme().muted_foreground;
         let dot_color = if agent.enabled {
             cx.theme().success
         } else {
@@ -74,13 +75,14 @@ impl AcpAgentCard {
         let glyph = div()
             .relative()
             .flex_none()
-            .size(px(20.))
+            .text_body(false, cx)
             .child(
                 Icon::empty()
                     .path("icons/box.svg")
-                    .small()
                     .text_color(cx.theme().foreground),
             )
+            // A status dot pinned over the glyph's corner, smaller than any
+            // icon or token size.
             .child(
                 div()
                     .absolute()
@@ -93,36 +95,27 @@ impl AcpAgentCard {
         let title = h_flex()
             .gap_2()
             .items_center()
-            .child(
-                div()
-                    .text_size(px(15.))
-                    .font_semibold()
-                    .child(agent.name.clone()),
-            )
+            .child(div().text_title(cx).child(agent.name.clone()))
             .when(!agent.version.is_empty(), |row| {
                 row.child(
                     div()
-                        .font_family("monospace")
-                        .text_size(px(13.))
-                        .text_color(muted)
+                        .text_meta_mono(false, cx)
                         .child(format!("v{}", agent.version.trim_start_matches('v'))),
                 )
             });
 
         h_flex()
             .w_full()
-            .px_4()
-            .py_3()
             .gap_3()
             .items_center()
             .child(glyph)
             .child(
-                v_flex().flex_1().min_w_0().gap_0p5().child(title).child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(muted)
-                        .child(launch_summary(agent)),
-                ),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(title)
+                    .child(div().text_secondary(false, cx).child(launch_summary(agent))),
             )
             .child(
                 Button::new(gpui::SharedString::from(format!("acp-details-{id}")))
@@ -152,13 +145,11 @@ impl AcpAgentCard {
             .into_any_element()
     }
 
-    fn field_block(&self, label: String, control: AnyElement, _cx: &Context<Self>) -> AnyElement {
+    fn field_block(&self, label: String, control: AnyElement, cx: &Context<Self>) -> AnyElement {
         v_flex()
             .w_full()
-            .px_4()
-            .py_3()
             .gap_1p5()
-            .child(div().text_size(px(13.)).font_medium().child(label))
+            .child(div().text_caption(cx).child(label))
             .child(control)
             .into_any_element()
     }
@@ -169,6 +160,7 @@ impl AcpAgentCard {
         let remove_id = self.agent_id.clone();
         v_flex()
             .w_full()
+            .gap_3()
             .child(
                 self.field_block(
                     crate::tr!("providers.acp.args").into_owned(),
@@ -219,7 +211,7 @@ impl AcpAgentCard {
                 ),
             )
             .child(
-                h_flex().w_full().justify_end().px_4().py_3().child(
+                h_flex().w_full().justify_end().child(
                     Button::new(gpui::SharedString::from(format!("acp-remove-{remove_id}")))
                         .outline()
                         .danger()
@@ -240,11 +232,8 @@ impl AcpAgentCard {
 impl Render for AcpAgentCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let agent = self.store.read(cx).installed_acp_agent(&self.agent_id);
-        v_flex()
+        material::card_secondary(cx)
             .w_full()
-            .rounded(material::radius_card(cx))
-            .bg(cx.theme().secondary)
-            .overflow_hidden()
             .when_some(agent, |card, agent| {
                 card.child(self.render_header(&agent, cx))
                     .when(self.expanded, |card| card.child(self.render_details(cx)))
@@ -358,15 +347,12 @@ impl AcpPanel {
 
     fn render_market_row(&self, agent: &AcpMarketplaceItem, cx: &mut Context<Self>) -> AnyElement {
         let id = agent.id.clone();
-        h_flex()
+        material::group_row(cx)
             .id(gpui::SharedString::from(format!("acp-market-row-{id}")))
             .debug_selector({
                 let id = id.clone();
                 move || format!("acp-market-row-{id}")
             })
-            .w_full()
-            .p_3()
-            .gap_3()
             .items_start()
             .hover(|row| row.bg(cx.theme().list_hover))
             .child(
@@ -383,45 +369,37 @@ impl AcpPanel {
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(
-                                div()
-                                    .text_size(px(15.))
-                                    .font_medium()
-                                    .child(agent.name.clone()),
-                            )
+                            .child(div().text_title(cx).child(agent.name.clone()))
                             .when(!agent.version.is_empty(), |row| {
                                 row.child(
                                     div()
-                                        .font_family("monospace")
-                                        .text_size(px(13.))
-                                        .text_color(cx.theme().muted_foreground)
+                                        .text_meta_mono(false, cx)
                                         .child(format!("v{}", agent.version)),
                                 )
                             }),
                     )
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
+                            .text_secondary(false, cx)
                             .child(agent.description.clone()),
                     ),
             )
             .child(if agent.installed {
-                div()
-                    .rounded_full()
-                    .bg(cx.theme().success.opacity(0.12))
-                    .text_size(px(13.))
-                    .text_color(cx.theme().success_foreground)
-                    .child(crate::tr!("providers.acp.installed").into_owned())
-                    .into_any_element()
+                material::semantic_chip(
+                    crate::tr!("providers.acp.installed").into_owned(),
+                    cx.theme().success.opacity(0.12),
+                    cx.theme().success_foreground,
+                    cx,
+                )
+                .into_any_element()
             } else if !agent.supported {
-                div()
-                    .rounded_full()
-                    .bg(cx.theme().muted)
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("providers.acp.unsupported").into_owned())
-                    .into_any_element()
+                material::semantic_chip(
+                    crate::tr!("providers.acp.unsupported").into_owned(),
+                    cx.theme().muted,
+                    cx.theme().muted_foreground,
+                    cx,
+                )
+                .into_any_element()
             } else {
                 Button::new(gpui::SharedString::from(format!(
                     "acp-install-{}",
@@ -465,18 +443,11 @@ impl AcpPanel {
         let loading = self.store.read(cx).acp_registry_loading();
         let empty = market.is_empty();
         let rows = if let Some(error) = error.filter(|_| empty) {
-            div()
-                .p_3()
-                .text_size(px(13.))
+            material::empty_row(error, cx)
                 .text_color(cx.theme().danger_foreground)
-                .child(error)
                 .into_any_element()
         } else if empty && loading {
-            div()
-                .p_3()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!("providers.acp.loading").into_owned())
+            material::empty_row(crate::tr!("providers.acp.loading").into_owned(), cx)
                 .into_any_element()
         } else {
             crate::scroll::page_viewport(
@@ -514,24 +485,18 @@ impl AcpPanel {
                     }),
             )
             .child(
-                h_flex()
-                    .id("acp-custom-open")
-                    .debug_selector(|| "acp-custom-open".into())
-                    .w_full()
-                    .pt_3()
-                    .gap_2()
-                    .items_center()
-                    .cursor_pointer()
-                    .child(Icon::new(IconName::Plus).text_color(cx.theme().muted_foreground))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .child(crate::tr!("providers.acp.custom").into_owned()),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.view = PanelView::CustomAcp;
-                        cx.notify();
-                    })),
+                h_flex().w_full().child(
+                    Button::new("acp-custom-open")
+                        .debug_selector(|| "acp-custom-open".into())
+                        .ghost()
+                        .small()
+                        .icon(IconName::Plus)
+                        .label(crate::tr!("providers.acp.custom").into_owned())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.view = PanelView::CustomAcp;
+                            cx.notify();
+                        })),
+                ),
             )
             .into_any_element()
     }
@@ -547,14 +512,11 @@ impl AcpPanel {
                      cx: &mut Context<Self>|
          -> AnyElement {
             let muted = cx.theme().muted_foreground;
-            let mut row = h_flex()
-                .id(id)
+            let row = material::card(cx)
+                .flex_row()
                 .w_full()
-                .p_3()
-                .gap_3()
                 .items_center()
-                .rounded(material::radius_card(cx))
-                .bg(cx.theme().muted)
+                .text_body(false, cx)
                 .child(glyph.text_color(if enabled {
                     cx.theme().foreground
                 } else {
@@ -567,37 +529,32 @@ impl AcpPanel {
                         .gap_0p5()
                         .child(
                             div()
-                                .text_size(px(14.))
-                                .font_medium()
                                 .text_color(if enabled {
                                     cx.theme().foreground
                                 } else {
                                     muted
                                 })
-                                .child(title),
+                                .child(title.clone()),
                         )
-                        .child(div().text_size(px(12.)).text_color(muted).child(subtitle)),
+                        .child(div().text_secondary(false, cx).child(subtitle)),
                 );
             if enabled {
-                row = row
+                material::accessible_clickable(row, id, gpui::Role::Button, title, cx)
                     .cursor_pointer()
                     .hover(|s| s.bg(cx.theme().list_hover))
-                    .child(Icon::new(IconName::ChevronRight).small().text_color(muted))
+                    .child(Icon::new(IconName::ChevronRight).text_color(muted))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_third_party(TpPreset::Kimi, window, cx);
-                    }));
+                    }))
+                    .into_any_element()
             } else {
-                row = row.child(
-                    div()
-                        .rounded_full()
-                        .px_2()
-                        .text_size(px(12.))
-                        .bg(cx.theme().muted)
-                        .text_color(muted)
-                        .child(crate::tr!("providers.third_party.soon").into_owned()),
-                );
+                row.id(id)
+                    .child(material::chip(
+                        crate::tr!("providers.third_party.soon").into_owned(),
+                        cx,
+                    ))
+                    .into_any_element()
             }
-            row.into_any_element()
         };
 
         v_flex()
@@ -605,14 +562,12 @@ impl AcpPanel {
             .gap_2()
             .child(
                 div()
-                    .text_size(px(12.))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_caption(cx)
                     .child(crate::tr!("providers.third_party.section").into_owned()),
             )
             .child(entry(
                 "provider-entry-claude",
-                crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode).small(),
+                crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode),
                 crate::tr!("providers.third_party.claude_title").into_owned(),
                 crate::tr!("providers.third_party.claude_subtitle").into_owned(),
                 true,
@@ -620,7 +575,7 @@ impl AcpPanel {
             ))
             .child(entry(
                 "provider-entry-codex",
-                crate::provider_card::provider_glyph(agent::ProviderKind::Codex).small(),
+                crate::provider_card::provider_glyph(agent::ProviderKind::Codex),
                 crate::tr!("providers.third_party.codex_title").into_owned(),
                 crate::tr!("providers.third_party.codex_subtitle").into_owned(),
                 false,
@@ -631,33 +586,20 @@ impl AcpPanel {
 
     /// The third-party Claude Code endpoint form (Kimi preset or fully custom).
     fn render_third_party(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let preset_tab = |this: &Self,
-                          id: &'static str,
-                          label: String,
-                          preset: TpPreset,
-                          cx: &mut Context<Self>|
-         -> AnyElement {
-            let active = this.tp_preset == preset;
-            h_flex()
-                .id(id)
-                .px_3()
-                .py_1p5()
-                .rounded(material::radius_button(cx))
-                .cursor_pointer()
-                .when(active, |s| s.bg(cx.theme().accent).font_medium())
-                .hover(|s| s.bg(cx.theme().accent))
-                .child(div().text_size(px(13.)).child(label))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_third_party(preset, window, cx);
-                }))
-                .into_any_element()
+        let panel = cx.entity().downgrade();
+        let preset_tab = |id: &'static str, label: String, preset: TpPreset| -> TabItem {
+            let panel = panel.clone();
+            TabItem::new(id, label)
+                .selected(self.tp_preset == preset)
+                .on_click(move |_, window, cx| {
+                    _ = panel.update(cx, |this, cx| this.open_third_party(preset, window, cx));
+                })
         };
         let field = |label: String, control: AnyElement| -> AnyElement {
             v_flex()
                 .w_full()
                 .gap_1()
-                .child(div().text_size(px(12.)).font_medium().child(label))
+                .child(div().text_caption(cx).child(label))
                 .child(control)
                 .into_any_element()
         };
@@ -678,33 +620,24 @@ impl AcpPanel {
                     })),
             )
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(preset_tab(
-                        self,
+                TabBar::new("tp-preset")
+                    .segmented()
+                    .item(preset_tab(
                         "tp-preset-kimi",
                         KIMI_NAME.to_string(),
                         TpPreset::Kimi,
-                        cx,
                     ))
-                    .child(preset_tab(
-                        self,
+                    .item(preset_tab(
                         "tp-preset-custom",
                         crate::tr!("providers.acp.custom").into_owned(),
                         TpPreset::Custom,
-                        cx,
                     )),
             )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(if is_kimi {
-                        crate::tr!("providers.third_party.kimi_help").into_owned()
-                    } else {
-                        crate::tr!("providers.third_party.custom_help").into_owned()
-                    }),
-            )
+            .child(div().text_secondary(false, cx).child(if is_kimi {
+                crate::tr!("providers.third_party.kimi_help").into_owned()
+            } else {
+                crate::tr!("providers.third_party.custom_help").into_owned()
+            }))
             .child(field(
                 crate::tr!("providers.third_party.name").into_owned(),
                 Input::new(&self.tp_name).into_any_element(),
@@ -724,10 +657,8 @@ impl AcpPanel {
                     .into_any_element(),
             ))
             .child(
-                h_flex()
+                DialogActions::new()
                     .w_full()
-                    .justify_end()
-                    .gap_2()
                     .child(
                         Button::new("tp-cancel")
                             .ghost()
@@ -789,14 +720,12 @@ impl AcpPanel {
             )
             .child(
                 div()
-                    .text_size(px(13.))
-                    .font_medium()
+                    .text_title(cx)
                     .child(crate::tr!("providers.acp.custom").into_owned()),
             )
             .child(
                 div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_secondary(false, cx)
                     .child(crate::tr!("providers.acp.custom_help").into_owned()),
             )
             .child(Input::new(&self.custom_name))
@@ -804,10 +733,8 @@ impl AcpPanel {
             .child(Input::new(&self.custom_args))
             .child(Input::new(&self.custom_env))
             .child(
-                h_flex()
+                DialogActions::new()
                     .w_full()
-                    .justify_end()
-                    .gap_2()
                     .child(
                         Button::new("acp-custom-cancel")
                             .ghost()

@@ -21,7 +21,7 @@ use gpui::{
     MouseButton, ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
+use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_client::host::ClientHost;
 use tcode_client::pairing::PairedHost;
@@ -29,12 +29,12 @@ use tcode_client::pairing::PairedHost;
 use crate::icon::{Icon, IconName};
 // Machines are a navigable content list, so their rows, captions and hairlines
 // are the shared plain-list vocabulary — the same the thread list uses.
-use crate::material::{list_caption, list_row, plain_list};
+use crate::material::{COMPACT_PAGE_INSET, list_caption, list_row, plain_list, section_gap};
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::pairing::PairForm;
-use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent};
 use crate::widgets::menu::DropdownMenu as _;
@@ -136,9 +136,6 @@ pub(crate) fn open_in_editor(path: &std::path::Path, cx: &App) -> Option<Result<
         .open_in_editor(path)
 }
 
-/// Page inset: the compact 16pt margin, a little more room when the same list
-/// runs inside the wide content column.
-const PAGE_PADDING: f32 = 16.;
 /// The Hosts content column, matching the settings and chat reading measure.
 const CONTENT_MAX_WIDTH: f32 = 768.;
 
@@ -369,7 +366,6 @@ impl RemotePanel {
     /// report on: this machine itself.
     fn current_glyph(cx: &App) -> AnyElement {
         Icon::new(IconName::Check)
-            .small()
             .flex_none()
             .text_color(cx.theme().muted_foreground)
             .into_any_element()
@@ -396,11 +392,10 @@ impl RemotePanel {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .gap(px(2.))
+                        .gap(cx.theme().tokens.spacing.xxs)
                         .child(
                             div()
-                                .text_size(px(15.))
-                                .font_medium()
+                                .text_title(cx)
                                 .truncate()
                                 .child(crate::tr!("hosts.this_computer")),
                         )
@@ -408,7 +403,7 @@ impl RemotePanel {
                             column.child(
                                 div()
                                     .debug_selector(|| "hosts-local-failure".into())
-                                    .text_size(px(13.))
+                                    .text_secondary(true, cx)
                                     .text_color(cx.theme().danger_foreground)
                                     .child(
                                         crate::tr!("hosts.local.unavailable", reason = reason)
@@ -480,19 +475,12 @@ impl RemotePanel {
             v_flex()
                 .flex_1()
                 .min_w_0()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .text_size(px(15.))
-                        .font_medium()
-                        .truncate()
-                        .child(name.clone()),
-                )
+                .gap(cx.theme().tokens.spacing.xxs)
+                .child(div().text_title(cx).truncate().child(name.clone()))
                 .when_some(host.space_name.as_deref(), |column, space| {
                     column.child(
                         div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
+                            .text_secondary(true, cx)
                             .truncate()
                             .child(crate::tr!("member.space", space = space).into_owned()),
                     )
@@ -502,8 +490,7 @@ impl RemotePanel {
                     |column| {
                         column.child(
                             div()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
+                                .text_secondary(true, cx)
                                 .truncate()
                                 .child(crate::tr!("hosts.in_group")),
                         )
@@ -512,7 +499,7 @@ impl RemotePanel {
                 .when_some(reason, |column, reason| {
                     column.child(
                         div()
-                            .text_size(px(13.))
+                            .text_secondary(true, cx)
                             .text_color(cx.theme().danger_foreground)
                             .child(failure_description(&reason)),
                     )
@@ -592,7 +579,12 @@ impl RemotePanel {
             .map(|client| client.load_hosts())
             .unwrap_or_default();
         let current_id = self.attached_host_id(cx);
-        let mut column = v_flex().w_full().gap_4().pt(px(8.)).pb(px(24.));
+        let spacing = &cx.theme().tokens.spacing;
+        let mut column = v_flex()
+            .w_full()
+            .gap(section_gap(cx))
+            .pt(spacing.sm)
+            .pb(spacing.xl);
         if let Some(local) = self.local_row(cx) {
             column = column.child(plain_list(vec![local.into_any_element()], cx));
         }
@@ -605,9 +597,8 @@ impl RemotePanel {
             column = column.child(
                 div()
                     .w_full()
-                    .px(px(PAGE_PADDING))
-                    .text_size(px(15.))
-                    .text_color(cx.theme().muted_foreground)
+                    .px(px(COMPACT_PAGE_INSET))
+                    .text_secondary(true, cx)
                     .child(crate::tr!("hosts.empty")),
             );
         } else {
@@ -654,9 +645,9 @@ impl RemotePanel {
             } => {
                 let group = spaces::local(cx)
                     .and_then(|spaces| spaces.read(cx).group().map(|group| group.name.clone()));
-                hosting::invitation_card(&invitation, remaining, group, compact, PAGE_PADDING, cx)
+                hosting::invitation_card(&invitation, remaining, group, compact, cx)
             }
-            InvitationOffer::Expired => hosting::expired_invitation_row(PAGE_PADDING, cx),
+            InvitationOffer::Expired => hosting::expired_invitation_row(cx),
             InvitationOffer::NotHosting | InvitationOffer::PairingOff => {
                 let note = if offer == InvitationOffer::PairingOff {
                     crate::tr!("hosts.invite.pairing_off")
@@ -670,10 +661,9 @@ impl RemotePanel {
                     .child(
                         div()
                             .w_full()
-                            .px(px(PAGE_PADDING))
-                            .pb(px(4.))
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
+                            .px(px(COMPACT_PAGE_INSET))
+                            .pb(cx.theme().tokens.spacing.xs)
+                            .text_secondary(true, cx)
                             .child(note),
                     )
                     .child(plain_list(
@@ -684,13 +674,12 @@ impl RemotePanel {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .text_size(px(15.))
+                                        .text_body(true, cx)
                                         .truncate()
                                         .child(title),
                                 )
                                 .child(
                                     Icon::new(IconName::ChevronRight)
-                                        .xsmall()
                                         .flex_none()
                                         .text_color(cx.theme().muted_foreground),
                                 )
@@ -718,7 +707,6 @@ impl RemotePanel {
                     cx.notify();
                 },
                 compact,
-                PAGE_PADDING,
                 cx,
             )
         });
@@ -775,13 +763,12 @@ impl RemotePanel {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(15.))
+                        .text_body(true, cx)
                         .truncate()
                         .child(title),
                 )
                 .child(
                     Icon::new(IconName::ChevronRight)
-                        .xsmall()
                         .flex_none()
                         .text_color(cx.theme().muted_foreground),
                 )
@@ -828,19 +815,14 @@ impl RemotePanel {
             return Some(
                 h_flex()
                     .w_full()
-                    .px(px(PAGE_PADDING))
-                    .py(px(8.))
+                    .px(px(COMPACT_PAGE_INSET))
+                    .py(cx.theme().tokens.spacing.sm)
                     .gap_2()
                     .items_center()
+                    .text_secondary(true, cx)
                     .debug_selector(|| "hosts-pairing".into())
-                    .child(crate::widgets::spinner::Spinner::new().small())
-                    .child(
-                        div()
-                            .min_w_0()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("hosts.pair.connecting")),
-                    )
+                    .child(crate::widgets::spinner::Spinner::new())
+                    .child(div().min_w_0().child(crate::tr!("hosts.pair.connecting")))
                     .into_any_element(),
             );
         }
@@ -852,9 +834,9 @@ impl RemotePanel {
         Some(
             div()
                 .w_full()
-                .px(px(PAGE_PADDING))
-                .py(px(8.))
-                .text_size(px(13.))
+                .px(px(COMPACT_PAGE_INSET))
+                .py(cx.theme().tokens.spacing.sm)
+                .text_secondary(true, cx)
                 .min_w_0()
                 .text_color(cx.theme().danger_foreground)
                 .debug_selector(|| "hosts-pair-error".into())
@@ -880,20 +862,18 @@ impl RemotePanel {
         Some(
             v_flex()
                 .w_full()
-                .px(px(PAGE_PADDING))
+                .px(px(COMPACT_PAGE_INSET))
                 .gap_1p5()
                 .debug_selector(|| "hosts-pair-address".into())
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .font_medium()
+                        .text_caption(cx)
                         .child(crate::tr!("hosts.pair.address")),
                 )
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_secondary(true, cx)
                         .min_w_0()
-                        .text_color(cx.theme().muted_foreground)
                         .child(crate::tr!("hosts.pair.address_description")),
                 )
                 .child(
@@ -902,7 +882,7 @@ impl RemotePanel {
                 )
                 .children(error.map(|error| {
                     div()
-                        .text_size(px(13.))
+                        .text_secondary(true, cx)
                         .min_w_0()
                         .text_color(cx.theme().danger_foreground)
                         .debug_selector(|| "hosts-pair-address-error".into())
@@ -937,26 +917,23 @@ impl RemotePanel {
         let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
         let body = v_flex()
             .w_full()
-            .py(px(16.))
-            .gap_4()
+            .py(cx.theme().tokens.spacing.lg)
+            .gap(section_gap(cx))
             .child(
                 div()
-                    .px(px(PAGE_PADDING))
-                    .text_size(px(15.))
-                    .line_height(px(20.))
+                    .px(px(COMPACT_PAGE_INSET))
+                    .text_secondary(true, cx)
                     .min_w_0()
-                    .text_color(cx.theme().muted_foreground)
                     .child(crate::tr!("hosts.pair.description")),
             )
             .child(
                 v_flex()
                     .w_full()
-                    .px(px(PAGE_PADDING))
+                    .px(px(COMPACT_PAGE_INSET))
                     .gap_1p5()
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .font_medium()
+                            .text_caption(cx)
                             .child(crate::tr!("hosts.pair.invitation")),
                     )
                     .child(
@@ -968,7 +945,7 @@ impl RemotePanel {
             .children(self.address_prompt(false, cx))
             .when(scannable, |column| {
                 column.child(
-                    div().px(px(PAGE_PADDING)).child(
+                    div().px(px(COMPACT_PAGE_INSET)).child(
                         Button::new("hosts-scan")
                             .ghost()
                             .outline()
@@ -1032,9 +1009,9 @@ impl RemotePanel {
                     div()
                         .w_full()
                         .max_w(px(CONTENT_MAX_WIDTH))
-                        .px(px(PAGE_PADDING))
-                        .pb(px(PAGE_PADDING))
-                        .pt(px(8.))
+                        .px(px(COMPACT_PAGE_INSET))
+                        .pb(px(COMPACT_PAGE_INSET))
+                        .pt(cx.theme().tokens.spacing.sm)
                         .child(action),
                 ),
             )

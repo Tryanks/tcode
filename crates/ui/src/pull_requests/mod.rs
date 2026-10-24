@@ -5,6 +5,7 @@ use crate::{
     sizing::Sizable as _,
     store::{TopicKind, WorkspaceStore, observe_store_topics},
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         button::{Button, ButtonVariants as _},
         input::{Input, InputEvent, InputState},
@@ -135,7 +136,7 @@ pub fn badge_label(
 pub fn badge(
     links: &[ThreadPullRequestLink],
     branch: Option<&BranchPullRequest>,
-    size: f32,
+    _size: f32,
     cx: &App,
 ) -> Option<AnyElement> {
     let (state, count, stacked) = pull_request::badge(links, branch)?;
@@ -155,14 +156,14 @@ pub fn badge(
             .aria_label(label)
             .flex_none()
             .items_center()
-            .gap(px(2.))
-            .text_size(px(size - 1.))
+            .gap(cx.theme().tokens.spacing.xxs)
+            .text_token(&cx.theme().tokens.typography.xs)
             .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
                 "tnum".into(),
                 1,
             )])))
             .text_color(color)
-            .child(Icon::new(if stacked { IconName::Layers } else { glyph }).size(px(size)))
+            .child(Icon::new(if stacked { IconName::Layers } else { glyph }))
             .child(text)
             .into_any_element(),
     )
@@ -181,43 +182,36 @@ pub fn sidebar_badge(
     let hover_branch = branch.cloned();
     let hover_store = store.clone();
     let hover_id = id.clone();
-    let trigger = crate::material::accessible_clickable(
-        div(),
-        SharedString::from(format!("pr-badge-{id}")),
-        gpui::Role::Button,
-        badge_label(links, branch, cx).unwrap_or_default(),
-        cx,
-    )
-    .cursor_pointer()
-    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-    .on_click(move |_, _, cx| {
-        cx.stop_propagation();
-        store.update(cx, |store, cx| {
-            store.select_session(id.clone());
-            store.open_tab_for(&id, RightTab::PullRequests, cx);
-        });
-    })
-    .child(badge);
+    let trigger = Button::new(SharedString::from(format!("pr-badge-{id}")))
+        .text()
+        .aria_label(badge_label(links, branch, cx).unwrap_or_default())
+        .cursor_pointer()
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            store.update(cx, |store, cx| {
+                store.select_session(id.clone());
+                store.open_tab_for(&id, RightTab::PullRequests, cx);
+            });
+        })
+        .child(badge);
     Some(
         gpui_base::HoverCard::new("pr-hover-card")
             .anchor(Anchor::TopLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
                 // gpui-base's HoverCard is an unstyled popup; the surface is the popover's.
-                let mut rows = v_flex()
+                let spacing = &cx.theme().tokens.spacing;
+                let mut rows = crate::material::overlay_contour(v_flex(), cx)
+                    .rounded(crate::material::radius_overlay(cx))
                     .id("pr-mini-list")
                     .w(px(320.))
-                    .p_2()
-                    .gap_0p5()
-                    .rounded(crate::material::radius_overlay(cx))
-                    .bg(cx.theme().popover)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .shadow_xl()
+                    .p(spacing.sm)
+                    .gap(spacing.xxs)
+                    .text_token(&cx.theme().tokens.typography.xs)
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
+                            .text_caption(cx)
                             .child(crate::tr!("pull_requests.title")),
                     );
                 let mut ordered: Vec<_> = pull_request::groups(&hover_links)
@@ -262,46 +256,43 @@ pub fn sidebar_badge(
                 for (index, (depth, key, snapshot, caption)) in ordered.iter().take(8).enumerate() {
                     let (glyph, color, _) = appearance(row_state(*snapshot, None), cx);
                     let (store, id, open) = (hover_store.clone(), hover_id.clone(), (*key).clone());
-                    rows = rows.child(
-                        h_flex()
-                            .id(index)
-                            .h(px(24.))
-                            .pl(px(depth.min(&3).to_owned() as f32 * 12.))
-                            .gap_2()
-                            .items_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().sidebar_accent))
-                            .on_click(move |_, _, cx| {
-                                store.update(cx, |store, cx| {
-                                    store.select_session(id.clone());
-                                    store.open_tab_for(&id, RightTab::PullRequests, cx);
-                                    store.set_open_pull_request(&id, Some(open.clone()), cx);
-                                });
-                            })
-                            .child(Icon::new(glyph).xsmall().text_color(color))
-                            .child(div().text_size(px(11.)).child(format!("#{}", key.number)))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(12.))
-                                    .child(snapshot.map_or_else(
+                    // A hover-card miniature is denser than any list owner's row, and
+                    // no row owner carries a tree indent.
+                    rows =
+                        rows.child(
+                            h_flex()
+                                .id(index)
+                                .h(px(24.))
+                                .pl(spacing.md * depth.min(&3).to_owned() as f32)
+                                .gap(spacing.sm)
+                                .items_center()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(cx.theme().list_hover))
+                                .on_click(move |_, _, cx| {
+                                    store.update(cx, |store, cx| {
+                                        store.select_session(id.clone());
+                                        store.open_tab_for(&id, RightTab::PullRequests, cx);
+                                        store.set_open_pull_request(&id, Some(open.clone()), cx);
+                                    });
+                                })
+                                .child(Icon::new(glyph).text_color(color))
+                                .child(div().child(format!("#{}", key.number)))
+                                .child(div().flex_1().min_w_0().truncate().child(
+                                    snapshot.map_or_else(
                                         || key.repository.clone(),
                                         |s| s.title.clone(),
-                                    )),
-                            )
-                            .children(caption.clone().map(|caption| {
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(caption)
-                            })),
-                    );
+                                    ),
+                                ))
+                                .children(
+                                    caption.clone().map(|caption| {
+                                        div().text_secondary(false, cx).child(caption)
+                                    }),
+                                ),
+                        );
                 }
                 if ordered.len() > 8 {
                     rows = rows.child(
-                        div().text_size(px(11.)).child(
+                        div().text_secondary(false, cx).child(
                             crate::tr!(
                                 "pull_requests.more",
                                 count = (ordered.len() - 8).to_string()
@@ -829,14 +820,20 @@ impl PullRequestsPanel {
             // separator and its spacing with it.
             let sep = || div().flex_none().ml_1().child("·");
             let mono = cx.theme().mono_font_family.clone();
+            let typography = &cx.theme().tokens.typography;
+            let line_height = if compact {
+                typography.sm.line_height
+            } else {
+                typography.xs.line_height
+            };
             h_flex()
                 .items_center()
                 .min_w_0()
                 .overflow_hidden()
                 .child(div().min_w_0().truncate().child(source.clone()))
                 // The author gives way first, whole: a line too narrow for it wraps it onto
-                // a second line this one-line box clips. The box sets its own line height
-                // and is exactly one such line tall (16 for line 2's 11px text); stretching
+                // a second line this one-line box clips. The box is exactly one line of
+                // line 2's text tall; stretching
                 // it to the row would not do, as a stretched box takes its wrapped content's
                 // two lines. gpui has no setter for a shrink value, hence the reach into the
                 // style.
@@ -844,8 +841,7 @@ impl PullRequestsPanel {
                     line.child(
                         h_flex()
                             .flex_wrap()
-                            .h(px(16.))
-                            .line_height(px(16.))
+                            .h(line_height)
                             .min_w_0()
                             .overflow_hidden()
                             .map(|mut group| {
@@ -918,7 +914,7 @@ impl PullRequestsPanel {
                 .overflow_hidden()
                 .when(
                     link.is_some_and(|link| link.source == PullRequestSource::Dismissed),
-                    |line| line.child(Icon::new(IconName::Unlink).size(px(12.))),
+                    |line| line.child(Icon::new(IconName::Unlink)),
                 )
                 .child(div().min_w_0().truncate().child(lead));
             tail_layer(line, layer).into_any_element()
@@ -949,9 +945,8 @@ impl PullRequestsPanel {
             })
             .into_owned();
             signals = signals.child(if compact {
-                // A 14px target is below touch size: the more menu stops it on a phone.
+                // A glyph is below touch size: the more menu stops the watch on a phone.
                 Icon::new(IconName::Eye)
-                    .size(px(14.))
                     .text_color(cx.theme().muted_foreground)
                     .into_any_element()
             } else {
@@ -973,7 +968,6 @@ impl PullRequestsPanel {
                     } else {
                         IconName::Eye
                     })
-                    .size(px(14.))
                     .text_color(if hovered {
                         cx.theme().foreground
                     } else {
@@ -1024,7 +1018,7 @@ impl PullRequestsPanel {
                 signals = signals.child(
                     div()
                         .id(SharedString::from(format!("pr-signal-{label}")))
-                        .child(Icon::new(icon).size(px(14.)).text_color(color))
+                        .child(Icon::new(icon).text_color(color))
                         .tooltip(move |window, cx| {
                             crate::widgets::tooltip::Tooltip::new(crate::tr!(label).into_owned())
                                 .build(window, cx)
@@ -1052,7 +1046,7 @@ impl PullRequestsPanel {
                 signals = signals.child(
                     div()
                         .id(SharedString::from(format!("pr-signal-{label}")))
-                        .child(Icon::new(icon).size(px(14.)).text_color(color))
+                        .child(Icon::new(icon).text_color(color))
                         .tooltip(move |window, cx| {
                             crate::widgets::tooltip::Tooltip::new(crate::tr!(label).into_owned())
                                 .build(window, cx)
@@ -1063,11 +1057,7 @@ impl PullRequestsPanel {
                 signals = signals.child(
                     div()
                         .id("pr-conflict")
-                        .child(
-                            Icon::new(IconName::GitMergeConflict)
-                                .size(px(14.))
-                                .text_color(cx.theme().warning),
-                        )
+                        .child(Icon::new(IconName::GitMergeConflict).text_color(cx.theme().warning))
                         .tooltip({
                             let base = snapshot.base_branch.clone();
                             move |window, cx| {
@@ -1102,11 +1092,7 @@ impl PullRequestsPanel {
             signals = signals.child(
                 div()
                     .id("pr-signal-blocked")
-                    .child(
-                        Icon::new(IconName::Lock)
-                            .size(px(14.))
-                            .text_color(cx.theme().muted_foreground),
-                    )
+                    .child(Icon::new(IconName::Lock).text_color(cx.theme().muted_foreground))
                     .tooltip(move |window, cx| {
                         crate::widgets::tooltip::Tooltip::new(blocker.clone()).build(window, cx)
                     }),
@@ -1117,195 +1103,195 @@ impl PullRequestsPanel {
             key.host, key.repository, key.number
         ));
         let label = SharedString::from(format!("#{} {title}", key.number));
-        let row = if compact {
-            crate::material::list_row(row_id.clone(), label, cx)
+        let spacing = &cx.theme().tokens.spacing;
+        let inset = if compact {
+            px(crate::material::COMPACT_PAGE_INSET)
         } else {
-            crate::material::accessible_clickable(
-                h_flex(),
-                row_id.clone(),
-                gpui::Role::Button,
-                label,
-                cx,
+            px(crate::material::CARD_INSET)
+        };
+        let row = crate::material::panel_row(row_id.clone(), label, compact, cx)
+            .group(row_id.clone())
+            .min_w_0()
+            // `panel_row` has no tree indent: a stacked layer steps in one level per depth.
+            .pl(inset + spacing.lg * depth.min(3) as f32)
+            .items_start()
+            .cursor_pointer()
+            .on_click({
+                let store = self.store.clone();
+                let window_state = self.window_state.clone();
+                let key = key.clone();
+                move |_, window, cx| {
+                    open_pull_request(&store, &window_state, key.clone(), window, cx)
+                }
+            })
+            .when(depth > 0, |row| {
+                row.child(div().w(px(1.)).h(spacing.xl).bg(cx.theme().border))
+            })
+            .child(
+                div()
+                    .text_body(compact, cx)
+                    .text_color(color)
+                    .child(Icon::new(glyph)),
             )
-            .hover(|s| s.bg(cx.theme().sidebar_accent))
-        }
-        .group(row_id.clone())
-        .w_full()
-        .min_w_0()
-        .min_h(px(if compact { 64. } else { 52. }))
-        .px_3()
-        .py_2()
-        .pl(px(12. + depth.min(3) as f32 * 16.))
-        .gap_2()
-        .items_start()
-        .rounded_md()
-        .cursor_pointer()
-        .on_click({
-            let store = self.store.clone();
-            let window_state = self.window_state.clone();
-            let key = key.clone();
-            move |_, window, cx| open_pull_request(&store, &window_state, key.clone(), window, cx)
-        })
-        .when(depth > 0, |row| {
-            row.child(div().w(px(1.)).h(px(24.)).bg(cx.theme().border))
-        })
-        .child(
-            Icon::new(glyph)
-                .size(px(if compact { 20. } else { 16. }))
-                .text_color(color),
-        )
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap(px(2.))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            div()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(px(if compact { 14. } else { 12. }))
-                                .id("pr-number")
-                                .tooltip({
-                                    let label = crate::tr!(
-                                        "pull_requests.number_tooltip",
-                                        source = source.clone(),
-                                        ago = crate::time::humanize_ago(
-                                            tcode_core::project::now_secs().saturating_sub(
-                                                link.and_then(|link| link.linked_at)
-                                                    .unwrap_or_default()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(spacing.xxs)
+                    .child(
+                        h_flex()
+                            .gap(spacing.sm)
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_meta_mono(compact, cx)
+                                    .text_color(cx.theme().foreground)
+                                    .id("pr-number")
+                                    .tooltip({
+                                        let label = crate::tr!(
+                                            "pull_requests.number_tooltip",
+                                            source = source.clone(),
+                                            ago = crate::time::humanize_ago(
+                                                tcode_core::project::now_secs().saturating_sub(
+                                                    link.and_then(|link| link.linked_at)
+                                                        .unwrap_or_default()
+                                                )
                                             )
                                         )
+                                        .into_owned();
+                                        move |window, cx| {
+                                            crate::widgets::tooltip::Tooltip::new(label.clone())
+                                                .build(window, cx)
+                                        }
+                                    })
+                                    .child(format!("#{}", key.number)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_body(compact, cx)
+                                    .text_color(if visible {
+                                        cx.theme().foreground
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
+                                    .when(snapshot.is_none(), |title| {
+                                        title.font_family(cx.theme().mono_font_family.clone())
+                                    })
+                                    .child(title),
+                            )
+                            .when(
+                                snapshot.is_some_and(|snapshot| {
+                                    snapshot.is_draft && snapshot.state == PullRequestState::Open
+                                }),
+                                |row| {
+                                    row.child(
+                                        div()
+                                            .text_secondary(false, cx)
+                                            .child(crate::tr!("pull_requests.draft")),
                                     )
-                                    .into_owned();
-                                    move |window, cx| {
-                                        crate::widgets::tooltip::Tooltip::new(label.clone())
+                                },
+                            )
+                            .child(signals),
+                    )
+                    .child(
+                        div()
+                            .id("pr-detail")
+                            .min_w_0()
+                            .text_secondary(compact, cx)
+                            .tooltip(move |window, cx| {
+                                crate::widgets::tooltip::Tooltip::new(detail.clone())
+                                    .build(window, cx)
+                            })
+                            .child(line_two),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    // The desktop slot holds the relative time under the hover-revealed menu
+                    // button; no owner sizes that overlay.
+                    .when(!compact, |slot| slot.min_w(px(36.)).min_h(spacing.xl))
+                    .when_some(
+                        running.clone().filter(|_| !compact),
+                        |slot, (icon, color, _, tooltip)| {
+                            slot.child(
+                                div()
+                                    .id("pr-signal-operation")
+                                    .group_hover(row_id.clone(), |signal| signal.invisible())
+                                    .child(Icon::new(icon).text_color(color))
+                                    .tooltip(move |window, cx| {
+                                        crate::widgets::tooltip::Tooltip::new(tooltip.clone())
                                             .build(window, cx)
-                                    }
-                                })
-                                .child(format!("#{}", key.number)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(if compact { 15. } else { 13. }))
-                                .text_color(if visible {
-                                    cx.theme().foreground
-                                } else {
-                                    cx.theme().muted_foreground
-                                })
-                                .when(snapshot.is_none(), |title| {
-                                    title.font_family(cx.theme().mono_font_family.clone())
-                                })
-                                .child(title),
-                        )
-                        .when(
-                            snapshot.is_some_and(|snapshot| {
-                                snapshot.is_draft && snapshot.state == PullRequestState::Open
-                            }),
-                            |row| {
-                                row.child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(crate::tr!("pull_requests.draft")),
-                                )
-                            },
-                        )
-                        .child(signals),
-                )
-                .child(
-                    div()
-                        .id("pr-detail")
-                        .min_w_0()
-                        .text_size(px(if compact { 13. } else { 11. }))
-                        .text_color(cx.theme().muted_foreground)
-                        .tooltip(move |window, cx| {
-                            crate::widgets::tooltip::Tooltip::new(detail.clone()).build(window, cx)
-                        })
-                        .child(line_two),
-                ),
-        )
-        .child(
-            div()
-                .relative()
-                .flex_none()
-                .min_w(px(if compact { 44. } else { 36. }))
-                .min_h(px(if compact { 44. } else { 24. }))
-                .when_some(
-                    running.clone().filter(|_| !compact),
-                    |slot, (icon, color, _, tooltip)| {
+                                    }),
+                            )
+                        },
+                    )
+                    .when(!compact && running.is_none(), |slot| {
                         slot.child(
                             div()
-                                .id("pr-signal-operation")
-                                .group_hover(row_id.clone(), |signal| signal.invisible())
-                                .child(Icon::new(icon).size(px(14.)).text_color(color))
-                                .tooltip(move |window, cx| {
-                                    crate::widgets::tooltip::Tooltip::new(tooltip.clone())
-                                        .build(window, cx)
-                                }),
-                        )
-                    },
-                )
-                .when(!compact && running.is_none(), |slot| {
-                    slot.child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .group_hover(row_id.clone(), |time| time.invisible())
-                            .children(
-                                snapshot
-                                    .and_then(|snapshot| {
-                                        chrono::DateTime::parse_from_rfc3339(&snapshot.updated_at)
+                                .text_secondary(false, cx)
+                                .group_hover(row_id.clone(), |time| time.invisible())
+                                .children(
+                                    snapshot
+                                        .and_then(|snapshot| {
+                                            chrono::DateTime::parse_from_rfc3339(
+                                                &snapshot.updated_at,
+                                            )
                                             .ok()
-                                    })
-                                    .map(|updated| {
-                                        crate::time::humanize_ago(
-                                            tcode_core::project::now_secs()
-                                                .saturating_sub(updated.timestamp().max(0) as u64),
-                                        )
-                                    }),
-                            ),
-                    )
-                })
-                .child(
-                    Button::new(SharedString::from(format!(
-                        "pr-menu-{}-{}-{}",
-                        key.host, key.repository, key.number
-                    )))
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::Ellipsis)
-                    .aria_label(
-                        crate::tr!("pull_requests.actions_for", number = key.number.to_string())
-                            .into_owned(),
-                    )
-                    .tooltip(
-                        crate::tr!("pull_requests.actions_for", number = key.number.to_string())
-                            .into_owned(),
-                    )
-                    .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)))
-                    .when(!compact, |button| {
-                        button
-                            .absolute()
-                            .right_0()
-                            .top_0()
-                            .opacity(0.)
-                            .group_hover(row_id.clone(), |button| button.opacity(1.))
-                            .focus(|button| button.opacity(1.))
+                                        })
+                                        .map(|updated| {
+                                            crate::time::humanize_ago(
+                                                tcode_core::project::now_secs().saturating_sub(
+                                                    updated.timestamp().max(0) as u64,
+                                                ),
+                                            )
+                                        }),
+                                ),
+                        )
                     })
-                    .dropdown_menu({
-                        let menu = menu.clone();
-                        move |state, window, cx| (menu)(state, window, cx)
-                    })
-                    .touch(compact),
-                ),
-        );
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "pr-menu-{}-{}-{}",
+                            key.host, key.repository, key.number
+                        )))
+                        .ghost()
+                        .small()
+                        .compact()
+                        .icon(IconName::Ellipsis)
+                        .aria_label(
+                            crate::tr!(
+                                "pull_requests.actions_for",
+                                number = key.number.to_string()
+                            )
+                            .into_owned(),
+                        )
+                        .tooltip(
+                            crate::tr!(
+                                "pull_requests.actions_for",
+                                number = key.number.to_string()
+                            )
+                            .into_owned(),
+                        )
+                        .when(!compact, |button| {
+                            button
+                                .absolute()
+                                .right_0()
+                                .top_0()
+                                .opacity(0.)
+                                .group_hover(row_id.clone(), |button| button.opacity(1.))
+                                .focus(|button| button.opacity(1.))
+                        })
+                        .dropdown_menu({
+                            let menu = menu.clone();
+                            move |state, window, cx| (menu)(state, window, cx)
+                        })
+                        .touch(compact),
+                    ),
+            );
 
         row.context_menu(move |state, window, cx| (menu)(state, window, cx))
             .touch(compact)
@@ -1322,12 +1308,7 @@ impl PullRequestsPanel {
         let open = self.agent_tools_open;
         let muted = cx.theme().muted_foreground;
         let label = crate::tr!("pull_requests.agent_sees").into_owned();
-        let caption = |key: &'static str| {
-            div()
-                .text_size(px(11.))
-                .text_color(muted)
-                .child(crate::tr!(key))
-        };
+        let caption = |key: &'static str| div().text_caption(cx).child(crate::tr!(key));
         let header = crate::material::accessible_clickable(
             h_flex(),
             "pr-agent-tools",
@@ -1336,21 +1317,20 @@ impl PullRequestsPanel {
             cx,
         )
         .aria_expanded(open)
-        .gap_1()
+        .gap(cx.theme().tokens.spacing.xs)
         .items_center()
-        .text_size(px(12.))
-        .text_color(muted)
+        .text_secondary(false, cx)
         .cursor_pointer()
-        .child(Icon::new(IconName::Bot).size(px(12.)))
+        .child(Icon::new(IconName::Bot))
         .child(label)
         .on_click(cx.listener(|this, _, _, cx| {
             this.agent_tools_open = !this.agent_tools_open;
             cx.notify();
         }));
         let body = v_flex()
-            .pt_1()
-            .gap_2()
-            .text_size(px(12.))
+            .pt(cx.theme().tokens.spacing.xs)
+            .gap(cx.theme().tokens.spacing.sm)
+            .text_token(&cx.theme().tokens.typography.xs)
             .child(caption("pull_requests.agent_tools"))
             .children(tools.tools.iter().map(|(name, description)| {
                 v_flex()
@@ -1400,7 +1380,7 @@ impl PullRequestsPanel {
                         };
                         v_flex()
                             .gap_0p5()
-                            .child(div().text_size(px(11.)).text_color(muted).child(channel))
+                            .child(div().text_caption(cx).child(channel))
                             .child(crate::chat::components::disclosure::disclosure_body(
                                 &format!("pr-agent-instructions-{index}"),
                                 &injected.text,
@@ -1410,8 +1390,8 @@ impl PullRequestsPanel {
             );
         v_flex()
             .flex_none()
-            .px_3()
-            .py_2()
+            .px(px(crate::material::CARD_INSET))
+            .py(cx.theme().tokens.spacing.sm)
             .child(header)
             .child(gpui_base::Collapsible::new().open(open).content(body))
             .into_any_element()
@@ -1477,14 +1457,10 @@ impl Render for PullRequestsPanel {
                 continue;
             }
             rows = rows.child(
-                h_flex()
-                    .px_3()
-                    .py_2()
-                    .gap_2()
+                crate::material::card(cx)
+                    .flex_row()
                     .items_center()
-                    .rounded_md()
-                    .bg(cx.theme().muted)
-                    .text_size(px(12.))
+                    .text_token(&cx.theme().tokens.typography.xs)
                     .child(div().flex_1().child(sync_error(
                         link,
                         &host_name(self.store.read(cx), &link.key.host),
@@ -1634,11 +1610,7 @@ impl Render for PullRequestsPanel {
                 )
             ));
         }
-        let summary = div()
-            .flex_1()
-            .text_size(px(if compact { 13. } else { 11. }))
-            .text_color(cx.theme().muted_foreground)
-            .child(summary);
+        let summary = div().flex_1().text_secondary(compact, cx).child(summary);
         if compact {
             // The bottom sheet scrolls its own content, so the list keeps its natural height.
             return v_flex()
@@ -1672,11 +1644,7 @@ impl Render for PullRequestsPanel {
             )
             .children(agent_tools)
             .child(
-                h_flex()
-                    .flex_none()
-                    .h(px(32.))
-                    .px_2()
-                    .gap_2()
+                crate::material::bar("pr-footer", crate::material::Bar::Toolbar, false, cx)
                     .items_center()
                     .border_t_1()
                     .border_color(cx.theme().border)
@@ -1762,15 +1730,15 @@ impl Render for LinkDialog {
             .gap_3()
             .child(
                 div()
-                    .text_size(px(13.))
+                    .text_body(false, cx)
                     .text_color(cx.theme().muted_foreground)
                     .child(description.into_owned()),
             )
             .child(Input::new(&self.input).disabled(self.pending))
             .child(
                 div()
-                    .min_h(px(16.))
-                    .text_size(px(12.))
+                    .min_h(cx.theme().tokens.typography.xs.line_height)
+                    .text_token(&cx.theme().tokens.typography.xs)
                     .text_color(cx.theme().danger)
                     .child(self.error.clone().unwrap_or_default()),
             )
@@ -1834,7 +1802,6 @@ pub fn open_link_dialog(
     });
     window.open_dialog(cx, move |base, _, cx| {
         base.title(crate::tr!("pull_requests.dialog_title").into_owned())
-            .w(px(460.))
             .keyboard(!dialog.read(cx).pending)
             .close_button(!dialog.read(cx).pending)
             .overlay_closable(!dialog.read(cx).pending)

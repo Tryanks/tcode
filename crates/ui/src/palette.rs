@@ -12,12 +12,10 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::input::{Input, InputEvent, InputState};
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
 use agent::ProviderKind;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
@@ -25,7 +23,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, list,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
 
 use crate::provider_card::provider_glyph;
@@ -34,6 +32,10 @@ use crate::settings_page::apply_theme;
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
+
+/// How far below the window's top the desktop palette hangs. See the host's
+/// note in [`CommandPalette`]'s render on why it does not use `overlay::Dialog`.
+const DESKTOP_TOP_OFFSET: f32 = 96.;
 
 /// Score `text` against a fuzzy `query` (case-insensitive subsequence match).
 /// Returns `None` when `query` is not a subsequence of `text`; a higher score
@@ -631,9 +633,7 @@ impl CommandPalette {
                     .px_2()
                     .pt_1()
                     .pb_1()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(muted)
+                    .text_caption(cx)
                     .child(label.clone())
                     .into_any_element();
             }
@@ -642,98 +642,91 @@ impl CommandPalette {
         let item = &items[index];
         let is_sel = index == self.selected;
         let action = item.action.clone();
+        // Every result takes the two-line row, so the list's uniform height
+        // hint holds whether or not a result has a subtitle.
+        let row = crate::material::selectable_row_two_line(
+            h_flex().id(("palette-row", index)),
+            is_sel,
+            compact,
+            cx,
+        );
         div()
             .pb_1()
             .child(
-                h_flex()
-                    .id(("palette-row", index))
-                    .debug_selector({
-                        let action = action.clone();
-                        move || match &action {
-                            Action::NewThread { project_id, .. } => {
-                                format!("palette-new-thread-{project_id}")
-                            }
-                            _ => format!("palette-row-{index}"),
+                row.debug_selector({
+                    let action = action.clone();
+                    move || match &action {
+                        Action::NewThread { project_id, .. } => {
+                            format!("palette-new-thread-{project_id}")
                         }
-                    })
-                    .role(Role::ListBoxOption)
-                    .aria_label(item.label.clone())
-                    .aria_selected(is_sel)
-                    .when(is_sel, |row| row.aria_active_descendant())
-                    .flex_none()
-                    .w_full()
-                    .h(px(if compact { 48. } else { 38. }))
-                    .px_2()
-                    .gap_2()
-                    .items_center()
-                    .rounded(cx.theme().tokens.radius.sm)
-                    .cursor_pointer()
-                    .when(is_sel, |s| s.bg(cx.theme().list_active))
-                    .when(!is_sel, |s| {
-                        s.hover(|style| style.bg(cx.theme().list_hover))
-                    })
-                    .child(match &item.action {
-                        Action::ChangeProjectIcon(project) => {
+                        _ => format!("palette-row-{index}"),
+                    }
+                })
+                .role(Role::ListBoxOption)
+                .aria_label(item.label.clone())
+                .aria_selected(is_sel)
+                .when(is_sel, |row| row.aria_active_descendant())
+                .flex_none()
+                .w_full()
+                .cursor_pointer()
+                .child(match &item.action {
+                    Action::ChangeProjectIcon(project) => {
+                        crate::project_icon::artwork(project, 16.).into_any_element()
+                    }
+                    Action::NewThread { project_id, .. } => self
+                        .store
+                        .read(cx)
+                        .project(project_id)
+                        .map(|project| {
                             crate::project_icon::artwork(project, 16.).into_any_element()
-                        }
-                        Action::NewThread { project_id, .. } => self
-                            .store
-                            .read(cx)
-                            .project(project_id)
-                            .map(|project| {
-                                crate::project_icon::artwork(project, 16.).into_any_element()
-                            })
-                            .unwrap_or_else(|| {
-                                Icon::new(item.icon.clone())
-                                    .small()
-                                    .text_color(muted)
-                                    .into_any_element()
-                            }),
-                        _ => Icon::new(item.icon.clone())
-                            .small()
-                            .text_color(muted)
-                            .into_any_element(),
-                    })
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
+                        })
+                        .unwrap_or_else(|| {
+                            Icon::new(item.icon.clone())
+                                .text_color(muted)
+                                .into_any_element()
+                        }),
+                    _ => Icon::new(item.icon.clone())
+                        .text_color(muted)
+                        .into_any_element(),
+                })
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_body(compact, cx)
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(item.label.clone()),
+                        )
+                        .when_some(item.subtitle.clone(), |this, sub| {
+                            this.child(
                                 div()
-                                    .text_size(px(15.))
+                                    .text_secondary(compact, cx)
                                     .overflow_hidden()
                                     .text_ellipsis()
-                                    .child(item.label.clone()),
+                                    .child(sub),
                             )
-                            .when_some(item.subtitle.clone(), |this, sub| {
-                                this.child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(muted)
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .child(sub),
-                                )
-                            }),
+                        }),
+                )
+                .when_some(item.provider, |this, provider| {
+                    this.child(
+                        h_flex()
+                            .flex_none()
+                            .gap_1p5()
+                            .items_center()
+                            .text_secondary(compact, cx)
+                            .when_some(item.updated_at, |this, at| {
+                                let ago = now_secs().saturating_sub(at);
+                                this.child(div().child(humanize_ago(ago)))
+                            })
+                            .child(provider_glyph(provider)),
                     )
-                    .when_some(item.provider, |this, provider| {
-                        this.child(
-                            h_flex()
-                                .flex_none()
-                                .gap_1p5()
-                                .items_center()
-                                .text_size(px(11.))
-                                .text_color(muted)
-                                .when_some(item.updated_at, |this, at| {
-                                    let ago = now_secs().saturating_sub(at);
-                                    this.child(div().child(humanize_ago(ago)))
-                                })
-                                .child(provider_glyph(provider).xsmall()),
-                        )
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate(action.clone(), window, cx);
-                    })),
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.activate(action.clone(), window, cx);
+                })),
             )
             .into_any_element()
     }
@@ -757,20 +750,21 @@ impl Render for CommandPalette {
         let muted = cx.theme().muted_foreground;
         let viewport = window.viewport_size();
         let insets = crate::window_seam::content_insets(window);
-        let available =
-            (viewport.height - insets.top - insets.bottom - px(if compact { 52. } else { 120. }))
-                .max(px(0.));
+        // A sheet stops a window strip short of the top; the desktop card hangs
+        // `DESKTOP_TOP_OFFSET` down and keeps a section gap clear below.
+        let reserve = if compact {
+            px(crate::window_caption::CAPTION_STRIP_HEIGHT)
+        } else {
+            px(DESKTOP_TOP_OFFSET) + crate::material::section_gap(cx)
+        };
+        let available = (viewport.height - insets.top - insets.bottom - reserve).max(px(0.));
+        let height = px(crate::overlay::DIALOG_LIST_HEIGHT).min(available);
         let dismissal = self.outside_dismissal.clone();
 
         let body = if total == 0 {
-            div()
+            crate::material::empty_row(crate::tr!("palette.no_matches"), cx)
                 .flex_1()
                 .min_h_0()
-                .px(px(if compact { 24. } else { 16. }))
-                .py_4()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(crate::tr!("palette.no_matches"))
                 .into_any_element()
         } else {
             crate::scroll::page_viewport(
@@ -784,7 +778,11 @@ impl Render for CommandPalette {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .px(px(if compact { 16. } else { 8. }))
+                    .px(if compact {
+                        px(crate::material::COMPACT_PAGE_INSET)
+                    } else {
+                        cx.theme().tokens.spacing.sm
+                    })
                     .py_2()
                     .child(
                         list(
@@ -795,39 +793,31 @@ impl Render for CommandPalette {
                         )
                         .size_full(),
                     )
+                    // material::selectable_row_two_line's height, which it
+                    // does not expose, and the row's bottom gap.
                     .child(crate::scroll::list_height_hint(
                         &self.list_state,
-                        px(if compact { 52. } else { 42. }),
+                        px(if compact { 56. } else { 48. }) + cx.theme().tokens.spacing.xs,
                     )),
             )
             .into_any_element()
         };
 
-        let card = crate::material::overlay_contour(
-            v_flex()
-                .w(if compact {
-                    viewport.width
-                } else {
-                    px(640.).min(viewport.width - px(32.))
-                })
-                .h(px(440.).min(available))
-                .when(compact, |card| {
-                    card.rounded_t(crate::material::radius_overlay_sheet(cx))
-                })
-                .when(!compact, |card| {
-                    card.rounded(crate::material::radius_overlay(cx))
-                })
-                .overflow_hidden(),
-            cx,
-        )
+        let surface = v_flex().h(height).overflow_hidden();
+        let card = if compact {
+            crate::material::sheet_contour(surface.w(viewport.width), cx)
+        } else {
+            crate::material::overlay_contour(
+                surface
+                    .w(crate::sizing::fit_viewport(640., viewport.width))
+                    .rounded(crate::material::radius_overlay(cx)),
+                cx,
+            )
+        }
         .child(
-            h_flex()
-                .flex_none()
-                .h(px(48.))
-                .px(px(if compact { 16. } else { 12. }))
-                .gap_2()
+            crate::material::bar("palette-header", crate::material::Bar::Toolbar, compact, cx)
                 .items_center()
-                .child(Icon::new(IconName::Search).small().text_color(muted))
+                .child(Icon::new(IconName::Search).text_color(muted))
                 .child(
                     div().flex_1().child(
                         Input::new(&self.query)
@@ -839,14 +829,10 @@ impl Render for CommandPalette {
         .child(body)
         .when(!compact, |card| {
             card.child(
-                h_flex()
-                    .flex_none()
-                    .h(px(34.))
-                    .px_3()
-                    .gap_3()
+                crate::material::bar("palette-footer", crate::material::Bar::Section, false, cx)
                     .items_center()
-                    .text_size(px(11.))
-                    .text_color(muted)
+                    .gap(cx.theme().tokens.spacing.md)
+                    .text_secondary(false, cx)
                     .child(crate::tr!("palette.navigate"))
                     .child(crate::tr!("palette.select"))
                     .child(crate::tr!("palette.close")),
@@ -868,6 +854,9 @@ impl Render for CommandPalette {
                 cx.stop_propagation();
             });
         let palette = cx.entity();
+        // overlay::Dialog centres a form at h/10 and pads it; the palette owns
+        // its list viewport and anchors to the keyboard-safe edge, so it hosts
+        // itself on gpui-base's Sheet and Dialog.
         if compact {
             let close = palette.clone();
             let binding = crate::overlay::bind_sheet(
@@ -909,10 +898,7 @@ impl Render for CommandPalette {
                         .left_0()
                         .bottom(
                             insets.bottom
-                                - crate::edge_back::BackProgress::offset(
-                                    progress,
-                                    px(440.).min(available),
-                                ),
+                                - crate::edge_back::BackProgress::offset(progress, height),
                         )
                         .child(card),
                 )
@@ -938,7 +924,7 @@ impl Render for CommandPalette {
             .items_center()
             .when(compact, |host| host.justify_end().pb(insets.bottom))
             .when(!compact, |host| {
-                host.justify_start().pt(insets.top + px(96.))
+                host.justify_start().pt(insets.top + px(DESKTOP_TOP_OFFSET))
             })
             .into_any_element()
     }

@@ -17,7 +17,7 @@ use gpui::{
     Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, Window, div, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 use tcode_client::HostLink;
 use tcode_core::settings::{Settings, TraverseInstance, TraverseSetting, TraverseSource};
 use tcode_protocol::{
@@ -30,41 +30,18 @@ use tcode_traverse::{DeviceInfo, HostConfig, HostMux, Invitation, TraverseHost};
 use super::qr::beside_qr;
 use super::spaces::SpacesSection;
 use crate::icon::IconName;
+use crate::material::{group_caption, group_row, group_row_stacked};
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::switch::Switch;
 
 /// How often the devices list re-reads which path each connection is on.
 const DEVICE_REFRESH: Duration = Duration::from_secs(2);
-
-/// A caption above one group of this settings-like page. Grouped cards, not
-/// the plain content-list rows Machines uses.
-fn section_caption(label: SharedString, cx: &App) -> AnyElement {
-    div()
-        .pl_3()
-        .pb(px(6.))
-        .text_size(px(11.))
-        .font_medium()
-        .text_color(cx.theme().muted_foreground)
-        .child(label)
-        .into_any_element()
-}
-
-/// A line of explanation inside a group.
-fn note(text: SharedString, cx: &App) -> AnyElement {
-    div()
-        .w_full()
-        .px_3()
-        .py_3()
-        .text_size(px(13.))
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
-        .into_any_element()
-}
 
 pub struct RemoteController {
     mux: HostMux,
@@ -309,44 +286,31 @@ pub fn machine_name() -> String {
 
 /// One hosting settings row: label and description left, control right. A
 /// compact page has no room for two columns — the description would be squeezed
-/// to a word per line — so it puts the control full width underneath the text,
-/// which is the same rule `SettingsPage::row_frame` applies.
-fn row(compact: bool) -> gpui::Div {
+/// to a word per line — so it puts the control full width underneath the text.
+/// A row whose control is a switch uses [`group_row`] at both widths: a switch
+/// never squeezes the label.
+fn row(compact: bool, cx: &App) -> gpui::Div {
     if compact {
-        v_flex()
-            .w_full()
-            .min_h(px(44.))
-            .px_3()
-            .py_2p5()
-            .gap_2()
-            .items_start()
+        group_row_stacked(cx)
     } else {
-        switch_row()
+        group_row(cx)
     }
-}
-
-/// A row whose control is a fixed 44pt affordance (a switch): it never squeezes
-/// the label, so it stays beside it at both widths.
-fn switch_row() -> gpui::Div {
-    h_flex()
-        .w_full()
-        .min_h(px(44.))
-        .px_3()
-        .py_2p5()
-        .gap_3()
-        .items_center()
 }
 
 /// A row whose control is a text field beside the label. The label keeps
 /// [`FIELD_LABEL_BASIS`] of the width, so where the field does not fit
 /// beside it the field wraps under the label instead of squeezing it.
-fn field_row(compact: bool) -> gpui::Div {
+fn field_row(compact: bool, cx: &App) -> gpui::Div {
     if compact {
-        row(true)
+        group_row_stacked(cx)
     } else {
-        switch_row().flex_wrap()
+        group_row(cx).flex_wrap()
     }
 }
+
+/// A text field's width beside its label on a wide settings row; no owner
+/// supplies a settings field width (`SettingsPage` uses the same 240).
+const FIELD_WIDTH: f32 = 240.;
 
 /// The width a [`field_row`]'s label keeps before its field wraps under it.
 const FIELD_LABEL_BASIS: f32 = 200.;
@@ -356,24 +320,31 @@ const FIELD_LABEL_BASIS: f32 = 200.;
 const STATUS_MIN_WIDTH: f32 = 96.;
 
 /// [`labels`] for a [`field_row`].
-fn field_labels(title: SharedString, description: Option<SharedString>, cx: &App) -> gpui::Div {
-    labels(title, description, cx).flex_basis(px(FIELD_LABEL_BASIS))
+fn field_labels(
+    title: SharedString,
+    description: Option<SharedString>,
+    compact: bool,
+    cx: &App,
+) -> gpui::Div {
+    labels(title, description, compact, cx).flex_basis(px(FIELD_LABEL_BASIS))
 }
 
 /// A row's title, with a description only where it says something the
 /// title and the control do not.
-fn labels(title: SharedString, description: Option<SharedString>, cx: &App) -> gpui::Div {
+fn labels(
+    title: SharedString,
+    description: Option<SharedString>,
+    compact: bool,
+    cx: &App,
+) -> gpui::Div {
     v_flex()
         .flex_1()
         .min_w_0()
-        .gap_0p5()
-        .child(div().text_size(px(15.)).font_medium().child(title))
-        .children(description.map(|description| {
-            div()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(description)
-        }))
+        .gap(cx.theme().tokens.spacing.xxs)
+        .child(div().text_title(cx).child(title))
+        .children(
+            description.map(|description| div().text_secondary(compact, cx).child(description)),
+        )
 }
 
 fn countdown(seconds: u64) -> String {
@@ -729,10 +700,11 @@ impl HostingPanel {
             .try_global::<RemoteController>()
             .map(|controller| (controller.is_hosting(), controller.pairing_enabled()))
             .unwrap_or_default();
-        let toggle = switch_row()
+        let toggle = group_row(cx)
             .child(labels(
                 crate::tr!("remote.host.title").into_owned().into(),
                 None,
+                compact,
                 cx,
             ))
             .child(
@@ -744,11 +716,12 @@ impl HostingPanel {
             )
             .into_any_element();
         let pairing_row = hosting.then(|| {
-            switch_row()
+            group_row(cx)
                 .debug_selector(|| "remote-pairing".into())
                 .child(labels(
                     crate::tr!("remote.pairing.title").into_owned().into(),
                     None,
+                    compact,
                     cx,
                 ))
                 .child(
@@ -760,7 +733,7 @@ impl HostingPanel {
                 )
                 .into_any_element()
         });
-        let name_row = field_row(compact)
+        let name_row = field_row(compact, cx)
             .child(field_labels(
                 crate::tr!("remote.host_name.title").into_owned().into(),
                 Some(
@@ -768,32 +741,33 @@ impl HostingPanel {
                         .into_owned()
                         .into(),
                 ),
+                compact,
                 cx,
             ))
             .child(
                 div()
                     .when(compact, |field| field.w_full())
                     .when(!compact, |field| {
-                        field.w(px(240.)).min_w_0().flex_shrink(1.)
+                        field.w(px(FIELD_WIDTH)).min_w_0().flex_shrink(1.)
                     })
                     .child(Input::new(&self.host_name_input)),
             )
             .into_any_element();
         let traverse_rows = self.render_traverse(compact, cx);
-        let mut column = v_flex().w_full().gap_3().child(
-            v_flex()
-                .child(section_caption(
-                    crate::tr!("remote.host.section").into_owned().into(),
-                    cx,
-                ))
-                .child(
-                    crate::material::group(cx)
-                        .child(toggle)
-                        .children(pairing_row)
-                        .child(name_row)
-                        .children(traverse_rows),
-                ),
-        );
+        let mut column = v_flex()
+            .w_full()
+            .gap(crate::material::section_gap(cx))
+            .child(
+                v_flex()
+                    .child(group_caption(crate::tr!("remote.host.section"), cx))
+                    .child(
+                        crate::material::group(cx)
+                            .child(toggle)
+                            .children(pairing_row)
+                            .child(name_row)
+                            .children(traverse_rows),
+                    ),
+            );
         if hosting {
             column = column
                 .child(self.render_devices(compact, cx))
@@ -810,14 +784,14 @@ impl HostingPanel {
             div()
                 .when(compact, |field| field.flex_1().min_w_0())
                 .when(!compact, |field| {
-                    field.w(px(240.)).min_w_0().flex_shrink(1.)
+                    field.w(px(FIELD_WIDTH)).min_w_0().flex_shrink(1.)
                 })
         };
         let mut rows = vec![
             div()
                 .w_full()
-                .px_3()
-                .pt_3()
+                .px(px(crate::material::CARD_INSET))
+                .pt(px(crate::material::CARD_INSET))
                 .child(labels(
                     crate::tr!("remote.traverse.title").into_owned().into(),
                     Some(
@@ -825,6 +799,7 @@ impl HostingPanel {
                             .into_owned()
                             .into(),
                     ),
+                    compact,
                     cx,
                 ))
                 .into_any_element(),
@@ -850,8 +825,7 @@ impl HostingPanel {
                             .flex_1()
                             .min_w_0()
                             .justify_end()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().muted_foreground)
+                            .text_secondary(false, cx)
                             .child(
                                 div()
                                     .min_w_0()
@@ -897,10 +871,11 @@ impl HostingPanel {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.remove_traverse(index, window, cx);
                     }));
-                    field_row(compact)
+                    field_row(compact, cx)
                         .child(field_labels(
                             crate::tr!("remote.traverse.custom").into_owned().into(),
                             Some(description),
+                            compact,
                             cx,
                         ))
                         .child(
@@ -922,11 +897,12 @@ impl HostingPanel {
                                 .child(switch),
                         )
                 }
-                _ => switch_row()
+                _ => group_row(cx)
                     .child(
                         labels(
                             crate::tr!("remote.traverse.official").into_owned().into(),
                             None,
+                            compact,
                             cx,
                         )
                         .when(slot.is_some(), |labels| labels.flex_none()),
@@ -938,7 +914,13 @@ impl HostingPanel {
                 v_flex()
                     .w_full()
                     .child(element)
-                    .children(detail.map(|detail| div().w_full().px_3().pb_2p5().child(detail)))
+                    .children(detail.map(|detail| {
+                        div()
+                            .w_full()
+                            .px(px(crate::material::CARD_INSET))
+                            .pb(cx.theme().tokens.spacing.sm)
+                            .child(detail)
+                    }))
                     .into_any_element(),
             );
         }
@@ -950,10 +932,11 @@ impl HostingPanel {
                 .into(),
         };
         rows.push(
-            field_row(compact)
+            field_row(compact, cx)
                 .child(field_labels(
                     crate::tr!("remote.traverse.add_title").into_owned().into(),
                     Some(add_description),
+                    compact,
                     cx,
                 ))
                 .child(
@@ -1017,8 +1000,8 @@ impl HostingPanel {
             .and_then(|spaces| spaces.read(cx).group().map(|group| group.name.clone()));
         let mut group = crate::material::group(cx);
         if devices.is_empty() {
-            group = group.child(note(
-                crate::tr!("remote.devices.empty").into_owned().into(),
+            group = group.child(crate::material::empty_row(
+                crate::tr!("remote.devices.empty"),
                 cx,
             ));
         }
@@ -1038,7 +1021,7 @@ impl HostingPanel {
                 .filter(|_| device.access == DeviceAccess::Full);
             let device_name = device.name.clone();
             group = group.child(
-                row(compact)
+                row(compact, cx)
                     .child(
                         h_flex()
                             .flex_1()
@@ -1049,6 +1032,7 @@ impl HostingPanel {
                                 super::device_label(&device.name, device.platform.as_deref())
                                     .into(),
                                 None,
+                                compact,
                                 cx,
                             ))
                             .children(space.map(|name| super::spaces::member_badge(name, cx))),
@@ -1060,7 +1044,7 @@ impl HostingPanel {
                             .when(compact, |controls| controls.w_full().justify_between())
                             .child(
                                 div()
-                                    .text_size(px(13.))
+                                    .text_secondary(compact, cx)
                                     .text_color(status_color)
                                     .child(status),
                             )
@@ -1107,10 +1091,7 @@ impl HostingPanel {
             );
         }
         v_flex()
-            .child(section_caption(
-                crate::tr!("remote.devices.section").into_owned().into(),
-                cx,
-            ))
+            .child(group_caption(crate::tr!("remote.devices.section"), cx))
             .child(group)
             .into_any_element()
     }
@@ -1215,9 +1196,9 @@ fn traverse_status_toggle(
     .gap_1p5()
     .items_center()
     .cursor_pointer()
-    .text_size(px(12.))
-    .text_color(cx.theme().muted_foreground)
+    .text_secondary(false, cx)
     .child(
+        // The manifest's status dot: a glyph, not text, so no token sizes it.
         div()
             .flex_none()
             .size(px(8.))
@@ -1230,7 +1211,6 @@ fn traverse_status_toggle(
         } else {
             IconName::ChevronDown
         })
-        .size(px(12.))
         .flex_none(),
     )
     .child(div().min_w_0().truncate().child(summary))
@@ -1246,10 +1226,8 @@ fn traverse_status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement
     let danger = cx.theme().danger;
     let heading = |text: SharedString| {
         div()
-            .pt_1()
-            .text_size(px(11.))
-            .font_medium()
-            .text_color(muted)
+            .pt(cx.theme().tokens.spacing.xs)
+            .text_caption(cx)
             .child(text)
     };
     let line = |name: String, value: AnyElement| {
@@ -1261,13 +1239,7 @@ fn traverse_status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement
             .child(div().min_w_0().truncate().child(name))
             .child(value)
     };
-    let error = |text: &str| {
-        div()
-            .w_full()
-            .text_size(px(12.))
-            .text_color(danger)
-            .child(text.to_owned())
-    };
+    let error = |text: &str| div().w_full().text_color(danger).child(text.to_owned());
     let manifest = &status.manifest;
     let mut manifest_value = vec![manifest_word(manifest.state).to_string()];
     if let Some(fetched) = manifest.fetched_unix {
@@ -1279,14 +1251,9 @@ fn traverse_status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement
             .into_owned(),
         );
     }
-    let mut column = v_flex()
+    let mut column = crate::material::card(cx)
         .w_full()
-        .gap_1()
-        .px_2()
-        .py_1p5()
-        .rounded(crate::material::radius_input(cx))
-        .bg(cx.theme().muted.opacity(0.5))
-        .text_size(px(12.))
+        .text_token(&cx.theme().tokens.typography.xs)
         .child(line(
             crate::tr!("remote.traverse.status.manifest").into_owned(),
             div()
@@ -1380,7 +1347,6 @@ pub(super) fn invitation_card<V: 'static>(
     remaining: u64,
     group: Option<String>,
     compact: bool,
-    inset: f32,
     cx: &mut Context<V>,
 ) -> AnyElement {
     let link = invitation.url();
@@ -1390,20 +1356,14 @@ pub(super) fn invitation_card<V: 'static>(
         .gap_3()
         .child(
             div()
-                .text_size(px(15.))
-                .line_height(px(20.))
+                .text_body(true, cx)
                 .child(crate::tr!("hosts.invite.description")),
         )
-        .children(group.map(|name| super::group::invitation_note(&name, cx)))
-        .child(
-            div()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!(
-                    "remote.invite.expires",
-                    time = countdown(remaining)
-                )),
-        )
+        .children(group.map(|name| super::group::invitation_note(&name, true, cx)))
+        .child(div().text_secondary(true, cx).child(crate::tr!(
+            "remote.invite.expires",
+            time = countdown(remaining)
+        )))
         .child(
             h_flex()
                 .gap_2()
@@ -1434,18 +1394,18 @@ pub(super) fn invitation_card<V: 'static>(
                 ),
         );
     beside_qr(text, &link, compact, cx)
-        .px(px(inset))
-        .py(px(8.))
+        .px(px(crate::material::COMPACT_PAGE_INSET))
+        .py(cx.theme().tokens.spacing.sm)
         .debug_selector(|| "remote-invitation".into())
         .into_any_element()
 }
 
 /// The invitation ran out: say so, next to the button that mints another.
-pub(super) fn expired_invitation_row<V: 'static>(inset: f32, cx: &mut Context<V>) -> AnyElement {
+pub(super) fn expired_invitation_row<V: 'static>(cx: &mut Context<V>) -> AnyElement {
     h_flex()
         .w_full()
-        .px(px(inset))
-        .py(px(8.))
+        .px(px(crate::material::COMPACT_PAGE_INSET))
+        .py(cx.theme().tokens.spacing.sm)
         .gap_3()
         .items_center()
         .debug_selector(|| "remote-invitation-expired".into())
@@ -1453,7 +1413,7 @@ pub(super) fn expired_invitation_row<V: 'static>(inset: f32, cx: &mut Context<V>
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(15.))
+                .text_body(true, cx)
                 .child(crate::tr!("remote.invite.expired")),
         )
         .child(new_invitation_button("remote-new-invitation", cx).primary())

@@ -2,9 +2,9 @@
 use crate::{
     icon::{Icon, IconName},
     overlay::OverlayExt as _,
-    sizing::fit_viewport,
     store::{WorkspaceStore, images},
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         button::{Button, ButtonVariants as _},
         input::{Input, InputEvent, InputState},
@@ -69,13 +69,13 @@ pub(crate) fn open(
     picker.update(cx, |picker, cx| {
         picker.browse(picker.project.root.clone(), window, cx)
     });
-    window.open_dialog(cx, move |dialog, window, _| {
+    window.open_dialog(cx, move |dialog, _, _| {
         let content = picker.clone();
         dialog
             // Enter in a path or filter field must not confirm the dialog.
             .on_ok(|_, _, _| false)
             .title(crate::tr!("project_icon.title"))
-            .w(fit_viewport(680., window.viewport_size().width))
+            .wide()
             .content(move |el, _, _| el.child(content.clone()))
     });
 }
@@ -247,7 +247,7 @@ impl Picker {
         .gap_1()
         .items_center()
         .justify_center()
-        .rounded(cx.theme().tokens.radius.md)
+        .rounded(crate::material::radius_card(cx))
         .border_1()
         .border_color(if is_selected {
             cx.theme().primary
@@ -273,7 +273,7 @@ impl Picker {
             div()
                 .w_full()
                 .truncate()
-                .text_size(px(11.))
+                .text_secondary(false, cx)
                 .child(entry.name.clone()),
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -313,19 +313,15 @@ impl Render for Picker {
         let columns = ((f32::from(self.grid_width) + TILE_GAP) / (TILE_WIDTH + TILE_GAP))
             .floor()
             .max(1.) as usize;
+        // The grid is a uniform_list, which needs a definite height; it shares
+        // the dialog with the path and search fields, so it takes what the
+        // window leaves instead of DIALOG_LIST_HEIGHT.
         let viewport_height =
             (f32::from(window.viewport_size().height) * 0.9 - 360.).clamp(48., 320.);
         let content = if self.loading {
-            div()
-                .p_4()
-                .child(crate::tr!("project_icon.loading"))
-                .into_any_element()
+            crate::material::empty_row(crate::tr!("project_icon.loading"), cx).into_any_element()
         } else if matches.is_empty() {
-            div()
-                .p_4()
-                .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!("project_icon.empty"))
-                .into_any_element()
+            crate::material::empty_row(crate::tr!("project_icon.empty"), cx).into_any_element()
         } else {
             let rows = matches.len().div_ceil(columns);
             let list = uniform_list(
@@ -371,12 +367,9 @@ impl Render for Picker {
                     .items_center()
                     .child(artwork(&self.project, 32.))
                     .child(
-                        v_flex().child(self.project.name.clone()).child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(host),
-                        ),
+                        v_flex()
+                            .child(div().text_body(false, cx).child(self.project.name.clone()))
+                            .child(div().text_secondary(false, cx).child(host)),
                     ),
             )
             .child(
@@ -447,22 +440,19 @@ impl Render for Picker {
             .when_some(self.error.clone(), |el, error| {
                 el.child(
                     div()
-                        .text_size(px(12.))
+                        .text_secondary(false, cx)
                         .text_color(cx.theme().danger)
                         .child(error),
                 )
             })
             .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(
-                        self.entries
-                            .iter()
-                            .find(|entry| Some(&entry.path) == selected.as_ref())
-                            .map(|entry| entry.name.clone())
-                            .unwrap_or_else(|| crate::tr!("project_icon.hint").into_owned()),
-                    ),
+                div().text_secondary(false, cx).child(
+                    self.entries
+                        .iter()
+                        .find(|entry| Some(&entry.path) == selected.as_ref())
+                        .map(|entry| entry.name.clone())
+                        .unwrap_or_else(|| crate::tr!("project_icon.hint").into_owned()),
+                ),
             )
             .child(
                 h_flex()

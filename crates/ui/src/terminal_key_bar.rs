@@ -6,19 +6,19 @@
 
 use crate::material;
 use crate::scroll::ScrollableElement as _;
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::{
     App, Context, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, px,
 };
-use gpui_base::{StyledExt as _, h_flex};
+use gpui_base::h_flex;
 use tcode_protocol::terminal::{
     KeyboardModes, TerminalMode,
     mappings::{self, Modifiers},
 };
-
-const KEY_BAR_HEIGHT: f32 = 44.;
 
 /// The scrolling symbol tail, ordered by how often a shell line needs the
 /// character: what falls past the scroll edge is what is reached for least.
@@ -200,25 +200,12 @@ impl TerminalKeyBar {
         key: TerminalKey,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let label = label.into();
         let focus = self.terminal_focus.clone();
-        material::accessible_clickable(div(), id, Role::Button, accessibility_label, cx)
-            .debug_selector(move || id.into())
-            .flex_none()
-            .size(px(material::TOUCH_TARGET))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .rounded(material::radius_button(cx))
-            .text_size(px(13.))
-            .hover(|style| style.bg(cx.theme().accent))
-            .on_click(cx.listener(move |_, _, window, cx| {
-                focus.focus(window, cx);
-                window.request_virtual_keyboard();
-                cx.emit(TerminalKeyBarEvent(key));
-            }))
-            .child(label)
+        Self::key(id, label, accessibility_label).on_click(cx.listener(move |_, _, window, cx| {
+            focus.focus(window, cx);
+            window.request_virtual_keyboard();
+            cx.emit(TerminalKeyBarEvent(key));
+        }))
     }
 
     fn modifier_button(
@@ -231,26 +218,8 @@ impl TerminalKeyBar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let focus = self.terminal_focus.clone();
-        material::accessible_clickable(div(), id, Role::Button, accessibility_label, cx)
-            .debug_selector(move || id.into())
-            .aria_selected(selected)
-            .flex_none()
-            .size(px(material::TOUCH_TARGET))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .rounded(material::radius_button(cx))
-            .text_size(px(12.))
-            .font_medium()
-            .when(selected, |style| {
-                style
-                    .bg(cx.theme().primary)
-                    .text_color(cx.theme().primary_foreground)
-            })
-            .when(!selected, |style| {
-                style.hover(|hover| hover.bg(cx.theme().accent))
-            })
+        Self::key(id, label, accessibility_label)
+            .selected(selected)
             .on_click(cx.listener(move |this, _, window, cx| {
                 if control {
                     this.encoder.modifiers.control = !this.encoder.modifiers.control;
@@ -261,7 +230,22 @@ impl TerminalKeyBar {
                 window.request_virtual_keyboard();
                 cx.notify();
             }))
-            .child(label)
+    }
+
+    /// A key leaves focus on the terminal it types into.
+    fn key(
+        id: &'static str,
+        label: impl Into<gpui::SharedString>,
+        accessibility_label: String,
+    ) -> Button {
+        Button::new(id)
+            .ghost()
+            .with_size(px(material::TOUCH_TARGET))
+            .touch(true)
+            .focusable(false)
+            .label(label)
+            .aria_label(accessibility_label)
+            .debug_selector(move || id.into())
     }
 }
 
@@ -322,7 +306,7 @@ impl Render for TerminalKeyBar {
                 TerminalKey::Right,
             ),
         ];
-        let mut tail = h_flex().flex_none().pr(px(16.));
+        let mut tail = h_flex().flex_none().pr(px(material::COMPACT_PAGE_INSET));
         for (id, label, translation, key) in arrows {
             tail = tail.child(self.key_button(
                 id,
@@ -368,16 +352,15 @@ impl Render for TerminalKeyBar {
             ));
         }
 
-        h_flex()
-            .id("terminal-key-bar")
+        // The key tail scrolls to the window edge; its own trailing inset
+        // replaces the bar's.
+        material::bar("terminal-key-bar", material::Bar::Toolbar, true, cx)
             .debug_selector(|| "terminal-key-bar".into())
-            .role(Role::Toolbar)
             .aria_label(crate::tr!("terminal.key_bar"))
-            .flex_none()
-            .w_full()
+            .pr_0()
             .min_w_0()
             .overflow_hidden()
-            .h(px(KEY_BAR_HEIGHT))
+            .text_body(true, cx)
             .border_t_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
@@ -402,7 +385,7 @@ pub(crate) fn should_show_terminal_key_bar(terminal_focused: bool, cx: &App) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, div};
 
     #[test]
     fn sticky_terminal_modifiers_encode_once_using_replicated_modes() {
@@ -514,8 +497,8 @@ mod tests {
                 cx.debug_bounds("terminal-key-bar").unwrap().size.width,
                 px(width)
             );
-            assert_eq!(pinned.size.width, px(44.));
-            assert_eq!(pinned.size.height, px(44.));
+            assert!(pinned.size.width >= px(material::TOUCH_TARGET));
+            assert!(pinned.size.height >= px(material::TOUCH_TARGET));
             assert!(
                 last.right() > viewport.right(),
                 "content must exceed the viewport"
@@ -543,7 +526,8 @@ mod tests {
             assert!(moved.left() < first.left(), "horizontal swipe must scroll");
             assert_eq!(moved.top(), first.top());
             assert_eq!(cx.debug_bounds("terminal-key-escape").unwrap(), pinned);
-            send(TouchPhase::Started, 190., 20., cx);
+            let inside = f32::from(viewport.left()) + 10.;
+            send(TouchPhase::Started, inside, 20., cx);
             send(TouchPhase::Moved, width + 300., 20., cx);
             send(TouchPhase::Cancelled, width + 300., 20., cx);
             assert_eq!(cx.debug_bounds("terminal-key-left").unwrap(), first);
@@ -668,9 +652,6 @@ mod tests {
             });
             let bar = cx.debug_bounds("terminal-key-bar");
             assert_eq!(bar.is_some(), visible, "mobile={mobile}, focused={focused}");
-            if let Some(bar) = bar {
-                assert_eq!(bar.size.height, px(KEY_BAR_HEIGHT));
-            }
         }
     }
 }

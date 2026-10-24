@@ -29,9 +29,8 @@ impl Composer {
                     h_flex()
                         .gap_1p5()
                         .items_center()
-                        .text_size(px(13.))
                         .text_color(muted)
-                        .child(Icon::empty().path("icons/git-branch.svg").xsmall())
+                        .child(Icon::empty().path("icons/git-branch.svg"))
                         .child(picker_current.clone()),
                 )
                 .into_any_element()
@@ -39,6 +38,7 @@ impl Composer {
             let store_open = self.workspace_store.clone();
             let store_content = self.workspace_store.clone();
             let current: Rc<str> = picker_current.as_str().into();
+            let compact = self.compact;
             let trigger = Button::new("branch-picker")
                 .ghost()
                 .outline()
@@ -47,11 +47,10 @@ impl Composer {
                     h_flex()
                         .gap_1p5()
                         .items_center()
-                        .text_size(px(13.))
                         .text_color(muted)
-                        .child(Icon::empty().path("icons/git-branch.svg").xsmall())
+                        .child(Icon::empty().path("icons/git-branch.svg"))
                         .child(picker_current.clone())
-                        .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+                        .child(Icon::new(IconName::ChevronDown)),
                 );
             crate::material::overlay_popover("branch-popover", cx)
                 .anchor(Anchor::BottomRight)
@@ -62,14 +61,18 @@ impl Composer {
                     }
                 })
                 .content(move |_state, _window, cx| {
-                    let muted = cx.theme().muted_foreground;
+                    let spacing = &cx.theme().tokens.spacing;
                     let mut col = v_flex()
                         .w(px(220.))
                         .max_h(px(280.))
                         .pt_1()
                         .px_1()
                         // The last branch row carries its gap.
-                        .pb(px(if branches.is_empty() { 4. } else { 2. }))
+                        .pb(if branches.is_empty() {
+                            spacing.xs
+                        } else {
+                            spacing.xxs
+                        })
                         .gap_0p5();
                     if worktree_mode {
                         col = col.child(
@@ -77,22 +80,15 @@ impl Composer {
                                 .flex_none()
                                 .px_2()
                                 .py_1()
-                                .text_size(px(11.))
-                                .font_medium()
-                                .text_color(muted)
+                                .text_caption(cx)
                                 .child(crate::tr!("composer.worktree_base")),
                         );
                     }
                     if branches.is_empty() {
                         return col
                             .child(
-                                div()
-                                    .flex_none()
-                                    .px_2()
-                                    .py_1p5()
-                                    .text_size(px(13.))
-                                    .text_color(muted)
-                                    .child(crate::tr!("composer.loading")),
+                                crate::material::empty_row(crate::tr!("composer.loading"), cx)
+                                    .flex_none(),
                             )
                             .into_any_element();
                     }
@@ -107,13 +103,27 @@ impl Composer {
                             move |range, _, cx| {
                                 range
                                     .map(|index| {
+                                        let store = store.clone();
+                                        let popover = popover.clone();
                                         branch_row(
                                             index,
                                             &branches[index],
                                             branches[index] == *current,
-                                            worktree_mode,
-                                            &store,
-                                            &popover,
+                                            compact,
+                                            move |branch_name, window, cx| {
+                                                store.update(cx, |store, _cx| {
+                                                    if worktree_mode {
+                                                        store.set_draft_workspace(
+                                                            WorkspaceMode::NewWorktree {
+                                                                base: branch_name,
+                                                            },
+                                                        );
+                                                    } else {
+                                                        store.checkout_branch(branch_name);
+                                                    }
+                                                });
+                                                popover.update(cx, |st, cx| st.dismiss(window, cx));
+                                            },
                                             cx,
                                         )
                                     })
@@ -137,8 +147,7 @@ impl Composer {
                 .px_2()
                 .items_center()
                 .justify_between()
-                .text_size(px(13.))
-                .text_color(muted)
+                .text_secondary(self.compact, cx)
                 .child(left)
                 .child(right)
                 .into_any_element(),
@@ -167,13 +176,14 @@ impl Composer {
                 .gap_1p5()
                 .items_center()
                 .text_color(muted)
-                .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
+                .child(Icon::empty().path("icons/folder-closed.svg"))
                 .child(label)
                 .into_any_element();
         }
 
         let store_content = self.workspace_store.clone();
         let base_default = base_default.to_string();
+        let compact = self.compact;
         let trigger = Button::new("workspace-picker")
             .ghost()
             .outline()
@@ -182,11 +192,10 @@ impl Composer {
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .text_size(px(13.))
                     .text_color(muted)
-                    .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
+                    .child(Icon::empty().path("icons/folder-closed.svg"))
                     .child(label)
-                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+                    .child(Icon::new(IconName::ChevronDown)),
             );
         crate::material::overlay_popover("workspace-popover", cx)
             .anchor(Anchor::BottomLeft)
@@ -202,23 +211,15 @@ impl Composer {
                                      selected: bool,
                                      cx: &mut Context<PopoverState>|
                  -> gpui::Div {
-                    h_flex()
+                    crate::material::menu_item_frame(compact, cx)
                         .w_full()
-                        .px_2()
-                        .py_1p5()
-                        .gap_2()
                         .items_center()
-                        .rounded(cx.theme().tokens.radius.sm)
                         .cursor_pointer()
-                        .text_size(px(13.))
+                        .text_body(compact, cx)
                         .hover(|s| s.bg(cx.theme().muted))
                         .child(div().flex_1().min_w_0().child(label))
                         .when(selected, |this| {
-                            this.child(
-                                Icon::new(IconName::Check)
-                                    .xsmall()
-                                    .text_color(cx.theme().primary),
-                            )
+                            this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
                         })
                 };
                 v_flex()
@@ -229,9 +230,7 @@ impl Composer {
                         div()
                             .px_2()
                             .py_1()
-                            .text_size(px(11.))
-                            .font_medium()
-                            .text_color(cx.theme().muted_foreground)
+                            .text_caption(cx)
                             .child(crate::tr!("composer.workspace")),
                     )
                     .child(
@@ -273,50 +272,27 @@ fn branch_row(
     index: usize,
     name: &str,
     is_current: bool,
-    worktree_mode: bool,
-    store: &Entity<WorkspaceStore>,
-    popover: &Entity<PopoverState>,
+    compact: bool,
+    on_pick: impl Fn(String, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let branch_name = name.to_string();
-    let store = store.clone();
-    let popover = popover.clone();
     div()
         .pb_0p5()
         .child(
-            h_flex()
+            crate::material::menu_item_frame(compact, cx)
                 .id(("branch-row", index))
                 .flex_none()
                 .w_full()
-                .px_2()
-                .py_1p5()
-                .gap_2()
                 .items_center()
-                .rounded(cx.theme().tokens.radius.sm)
                 .cursor_pointer()
-                .text_size(px(13.))
+                .text_body(compact, cx)
                 .hover(|s| s.bg(cx.theme().muted))
                 .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
                 .when(is_current, |this| {
-                    this.child(
-                        Icon::new(IconName::Check)
-                            .xsmall()
-                            .text_color(cx.theme().primary),
-                    )
+                    this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
                 })
-                .on_click(move |_, window, cx| {
-                    let branch_name = branch_name.clone();
-                    store.update(cx, |store, _cx| {
-                        if worktree_mode {
-                            store.set_draft_workspace(WorkspaceMode::NewWorktree {
-                                base: branch_name,
-                            });
-                        } else {
-                            store.checkout_branch(branch_name);
-                        }
-                    });
-                    popover.update(cx, |st, cx| st.dismiss(window, cx));
-                }),
+                .on_click(move |_, window, cx| on_pick(branch_name.clone(), window, cx)),
         )
         .into_any_element()
 }

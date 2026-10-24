@@ -15,8 +15,9 @@ use tcode_protocol::ThreadExportFormat;
 use crate::overlay::{DialogActions, Notification, OverlayExt as _};
 use crate::store::{ThreadExportArtifact, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
-use gpui::{IntoElement, ParentElement as _, Styled as _, div, prelude::FluentBuilder as _, px};
+use gpui::{IntoElement, ParentElement as _, Styled as _, div, prelude::FluentBuilder as _};
 use gpui_base::v_flex;
 
 pub(crate) fn prompt_thread_export<V: 'static>(
@@ -68,7 +69,7 @@ fn open_delivery_dialog(
     )
     .into_owned();
     let can_download = store.read(cx).supports_artifact_delivery();
-    window.open_dialog(cx, move |builder, _, cx| {
+    window.open_dialog(cx, move |builder, _, _| {
         let summary = summary.clone();
         let copy_artifact = artifact.clone();
         let download_artifact = artifact.clone();
@@ -76,18 +77,12 @@ fn open_delivery_dialog(
         let download_store = store.clone();
         let directory = directory.clone();
         builder
-            .w(px(420.))
-            .rounded(crate::material::radius_overlay(cx))
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
             .title(crate::tr!("export.title").into_owned())
             .content(move |content, _, cx| {
                 content.child(
                     v_flex().gap_1().child(
                         div()
-                            .text_size(px(13.))
+                            .text_body(false, cx)
                             .text_color(cx.theme().muted_foreground)
                             .child(summary.clone()),
                     ),
@@ -97,13 +92,11 @@ fn open_delivery_dialog(
                 DialogActions::new()
                     .child(
                         Button::new("export-cancel")
-                            .rounded(crate::material::radius_button(cx))
                             .label(crate::tr!("export.cancel"))
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
                         Button::new("export-copy")
-                            .rounded(crate::material::radius_button(cx))
                             .label(crate::tr!("export.copy"))
                             .on_click(move |_, window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
@@ -121,7 +114,6 @@ fn open_delivery_dialog(
                         let store = download_store.clone();
                         actions.child(
                             Button::new("export-download")
-                                .rounded(crate::material::radius_button(cx))
                                 .label(crate::tr!("export.download"))
                                 .on_click(move |_, window, cx| {
                                     let result = store.read(cx).deliver_artifact(
@@ -154,7 +146,6 @@ fn open_delivery_dialog(
                         let directory = directory.clone();
                         actions.child(
                             Button::new("export-save")
-                                .rounded(crate::material::radius_button(cx))
                                 .primary()
                                 .label(crate::tr!("export.save"))
                                 .on_click(move |_, window, cx| {

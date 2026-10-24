@@ -4,6 +4,7 @@ use std::{
     rc::Rc,
 };
 
+use crate::material::{Bar, COMPACT_PAGE_INSET, bar, bar_height, empty_row, selectable_row};
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::remote::spaces::{self, ShareTarget, SpacesObserver};
 use crate::scroll::ScrollableElement as _;
@@ -34,9 +35,9 @@ use tcode_core::{
     settings::SidebarLayout,
 };
 
-use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ForkAvailability, StoreChange, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
+use crate::typography::TextRole as _;
 use crate::window_drag_area;
 use crate::window_state::{Destination, Route, WindowState};
 
@@ -47,15 +48,12 @@ use arrange::{DraggedThread, DropZone, ThreadDrag};
 /// sized to the row height minus this vertical inset so it sits inside the row.
 const PROVIDER_MARK_ALPHA: f32 = 0.32;
 const PROVIDER_MARK_INSET: f32 = 8.;
-/// Right inset of provider marks, aligned with the selectable row content.
+/// Right inset of provider marks: `selectable_row`'s desktop inset, which
+/// material does not expose.
 const THREAD_ROW_PADDING_X: f32 = 10.;
-
-/// Left padding on the sidebar's top row so branding clears the native macOS
-/// traffic lights (ending near x=72); a small inset elsewhere.
-#[cfg(target_os = "macos")]
-const TRAFFIC_LIGHT_INSET: f32 = 80.;
-#[cfg(not(target_os = "macos"))]
-const TRAFFIC_LIGHT_INSET: f32 = 8.;
+/// A project's threads indent beneath its header's chevron and artwork;
+/// `selectable_row` has no indent.
+const THREAD_INDENT: f32 = 30.;
 
 /// Rows a project shows in the project view before "Show more".
 const THREADS_COLLAPSED_LIMIT: usize = 6;
@@ -70,11 +68,11 @@ fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static,
     })
 }
 
-/// Flat-list row geometry, including the 2px gap reserved below every row.
-const FLAT_ROW_HEIGHT: f32 = 50.;
-/// The clickable row inside each flat slot (the slot adds 2px of spacing).
+/// The desktop height `selectable_row_two_line` draws; material exposes no
+/// accessor for it, and the flat list's scroll math needs it.
 const FLAT_ROW_INNER_HEIGHT: f32 = 48.;
-const SETTLED_HEADER_HEIGHT: f32 = 34.;
+/// Each flat slot: the row and the 2pt gap reserved below it.
+const FLAT_ROW_HEIGHT: f32 = FLAT_ROW_INNER_HEIGHT + 2.;
 
 /// A critically damped spring keeps reordering legible without bouncing rows
 /// past their destinations. GPUI also makes this snap to the target when the
@@ -96,7 +94,6 @@ fn collapse_chevron(collapsed: bool, cx: &Context<SessionsSidebar>) -> Icon {
         IconName::ChevronDown
     })
     .flex_none()
-    .size_3()
     .text_color(cx.theme().muted_foreground)
 }
 
@@ -345,8 +342,7 @@ pub(super) fn confirm_remove_project(
     let Some((project_name, count)) = store.read(cx).project_summary(&project_id) else {
         return;
     };
-    window.open_alert_dialog(cx, move |alert, _, cx| {
-        let alert = alert.bg(cx.theme().popover);
+    window.open_alert_dialog(cx, move |alert, _, _| {
         let store = store.clone();
         let project_id = project_id.clone();
         alert
@@ -1314,11 +1310,19 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let key = key.to_owned();
-        crate::material::accessible_clickable(
-            h_flex(),
-            SharedString::from(format!("settled-more-{key}")),
-            Role::Button,
-            crate::tr!("sidebar.show_more_settled", count = count),
+        let compact = self.compact(cx);
+        // A full-width row with its label at the leading edge: `Button`
+        // centres its content.
+        selectable_row(
+            crate::material::accessible_clickable(
+                h_flex(),
+                SharedString::from(format!("settled-more-{key}")),
+                Role::Button,
+                crate::tr!("sidebar.show_more_settled", count = count),
+                cx,
+            ),
+            false,
+            compact,
             cx,
         )
         .debug_selector({
@@ -1326,14 +1330,9 @@ impl SessionsSidebar {
             move || format!("settled-more-{key}")
         })
         .w_full()
-        .h(px(if self.compact(cx) { 44. } else { 34. }))
-        .px_2()
-        .gap_2()
-        .text_size(px(13.))
-        .text_color(cx.theme().muted_foreground)
+        .text_secondary(compact, cx)
         .cursor_pointer()
-        .hover(|row| row.bg(cx.theme().list_hover))
-        .child(Icon::new(IconName::Plus).size(px(14.)))
+        .child(Icon::new(IconName::Plus))
         .child(crate::tr!("sidebar.show_more_settled", count = count))
         .on_click(cx.listener(move |this, _, _, cx| {
             *this.settled_limits.entry(key.clone()).or_insert(10) += 25;
@@ -1344,13 +1343,7 @@ impl SessionsSidebar {
     }
 
     fn render_active_empty(&self, cx: &App) -> gpui::AnyElement {
-        div()
-            .px_2()
-            .py_3()
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child(crate::tr!("sidebar.active_empty"))
-            .into_any_element()
+        empty_row(crate::tr!("sidebar.active_empty"), cx).into_any_element()
     }
 
     fn render_settled_header(
@@ -1367,6 +1360,16 @@ impl SessionsSidebar {
             Some(_) => cx.theme().sidebar_foreground,
         };
         let key = key.to_string();
+        let compact = self.compact(cx);
+        let spacing = &cx.theme().tokens.spacing;
+        let inset = if compact {
+            px(COMPACT_PAGE_INSET)
+        } else {
+            spacing.sm
+        };
+        // A disclosure across a whole section bar, at the bar's height and
+        // inset. Not a `bar`: gpui-base's `Toolbar` fixes the toolbar role,
+        // and its `Collapsible` has no trigger.
         crate::material::accessible_clickable(
             h_flex(),
             SharedString::from(format!("settled-{key}")),
@@ -1380,14 +1383,10 @@ impl SessionsSidebar {
             move || format!("settled-{key}")
         })
         .w_full()
-        .h(px(if self.compact(cx) {
-            44.
-        } else {
-            SETTLED_HEADER_HEIGHT
-        }))
-        .gap_2()
-        .px_3()
-        .text_size(px(12.))
+        .h(px(bar_height(Bar::Section, compact)))
+        .px(inset)
+        .gap(spacing.sm)
+        .text_caption(cx)
         .text_color(color)
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1472,8 +1471,7 @@ impl SessionsSidebar {
             return;
         }
         let count = session_ids.len();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let alert = alert.bg(cx.theme().popover);
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let store = store.clone();
             let session_ids = session_ids.clone();
             alert
@@ -1627,8 +1625,7 @@ impl SessionsSidebar {
             return;
         }
         let title = title.to_string();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let alert = alert.bg(cx.theme().popover);
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let sidebar = sidebar.clone();
             let session_id = session_id.clone();
             alert
@@ -1689,25 +1686,15 @@ impl SessionsSidebar {
     }
 
     fn render_app_row(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let traffic_lights = crate::window_caption::traffic_light_inset(window);
         window_drag_area(
             "sidebar-app-row-drag",
-            h_flex()
-                .h(px(52.))
-                .flex_none()
-                .items_center()
-                .gap_2()
-                .pl(px(TRAFFIC_LIGHT_INSET))
-                .pr_2(),
+            bar("sidebar-app-row", Bar::Strip, false, cx)
+                .when(traffic_lights > px(0.), |strip| strip.pl(traffic_lights)),
             window,
             cx,
         )
-        .child(
-            div()
-                .text_sm()
-                .font_bold()
-                .text_color(cx.theme().sidebar_foreground)
-                .child(crate::tr!("app.name")),
-        )
+        .child(crate::material::brand_wordmark(cx))
         // The collapse toggle lives in the chat header (`crate::chat`), not
         // here: collapsing takes the sidebar to zero width, so a control that
         // rode the sidebar would take itself off screen.
@@ -1715,47 +1702,38 @@ impl SessionsSidebar {
     }
 
     fn render_search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Opens the palette but reads as a search field, its text at the
+        // leading edge, so it is a rail row rather than a `Button`, which
+        // centres its content.
         div().flex_none().px_2().pb_1().child(
-            crate::material::accessible_clickable(
-                h_flex(),
-                "sidebar-search",
-                Role::Button,
-                crate::tr!("sidebar.search"),
+            selectable_row(
+                crate::material::accessible_clickable(
+                    h_flex(),
+                    "sidebar-search",
+                    Role::Button,
+                    crate::tr!("sidebar.search"),
+                    cx,
+                ),
+                false,
+                false,
                 cx,
             )
-            .h(px(32.))
-            .items_center()
-            .gap_2()
-            .px_2()
-            .rounded(cx.theme().tokens.radius.md)
+            .text_body(false, cx)
+            .text_color(cx.theme().muted_foreground)
             .cursor_pointer()
-            .hover(|s| s.bg(cx.theme().sidebar_accent))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.window_state
                     .update(cx, |state, cx| state.open_palette(cx));
             }))
+            .child(Icon::new(IconName::Search))
+            .child(div().flex_1().child(crate::tr!("sidebar.search")))
             .child(
-                Icon::new(IconName::Search)
-                    .small()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("sidebar.search")),
-            )
-            .child(
-                div()
-                    .px_1()
-                    .py(px(1.))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .text_color(cx.theme().muted_foreground)
-                    .text_size(px(10.))
-                    .child(format_secondary_shortcut("k")),
+                crate::widgets::kbd::Kbd::new(gpui::Keystroke {
+                    modifiers: gpui::Modifiers::secondary_key(),
+                    key: "k".into(),
+                    key_char: None,
+                })
+                .outline(),
             ),
         )
     }
@@ -1781,7 +1759,11 @@ impl SessionsSidebar {
         });
         div()
             .flex_none()
-            .px(px(if compact { COMPACT_PAGE_PADDING } else { 8. }))
+            .px(if compact {
+                px(COMPACT_PAGE_INSET)
+            } else {
+                cx.theme().tokens.spacing.sm
+            })
             .pb_1()
             .child(
                 crate::material::selectable_row(
@@ -1817,16 +1799,15 @@ impl SessionsSidebar {
                         .build(window, cx)
                     })
                 })
+                .text_body(compact, cx)
                 .child(
                     Icon::new(IconName::Network)
-                        .small()
                         .flex_none()
                         .text_color(cx.theme().muted_foreground),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(if compact { 15. } else { 13. }))
                         .text_color(cx.theme().sidebar_foreground)
                         .child(crate::tr!("hosts.title")),
                 )
@@ -1836,9 +1817,8 @@ impl SessionsSidebar {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(if compact { 13. } else { 12. }))
+                            .text_secondary(compact, cx)
                             .text_align(gpui::TextAlign::Right)
-                            .text_color(cx.theme().muted_foreground)
                             .child(host),
                     )
                     .child(
@@ -1857,54 +1837,38 @@ impl SessionsSidebar {
             SidebarLayout::Flat => crate::tr!("sidebar.layout_grouped"),
             SidebarLayout::Grouped => crate::tr!("sidebar.layout_flat"),
         };
-        let compact = self.compact(cx);
-        Button::new("toggle-sidebar-layout")
-            .ghost()
-            .xsmall()
-            .compact()
-            .map(|button| {
-                if compact {
-                    button
-                        .with_size(px(44.))
-                        .w(px(44.))
-                        .h(px(44.))
-                        .child(Icon::new(IconName::LayoutDashboard).size(px(18.)))
-                } else {
-                    button.icon(IconName::LayoutDashboard)
-                }
-            })
-            .aria_label(tooltip.clone())
-            .tooltip(tooltip)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let next = match layout {
-                    SidebarLayout::Flat => SidebarLayout::Grouped,
-                    SidebarLayout::Grouped => SidebarLayout::Flat,
-                };
-                this.store.update(cx, |store, _cx| {
-                    store.set_sidebar_layout(next);
-                });
-            }))
+        crate::material::toolbar_icon_button(
+            "toggle-sidebar-layout",
+            IconName::LayoutDashboard,
+            tooltip.clone(),
+            self.compact(cx),
+        )
+        .aria_label(tooltip)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let next = match layout {
+                SidebarLayout::Flat => SidebarLayout::Grouped,
+                SidebarLayout::Grouped => SidebarLayout::Flat,
+            };
+            this.store.update(cx, |store, _cx| {
+                store.set_sidebar_layout(next);
+            });
+        }))
     }
 
     fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let sort_label = crate::settings::project_sort_label(self.store.read(cx).project_sort());
-        h_flex()
-            .flex_none()
-            .h(px(28.))
+        bar("sidebar-projects-header", Bar::Section, false, cx)
             .items_center()
             .justify_between()
-            .px_3()
             .child(
                 div()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_caption(cx)
                     // Small-caps section label; `to_uppercase` is a no-op on CJK.
                     .child(crate::tr!("sidebar.projects").to_uppercase()),
             )
             .child(
                 h_flex()
-                    .gap_0p5()
+                    .gap(cx.theme().tokens.spacing.xxs)
                     .child(
                         Button::new("sort-projects")
                             .ghost()
@@ -2028,22 +1992,17 @@ impl SessionsSidebar {
                 .into_any_element()
         };
 
-        h_flex()
-            .flex_none()
-            .h(px(28.))
+        bar("sidebar-flat-header", Bar::Section, false, cx)
             .items_center()
             .justify_between()
-            .px_3()
             .child(
                 div()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_caption(cx)
                     .child(crate::tr!("sidebar.threads").to_uppercase()),
             )
             .child(
                 h_flex()
-                    .gap_0p5()
+                    .gap(cx.theme().tokens.spacing.xxs)
                     .child(filter_button)
                     .child(self.render_layout_toggle(SidebarLayout::Flat, cx))
                     .child(new_thread)
@@ -2098,11 +2057,22 @@ impl SessionsSidebar {
         } else {
             crate::tr!("sidebar.project", name = name.clone()).into_owned()
         };
-        let header = crate::material::accessible_clickable(
-            h_flex(),
-            gpui::SharedString::from(format!("project-header-{project_id}")),
-            Role::Button,
-            header_label,
+        let new_thread_label: SharedString = if quick_chat {
+            crate::tr!("sidebar.quick_chat")
+        } else {
+            crate::tr!("sidebar.create_thread")
+        }
+        .into();
+        let header = selectable_row(
+            crate::material::accessible_clickable(
+                h_flex(),
+                gpui::SharedString::from(format!("project-header-{project_id}")),
+                Role::Button,
+                header_label,
+                cx,
+            ),
+            false,
+            false,
             cx,
         )
         .aria_expanded(!collapsed)
@@ -2117,13 +2087,8 @@ impl SessionsSidebar {
             }
         })
         .group(group_key.clone())
-        .h(px(30.))
-        .items_center()
-        .gap_1()
-        .px_2()
-        .rounded(cx.theme().tokens.radius.md)
+        .text_body(false, cx)
         .cursor_pointer()
-        .hover(|s| s.bg(cx.theme().sidebar_accent))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.toggle_project(&header_toggle_id, cx);
         }))
@@ -2133,13 +2098,11 @@ impl SessionsSidebar {
             } else {
                 IconName::ChevronDown
             })
-            .size_4()
             .text_color(cx.theme().muted_foreground),
         )
         .child(crate::project_icon::artwork(&group.project, 16.))
         .child(
             truncated_sidebar_label()
-                .text_sm()
                 .font_medium()
                 .text_color(cx.theme().sidebar_foreground)
                 .child(name),
@@ -2156,60 +2119,30 @@ impl SessionsSidebar {
             )
         })
         .child(
-            crate::material::accessible_clickable(
-                h_flex(),
-                gpui::SharedString::from(format!("new-thread-{project_id}")),
-                Role::Button,
-                if quick_chat {
-                    crate::tr!("sidebar.quick_chat")
-                } else {
-                    crate::tr!("sidebar.create_thread")
-                },
-                cx,
-            )
-            .size_5()
-            .items_center()
-            .justify_center()
-            .rounded(cx.theme().tokens.radius.sm)
-            .cursor_pointer()
-            // Opacity (rather than `visibility: hidden`) keeps this in Root's
-            // tab-stop registry so keyboard focus can reveal it. `focus`, not
-            // `in_focus`: a click-focused ancestor row would otherwise pin the
-            // control visible.
-            .opacity(0.)
-            .group_hover(group_key.clone(), |s| s.opacity(1.))
-            .focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
-            .hover(|s| s.bg(cx.theme().sidebar_accent))
-            .tooltip(move |window, cx| {
-                Tooltip::new(
-                    if quick_chat {
-                        crate::tr!("sidebar.quick_chat")
-                    } else {
-                        crate::tr!("sidebar.create_thread")
-                    }
-                    .into_owned(),
-                )
-                .build(window, cx)
-            })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                crate::widgets::stop_click_propagation(window, cx);
-                let cwd = plus_cwd.clone();
-                let project_id = plus_project_id.clone();
-                this.store.update(cx, |store, cx| {
-                    if quick_chat {
-                        store.start_scratch_draft(cx);
-                    } else {
-                        store.start_draft(project_id, cwd, cx);
-                    }
-                });
-                this.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
-            }))
-            .child(
-                Icon::new(IconName::Plus)
-                    .xsmall()
-                    .text_color(cx.theme().muted_foreground),
-            ),
+            Button::new(gpui::SharedString::from(format!("new-thread-{project_id}")))
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(IconName::Plus).text_color(cx.theme().muted_foreground))
+                .aria_label(new_thread_label.clone())
+                .tooltip(new_thread_label)
+                // Opacity keeps the button a tab stop, as the settle button does.
+                .opacity(0.)
+                .group_hover(group_key.clone(), |button| button.opacity(1.))
+                .focus_visible(|button| button.opacity(1.))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    crate::widgets::stop_click_propagation(window, cx);
+                    let cwd = plus_cwd.clone();
+                    let project_id = plus_project_id.clone();
+                    this.store.update(cx, |store, cx| {
+                        if quick_chat {
+                            store.start_scratch_draft(cx);
+                        } else {
+                            store.start_draft(project_id, cwd, cx);
+                        }
+                    });
+                    this.window_state
+                        .update(cx, |state, cx| state.open_thread(cx));
+                })),
         );
         if quick_chat {
             return header.into_any_element();
@@ -2288,28 +2221,20 @@ impl SessionsSidebar {
                 let project_id = groups[*group].project.id.clone();
                 let toggle_id = project_id.clone();
                 item.child(
-                    crate::material::accessible_clickable(
-                        div(),
-                        SharedString::from(format!("show-more-{project_id}")),
-                        Role::Button,
-                        label.clone(),
-                        cx,
-                    )
-                    .aria_expanded(*expanded)
-                    .debug_selector(move || format!("show-more-{project_id}"))
-                    .pl(px(30.))
-                    .py_1()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(cx.theme().sidebar_foreground))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.expanded_groups.remove(&toggle_id) {
-                            this.expanded_groups.insert(toggle_id.clone());
-                        }
-                        cx.notify();
-                    }))
-                    .child(label.clone()),
+                    div().w_full().pl(px(THREAD_INDENT)).child(
+                        Button::new(SharedString::from(format!("show-more-{project_id}")))
+                            .text()
+                            .xsmall()
+                            .label(label.clone())
+                            .aria_expanded(*expanded)
+                            .debug_selector(move || format!("show-more-{project_id}"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.expanded_groups.remove(&toggle_id) {
+                                    this.expanded_groups.insert(toggle_id.clone());
+                                }
+                                cx.notify();
+                            })),
+                    ),
                 )
                 .into_any_element()
             }
@@ -2397,6 +2322,7 @@ impl SessionsSidebar {
             )
     }
 
+    /// `base` carries the row's selectable surface, selected when `is_active`.
     fn thread_clickable_row(
         &self,
         base: gpui::Div,
@@ -2407,18 +2333,14 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let session_id = state.session_id.clone();
-        let row = crate::material::selectable_row(
-            crate::material::accessible_clickable(
-                base,
-                row_id,
-                Role::Button,
-                crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
-                cx,
-            ),
-            is_active,
-            false,
+        let row = crate::material::accessible_clickable(
+            base,
+            row_id,
+            Role::Button,
+            crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
             cx,
         )
+        .text_body(false, cx)
         .aria_selected(is_active)
         .debug_selector({
             let id = meta.id.clone();
@@ -2480,8 +2402,7 @@ impl SessionsSidebar {
             self.rename_input(input, cx).into_any_element()
         } else {
             truncated_sidebar_label()
-                .text_size(px(13.))
-                .line_height(px(18.))
+                .text_body(false, cx)
                 .text_color(if meta.is_settled() {
                     cx.theme().muted_foreground
                 } else {
@@ -2502,7 +2423,7 @@ impl SessionsSidebar {
                 row.child(
                     div()
                         .flex_none()
-                        .child(Spinner::new().xsmall().color(cx.theme().muted_foreground)),
+                        .child(Spinner::new().color(cx.theme().muted_foreground)),
                 )
             })
             .into_any_element()
@@ -2531,11 +2452,7 @@ impl SessionsSidebar {
                 .child(
                     div()
                         .group_hover(row_key.to_owned(), |glyph| glyph.invisible())
-                        .child(
-                            Icon::new(IconName::Pin)
-                                .size(px(12.))
-                                .text_color(cx.theme().muted_foreground),
-                        ),
+                        .child(Icon::new(IconName::Pin).text_color(cx.theme().muted_foreground)),
                 )
                 .child(
                     Button::new(SharedString::from(format!("unpin-thread-{id}")))
@@ -2631,8 +2548,7 @@ impl SessionsSidebar {
                 .child(
                     div()
                         .whitespace_nowrap()
-                        .text_size(px(11.))
-                        .line_height(px(18.))
+                        .text_secondary(false, cx)
                         .text_color(color)
                         .child(label),
                 )
@@ -2816,15 +2732,14 @@ impl SessionsSidebar {
 
         let row = self
             .thread_clickable_row(
-                h_flex(),
+                selectable_row(h_flex(), is_active, false, cx),
                 gpui::SharedString::from(format!("thread-row-{session_id}")),
                 meta,
                 &state,
                 is_active,
                 cx,
             )
-            // Indent threads beneath their project header's icon and chevron.
-            .pl(px(30.))
+            .pl(px(THREAD_INDENT))
             // First child so the row's content paints over the mark.
             .relative()
             .child(self.provider_mark(
@@ -2855,7 +2770,6 @@ impl SessionsSidebar {
                 row.child(
                     Icon::empty()
                         .path("icons/git-branch.svg")
-                        .xsmall()
                         .text_color(cx.theme().muted_foreground),
                 )
             })
@@ -2922,8 +2836,7 @@ impl SessionsSidebar {
                     .h_full()
                     .items_center()
                     .whitespace_nowrap()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_secondary(false, cx)
                     .when(action_on_hover, |time| {
                         time.group_hover(row_key.clone(), |time| time.invisible())
                     })
@@ -2986,7 +2899,7 @@ impl SessionsSidebar {
 
         let row = self
             .thread_clickable_row(
-                v_flex(),
+                crate::material::selectable_row_two_line(v_flex(), is_active, false, cx),
                 gpui::SharedString::from(format!("flat-thread-row-{session_id}")),
                 meta,
                 &state,
@@ -2997,11 +2910,8 @@ impl SessionsSidebar {
                 let id = session_id.clone();
                 move || format!("sidebar-thread-{id}")
             })
-            // Two lines need the taller flat slot; the rail supplies its surface.
-            .h(px(FLAT_ROW_INNER_HEIGHT))
             .items_stretch()
             .justify_center()
-            .gap(px(2.))
             // First child so the row's content paints over the mark.
             .relative()
             .child(self.provider_mark(meta, FLAT_ROW_INNER_HEIGHT, THREAD_ROW_PADDING_X, cx));
@@ -3047,8 +2957,7 @@ impl SessionsSidebar {
                 .min_w_0()
                 .items_center()
                 .gap_1()
-                .text_size(px(11.))
-                .text_color(cx.theme().muted_foreground)
+                .text_secondary(false, cx)
                 .when_some(status, |line, (color, label, waiting)| {
                     line.child(
                         div()
@@ -3072,9 +2981,7 @@ impl SessionsSidebar {
                             .map(|project| {
                                 crate::project_icon::artwork(project, 12.).into_any_element()
                             })
-                            .unwrap_or_else(|| {
-                                Icon::new(IconName::Folder).size_3().into_any_element()
-                            }),
+                            .unwrap_or_else(|| Icon::new(IconName::Folder).into_any_element()),
                     )
                     .child(truncated_sidebar_label().child(project_name))
                 })
@@ -3085,7 +2992,6 @@ impl SessionsSidebar {
                     line.child(
                         Icon::empty()
                             .path("icons/git-branch.svg")
-                            .xsmall()
                             .text_color(cx.theme().muted_foreground),
                     )
                 });
@@ -3110,35 +3016,29 @@ impl SessionsSidebar {
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex_none().child(
-            crate::material::accessible_clickable(
-                h_flex(),
-                "sidebar-settings",
-                Role::Button,
-                crate::tr!("settings.title"),
+        bar("sidebar-footer", Bar::Toolbar, false, cx).child(
+            selectable_row(
+                crate::material::accessible_clickable(
+                    h_flex(),
+                    "sidebar-settings",
+                    Role::Button,
+                    crate::tr!("settings.title"),
+                    cx,
+                ),
+                false,
+                false,
                 cx,
             )
-            .h(px(40.))
-            .items_center()
-            .gap_2()
-            .px_3()
+            .flex_1()
+            .text_body(false, cx)
+            .text_color(cx.theme().sidebar_foreground)
             .cursor_pointer()
-            .hover(|s| s.bg(cx.theme().sidebar_accent))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.window_state
                     .update(cx, |state, cx| state.open_settings(cx));
             }))
-            .child(
-                Icon::new(IconName::Settings)
-                    .size_4()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child(crate::tr!("settings.title")),
-            ),
+            .child(Icon::new(IconName::Settings).text_color(cx.theme().muted_foreground))
+            .child(crate::tr!("settings.title")),
         )
     }
 }
@@ -3178,8 +3078,7 @@ fn open_delete_confirmation(
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
-    window.open_alert_dialog(cx, move |alert, _, cx| {
-        let alert = alert.bg(cx.theme().popover);
+    window.open_alert_dialog(cx, move |alert, _, _| {
         let store = store.clone();
         let session_id = session_id.clone();
         let description = if count > 1 {
@@ -3224,8 +3123,7 @@ pub(crate) fn proceed_delete(
         return;
     };
     let path = worktree.root_project_path.display().to_string();
-    window.open_alert_dialog(cx, move |alert, _, cx| {
-        let alert = alert.bg(cx.theme().popover);
+    window.open_alert_dialog(cx, move |alert, _, _| {
         let store = store.clone();
         let session_id = session_id.clone();
         let remove = session_id.clone();
@@ -3259,8 +3157,15 @@ pub(crate) fn proceed_delete(
     });
 }
 
-const COMPACT_PAGE_PADDING: f32 = 16.;
-const COMPACT_SEARCH_HEIGHT: f32 = 40.;
+/// A compact thread row as [`SessionsSidebar::render_compact_thread`] lays it
+/// out — a title and a second line inside `list_row`'s vertical inset, at
+/// least `list_row`'s height — and the hairline below it.
+fn compact_thread_row_height(cx: &App) -> f32 {
+    let theme = cx.theme();
+    let (typography, spacing) = (&theme.tokens.typography, &theme.tokens.spacing);
+    let lines = typography.md.line_height + spacing.xxs + typography.sm.line_height;
+    f32::from(lines + spacing.sm * 2.).max(crate::material::LIST_ROW_MIN_HEIGHT) + 1.
+}
 
 fn thread_list_scrollbar(
     id: &'static str,
@@ -3548,33 +3453,32 @@ impl SessionsSidebar {
                     .into_iter()
                     .filter(|(id, _)| loading || !cached.iter().any(|meta| &meta.id == id))
                     .map(|(id, preview)| {
-                        v_flex()
-                            .id(SharedString::from(format!("pending-thread-{id}")))
-                            .debug_selector(|| "pending-thread-row".into())
-                            .px_4()
-                            .py_2()
-                            .gap_1()
-                            .cursor_pointer()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .child(crate::tr!("chat.waiting_connection")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .truncate()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(preview),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.store.update(cx, |store, cx| {
-                                    store.select_session(id.clone());
-                                    cx.notify();
-                                });
-                                this.window_state
-                                    .update(cx, |state, cx| state.open_thread(cx));
-                            }))
+                        crate::material::list_row(
+                            SharedString::from(format!("pending-thread-{id}")),
+                            format!("{}, {preview}", crate::tr!("chat.waiting_connection")).into(),
+                            cx,
+                        )
+                        .debug_selector(|| "pending-thread-row".into())
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(cx.theme().tokens.spacing.xs)
+                                .child(
+                                    div()
+                                        .text_body(true, cx)
+                                        .child(crate::tr!("chat.waiting_connection")),
+                                )
+                                .child(div().truncate().text_secondary(true, cx).child(preview)),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.store.update(cx, |store, cx| {
+                                store.select_session(id.clone());
+                                cx.notify();
+                            });
+                            this.window_state
+                                .update(cx, |state, cx| state.open_thread(cx));
+                        }))
                     }),
             )
             .into_any_element()
@@ -3603,15 +3507,10 @@ impl SessionsSidebar {
                 .w_full()
                 .child(self.render_compact_thread(row, cx))
                 .when(row.separator, |list| {
-                    list.child(
-                        div()
-                            .w_full()
-                            .pl(px(crate::material::COMPACT_PAGE_INSET))
-                            .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
-                    )
+                    list.child(crate::material::row_hairline(px(COMPACT_PAGE_INSET), cx))
                 })
                 .into_any_element(),
-            CompactListRow::BottomInset => div().h(px(24.)).into_any_element(),
+            CompactListRow::BottomInset => div().h(cx.theme().tokens.spacing.xl).into_any_element(),
         }
     }
 
@@ -3715,7 +3614,7 @@ impl SessionsSidebar {
                     list.child(thread_list_scrollbar(
                         "compact-thread-scrollbar",
                         &self.compact_list_state,
-                        58.,
+                        compact_thread_row_height(cx),
                     ))
                 })
                 .into_any_element()
@@ -3747,19 +3646,13 @@ impl SessionsSidebar {
             .child(self.render_compact_search(cx))
             .child(self.render_feature_rows(cx))
             .child(
-                h_flex()
-                    .flex_none()
-                    .px(px(COMPACT_PAGE_PADDING))
+                bar("compact-layout-bar", Bar::Section, true, cx)
+                    .items_center()
                     .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(match layout {
-                                SidebarLayout::Flat => crate::tr!("sidebar.recent"),
-                                SidebarLayout::Grouped => crate::tr!("sidebar.by_project"),
-                            }),
-                    )
+                    .child(div().text_secondary(true, cx).child(match layout {
+                        SidebarLayout::Flat => crate::tr!("sidebar.recent"),
+                        SidebarLayout::Grouped => crate::tr!("sidebar.by_project"),
+                    }))
                     .child(
                         div()
                             .debug_selector(|| "compact-layout-toggle".into())
@@ -3774,11 +3667,14 @@ impl SessionsSidebar {
     }
 
     fn render_compact_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let spacing = &cx.theme().tokens.spacing;
+        // Search-field lookalike: a full-width pill whose text sits at the
+        // leading edge; `Button` centres its content and has no pill form.
         div()
             .flex_none()
-            .px(px(COMPACT_PAGE_PADDING))
-            .pt(px(8.))
-            .pb(px(4.))
+            .px(px(COMPACT_PAGE_INSET))
+            .pt(spacing.sm)
+            .pb(spacing.xs)
             .child(
                 crate::material::accessible_clickable(
                     h_flex(),
@@ -3788,10 +3684,12 @@ impl SessionsSidebar {
                     cx,
                 )
                 .debug_selector(|| "compact-search".into())
-                .h(px(COMPACT_SEARCH_HEIGHT))
+                .h(px(crate::material::input_height(true)))
                 .items_center()
-                .gap(px(8.))
-                .px(px(12.))
+                .gap(spacing.sm)
+                .px(spacing.md)
+                .text_body(true, cx)
+                .text_color(cx.theme().muted_foreground)
                 .rounded_full()
                 .bg(cx.theme().secondary)
                 .cursor_pointer()
@@ -3800,18 +3698,12 @@ impl SessionsSidebar {
                     this.window_state
                         .update(cx, |state, cx| state.open_palette(cx));
                 }))
-                .child(
-                    Icon::new(IconName::Search)
-                        .size(px(16.))
-                        .text_color(cx.theme().muted_foreground),
-                )
+                .child(Icon::new(IconName::Search))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(15.))
-                        .text_color(cx.theme().muted_foreground)
                         .child(crate::tr!("mobile.search_threads")),
                 ),
             )
@@ -3824,6 +3716,7 @@ impl SessionsSidebar {
     ) -> impl IntoElement + use<> {
         let project_id = row.project_id.clone();
         let collapsed = row.collapsed;
+        let spacing = &cx.theme().tokens.spacing;
         crate::material::accessible_clickable(
             h_flex(),
             row.row_id.clone(),
@@ -3833,20 +3726,20 @@ impl SessionsSidebar {
         )
         .aria_expanded(!collapsed)
         .debug_selector(|| "compact-group-header".into())
-        // A project is a section of the thread list, so its header is the
-        // shared list caption — with the collapse affordance it also carries.
+        // A project is a section of the thread list, so its header is a list
+        // caption that also carries the collapse affordance; a clickable row
+        // rather than a `Button`, which centres its content.
         .w_full()
-        .px(px(COMPACT_PAGE_PADDING))
-        .pt(px(16.))
-        .pb(px(4.))
+        .px(px(COMPACT_PAGE_INSET))
+        .pt(spacing.lg)
+        .pb(spacing.xs)
         .items_center()
-        .gap(px(8.))
+        .gap(spacing.sm)
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| {
             this.toggle_project(&project_id, cx);
         }))
-        .text_size(px(13.))
-        .text_color(cx.theme().muted_foreground)
+        .text_caption(cx)
         .when_some(
             self.store.read(cx).project(&row.project_id),
             |el, project| el.child(crate::project_icon::artwork(project, 14.)),
@@ -3856,7 +3749,6 @@ impl SessionsSidebar {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .font_medium()
                 .debug_selector({
                     let name = row.name.clone();
                     move || format!("compact-group-{name}")
@@ -3865,14 +3757,11 @@ impl SessionsSidebar {
         )
         .children(self.shared_badge(&row.project_id, cx))
         .child(div().flex_none().child(row.count.clone()))
-        .child(
-            Icon::new(if collapsed {
-                IconName::ChevronRight
-            } else {
-                IconName::ChevronDown
-            })
-            .size(px(14.)),
-        )
+        .child(Icon::new(if collapsed {
+            IconName::ChevronRight
+        } else {
+            IconName::ChevronDown
+        }))
     }
 
     /// One 56pt thread row. Long press opens the shared thread context menu.
@@ -3906,7 +3795,7 @@ impl SessionsSidebar {
         let mark = self.provider_mark(
             meta,
             crate::material::LIST_ROW_MIN_HEIGHT,
-            crate::material::COMPACT_PAGE_INSET,
+            COMPACT_PAGE_INSET,
             cx,
         );
 
@@ -3965,7 +3854,7 @@ impl SessionsSidebar {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(2.))
+                    .gap(cx.theme().tokens.spacing.xxs)
                     .child(
                         h_flex()
                             .w_full()
@@ -3975,8 +3864,7 @@ impl SessionsSidebar {
                                 self.rename_input(&rename.input, cx).into_any_element()
                             } else {
                                 truncated_sidebar_label()
-                                    .text_size(px(16.))
-                                    .line_height(px(21.))
+                                    .text_body(true, cx)
                                     .text_color(if meta.is_settled() {
                                         cx.theme().muted_foreground
                                     } else {
@@ -3994,25 +3882,24 @@ impl SessionsSidebar {
                             .when(meta.pinned_at.is_some() && !meta.is_settled(), |row| {
                                 row.child(
                                     Icon::new(IconName::Pin)
-                                        .size(px(14.))
                                         .flex_none()
                                         .text_color(cx.theme().muted_foreground),
                                 )
                             })
                             .when(state.title_generating, |row| {
-                                row.child(div().flex_none().child(
-                                    Spinner::new().xsmall().color(cx.theme().muted_foreground),
-                                ))
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .child(Spinner::new().color(cx.theme().muted_foreground)),
+                                )
                             }),
                     )
                     .child(
                         h_flex()
                             .w_full()
                             .min_w_0()
-                            .gap(px(4.))
-                            .text_size(px(13.))
-                            .line_height(px(18.))
-                            .text_color(cx.theme().muted_foreground)
+                            .gap(cx.theme().tokens.spacing.xs)
+                            .text_secondary(true, cx)
                             .when_some(project_name, |line, name| {
                                 line.child(
                                     div()
@@ -4062,7 +3949,7 @@ fn compact_status_glyph(
             .bg(cx.theme().warning)
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_token(&cx.theme().tokens.typography.xs)
                     .font_semibold()
                     .text_color(gpui::white())
                     .child("!"),
@@ -4076,7 +3963,7 @@ fn compact_status_glyph(
             .bg(cx.theme().primary)
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_token(&cx.theme().tokens.typography.xs)
                     .font_semibold()
                     .text_color(cx.theme().primary_foreground)
                     .child("?"),
@@ -4182,20 +4069,16 @@ impl Render for SessionsSidebar {
                         .min_h_0()
                         .overflow_y_scrollbar()
                         .child(
-                            div().size_full().child(
-                                v_flex().w_full().px_2().pb_2().child(
-                                    div()
-                                        .px_2()
-                                        .py_3()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(if self.store.read(cx).scope().is_full() {
-                                            crate::tr!("sidebar.empty")
-                                        } else {
-                                            crate::tr!("member.empty_description")
-                                        }),
-                                ),
-                            ),
+                            div()
+                                .size_full()
+                                .child(v_flex().w_full().px_2().pb_2().child(empty_row(
+                                    if self.store.read(cx).scope().is_full() {
+                                        crate::tr!("sidebar.empty")
+                                    } else {
+                                        crate::tr!("member.empty_description")
+                                    },
+                                    cx,
+                                ))),
                         )
                         .into_any_element()
                 } else {
@@ -4282,14 +4165,7 @@ impl Render for SessionsSidebar {
                     } else {
                         crate::tr!("sidebar.filter_empty")
                     };
-                    let list_content = v_flex().w_full().px_2().pb_2().child(
-                        div()
-                            .px_2()
-                            .py_3()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(hint),
-                    );
+                    let list_content = v_flex().w_full().px_2().pb_2().child(empty_row(hint, cx));
                     let thread_list = div()
                         .id("sidebar-project-list")
                         .flex_1()
@@ -4320,7 +4196,7 @@ impl Render for SessionsSidebar {
                             visible.push(FlatListRow::Empty);
                         }
                         visible.push(FlatListRow::Settled);
-                        top += SETTLED_HEADER_HEIGHT;
+                        top += bar_height(Bar::Section, false);
                         for meta in settled_visible {
                             visible.push(FlatListRow::Thread(Box::new(meta.clone()), top));
                             top += FLAT_ROW_HEIGHT;
@@ -4579,14 +4455,11 @@ mod tests {
     }
 
     impl Render for WorkingThreadRowProbe {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            h_flex()
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            selectable_row(h_flex(), false, false, cx)
                 .w_full()
-                .h(px(30.))
-                .items_center()
-                .gap_2()
-                .pl(px(42.))
-                .pr_2()
+                .pl(px(THREAD_INDENT))
+                .text_body(false, cx)
                 .debug_selector(|| "thread-row".into())
                 .child(
                     h_flex()
@@ -4594,13 +4467,17 @@ mod tests {
                         .items_center()
                         .gap_1()
                         .child(div().size(px(6.)))
-                        .child(div().whitespace_nowrap().text_size(px(11.)).child("工作中")),
+                        .child(
+                            div()
+                                .whitespace_nowrap()
+                                .text_secondary(false, cx)
+                                .child("工作中"),
+                        ),
                 )
-                .child(div().flex_none().text_size(px(13.)).child("↳"))
                 .child(
                     truncated_sidebar_label()
                         .debug_selector(|| "thread-title".into())
-                        .text_size(px(13.))
+                        .text_body(false, cx)
                         .child("Phase 0 修复架构约束测试"),
                 )
         }
@@ -4740,6 +4617,7 @@ mod tests {
 
     #[gpui::test]
     fn working_thread_title_stays_inside_row_at_every_sidebar_width(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
         let (_, cx) = cx.add_window_view(|_, _| WorkingThreadRowProbe);
         let cx: &mut VisualTestContext = cx;
 

@@ -11,6 +11,7 @@ use super::*;
 use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, WeakEntity, deferred};
 use tcode_core::thread_sort::{order_key_between, plan_reorder, thread_section};
 
+/// A `semantic_chip`'s height: one `xs` line and its 1pt insets.
 const BOUNDARY_LABEL_HEIGHT: f32 = 18.;
 const EMPTY_TARGET_HEIGHT: f32 = 36.;
 const ARRANGE_HANDLE_SIZE: f32 = 44.;
@@ -142,18 +143,20 @@ impl Render for ThreadDragView {
             })
             .unwrap_or((None, px(240.)));
         if self.compact {
+            // The lifted `list_row` a finger carries: its height and inset,
+            // floated at the overlay radius.
             return v_flex()
                 .w(width)
                 .min_h(px(crate::material::LIST_ROW_MIN_HEIGHT))
                 .justify_center()
-                .px(px(crate::material::COMPACT_PAGE_INSET))
-                .py(px(8.))
-                .rounded(cx.theme().tokens.radius.lg)
+                .px(px(COMPACT_PAGE_INSET))
+                .py(cx.theme().tokens.spacing.sm)
+                .rounded(crate::material::radius_overlay(cx))
                 .bg(cx.theme().list_active)
                 .shadow_lg()
                 .child(
                     div()
-                        .text_size(px(15.))
+                        .text_body(true, cx)
                         .line_clamp(2)
                         .text_color(cx.theme().foreground)
                         .child(self.title.clone()),
@@ -161,26 +164,20 @@ impl Render for ThreadDragView {
                 .when_some(action, |card, action| {
                     card.child(
                         div()
-                            .text_size(px(13.))
+                            .text_secondary(true, cx)
                             .text_color(cx.theme().primary)
                             .child(action.label()),
                     )
                 })
                 .into_any_element();
         }
-        h_flex()
+        crate::material::selectable_row_two_line(h_flex(), true, false, cx)
             .w(width)
-            .h(px(FLAT_ROW_INNER_HEIGHT))
-            .px(px(THREAD_ROW_PADDING_X))
-            .gap_2()
-            .items_center()
-            .rounded(cx.theme().tokens.radius.md)
-            .bg(cx.theme().list_active)
             .shadow_lg()
             .text_color(cx.theme().sidebar_foreground)
             .child(
                 truncated_sidebar_label()
-                    .text_size(px(13.))
+                    .text_body(false, cx)
                     .child(self.title.clone()),
             )
             .when_some(action, |row, action| {
@@ -189,19 +186,21 @@ impl Render for ThreadDragView {
                         .id("thread-drag-badge")
                         .role(Role::Status)
                         .aria_label(action.label())
+                        // A bordered status badge with a leading icon:
+                        // `semantic_chip` takes neither.
                         .flex_none()
                         .h(px(20.))
                         .px(px(6.))
                         .gap_1()
                         .items_center()
-                        .rounded(cx.theme().tokens.radius.sm)
+                        .rounded(crate::material::radius_chip(cx))
                         .border_1()
                         .border_color(cx.theme().primary.opacity(0.4))
                         .bg(cx.theme().primary.opacity(0.1))
-                        .text_size(px(11.))
+                        .text_token(&cx.theme().tokens.typography.xs)
                         .font_medium()
                         .text_color(cx.theme().primary)
-                        .child(Icon::new(action.icon()).size(px(12.)))
+                        .child(Icon::new(action.icon()))
                         .child(action.label()),
                 )
             })
@@ -774,12 +773,11 @@ impl SessionsSidebar {
                     .h(px(EMPTY_TARGET_HEIGHT - 8.))
                     .px_2()
                     .items_center()
-                    .rounded(cx.theme().tokens.radius.sm)
+                    .rounded(crate::material::radius_chip(cx))
                     .border_1()
                     .border_dashed()
                     .border_color(cx.theme().primary)
-                    .text_size(px(12.))
-                    .font_medium()
+                    .text_caption(cx)
                     .text_color(color)
                     .child(label),
             );
@@ -810,21 +808,16 @@ impl SessionsSidebar {
                     .gap_1()
                     .items_center()
                     .child(div().flex_none().w_2().h(px(1.)).bg(rule))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_1p5()
-                            .rounded_full()
-                            .bg(cx.theme().muted)
-                            .text_size(px(11.))
-                            .line_height(px(BOUNDARY_LABEL_HEIGHT))
-                            .text_color(if targeted {
-                                cx.theme().primary
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .child(label),
-                    )
+                    .child(crate::material::semantic_chip(
+                        label,
+                        cx.theme().muted,
+                        if targeted {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().muted_foreground
+                        },
+                        cx,
+                    ))
                     .child(div().flex_1().h(px(1.)).bg(rule)),
             ))
             .into_any_element()
@@ -923,19 +916,18 @@ impl SessionsSidebar {
                 div()
                     .debug_selector(|| "arrange-title".into())
                     .flex_none()
-                    .px(px(COMPACT_PAGE_PADDING))
-                    .pt(px(8.))
-                    .text_size(px(22.))
+                    .px(px(COMPACT_PAGE_INSET))
+                    .pt(cx.theme().tokens.spacing.sm)
+                    .text_token(&cx.theme().tokens.typography.xl)
                     .font_semibold()
                     .child(crate::tr!("sidebar.arrange_title")),
             )
             .child(
                 div()
                     .flex_none()
-                    .px(px(COMPACT_PAGE_PADDING))
-                    .py(px(8.))
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
+                    .px(px(COMPACT_PAGE_INSET))
+                    .py(cx.theme().tokens.spacing.sm)
+                    .text_secondary(true, cx)
                     .child(crate::tr!("sidebar.arrange_hint")),
             )
             .child(
@@ -995,13 +987,7 @@ impl SessionsSidebar {
             }
             ArrangeRow::PinnedEmpty => self
                 .drop_zone(
-                    div()
-                        .w_full()
-                        .px(px(crate::material::COMPACT_PAGE_INSET))
-                        .py(px(12.))
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("sidebar.arrange_pinned_empty")),
+                    crate::material::empty_row(crate::tr!("sidebar.arrange_pinned_empty"), cx),
                     DropZone::Start(ThreadSection::Pinned),
                     scope,
                     0.,
@@ -1010,6 +996,8 @@ impl SessionsSidebar {
                 .into_any_element(),
             ArrangeRow::Settled(count) => {
                 let expanded = self.arrange_settled_expanded;
+                // The compact sidebar's settled disclosure, at a touch
+                // section bar's height and inset.
                 let header = crate::material::accessible_clickable(
                     h_flex(),
                     "arrange-settled",
@@ -1020,12 +1008,11 @@ impl SessionsSidebar {
                 .aria_expanded(expanded)
                 .debug_selector(|| "arrange-settled".into())
                 .w_full()
-                .h(px(44.))
-                .gap_2()
-                .px(px(crate::material::COMPACT_PAGE_INSET))
+                .h(px(bar_height(Bar::Section, true)))
+                .gap(cx.theme().tokens.spacing.sm)
+                .px(px(COMPACT_PAGE_INSET))
                 .items_center()
-                .text_size(px(13.))
-                .font_medium()
+                .text_caption(cx)
                 .text_color(caption_color(ThreadSection::Settled))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -1124,16 +1111,17 @@ impl SessionsSidebar {
             let id = meta.id.clone();
             move || format!("arrange-row-{id}")
         })
-        .pr(px(4.))
+        // The 44pt grip must reach the page edge; `list_row`'s trailing inset
+        // would push it in.
+        .pr(cx.theme().tokens.spacing.xs)
         .child(
             v_flex()
                 .flex_1()
                 .min_w_0()
-                .gap(px(2.))
+                .gap(cx.theme().tokens.spacing.xxs)
                 .child(
                     div()
-                        .text_size(px(15.))
-                        .line_height(px(20.))
+                        .text_body(true, cx)
                         .line_clamp(2)
                         .text_color(if meta.is_settled() {
                             cx.theme().muted_foreground
@@ -1143,13 +1131,7 @@ impl SessionsSidebar {
                         .child(meta.title.clone()),
                 )
                 .when_some(project, |column, project| {
-                    column.child(
-                        div()
-                            .text_size(px(13.))
-                            .truncate()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(project),
-                    )
+                    column.child(div().truncate().text_secondary(true, cx).child(project))
                 }),
         )
         .child(handle)

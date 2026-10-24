@@ -1,8 +1,10 @@
 //! Controls for the headless listener, carried on the authenticated host pipe.
 use crate::{
+    material::{empty_row, group_caption, group_row, group_row_stacked, section_gap},
     overlay::OverlayExt as _,
     store::WorkspaceStore,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         button::{Button, ButtonVariants as _},
         switch::Switch,
@@ -99,7 +101,8 @@ impl HostedPanel {
     }
 
     fn body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut column = v_flex().gap_3().w_full();
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        let mut column = v_flex().gap(section_gap(cx)).w_full();
         if let Some(error) = &self.error {
             column = column.child(
                 div()
@@ -112,7 +115,7 @@ impl HostedPanel {
         };
         column = column.child(
             crate::material::group(cx).child(
-                h_flex().p_3().gap_3().child(
+                group_row(cx).child(
                     Switch::new("headless-pairing-enabled")
                         .w_full()
                         .flex_row_reverse()
@@ -127,32 +130,29 @@ impl HostedPanel {
             ),
         );
         if state.enabled {
-            let mut invitation =
-                v_flex()
-                    .gap_2()
-                    .flex_1()
-                    .min_w_0()
-                    .child(crate::tr!("remote.invite.title"))
-                    .child(div().text_size(px(15.)).line_height(px(20.)).child(
-                        match &state.invite {
-                            Some(_) => crate::tr!(
-                                "remote.invite.expires",
-                                time = format!(
-                                    "{}:{:02}",
-                                    state.expires_in_secs / 60,
-                                    state.expires_in_secs % 60
-                                )
-                            ),
-                            None => crate::tr!("remote.invite.expired"),
-                        },
-                    ))
-                    .children(
-                        state
-                            .group
-                            .as_ref()
-                            .filter(|_| state.invite.is_some())
-                            .map(|group| super::group::invitation_note(&group.name, cx)),
-                    );
+            let mut invitation = v_flex()
+                .gap_2()
+                .flex_1()
+                .min_w_0()
+                .child(crate::tr!("remote.invite.title"))
+                .child(div().text_body(compact, cx).child(match &state.invite {
+                    Some(_) => crate::tr!(
+                        "remote.invite.expires",
+                        time = format!(
+                            "{}:{:02}",
+                            state.expires_in_secs / 60,
+                            state.expires_in_secs % 60
+                        )
+                    ),
+                    None => crate::tr!("remote.invite.expired"),
+                }))
+                .children(
+                    state
+                        .group
+                        .as_ref()
+                        .filter(|_| state.invite.is_some())
+                        .map(|group| super::group::invitation_note(&group.name, compact, cx)),
+                );
             let mut actions = h_flex().gap_2();
             if let Some(link) = state.invite.clone() {
                 actions = actions.child(
@@ -180,25 +180,20 @@ impl HostedPanel {
                         })),
                 ),
             );
-            let mut row = if crate::window_seam::window_is_compact(window, cx) {
-                v_flex()
+            let mut row = if compact {
+                group_row_stacked(cx)
             } else {
-                h_flex()
-            };
-            row = row.p_3().gap_4().items_start().child(invitation);
+                group_row(cx).items_start()
+            }
+            .child(invitation);
             if let Some(link) = &state.invite {
                 row = row.children(super::qr::qr_element(link, cx));
             }
             column = column.child(crate::material::group(cx).child(row));
         }
-        column = column.child(
-            div()
-                .text_size(px(13.))
-                .child(crate::tr!("remote.devices.section")),
-        );
         let mut devices = crate::material::group(cx);
         if state.devices.is_empty() {
-            devices = devices.child(div().p_3().child(crate::tr!("remote.devices.empty")));
+            devices = devices.child(empty_row(crate::tr!("remote.devices.empty"), cx));
         }
         let group_name = state.group.as_ref().map(|group| group.name.clone());
         for device in state.devices {
@@ -221,9 +216,7 @@ impl HostedPanel {
                 None => cx.theme().muted_foreground,
             };
             devices = devices.child(
-                h_flex()
-                    .p_3()
-                    .gap_3()
+                group_row(cx)
                     .child(
                         h_flex()
                             .flex_1()
@@ -239,7 +232,7 @@ impl HostedPanel {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(13.))
+                            .text_secondary(compact, cx)
                             .text_color(status_color)
                             .child(super::path_label(device.path.as_ref())),
                     )
@@ -272,7 +265,11 @@ impl HostedPanel {
             );
         }
         column
-            .child(devices)
+            .child(
+                v_flex()
+                    .child(group_caption(crate::tr!("remote.devices.section"), cx))
+                    .child(devices),
+            )
             .child(self.group.clone())
             .child(self.spaces.clone())
             .into_any_element()

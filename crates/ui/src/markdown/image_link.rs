@@ -1,12 +1,15 @@
 use std::path::Path;
 
-use gpui::{
-    App, Div, Entity, InteractiveElement as _, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
-};
-use gpui_base::Button;
+use gpui::{App, Div, Entity, ParentElement as _, SharedString, Styled as _, Window, div, px};
 
-use crate::{icon::Icon, sizing::Sizable as _, theme::ActiveTheme as _, widgets::Tooltip};
+use crate::{
+    icon::Icon,
+    material::{Bar, bar_height},
+    sizing::Sizable as _,
+    theme::ActiveTheme as _,
+    typography::TextRole as _,
+    widgets::button::Button,
+};
 
 use super::{
     MarkdownState,
@@ -43,34 +46,19 @@ pub(super) fn badge(
     window: &Window,
     cx: &App,
 ) -> Div {
-    let (row_height, badge_height) = if crate::window_seam::window_is_compact(window, cx) {
-        (44., 38.)
-    } else {
-        (28., 26.)
-    };
-    let hover = cx.theme().secondary_active;
-    let tooltip_url = url.clone();
+    let compact = crate::window_seam::window_is_compact(window, cx);
     let badge = Button::new(("markdown-image-link", ix))
-        .rounded(cx.theme().tokens.radius.md)
-        .h(px(badge_height))
-        .px_2()
-        .gap_1()
-        .flex_shrink_0()
+        .small()
+        .touch(compact)
         .max_w_full()
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(crate::material::content_surface(cx))
-        .text_size(px(13.))
-        .text_color(cx.theme().foreground)
-        .hover(move |badge| badge.bg(hover))
-        .child(
+        .text_body(false, cx)
+        .icon(
             Icon::default()
                 .path("icons/image.svg")
-                .small()
                 .text_color(cx.theme().link),
         )
-        .accessibility_label(label.clone())
-        .tooltip(move |window, cx| Tooltip::new(tooltip_url.clone()).build(window, cx))
+        .aria_label(label.clone())
+        .tooltip(url.clone())
         .child(div().min_w_0().truncate().child(label.clone()))
         .on_click(move |_, window, cx| {
             crate::widgets::stop_click_propagation(window, cx);
@@ -81,7 +69,7 @@ pub(super) fn badge(
     div()
         .flex()
         .items_center()
-        .min_h(px(row_height))
+        .min_h(px(bar_height(Bar::Section, compact)))
         .max_w(px(360.))
         .child(badge)
 }

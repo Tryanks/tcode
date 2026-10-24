@@ -16,7 +16,7 @@ use std::time::Duration;
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EntityId, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div,
 };
 use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
@@ -28,9 +28,9 @@ use tcode_protocol::{HostingAction, HostingState, SpaceAction, SpaceInfo};
 
 use crate::icon::Icon;
 use crate::overlay::{DialogActions, Notification, OverlayExt as _};
-use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::menu::PopupMenu;
@@ -638,7 +638,6 @@ pub(crate) fn shared_badge(project_id: &str, names: &[String], cx: &App) -> AnyE
         .child(
             Icon::empty()
                 .path("icons/users.svg")
-                .xsmall()
                 .text_color(cx.theme().muted_foreground),
         )
         .tooltip(move |window, cx| crate::widgets::Tooltip::new(tooltip.clone()).build(window, cx))
@@ -699,7 +698,6 @@ pub(crate) fn open_create(
         let ok = submit.clone();
         let create = submit.clone();
         dialog
-            .w(px(420.))
             .title(title.clone())
             .on_ok(move |_, window, cx| ok(window, cx))
             .content(move |content, _, cx| {
@@ -710,8 +708,7 @@ pub(crate) fn open_create(
                         .child(Input::new(&field))
                         .child(
                             div()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
+                                .text_secondary(false, cx)
                                 .child(crate::tr!("spaces.create.disclosure")),
                         ),
                 )
@@ -785,7 +782,6 @@ fn open_shared(
             crate::tr!("spaces.shared.description", project = project_name.clone()).into_owned();
         let title = quoted("spaces.shared.title", &space.name);
         dialog
-            .w(px(440.))
             .title(title)
             .content(move |content, _, cx| {
                 content.child(link_body(&space, accepting, description.clone(), true, cx))
@@ -841,7 +837,7 @@ fn link_body(
     let Some(link) = space.link.clone() else {
         let reason = link_unavailable(space, accepting).unwrap_or_default();
         return div()
-            .text_size(px(13.))
+            .text_secondary(false, cx)
             .text_color(if space.link_dead {
                 cx.theme().danger_foreground
             } else {
@@ -854,12 +850,7 @@ fn link_body(
         .flex_1()
         .min_w_0()
         .gap_3()
-        .child(
-            div()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(description),
-        )
+        .child(div().text_secondary(false, cx).child(description))
         .child(
             h_flex().gap_2().flex_wrap().child(
                 Button::new(SharedString::from(format!("space-copy-{}", space.id)))
@@ -887,12 +878,13 @@ mod section {
     use super::*;
     use crate::icon::IconName;
     use crate::overlay::DialogButtons;
+    use crate::sizing::Sizable as _;
     use crate::widgets::ButtonVariant;
     use crate::widgets::checkbox::Checkbox;
     use crate::widgets::menu::DropdownMenu as _;
     use crate::widgets::switch::Switch;
     use gpui::prelude::FluentBuilder as _;
-    use gpui_base::StyledExt as _;
+    use gpui::px;
     use tcode_protocol::HostedDevice;
 
     /// Move a member to another space.
@@ -1016,7 +1008,6 @@ mod section {
                 let ok = submit.clone();
                 let save = submit.clone();
                 dialog
-                    .w(px(420.))
                     .title(crate::tr!("spaces.rename_title").into_owned())
                     .on_ok(move |_, window, cx| ok(window, cx))
                     .content(move |content, _, _| content.child(Input::new(&field)))
@@ -1049,11 +1040,10 @@ mod section {
             let id = space.id.clone();
             let name = space.name.clone();
             let members = space.members.len();
-            window.open_alert_dialog(cx, move |alert, _, cx| {
+            window.open_alert_dialog(cx, move |alert, _, _| {
                 let spaces = spaces.clone();
                 let id = id.clone();
                 alert
-                    .bg(cx.theme().popover)
                     .title(quoted("spaces.delete_title", &name))
                     .description(if members == 0 {
                         crate::tr!("spaces.delete_description_empty")
@@ -1101,6 +1091,7 @@ mod section {
             &self,
             space: &SpaceInfo,
             expanded: bool,
+            compact: bool,
             cx: &mut Context<Self>,
         ) -> AnyElement {
             let id = space.id.clone();
@@ -1120,7 +1111,7 @@ mod section {
                 None
             };
             crate::material::accessible_clickable(
-                h_flex(),
+                crate::material::group_row(cx),
                 SharedString::from(format!("space-row-{id}")),
                 gpui::Role::Button,
                 space.name.clone(),
@@ -1131,12 +1122,6 @@ mod section {
                 let id = id.clone();
                 move || format!("space-row-{id}")
             })
-            .w_full()
-            .min_h(px(44.))
-            .px_3()
-            .py_2p5()
-            .gap_3()
-            .items_center()
             .cursor_pointer()
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |section, _, _, cx| {
@@ -1153,41 +1138,20 @@ mod section {
                 } else {
                     IconName::ChevronRight
                 })
-                .small()
                 .text_color(cx.theme().muted_foreground),
             )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_medium()
-                            .truncate()
-                            .child(space.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(summary(space)),
-                    ),
+                    .gap(cx.theme().tokens.spacing.xxs)
+                    .child(div().text_title(cx).truncate().child(space.name.clone()))
+                    .child(div().text_secondary(compact, cx).child(summary(space))),
             )
             .children(
                 status.map(|(label, bg, fg)| crate::material::semantic_chip(label, bg, fg, cx)),
             )
             .into_any_element()
-        }
-
-        fn subheading(label: SharedString, cx: &App) -> AnyElement {
-            div()
-                .text_size(px(13.))
-                .font_medium()
-                .text_color(cx.theme().muted_foreground)
-                .child(label)
-                .into_any_element()
         }
 
         fn link_block(
@@ -1215,8 +1179,7 @@ mod section {
                         .gap_3()
                         .child(
                             div()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
+                                .text_secondary(compact, cx)
                                 .child(quoted("spaces.link.description", &space.name)),
                         )
                         .child(
@@ -1250,8 +1213,10 @@ mod section {
                         .child(
                             div()
                                 .flex_1()
+                                // The narrowest the reason gets before the
+                                // button wraps under it: a layout breakpoint.
                                 .min_w(px(160.))
-                                .text_size(px(13.))
+                                .text_secondary(compact, cx)
                                 .text_color(if space.link_dead {
                                     cx.theme().danger_foreground
                                 } else {
@@ -1277,7 +1242,7 @@ mod section {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(15.))
+                                .text_body(compact, cx)
                                 .child(crate::tr!("spaces.link.enabled")),
                         )
                         .child(
@@ -1304,6 +1269,7 @@ mod section {
             &self,
             space: &SpaceInfo,
             projects: Option<&[Project]>,
+            compact: bool,
             cx: &mut Context<Self>,
         ) -> AnyElement {
             let mut chips = h_flex().w_full().gap_2().flex_wrap();
@@ -1325,44 +1291,37 @@ mod section {
                     space_id: space.id.clone(),
                     project_id: project_id.clone(),
                 };
+                let foreground = if removed {
+                    cx.theme().muted_foreground
+                } else {
+                    cx.theme().foreground
+                };
                 chips = chips.child(
-                    h_flex()
-                        .flex_none()
-                        .max_w_full()
-                        .h(px(28.))
-                        .pl_2p5()
-                        .pr_0p5()
-                        .gap_1()
-                        .items_center()
-                        .rounded(crate::material::radius_chip(cx))
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().muted.opacity(0.5))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(13.))
-                                .when(removed, |label| {
-                                    label.italic().text_color(cx.theme().muted_foreground)
-                                })
-                                .child(label.clone()),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "space-unshare-{}-{project_id}",
-                                space.id
-                            )))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .aria_label(crate::tr!("spaces.projects.remove", name = label))
-                            .on_click(cx.listener(
-                                move |section, _, window, cx| {
-                                    section.on_toggle_share(&action, window, cx);
-                                },
-                            )),
-                        ),
+                    crate::material::semantic_chip(
+                        label.clone(),
+                        cx.theme().secondary,
+                        foreground,
+                        cx,
+                    )
+                    .flex()
+                    .items_center()
+                    .gap(cx.theme().tokens.spacing.xs)
+                    .when(removed, |chip| chip.italic())
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "space-unshare-{}-{project_id}",
+                            space.id
+                        )))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .aria_label(crate::tr!("spaces.projects.remove", name = label))
+                        .on_click(cx.listener(
+                            move |section, _, window, cx| {
+                                section.on_toggle_share(&action, window, cx);
+                            },
+                        )),
+                    ),
                 );
             }
             let add = projects
@@ -1401,21 +1360,25 @@ mod section {
                 });
             v_flex()
                 .w_full()
-                .gap_2()
-                .child(Self::subheading(
-                    crate::tr!("spaces.projects.title").into_owned().into(),
+                .child(crate::material::group_caption(
+                    crate::tr!("spaces.projects.title"),
                     cx,
                 ))
-                .when(space.project_ids.is_empty(), |column| {
-                    column.child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("spaces.projects.empty")),
-                    )
-                })
-                .when(!space.project_ids.is_empty(), |column| column.child(chips))
-                .children(add.map(|add| h_flex().child(add)))
+                .child(
+                    v_flex()
+                        .w_full()
+                        .px(px(crate::material::CARD_INSET))
+                        .gap(cx.theme().tokens.spacing.sm)
+                        .when(space.project_ids.is_empty(), |column| {
+                            column.child(
+                                div()
+                                    .text_secondary(compact, cx)
+                                    .child(crate::tr!("spaces.projects.empty")),
+                            )
+                        })
+                        .when(!space.project_ids.is_empty(), |column| column.child(chips))
+                        .children(add.map(|add| h_flex().child(add))),
+                )
                 .into_any_element()
         }
 
@@ -1462,7 +1425,7 @@ mod section {
                         div()
                             .flex_none()
                             .when(compact, |status| status.flex_1())
-                            .text_size(px(13.))
+                            .text_secondary(compact, cx)
                             .text_color(status_color)
                             .child(super::super::path_label(member.path.as_ref())),
                     )
@@ -1484,45 +1447,33 @@ mod section {
                 let name = div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(15.))
+                    .text_body(compact, cx)
                     .truncate()
                     .child(super::super::device_label(
                         &member.name,
                         member.platform.as_deref(),
                     ));
-                rows = rows.child(if compact {
-                    v_flex()
-                        .w_full()
-                        .py_1p5()
-                        .gap_1()
-                        .child(name)
-                        .child(controls)
-                        .into_any_element()
-                } else {
-                    h_flex()
-                        .w_full()
-                        .min_h(px(36.))
-                        .gap_3()
-                        .items_center()
-                        .child(name)
-                        .child(controls)
-                        .into_any_element()
-                });
+                rows = rows.child(
+                    if compact {
+                        crate::material::group_row_stacked(cx)
+                    } else {
+                        crate::material::group_row(cx)
+                    }
+                    .child(name)
+                    .child(controls),
+                );
             }
             v_flex()
                 .w_full()
-                .gap_1()
-                .child(Self::subheading(
-                    crate::tr!("spaces.members.title").into_owned().into(),
+                .child(crate::material::group_caption(
+                    crate::tr!("spaces.members.title"),
                     cx,
                 ))
                 .when(space.members.is_empty(), |column| {
-                    column.child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("spaces.members.empty")),
-                    )
+                    column.child(crate::material::empty_row(
+                        crate::tr!("spaces.members.empty"),
+                        cx,
+                    ))
                 })
                 .child(rows)
                 .into_any_element()
@@ -1544,18 +1495,25 @@ mod section {
                 .collect();
             let rename_space = space.clone();
             let delete_space = space.clone();
+            let inset = px(crate::material::CARD_INSET);
+            // The link and the actions sit at the card inset; the projects and
+            // members blocks carry it themselves, as their rows do.
             v_flex()
                 .w_full()
-                .px_3()
-                .pt_1()
-                .pb_3()
-                .gap_5()
+                .pt(cx.theme().tokens.spacing.xs)
+                .pb(inset)
+                .gap(crate::material::section_gap(cx))
                 .debug_selector(|| "space-detail".into())
-                .child(self.link_block(space, accepting, compact, cx))
-                .child(self.projects_block(space, projects, cx))
+                .child(
+                    div()
+                        .px(inset)
+                        .child(self.link_block(space, accepting, compact, cx)),
+                )
+                .child(self.projects_block(space, projects, compact, cx))
                 .child(self.members_block(space, &others, compact, cx))
                 .child(
                     h_flex()
+                        .px(inset)
                         .gap_2()
                         .flex_wrap()
                         .child(
@@ -1581,14 +1539,6 @@ mod section {
                 )
                 .into_any_element()
         }
-
-        fn hairline(cx: &App) -> AnyElement {
-            div()
-                .w_full()
-                .pl_3()
-                .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6)))
-                .into_any_element()
-        }
     }
 
     impl gpui::Render for SpacesSection {
@@ -1612,28 +1562,23 @@ mod section {
             }
             let mut group = crate::material::group(cx);
             if list.is_empty() {
-                group = group.child(
-                    div()
-                        .w_full()
-                        .px_3()
-                        .pt_3()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("spaces.intro")),
-                );
+                group = group.child(crate::material::empty_row(crate::tr!("spaces.intro"), cx));
             }
             for space in &list {
                 let expanded = self.expanded.as_deref() == Some(space.id.as_str());
-                group = group.child(self.space_row(space, expanded, cx));
+                group = group.child(self.space_row(space, expanded, compact, cx));
                 if expanded {
                     let detail =
                         self.detail(space, &list, accepting, projects.as_deref(), compact, cx);
                     group = group.child(detail);
                 }
-                group = group.child(Self::hairline(cx));
+                group = group.child(crate::material::row_hairline(
+                    px(crate::material::CARD_INSET),
+                    cx,
+                ));
             }
             group = group.child(
-                h_flex().w_full().px_3().py_2p5().child(
+                crate::material::group_row(cx).child(
                     Button::new("spaces-new")
                         .ghost()
                         .compact()
@@ -1647,15 +1592,10 @@ mod section {
                 .debug_selector(|| "spaces-section".into())
                 .on_action(cx.listener(Self::on_toggle_share))
                 .on_action(cx.listener(Self::on_move_member))
-                .child(
-                    div()
-                        .pl_3()
-                        .pb(px(6.))
-                        .text_size(px(11.))
-                        .font_medium()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("spaces.section")),
-                )
+                .child(crate::material::group_caption(
+                    crate::tr!("spaces.section"),
+                    cx,
+                ))
                 .child(group)
                 .into_any_element()
         }
@@ -1711,7 +1651,6 @@ mod section {
             let spaces = spaces.clone();
             let device_id = device_id.clone();
             dialog
-                .w(px(420.))
                 .close_button(false)
                 .title(
                     crate::tr!(
@@ -1728,8 +1667,7 @@ mod section {
                             .debug_selector(|| "spaces-remove-member".into())
                             .child(
                                 div()
-                                    .text_size(px(13.))
-                                    .text_color(cx.theme().muted_foreground)
+                                    .text_secondary(false, cx)
                                     .child(crate::tr!("spaces.members.remove_description")),
                             )
                             .child(
@@ -1772,19 +1710,20 @@ mod section {
 
     /// A member's space, as the Connected devices list marks it.
     pub(crate) fn member_badge(name: &str, cx: &App) -> AnyElement {
+        // A `semantic_chip` with a leading icon, which that owner has no slot
+        // for; its fill, inset, radius and text are the owner's.
         h_flex()
             .flex_none()
+            // The longest a space name runs in a device row before it truncates.
             .max_w(px(160.))
-            .gap_1()
-            .px_2()
+            .gap(cx.theme().tokens.spacing.xs)
+            .px(cx.theme().tokens.spacing.sm)
             .py(px(1.))
             .items_center()
             .rounded(crate::material::radius_chip(cx))
             .bg(cx.theme().muted)
-            .text_size(px(11.))
-            .font_medium()
-            .text_color(cx.theme().muted_foreground)
-            .child(Icon::empty().path("icons/users.svg").xsmall())
+            .text_caption(cx)
+            .child(Icon::empty().path("icons/users.svg"))
             .child(div().min_w_0().truncate().child(name.to_owned()))
             .into_any_element()
     }
@@ -1797,7 +1736,7 @@ pub(crate) use section::member_badge;
 mod machines {
     use super::*;
     use crate::icon::IconName;
-    use gpui_base::StyledExt as _;
+    use gpui::px;
 
     /// This machine's spaces on the Machines page, one compact row each:
     /// the link's state, its QR on demand and Copy. A paused or dead link
@@ -1807,7 +1746,6 @@ mod machines {
         open_qr: Option<&str>,
         toggle_qr: fn(&mut V, String, &mut Context<V>),
         compact: bool,
-        inset: f32,
         cx: &mut Context<V>,
     ) -> Option<AnyElement> {
         let model = spaces.read(cx);
@@ -1880,10 +1818,11 @@ mod machines {
                         }),
                 );
             }
+            let inset = px(crate::material::COMPACT_PAGE_INSET);
             let line = h_flex()
                 .w_full()
-                .px(px(inset))
-                .py(px(8.))
+                .px(inset)
+                .py(cx.theme().tokens.spacing.sm)
                 .gap_3()
                 .items_center()
                 .debug_selector({
@@ -1894,15 +1833,14 @@ mod machines {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .gap(px(2.))
+                        .gap(cx.theme().tokens.spacing.xxs)
+                        .child(div().text_title(cx).truncate().child(space.name.clone()))
                         .child(
                             div()
-                                .text_size(px(15.))
-                                .font_medium()
-                                .truncate()
-                                .child(space.name.clone()),
-                        )
-                        .child(div().text_size(px(13.)).text_color(color).child(status)),
+                                .text_secondary(true, cx)
+                                .text_color(color)
+                                .child(status),
+                        ),
                 )
                 .child(controls);
             let mut row = v_flex().w_full().child(line);
@@ -1912,15 +1850,14 @@ mod machines {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(15.))
-                            .line_height(px(20.))
+                            .text_body(true, cx)
                             .child(quoted("spaces.link.description", &space.name)),
                         link,
                         compact,
                         cx,
                     )
-                    .px(px(inset))
-                    .pb(px(8.)),
+                    .px(inset)
+                    .pb(cx.theme().tokens.spacing.sm),
                 );
             }
             rows.push(row.into_any_element());
@@ -1954,7 +1891,7 @@ mod machines {
 #[cfg(all(test, feature = "remote-hosting"))]
 mod tests {
     use super::*;
-    use gpui::{BorrowAppContext as _, Render, TestAppContext, VisualTestContext};
+    use gpui::{BorrowAppContext as _, Render, TestAppContext, VisualTestContext, px};
     use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, TraverseHost};
 
     struct Probe(Entity<SpacesSection>);
