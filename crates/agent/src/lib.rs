@@ -15,6 +15,7 @@ mod actor;
 #[cfg(feature = "process")]
 pub mod claude;
 mod claude_context;
+#[cfg(feature = "process")]
 mod claude_goal;
 mod claude_manifest;
 #[cfg(feature = "process")]
