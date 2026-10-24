@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build from the repository root:
-#   docker build --target full -f crates/headless/Dockerfile -t tcode-headless .
+#   docker build -f crates/headless/Dockerfile -t tcode-headless .
 # Releases use --build-arg BINARY_SOURCE=release and the same Linux binary as
 # the downloadable archives, staged in dist/<amd64|arm64>/tcode-headless.
 ARG BINARY_SOURCE=source
@@ -30,7 +30,7 @@ COPY --chmod=755 dist/${TARGETARCH}/tcode-headless /tcode-headless
 
 FROM ${BINARY_SOURCE} AS binary
 
-FROM node:24-trixie-slim AS runtime
+FROM node:24-trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash ca-certificates curl git libssl3t64 libzstd1 openssh-client \
@@ -39,36 +39,26 @@ RUN apt-get update \
     && groupmod --new-name tcode node \
     && usermod --login tcode --home /data/home --shell /bin/bash node
 COPY crates/headless/container/agents.json crates/headless/container/install-agents.mjs /opt/tcode/
-# The agent manifest owns CLI versions, so the CLIs' own updaters stay off.
+# Agent commands are on PATH only through /data/agents/bin, which holds the
+# selected ones; Cursor's installer also writes $HOME/.local/bin.
 ENV HOME=/data/home \
     TCODE_DATA_DIR=/data/tcode \
     SHELL=/bin/bash \
     LANG=C.UTF-8 \
-    DISABLE_AUTOUPDATER=1 \
-    OPENCODE_DISABLE_AUTOUPDATE=true \
     NPM_CONFIG_PREFIX=/data/agents/custom \
     NPM_CONFIG_CACHE=/data/agents/npm-cache \
-    PATH=/data/agents/bin:/data/bin:/data/home/.local/bin:/data/agents/custom/bin:$PATH
+    PATH=/data/agents/bin:/data/bin:/data/agents/custom/bin:$PATH
 LABEL org.opencontainers.image.title="tcode-headless" \
       org.opencontainers.image.description="Tcode headless machine with the browser app, for NAS and homelab hosts" \
       org.opencontainers.image.licenses="MIT"
-
-FROM runtime AS bundled-agents
-RUN NPM_CONFIG_CACHE=/tmp/npm-cache node /opt/tcode/install-agents.mjs /opt/tcode/agents \
-    && rm -rf /tmp/npm-cache
-
-FROM runtime AS slim
 COPY --from=binary /tcode-headless /usr/local/bin/tcode-headless
 COPY --chmod=755 crates/headless/container/entrypoint.sh /opt/tcode/entrypoint.sh
 COPY crates/headless/container/profile.sh /etc/profile.d/tcode.sh
 WORKDIR /projects
 VOLUME ["/data"]
 EXPOSE 47420/tcp 47420/udp
-# A slim first start installs the selected CLIs before the listener opens.
+# A first start installs the selected CLIs before the listener opens.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10m --start-interval=5s \
     CMD curl -fsS -o /dev/null http://127.0.0.1:47420/auth/state || exit 1
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/tcode/entrypoint.sh"]
 CMD ["serve", "--browser-listen", "0.0.0.0:47420"]
-
-FROM slim AS full
-COPY --from=bundled-agents /opt/tcode/agents /opt/tcode/agents

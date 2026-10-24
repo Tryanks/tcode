@@ -39,7 +39,7 @@ if [ "${1:-serve}" = serve ]; then
         TCODE_AGENTS=$(node -e 'console.log(Object.keys(require("/opt/tcode/agents.json")).join(","))')
         export TCODE_AGENTS
     fi
-    node /opt/tcode/install-agents.mjs /data/agents /opt/tcode/agents
+    node /opt/tcode/install-agents.mjs /data/agents
 fi
 
 exec tcode-headless "$@"

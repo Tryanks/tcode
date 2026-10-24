@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/Tryanks/tcode/issues</Support>
   <Project>https://github.com/Tryanks/tcode</Project>
-  <Overview>Tcode headless machine: Claude Code, Codex, pi, OpenCode, Cursor and Grok in a native GUI on your phone, desktop or browser. Pair a device with the invitation in the container log, or open the browser app on port 47420. Use the slim tag to install only the CLIs listed in TCODE_AGENTS.</Overview>
+  <Overview>Tcode headless machine: Claude Code, Codex, pi, OpenCode, Cursor and Grok in a native GUI on your phone, desktop or browser. Pair a device with the invitation in the container log, or open the browser app on port 47420. The agent CLIs listed in TCODE_AGENTS install into the appdata folder on first start.</Overview>
   <Category>Productivity: Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:47420]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/Tryanks/tcode/main/crates/headless/container/unraid.xml</TemplateURL>

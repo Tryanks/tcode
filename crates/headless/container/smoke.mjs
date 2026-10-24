@@ -6,9 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const [full, slim, probe, traverse] = process.argv.slice(2);
-if (!full || !slim || !probe || !traverse) {
-  throw new Error('Usage: smoke.mjs FULL_IMAGE SLIM_IMAGE PAIR_AND_QUERY_BINARY TRAVERSE_IMAGE');
+const [image, probe, traverse] = process.argv.slice(2);
+if (!image || !probe || !traverse) {
+  throw new Error('Usage: smoke.mjs HEADLESS_IMAGE PAIR_AND_QUERY_BINARY TRAVERSE_IMAGE');
 }
 const id = `tcode-smoke-${randomUUID()}`;
 const data = `${id}-data`;
@@ -34,12 +34,14 @@ const docker = (...args) => command('docker', args);
 const exec = script => docker('exec', '--user', 'tcode', id, 'sh', '-ec', script);
 const jsonFile = file => JSON.parse(exec(`cat '${file}'`));
 
-async function start(image, agents, uid = '1234', gid = '2345', dockerGid) {
+/// `agents` undefined leaves TCODE_AGENTS unset: every agent.
+async function start(agents, uid = '1234', gid = '2345', dockerGid) {
   docker('run', '--detach', '--name', id,
     '--group-add', '3456',
     ...(dockerGid === undefined ? [] : ['--env', `DOCKER_GID=${dockerGid}`]),
+    ...(agents === undefined ? [] : ['--env', `TCODE_AGENTS=${agents}`]),
     '--env', `PUID=${uid}`, '--env', `PGID=${gid}`, '--env', `TCODE_PASSWORD=${password}`, '--env', 'TZ=Asia/Shanghai',
-    '--env', `TCODE_AGENTS=${agents}`, '--volume', `${data}:/data`,
+    '--volume', `${data}:/data`,
     '--mount', `type=volume,src=${projects},dst=/projects,volume-nocopy`,
     '--publish', '127.0.0.1::47420/tcp', '--publish', `127.0.0.1:${udpPort}:${udpPort}/udp`,
     image, 'serve', '--traverse', 'off', '--browser-listen', '0.0.0.0:47420', '--port', String(udpPort));
@@ -54,7 +56,7 @@ async function waitForJson(name, url) {
     let response;
     try {
       response = await fetch(url, { signal: AbortSignal.timeout(1000) });
-    } catch { /* Installation can precede the listener on a fresh slim volume. */ }
+    } catch { /* Installation precedes the listener on a fresh volume. */ }
     if (response?.ok) return response.json();
     if (!JSON.parse(docker('inspect', name))[0].State.Running) throw new Error(docker('logs', name));
     await delay(1000);
@@ -132,10 +134,10 @@ try {
   docker('volume', 'create', data);
   docker('volume', 'create', projects);
   docker('run', '--rm', '--entrypoint', 'sh',
-    '--mount', `type=volume,src=${projects},dst=/projects,volume-nocopy`, full,
+    '--mount', `type=volume,src=${projects},dst=/projects,volume-nocopy`, image,
     '-ec', 'chown 1234:2345 /projects');
-  console.log('Full image: CLIs, browser password, LAN pairing, project ownership and terminal PATH');
-  let base = await start(full, 'claude,codex,pi,opencode,cursor,grok');
+  console.log('First start: every CLI installed, browser password, LAN pairing, project ownership and terminal PATH');
+  let base = await start(undefined);
   for (const name of commands) exec(`${name} --version`);
   assert.equal(exec('bash -lc "id -u; command -v codex"'), '1234\n/data/agents/bin/codex');
   assert.equal(exec('bash -lc "locale charmap; date +%Z"'), 'UTF-8\nCST', 'Terminal panes get UTF-8 and TZ');
@@ -153,8 +155,8 @@ try {
   exec('printf "#!/bin/sh\\necho acp-ok\\n" > /data/bin/custom-acp; chmod +x /data/bin/custom-acp');
   stop();
 
-  console.log('Full image subset: cached omitted providers disappear, pairings and homes survive');
-  base = await start(full, 'codex,pi');
+  console.log('Subset: omitted CLIs leave PATH and their providers, pairings and homes survive');
+  base = await start('codex,pi');
   for (const name of ['claude', 'opencode', 'cursor-agent', 'grok']) exec(`! command -v ${name}`);
   const settings = jsonFile('/data/tcode/settings.json');
   for (const name of ['claude', 'opencode', 'cursor', 'grok']) assert.equal(settings.providers[name].enabled, false);
@@ -166,17 +168,13 @@ try {
   await connectBrowser(base, token);
   stop();
 
-  console.log('Slim image: first-start subset installation, then reuse with networking disabled');
-  base = await start(slim, 'codex');
-  exec('codex --version');
-  native('--connect');
-  stop();
+  console.log('Installed CLIs are reused with networking disabled');
   docker('run', '--rm', '--network', 'none', '--entrypoint', 'sh', '--env', 'TCODE_AGENTS=codex',
-    '--volume', `${data}:/data`, slim, '-ec',
-    'node /opt/tcode/install-agents.mjs /data/agents /opt/tcode/agents; codex --version');
+    '--volume', `${data}:/data`, image, '-ec',
+    'node /opt/tcode/install-agents.mjs /data/agents; codex --version');
 
-  console.log('Slim image: empty selection, custom ACP command, changed UID/GID, same identity');
-  base = await start(slim, '', '1235', '2346', '0');
+  console.log('Empty selection, custom ACP command, changed UID/GID, same identity');
+  base = await start('', '1235', '2346', '0');
   for (const name of commands) exec(`! command -v ${name}`);
   assert.equal(exec('custom-acp'), 'acp-ok');
   assert.equal(exec('stat -c "%u:%g" /data/home/.codex/container-smoke-marker'), '1235:2346');

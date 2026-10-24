@@ -1,11 +1,12 @@
 # Tcode on Docker, NAS and homelab hosts
 
-Releases publish `ghcr.io/tryanks/tcode-headless` for Linux `amd64` and `arm64`.
-The image contains the release's headless binary with its browser app embedded.
-`latest` includes all six native agent CLIs; `slim` contains the host, Node.js
-and the system tools needed to install selected agents on first start. Version
-tags are `<version>` and `<version>-slim`, without the leading `v`. Prereleases
-have version tags only and do not replace `latest` or `slim`.
+Releases publish `ghcr.io/tryanks/tcode-headless` for Linux `amd64` and
+`arm64`. The image contains the release's headless binary with its browser app
+embedded, Node.js and the system tools agents use; no agent CLI is in it. The
+CLIs `TCODE_AGENTS` selects install into the data volume when the container
+starts (see [Choose agents](#choose-agents)). Tags are `<version>`, without
+the leading `v`, and `latest`; a prerelease has its version tag only and does
+not move `latest`.
 
 Each published image carries a build provenance attestation, and each
 architecture an SPDX SBOM, signed by this repository's release workflow:
@@ -26,7 +27,7 @@ PGID=1000
 TCODE_PROJECTS=/srv/projects
 TZ=Europe/Berlin
 TCODE_NAME=NAS
-# TCODE_VERSION=slim
+# TCODE_VERSION=0.3.0
 # TCODE_AGENTS=codex,pi
 ```
 
@@ -58,7 +59,7 @@ reverse proxy for browser access over an untrusted network.
 
 The image's health check requests `/auth/state` on the browser listener at
 `127.0.0.1:47420`, so NAS dashboards and `docker compose ps` show whether the
-machine is serving. It allows ten minutes for a slim first start. If `command`
+machine is serving. It allows ten minutes for a first start's installs. If `command`
 moves the listener to another port, override `healthcheck` in Compose to match.
 Stopping waits up to 30 seconds (`stop_grace_period`) while running agent
 sessions are flushed.
@@ -78,7 +79,7 @@ keeps the machine to the LAN and addresses typed on a device.
 | --- | --- |
 | `/data/tcode` | Tcode settings, threads, `traverse.json`, browser password and tokens |
 | `/data/home` | The runtime user's `HOME`: all agent credential and configuration directories |
-| `/data/agents` | Slim CLI installations and npm cache; custom global npm packages under `custom` |
+| `/data/agents` | Agent CLI installations, their commands in `bin`, the npm cache; custom global npm packages under `custom` |
 | `/data/bin` | User-supplied executables, including ACP agent commands, on `PATH` |
 | `/projects` | Mounted project directories; use these paths when adding projects in Tcode |
 
@@ -96,26 +97,24 @@ Use `docker compose exec --user tcode tcode bash` for a maintenance shell.
 
 ## Choose agents
 
-`TCODE_AGENTS` accepts comma-separated `claude,codex,pi,opencode,cursor,grok`.
-Unset means all six; an explicitly empty value means no native providers, even
-on the full image. Unknown names stop startup. A selection is reapplied to the
-native provider switches at startup; omitted native profiles are disabled, and
-their configuration and credentials are retained. ACP configuration is retained.
+`TCODE_AGENTS` lists the native agent CLIs the machine has, comma separated
+from `claude,codex,pi,opencode,cursor,grok`. Unset means all six; an
+explicitly empty value means none; to leave one or two out, list the others.
+Unknown names stop startup. The selection is reapplied to the native provider
+switches at every start: omitted native profiles are disabled, and their
+configuration and credentials are retained. ACP configuration is retained.
 
-Only selected CLI commands are added to the managed `PATH` directory. On the
-full image they point to bundled installations; on slim, missing installations
-are downloaded into `/data/agents` and reused offline on later starts. The
-[agent manifest](../crates/headless/container/agents.json) pins the versions for
-both images; the Cursor archive is also pinned by SHA-256 per architecture and
-checked before it is unpacked. A weekly
-[workflow](../.github/workflows/container-agents.yml) runs
-[`update-agents.mjs`](../crates/headless/container/update-agents.mjs) and opens a
-pull request when any CLI has a newer release, so each Tcode release ships the
-CLIs current at its cut after the container smoke check has installed them.
-The CLIs' own self-updaters are disabled in the image (`DISABLE_AUTOUPDATER`,
-`OPENCODE_DISABLE_AUTOUPDATE`). Cache entries include the architecture and version, so a migrated
-volume cannot reuse an executable for the wrong CPU. Changing the selection
-removes command links without deleting cached packages or credentials.
+At start, each selected CLI that is not yet installed is installed in its
+current release: the npm packages under `/data/agents/<cpu
+architecture>/<agent>`, Cursor with its own installer under `/data/home`.
+Later starts reuse it offline, and it updates itself the way that CLI does
+outside a container; a CLI that installs its updates with npm updates this
+same copy. A CLI that cannot be installed (no network on its first start, say)
+is reported in the log, the machine starts without it, and the next start
+tries again. Only selected CLIs are on `PATH`, through `/data/agents/bin`;
+changing the selection removes their commands without deleting installations
+or credentials. The [agent manifest](../crates/headless/container/agents.json)
+names each CLI's package or installer and its commands.
 
 For ACP, install the agent's command into `/data/bin`, mount an executable
 there, or run `npm install --global <package>` as `tcode` to persist it under
@@ -205,9 +204,8 @@ The [Unraid template](../crates/headless/container/unraid.xml) maps `/data` to
 Unraid's usual `99:100` (`nobody:users`). Save it as
 `/boot/config/plugins/dockerMan/templates-user/my-tcode.xml`, then **Docker →
 Add Container → Template: tcode**, set the password and apply. The container's
-log shows the invitation; **WebUI** opens the browser app. Change the
-repository to `ghcr.io/tryanks/tcode-headless:slim` for the slim image.
-With the Compose Manager plugin, the Compose file above works as it is.
+log shows the invitation; **WebUI** opens the browser app. With the Compose
+Manager plugin, the Compose file above works as it is.
 
 ### TrueNAS SCALE
 
@@ -241,17 +239,17 @@ modes, ports and limits.
 
 ## Upgrade or build locally
 
-Back up `/data`, change `TCODE_VERSION` if pinned, then run
-`docker compose pull && docker compose up -d`. Bundled CLIs are image-managed;
-update them by upgrading the image. Slim downloads the new manifest versions
-once, retaining existing login data. Old cache versions can be removed while
-the service is stopped to reclaim space.
+Back up `/data`, change `TCODE_VERSION` if pinned, then run `docker compose
+pull && docker compose up -d`. Upgrading the image does not reinstall the
+agent CLIs: they live in the volume and update themselves. To reinstall one,
+stop the service, delete its directory under `/data/agents/<cpu architecture>`
+(Cursor: `/data/home/.local/share/cursor-agent` and its links in
+`/data/home/.local/bin`) and start again.
 
 To build the image from a checkout instead, run from the repository root:
 
 ```sh
-docker build --target full -f crates/headless/Dockerfile -t tcode-headless:local .
-# Or: --target slim
+docker build -f crates/headless/Dockerfile -t tcode-headless:local .
 ```
 
 This compiles the browser app and the headless binary inside Docker, so the
@@ -272,10 +270,6 @@ public in their package settings after their first upload, and retain this
 repository's Actions access. GHCR creates new packages as private; repository
 linking grants workflow access but does not make anonymous pulls available.
 See [GitHub's registry setup](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#pushing-container-images).
-The agent-version workflow needs **Settings → Actions → General → Allow GitHub
-Actions to create and approve pull requests**; it dispatches CI on its branch
-itself, because pull requests opened with `GITHUB_TOKEN` start no
-`pull_request` runs.
 
 CI builds the browser bundle on every push, runs Clippy on the
 `tcode-headless --features web` binary the image runs, and checks the container

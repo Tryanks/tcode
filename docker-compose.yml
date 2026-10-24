@@ -1,8 +1,7 @@
 services:
   tcode:
-    # Pin TCODE_VERSION in .env to a release; use <version>-slim
-    # (or slim) to download only selected CLIs on first start into the data volume.
-    # TCODE_IMAGE names a local build instead (docs/docker.md).
+    # Pin TCODE_VERSION in .env to a release. TCODE_IMAGE names a local build
+    # instead (docs/docker.md).
     image: ${TCODE_IMAGE:-ghcr.io/tryanks/tcode-headless}:${TCODE_VERSION:-latest}
     restart: unless-stopped
     # Stopping flushes every running agent session first.
@@ -13,7 +12,8 @@ services:
       PGID: ${PGID:-1000}
       TZ: ${TZ:-UTC}
       TCODE_PASSWORD: ${TCODE_PASSWORD:?Set TCODE_PASSWORD in .env}
-      # Unset means all six; an explicitly empty value means no native providers.
+      # Installed into the data volume on first start, then updated by each CLI.
+      # Unset means all six; an explicitly empty value means none.
       TCODE_AGENTS: ${TCODE_AGENTS-claude,codex,pi,opencode,cursor,grok}
       # Optional API keys, or log in from a Tcode terminal pane (docs/docker.md).
       # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}

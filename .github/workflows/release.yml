@@ -358,8 +358,8 @@ jobs:
           image_repo="$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')"
           {
             printf '\n## Docker (Linux amd64 / arm64)\n\n'
-            printf 'Images: `ghcr.io/%s-headless:%s`, `ghcr.io/%s-headless:%s-slim` and `ghcr.io/%s-traverse:%s`.\n\n' \
-              "$image_repo" "$VERSION" "$image_repo" "$VERSION" "$image_repo" "$VERSION"
+            printf 'Images: `ghcr.io/%s-headless:%s` and `ghcr.io/%s-traverse:%s`. The agent CLIs named in `TCODE_AGENTS` (all six by default) install into the data volume on first start.\n\n' \
+              "$image_repo" "$VERSION" "$image_repo" "$VERSION"
             printf 'Save this as `docker-compose.yml`, set `TCODE_PASSWORD` in `.env`, then run `docker compose up -d`. Set `TCODE_VERSION=%s` in `.env` to pin this release.\n\n' "$VERSION"
             printf 'Container login methods and NAS setup: https://github.com/%s/blob/%s/docs/docker.md\n\n' "$REPOSITORY" "$RELEASE_TAG"
             printf '```yaml\n'
@@ -712,26 +712,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build slim image
+      - name: Build headless image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: crates/headless/Dockerfile
-          target: slim
-          build-args: BINARY_SOURCE=release
-          load: true
-          tags: ${{ env.HEADLESS_IMAGE }}:${{ env.VERSION }}-slim-${{ env.ARCH }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ env.VERSION }}
-            org.opencontainers.image.revision=${{ env.REVISION }}
-
-      - name: Build full image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: crates/headless/Dockerfile
-          target: full
           build-args: BINARY_SOURCE=release
           load: true
           tags: ${{ env.HEADLESS_IMAGE }}:${{ env.VERSION }}-${{ env.ARCH }}
@@ -756,7 +741,7 @@ jobs:
       - name: Verify containers before publishing
         run: |
           node crates/headless/container/smoke.mjs \
-            "$HEADLESS_IMAGE:$VERSION-$ARCH" "$HEADLESS_IMAGE:$VERSION-slim-$ARCH" \
+            "$HEADLESS_IMAGE:$VERSION-$ARCH" \
             "$PWD/target/debug/examples/pair_and_query" "$TRAVERSE_IMAGE:$VERSION-$ARCH"
 
       - uses: anchore/sbom-action/download-syft@v0.24.3
@@ -769,7 +754,6 @@ jobs:
         run: |
           set -euo pipefail
           for entry in "headless=$HEADLESS_IMAGE:$VERSION-$ARCH" \
-                       "slim=$HEADLESS_IMAGE:$VERSION-slim-$ARCH" \
                        "traverse=$TRAVERSE_IMAGE:$VERSION-$ARCH"; do
             name="${entry%%=*}"
             image="${entry#*=}"
@@ -787,20 +771,13 @@ jobs:
 
       - uses: actions/attest@v4
         with:
-          subject-name: ${{ env.HEADLESS_IMAGE }}
-          subject-digest: ${{ steps.push.outputs.slim }}
-          sbom-path: ${{ runner.temp }}/slim.spdx.json
-          push-to-registry: true
-
-      - uses: actions/attest@v4
-        with:
           subject-name: ${{ env.TRAVERSE_IMAGE }}
           subject-digest: ${{ steps.push.outputs.traverse }}
           sbom-path: ${{ runner.temp }}/traverse.spdx.json
           push-to-registry: true
 
   publish-containers:
-    name: Publish ${{ matrix.image }}${{ matrix.suffix }}
+    name: Publish ${{ matrix.image }}
     needs: [setup, container-images]
     runs-on: ubuntu-24.04
     permissions:
@@ -809,16 +786,7 @@ jobs:
       attestations: write
     strategy:
       matrix:
-        include:
-          - image: headless
-            suffix: ''
-            alias: latest
-          - image: headless
-            suffix: -slim
-            alias: slim
-          - image: traverse
-            suffix: ''
-            alias: latest
+        image: [headless, traverse]
     steps:
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
@@ -832,19 +800,17 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           VERSION: ${{ needs.setup.outputs.version }}
           PRERELEASE: ${{ needs.setup.outputs.prerelease }}
-          SUFFIX: ${{ matrix.suffix }}
-          ALIAS: ${{ matrix.alias }}
         run: |
           set -euo pipefail
           image="ghcr.io/${REPOSITORY,,}-${{ matrix.image }}"
-          tags=(--tag "$image:$VERSION$SUFFIX")
+          tags=(--tag "$image:$VERSION")
           if [[ "$PRERELEASE" == false ]]; then
-            tags+=(--tag "$image:$ALIAS")
+            tags+=(--tag "$image:latest")
           fi
           docker buildx imagetools create "${tags[@]}" \
-            "$image:$VERSION$SUFFIX-amd64" "$image:$VERSION$SUFFIX-arm64"
+            "$image:$VERSION-amd64" "$image:$VERSION-arm64"
           echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "digest=$(docker buildx imagetools inspect "$image:$VERSION$SUFFIX" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
+          echo "digest=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ steps.manifest.outputs.image }}
