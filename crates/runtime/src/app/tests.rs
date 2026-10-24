@@ -9044,18 +9044,13 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
             tcode_client::attachment::AttachmentPolicy::LOCAL,
         )
     });
-    cx.run_until_parked();
-    let archived = cx
-        .drain_outgoing()
-        .into_iter()
-        .find_map(|message| match message {
-            HostMessage::QueryResult {
-                id: 3,
-                result: Ok(QueryResponse::ArchivedSessions(archived)),
-            } => Some(archived),
-            _ => None,
-        })
-        .expect("archived list reply");
+    let (archived, _) = cx.run_until_sent(|message| match message {
+        HostMessage::QueryResult {
+            id: 3,
+            result: Ok(QueryResponse::ArchivedSessions(archived)),
+        } => Some(archived.clone()),
+        _ => None,
+    });
     assert_eq!(archived.revision, summary_revision);
     assert_eq!(archived.sessions[0].title, "Archived rename");
 
