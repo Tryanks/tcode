@@ -38,6 +38,8 @@ pub mod pi;
 #[cfg(feature = "process")]
 mod process;
 #[cfg(feature = "process")]
+pub use process::keep_own_stdio_from_children;
+#[cfg(feature = "process")]
 mod subagent_tail;
 
 use std::path::PathBuf;

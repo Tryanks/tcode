@@ -753,8 +753,8 @@ impl Forge for Azure {
         repository::pull_request_url(url)
     }
 
-    fn checkout_repository(&self, cwd: &Path) -> Option<Repository> {
-        repository::resolve(cwd)
+    fn checkout_repository(&self, checkout: &crate::forge::Checkout<'_>) -> Option<Repository> {
+        repository::resolve(checkout)
     }
 
     fn repository(&self, name: &str, host: &str) -> Option<Repository> {
@@ -770,14 +770,14 @@ impl Forge for Azure {
     fn discover(
         &self,
         cwd: &Path,
-        root: &Path,
+        root: &crate::forge::Checkout<'_>,
         refresh: bool,
     ) -> Result<Option<Discovered>, ForgeError> {
-        let cwd = if cwd.exists() { cwd } else { root };
+        let cwd = if cwd.exists() { cwd } else { root.cwd() };
         let Some(target) = repository::resolve(root) else {
             return Ok(None);
         };
-        let Some(branch) = repository::branch(cwd) else {
+        let Some(branch) = repository::branch(root, cwd) else {
             return Ok(None);
         };
         let slot = (

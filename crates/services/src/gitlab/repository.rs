@@ -137,14 +137,21 @@ pub(super) fn remote(known: &[String], value: &str) -> Option<Repository> {
 }
 
 /// The checkout's project: `upstream`, then `origin`, then the first remote here.
-pub(super) fn resolve(known: &[String], cwd: &Path) -> Option<Repository> {
-    crate::forge::checkout::resolve(cwd, |url| remote(known, url))
+pub(super) fn resolve(
+    known: &[String],
+    checkout: &crate::forge::Checkout<'_>,
+) -> Option<Repository> {
+    crate::forge::checkout::resolve(checkout, |url| remote(known, url))
 }
 
 /// The checked-out branch and the project and branch a merge request from it names as its
 /// source.
-pub(super) fn branch(known: &[String], cwd: &Path) -> Option<crate::forge::checkout::Branch> {
-    crate::forge::checkout::branch(cwd, |url| remote(known, url))
+pub(super) fn branch(
+    known: &[String],
+    root: &crate::forge::Checkout<'_>,
+    cwd: &Path,
+) -> Option<crate::forge::checkout::Branch> {
+    crate::forge::checkout::branch(root, cwd, |url| remote(known, url))
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
-//! Child-process constructors that never flash a console window on Windows.
+//! Child-process constructors that never flash a console window on Windows,
+//! and never hand a child this process's own standard handles.
 //!
 //! Provider CLIs are spawned from a GUI app; a plain `Command` on Windows
 //! allocates a console for the child, which pops a black box on screen.
@@ -17,8 +18,41 @@ const STDERR_TAIL_LINES: usize = 20;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Keep this process's own standard handles out of every child it starts.
+///
+/// Windows gives a child each inheritable handle of its parent, not only the
+/// stdio its `Command` names, so a child that outlives the parent keeps open
+/// the pipes whoever runs the parent reads from. A child spawned with
+/// `Stdio::inherit` still gets them: std hands it an inheritable duplicate.
+/// No-op elsewhere.
+pub fn keep_own_stdio_from_children() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::{
+            HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,
+        };
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            for handle in [
+                std::io::stdin().as_raw_handle(),
+                std::io::stdout().as_raw_handle(),
+                std::io::stderr().as_raw_handle(),
+            ] {
+                // SAFETY: these are this process's standard handles, open for
+                // its lifetime; a missing one only makes the call fail, which
+                // leaves nothing to keep from a child.
+                let _ = unsafe {
+                    SetHandleInformation(HANDLE(handle), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0))
+                };
+            }
+        });
+    }
+}
+
 /// A blocking `std::process::Command` with the console suppressed.
 pub(crate) fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    keep_own_stdio_from_children();
     #[cfg_attr(not(windows), allow(unused_mut))]
     // Approved constructor: this is the helper every other site must use.
     #[allow(clippy::disallowed_methods)]

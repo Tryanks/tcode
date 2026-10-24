@@ -170,6 +170,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "ureq",
  "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]
