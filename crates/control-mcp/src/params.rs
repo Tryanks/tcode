@@ -157,15 +157,27 @@ pub struct PositionRange {
     pub to: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OutlineLevel {
+    /// Per turn: time, the start of the user message, the first lines and headings of the
+    /// assistant's reply, commits and pull requests, markers.
+    Coarse,
+    /// Coarse plus the tools, files, commands with exit codes and errors of each turn.
+    Turns,
+    /// Turns plus display segments inside long autonomous turns.
+    Segments,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OutlineParams {
     #[schemars(description = "The thread id.")]
     pub thread_id: String,
     #[serde(default)]
     #[schemars(
-        description = "Detail: 0 lists turns only, 1 adds segments, 2 adds every tool, file and command. A very large thread answers coarse and newest first whatever is asked."
+        description = "Detail; default turns. A very large thread answers coarser and newest first whatever is asked."
     )]
-    pub level: Option<u8>,
+    pub level: Option<OutlineLevel>,
     #[serde(default)]
     #[schemars(description = "Only entries within this position range.")]
     pub range: Option<PositionRange>,
@@ -183,7 +195,12 @@ pub struct ReadParams {
     #[schemars(description = "The last anchor of the range, inclusive; same thread as from.")]
     pub to: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Response budget in bytes; the host caps it at about 64 KiB.")]
+    #[schemars(
+        description = "Instead of anchors or a range: the cursor a truncated entry returned, to continue its text."
+    )]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Response budget in bytes; default 32 KiB, capped at 64 KiB.")]
     pub max_bytes: Option<u64>,
 }
 

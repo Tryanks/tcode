@@ -25,6 +25,9 @@ const CONTROL_ACTIVITY_LIMIT: usize = 200;
 pub(super) struct ControlState {
     activity: VecDeque<ControlActivityEntry>,
     review_records: Vec<tcode_core::control::ReviewRecord>,
+    /// Bytes each caller has read from each thread since the host started, for the hint to
+    /// narrow the query.
+    content_read: HashMap<(String, String), usize>,
 }
 
 /// The thread behind a `tcode_control` call, with the grant in force when it arrived.
