@@ -133,14 +133,10 @@ pub struct SearchParams {
     #[schemars(description = "Only these threads.")]
     pub thread_ids: Option<Vec<String>>,
     #[serde(default)]
-    #[schemars(description = "Only items of these kinds.")]
+    #[schemars(
+        description = "Only items of these kinds. subagent, image_read, web_search and other are indexed as one kind, so naming any of them matches all four; reasoning is not indexed."
+    )]
     pub kinds: Option<Vec<ItemKind>>,
-    #[serde(default)]
-    #[schemars(description = "Only entries at or after this unix time in ms.")]
-    pub since: Option<u64>,
-    #[serde(default)]
-    #[schemars(description = "Only entries before this unix time in ms.")]
-    pub until: Option<u64>,
     #[serde(default)]
     #[schemars(description = "Page size; the host caps it.")]
     pub limit: Option<u32>,
@@ -387,7 +383,9 @@ pub struct StartThreadParams {
     #[schemars(description = "Working directory; default the project root.")]
     pub cwd: Option<String>,
     #[serde(default)]
-    #[schemars(description = "local (the checkout) or worktree (a dedicated git worktree).")]
+    #[schemars(
+        description = "local (the checkout, the default). worktree is refused: Tcode makes a thread's dedicated worktree only from a draft's first send."
+    )]
     pub workspace: Option<Workspace>,
     #[schemars(
         description = "Provider name as list_providers lists it, for example claude or codex."
@@ -455,9 +453,7 @@ pub enum RunOp {
     },
     Compact,
     SetModel {
-        provider: String,
         model: String,
-        profile: Option<String>,
     },
     SetOption {
         id: String,
@@ -477,7 +473,7 @@ pub struct RunChange {
     #[schemars(description = "The thread id.")]
     pub thread_id: String,
     #[schemars(
-        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"provider\", \"model\", \"profile\"?}}, {\"set_option\": {\"id\", \"value\"}}, fork, {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}. Dropping a queued human message needs history_edit."
+        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"model\"}} (a model of the thread's own provider and profile), {\"set_option\": {\"id\", \"value\"}}, fork, {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}. Dropping a queued human message needs history_edit."
     )]
     pub op: RunOp,
 }
@@ -499,18 +495,24 @@ pub enum PullRequestOp {
     Watch,
     Unwatch,
     Refresh,
-    Comment { body: String },
-    Review { event: String, body: Option<String> },
-    Reply { comment_id: String, body: String },
-    Resolve { review_thread_id: String },
+    Comment {
+        body: String,
+    },
+    Reply {
+        review_thread_id: String,
+        body: String,
+    },
+    Resolve {
+        review_thread_id: String,
+    },
 }
 
 impl PullRequestOp {
-    /// Comment, review, reply and resolve write to the host and need `pr_write`.
+    /// Comment, reply and resolve write to the host and need `pr_write`.
     pub fn writes(&self) -> bool {
         matches!(
             self,
-            Self::Comment { .. } | Self::Review { .. } | Self::Reply { .. } | Self::Resolve { .. }
+            Self::Comment { .. } | Self::Reply { .. } | Self::Resolve { .. }
         )
     }
 }
@@ -528,7 +530,7 @@ pub struct PullRequestParams {
     )]
     pub reference: Option<String>,
     #[schemars(
-        description = "link, unlink, watch, unwatch, refresh, or a write: {\"comment\": {\"body\"}}, {\"review\": {\"event\", \"body\"?}}, {\"reply\": {\"comment_id\", \"body\"}}, {\"resolve\": {\"review_thread_id\"}}. Writes need pr_write."
+        description = "link, unlink, watch, unwatch, refresh, or a write: {\"comment\": {\"body\"}}, {\"reply\": {\"review_thread_id\", \"body\"}} (a reply in a review comment thread), {\"resolve\": {\"review_thread_id\"}}. Writes need pr_write."
     )]
     pub op: PullRequestOp,
     #[serde(default)]

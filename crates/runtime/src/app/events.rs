@@ -618,8 +618,13 @@ impl AppState {
         // describe what comes next, not the turn that just ended.
         if let AgentEvent::TurnCompleted { status, .. } = &event {
             self.settle_child_expectation(session_id, *status, cx);
-            self.fire_control_watches(session_id, WatchEvent::TurnCompleted, cx);
-            self.fire_control_watches(session_id, WatchEvent::Idle, cx);
+            let woken_by_control = self
+                .resident_mut(session_id)
+                .is_some_and(|session| std::mem::take(&mut session.turn_woken_by_control));
+            if !woken_by_control {
+                self.fire_control_watches(session_id, WatchEvent::TurnCompleted, cx);
+                self.fire_control_watches(session_id, WatchEvent::Idle, cx);
+            }
             self.settle_self_if_due(session_id, true, cx);
         }
 

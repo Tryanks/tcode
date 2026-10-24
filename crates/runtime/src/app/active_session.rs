@@ -184,6 +184,10 @@ pub struct ActiveSession {
     pub(super) delivery_in_flight: Option<u64>,
     pub(super) pending_steers: Vec<PendingSteer>,
     pub(super) turn_in_flight: bool,
+    /// The running turn's only input so far is a `tcode_control` watch callback. Such a turn
+    /// fires no `turn_completed` or `idle` watch, so two threads watching each other cannot
+    /// wake each other forever.
+    pub(super) turn_woken_by_control: bool,
     /// Set once an interrupt reached the provider; cleared when the turn ends.
     pub(super) interrupt_requested: bool,
     /// A provider command (compaction, a goal change) asked for while the
@@ -207,6 +211,11 @@ pub struct ActiveSession {
     /// Lazily-spawned per-session PTYs and provider-bound terminal context.
     pub terminal_workspace: TerminalWorkspace,
     pub(super) _pump: Option<HostTask<()>>,
+}
+
+/// A `tcode_control` watch callback, as `fire_control_watches` words it.
+fn is_control_callback(text: &str) -> bool {
+    text.starts_with(tcode_core::notice::CONTROL_CALLBACK_PREFIX)
 }
 
 /// A steer handed to the provider whose consumption it has not yet reported.
@@ -257,6 +266,7 @@ impl ActiveSession {
             delivery_in_flight: None,
             pending_steers: Vec::new(),
             turn_in_flight: false,
+            turn_woken_by_control: false,
             interrupt_requested: false,
             requested_command: None,
             background_task_count: 0,
@@ -470,6 +480,9 @@ impl ActiveSession {
         let Runtime::Live(commands) = &self.runtime else {
             return Err(());
         };
+        if !is_control_callback(&text) {
+            self.turn_woken_by_control = false;
+        }
         commands
             .try_send(SessionCommand::Steer {
                 request_id,
@@ -524,7 +537,7 @@ impl ActiveSession {
         self.idle_since = None;
         let delivery_in_flight = self.delivery_in_flight;
         // A merged message must still read as one notice (`tcode_core::notice::host_notice`).
-        let control = |text: &str| text.starts_with(tcode_core::notice::CONTROL_CALLBACK_PREFIX);
+        let control = is_control_callback;
         if let Some(pending) = self.queue.iter_mut().find(|message| {
             message.kind == QueuedMessageKind::OrchestrateCallback
                 && Some(message.id) != delivery_in_flight
@@ -649,7 +662,10 @@ impl ActiveSession {
         self.delivery_in_flight = None;
         self.turn_in_flight = true;
         self.idle_since = None;
-        Some(self.queue.remove(position))
+        let message = self.queue.remove(position);
+        self.turn_woken_by_control = message.kind == QueuedMessageKind::OrchestrateCallback
+            && is_control_callback(&message.text);
+        Some(message)
     }
 
     pub(super) fn is_starting_generation(&self, generation: u64) -> bool {

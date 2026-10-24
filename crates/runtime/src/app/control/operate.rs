@@ -485,34 +485,15 @@ impl AppState {
                 }
                 (Command::CompactContext { session_id }, "compact".to_owned())
             }
-            RunOp::SetModel {
-                provider,
-                model,
-                profile,
-            } => {
-                let provider = native_provider_named(provider)
-                    .ok_or_else(|| failed(format!("unknown provider: {provider}")))?;
-                let profile_id = profile
-                    .clone()
-                    .filter(|id| !Settings::is_builtin_profile_id(id));
-                if provider != meta.provider || profile_id != meta.profile_id {
-                    return Err(failed(
-                        "refused: a different provider or profile hands the conversation to \
-                         another backend, which only the user confirms; set_model keeps the \
-                         thread's provider and profile"
-                            .into(),
-                    ));
-                }
-                (
-                    Command::SetActiveModel {
-                        session_id,
-                        provider,
-                        model: Some(model.clone()),
-                        profile_id,
-                    },
-                    format!("set model {model}"),
-                )
-            }
+            RunOp::SetModel { model } => (
+                Command::SetActiveModel {
+                    session_id,
+                    provider: meta.provider,
+                    model: Some(model.clone()),
+                    profile_id: meta.profile_id.clone(),
+                },
+                format!("set model {model}"),
+            ),
             RunOp::SetOption { id, value } => (
                 Command::SetActiveOption {
                     session_id,
@@ -729,21 +710,17 @@ impl AppState {
                 };
             }
             PullRequestOp::Comment { body } => PullRequestAction::Comment { body },
-            PullRequestOp::Reply { comment_id, body } => PullRequestAction::ReplyToThread {
-                thread_id: comment_id,
+            PullRequestOp::Reply {
+                review_thread_id,
+                body,
+            } => PullRequestAction::ReplyToThread {
+                thread_id: review_thread_id,
                 body,
             },
             PullRequestOp::Resolve { review_thread_id } => PullRequestAction::ResolveThread {
                 thread_id: review_thread_id,
                 resolved: true,
             },
-            PullRequestOp::Review { .. } => {
-                return Answer::Now(Err(
-                    "refused: `review` submits the thread's review draft at the head commit \
-                     its reviewer read, which this tool cannot name; post a comment instead"
-                        .into(),
-                ));
-            }
         };
         let command = Command::RunPullRequestAction {
             session_id: thread.clone(),

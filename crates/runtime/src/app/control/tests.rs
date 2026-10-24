@@ -466,6 +466,63 @@ fn a_watch_wakes_the_watcher_when_the_thread_asks_and_finishes() {
     });
 }
 
+/// Two threads watching each other's `turn_completed` exchange one callback, not an endless
+/// ping-pong: a turn woken only by a `[control]` callback fires no `turn_completed` or `idle`
+/// watch.
+#[test]
+fn mutual_watchers_do_not_wake_each_other_forever() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-control-watch-loop");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        let mut providers = HashMap::new();
+        for id in ["a", "b"] {
+            let meta = thread(id, "p");
+            state.sessions.push(meta.clone());
+            providers.insert(id, install_live(state, meta));
+        }
+        for (id, other) in [("a", "b"), ("b", "a")] {
+            call(
+                state,
+                id,
+                ControlOp::NotifyWhen(NotifyWhenParams {
+                    thread_ids: vec![other.into()],
+                    events: vec![WatchEvent::TurnCompleted],
+                    once: None,
+                    request_id: None,
+                }),
+                cx,
+            )
+            .unwrap();
+        }
+        state.resident_mut("b").unwrap().turn_in_flight = false;
+
+        // The user's turn in `a` ends; from here on every turn runs on callbacks alone.
+        state.provider_event_for_test("a", turn_completed(), cx);
+        let mut callbacks = HashMap::new();
+        for _ in 0..10 {
+            let mut ran = false;
+            for id in ["a", "b"] {
+                while let Ok(agent::SessionCommand::SendTurn {
+                    delivery_id, text, ..
+                }) = providers[id].try_recv()
+                {
+                    ran = true;
+                    assert!(text.starts_with(tcode_core::notice::CONTROL_CALLBACK_PREFIX));
+                    *callbacks.entry(id).or_insert(0) += 1;
+                    state.provider_event_for_test(id, AgentEvent::TurnAccepted { delivery_id }, cx);
+                    state.provider_event_for_test(id, turn_completed(), cx);
+                }
+            }
+            if !ran {
+                break;
+            }
+        }
+        assert_eq!(callbacks, HashMap::from([("b", 1)]));
+        assert!(queued_texts(state, "a").is_empty() && queued_texts(state, "b").is_empty());
+    });
+}
+
 /// Watches are stored on the watcher and outlive a host restart; `once` ends a watch
 /// when it fires and `cancel_notify` ends the rest.
 #[test]

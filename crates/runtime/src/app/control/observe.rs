@@ -904,13 +904,6 @@ impl AppState {
             .kinds
             .as_deref()
             .map(|kinds| search_kinds(kinds, &mut omitted));
-        if params.since.is_some() || params.until.is_some() {
-            omitted.push(
-                "since/until were not applied: the index holds no per-entry times; narrow \
-                 threads with list_threads active_since/active_before and pass thread_ids"
-                    .into(),
-            );
-        }
         omitted.push("neighbouring entries: read around a hit's anchor with read from/to".into());
         omitted.push("command and tool output is not indexed; use search_in_item".into());
         let offset: usize = match params.cursor.as_deref() {

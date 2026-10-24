@@ -81,7 +81,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Substring search over stored thread content in scope, optionally limited to threads, item kinds and a time range. Each hit carries its anchor, turn, a snippet and one neighbouring entry on each side; counts per thread and per turn follow. A paraphrase will not match: rephrase and filter. Command and tool output is searched with search_in_item. Reads only."
+        description = "Substring search over stored thread content in scope, optionally limited to threads and item kinds. Each hit carries its anchor, turn and a snippet; read around an anchor for its neighbours. Counts per thread and per turn follow. A paraphrase will not match: rephrase and filter. Reasoning is not indexed, and command and tool output is searched with search_in_item. To narrow by time, find threads with list_threads active_since/active_before and pass their thread_ids. Reads only."
     )]
     async fn search(&self, Parameters(p): Parameters<SearchParams>) -> CallToolResult {
         self.run(ControlOp::Search(p)).await
@@ -185,14 +185,14 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Arrange for this thread, and only this thread, to settle itself: at the end of your current turn, or when a named pull request merges or closes. Requires the user's consent, quoted verbatim in consent_quote; the user can revoke it from the thread's control chip. Settle stops the provider, ends the thread's pull request watches, drops its non-human queued messages, closes its idle terminals, unpins it, and answers pending non-blocking input with empty answers. Never fires mid-turn."
+        description = "Arrange for this thread, and only this thread, to settle itself: at the end of your current turn, or when a named pull request merges or closes. Requires the user's consent, quoted verbatim in consent_quote; the user can revoke it from the thread's control chip, and any new message from the user withdraws it. Settle stops the provider, ends the thread's pull request watches, drops its non-human queued messages, closes its idle terminals, unpins it, and answers pending non-blocking input with empty answers. Never fires mid-turn."
     )]
     async fn settle_self(&self, Parameters(p): Parameters<SettleSelfParams>) -> CallToolResult {
         self.run(ControlOp::SettleSelf(p)).await
     }
 
     #[tool(
-        description = "Start an ordinary new thread in a project with a first message: not a child of this thread, never blocking you, recorded as started by this thread. The user's standing draft is never touched. request_id is stored on the thread, so a retry after a failure or restart returns the same thread. The message is sent as from this thread (origin agent) and never counts as the user's activity."
+        description = "Start an ordinary new thread in a project's checkout with a first message (a dedicated worktree is not available here): not a child of this thread, never blocking you, recorded as started by this thread. The user's standing draft is never touched. request_id is stored on the thread, so a retry after a failure or restart returns the same thread. The message is sent as from this thread (origin agent) and never counts as the user's activity."
     )]
     async fn start_thread(&self, Parameters(p): Parameters<StartThreadParams>) -> CallToolResult {
         self.run(ControlOp::StartThread(p)).await
@@ -206,7 +206,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Drive a thread's run in a batch: interrupt, retry a turn, compact context, set the model or a provider option (takes effect at the next provider start), fork, steer a queued message, or drop a queued message. Dropping a queued human message needs history_edit. One result per change in input order."
+        description = "Drive a thread's run in a batch: interrupt, retry a turn, compact context, set the model within the thread's own provider and profile or a provider option (takes effect at the next provider start), fork, steer a queued message, or drop a queued message. Dropping a queued human message needs history_edit. One result per change in input order."
     )]
     async fn control_thread(
         &self,
@@ -216,7 +216,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Link, unlink, watch, unwatch or refresh a pull request for a thread; with pr_write also comment, review, reply or resolve on the host. A watch wakes the thread when checks fail or pass, someone else comments or reviews, the branch conflicts, or the pull request merges or closes; it ends when the thread settles or is archived."
+        description = "Link, unlink, watch, unwatch or refresh a pull request for a thread; with pr_write also comment, reply in a review comment thread, or resolve one on the host. A watch wakes the thread when checks fail or pass, someone else comments or reviews, the branch conflicts, or the pull request merges or closes; it ends when the thread settles or is archived."
     )]
     async fn pull_request(&self, Parameters(p): Parameters<PullRequestParams>) -> CallToolResult {
         self.run(ControlOp::PullRequest(p)).await
