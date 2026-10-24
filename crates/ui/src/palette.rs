@@ -370,7 +370,7 @@ impl CommandPalette {
             IconName::SquareTerminal,
             Action::ToggleTerminal,
         );
-        if store.scope().is_full() {
+        if store.offers_preview() {
             push_action(
                 crate::tr!("palette.open_preview").into_owned(),
                 IconName::Globe,
