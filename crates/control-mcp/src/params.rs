@@ -646,16 +646,31 @@ pub struct DeleteThreadsParams {
     #[schemars(description = "Also remove each thread's dedicated worktree.")]
     pub remove_worktree: Option<bool>,
     #[serde(default)]
+    #[schemars(description = "Report what would be deleted and delete nothing.")]
+    pub dry_run: Option<bool>,
+    #[serde(default)]
     #[schemars(description = "Idempotency key.")]
     pub request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindScope {
+    Files,
+    Conversation,
+    FilesAndConversation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RewindParams {
     #[schemars(description = "The thread to rewind.")]
     pub thread_id: String,
-    #[schemars(description = "The turn id to rewind to, as outline lists it.")]
-    pub turn: String,
+    #[schemars(description = "The turn number to rewind to, as outline lists it.")]
+    pub turn: usize,
+    #[schemars(
+        description = "files, conversation or files_and_conversation: what the provider restores."
+    )]
+    pub mode: RewindScope,
     #[serde(default)]
     #[schemars(description = "Idempotency key.")]
     pub request_id: Option<String>,

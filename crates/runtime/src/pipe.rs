@@ -500,10 +500,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
     let mut response = CommandResponse::Unit;
     match command {
         Command::TerminalInput { terminal_id, bytes } => {
-            if let Some(terminal) = app.terminal_handle(terminal_id) {
-                terminal.write_input(bytes);
-            }
-            app.schedule_terminal_projection(terminal_id, cx);
+            app.write_terminal_input(terminal_id, bytes, cx)
         }
         Command::ResizeTerminal {
             terminal_id,

@@ -59,7 +59,7 @@ impl AppState {
             })
     }
 
-    fn terminal_owner(&self, terminal_id: u64) -> Option<&str> {
+    pub(super) fn terminal_owner(&self, terminal_id: u64) -> Option<&str> {
         self.residents
             .ids()
             .find(|id| {

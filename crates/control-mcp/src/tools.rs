@@ -240,7 +240,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Register a wake on other threads' events (idle, turn_completed, needs_input, needs_approval, settled, pr_changed) instead of polling. When one fires you receive a message \"[control] thread <id> (\"<title>\") <event>\" as from an agent; once removes the watch after it fires. Returns the watch ids. The watch is stored on this thread and survives a restart."
+        description = "Register a wake on other threads' events (idle, turn_completed, needs_input, needs_approval, settled, pr_changed) instead of polling. When one fires you receive a message \"[control] thread <id> (\"<title>\") <event>: <detail>\" as from an agent; idle means the thread has no work left, and pr_changed fires for pull requests the watched thread itself watches. once removes the watch after it fires. Returns the watch id for cancel_notify. The watch is stored on this thread and survives a restart."
     )]
     async fn notify_when(&self, Parameters(p): Parameters<NotifyWhenParams>) -> CallToolResult {
         self.run(ControlOp::NotifyWhen(p)).await
@@ -273,7 +273,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Delete threads and every thread under them (privileged: delete). Delete is permanent and leaves no tombstone: the log, attachments and metadata are gone and nothing can be restored. remove_worktree also deletes each thread's dedicated worktree. One result per thread."
+        description = "Delete threads and every thread under them (privileged: delete). Delete is permanent and leaves no tombstone: the log, attachments and metadata are gone and nothing can be restored. remove_worktree also deletes each thread's dedicated worktree; dry_run reports what would go and deletes nothing. One result per thread."
     )]
     async fn delete_threads(
         &self,
@@ -283,7 +283,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Rewind a thread's conversation to an earlier turn (privileged: history_edit). What came after it is cut from the conversation the provider sees; the stored log keeps it appended. Only where the provider supports rewind, and never while the thread is busy."
+        description = "Rewind a thread to an earlier turn through its provider (privileged: history_edit). files restores the files the provider tracked; conversation cuts what came after the turn from the conversation the provider sees, while the stored log keeps it appended. Only where the provider supports rewind, and never while the thread is busy."
     )]
     async fn rewind(&self, Parameters(p): Parameters<RewindParams>) -> CallToolResult {
         self.run(ControlOp::Rewind(p)).await
