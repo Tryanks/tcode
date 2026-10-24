@@ -147,6 +147,10 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/zap-filled.svg",
         include_bytes!("../../../assets/icons/zap-filled.svg"),
     ),
+    (
+        "icons/zaps-filled.svg",
+        include_bytes!("../../../assets/icons/zaps-filled.svg"),
+    ),
     ("icons/mic.svg", MIC_SVG.as_bytes()),
     // Register compact-shell icons for native and browser clients.
     ("icons/chevron-left.svg", CHEVRON_LEFT_SVG.as_bytes()),

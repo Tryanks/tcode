@@ -1511,7 +1511,9 @@ fn render_traits_pane(
                 let options: Vec<agent::SelectOption> = if fast_owned {
                     options
                         .iter()
-                        .filter(|choice| !FastMode::is_fast_tier(choice))
+                        .filter(|choice| {
+                            !FastMode::is_fast_tier(choice) && !FastMode::is_ultrafast_tier(choice)
+                        })
                         .cloned()
                         .collect()
                 } else {
@@ -1662,10 +1664,11 @@ fn render_fast_mode_bolt(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
-    let on = fast.map(|fast| fast.enabled(selections));
-    let (path, color) = match on {
-        Some(true) => ("icons/zap-filled.svg", theme.fast_mode_accent()),
-        _ => ("icons/zap.svg", theme.muted_foreground),
+    let level = fast.map_or(FastLevel::Off, |fast| fast.level(selections));
+    let (path, color) = match level {
+        FastLevel::Off => ("icons/zap.svg", theme.muted_foreground),
+        FastLevel::Fast => ("icons/zap-filled.svg", theme.fast_mode_accent()),
+        FastLevel::Ultra => ("icons/zaps-filled.svg", theme.fast_mode_accent()),
     };
     let icon = Icon::empty().path(path).text_color(color);
     let wrapper = div()
@@ -1696,7 +1699,7 @@ fn render_fast_mode_bolt(
             .debug_selector(|| "traits-fast-mode".into())
             .on_click(move |_, window, cx| {
                 crate::widgets::stop_click_propagation(window, cx);
-                let value = fast.value(on != Some(true));
+                let value = fast.value(fast.next(level));
                 store.update(cx, |store, _cx| {
                     store.set_active_option(fast.option_id.clone(), Some(value));
                 });
