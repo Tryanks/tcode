@@ -79,7 +79,7 @@ keeps the machine to the LAN and addresses typed on a device.
 | --- | --- |
 | `/data/tcode` | Tcode settings, threads, `traverse.json`, browser password and tokens |
 | `/data/home` | The runtime user's `HOME`: all agent credential and configuration directories |
-| `/data/agents` | Agent CLI installations, their commands in `bin`, the npm cache; custom global npm packages under `custom` |
+| `/data/agents` | The global npm prefix per CPU architecture (`<arch>/npm`: npm agent CLIs and every other global npm install), links to Cursor's and Grok's current builds in `bin`, the npm cache |
 | `/data/bin` | User-supplied executables, including ACP agent commands, on `PATH` |
 | `/projects` | Mounted project directories; use these paths when adding projects in Tcode |
 
@@ -88,6 +88,13 @@ machine key and invalidates every native pairing. Losing the home directory
 loses CLI logins. `docker compose down` retains the named volume;
 `docker compose down -v` deletes it. Stop Tcode before taking a consistent
 backup. Never run two hosts against the same volume.
+
+Nothing an agent needs across restarts is outside `/data`: every CLI keeps its
+login, configuration and history under `/data/home`, and none uses a keyring
+on Linux, so the container needs no D-Bus. `/tmp` is not persisted; Claude
+Code keeps its scratchpad and copies of pasted images in `/tmp/claude-<uid>`
+and OpenCode keeps temporary files in `/tmp/opencode`, both lost on restart.
+The [research notes](research/agent-persistence.md) cite each CLI's paths.
 
 The entrypoint initializes the volume, then runs both CLI installation and
 Tcode as `PUID:PGID` (1000:1000 by default). Agent processes and terminal panes
@@ -105,21 +112,30 @@ switches at every start: omitted native profiles are disabled, and their
 configuration and credentials are retained. ACP configuration is retained.
 
 At start, each selected CLI that is not yet installed is installed in its
-current release: the npm packages under `/data/agents/<cpu
-architecture>/<agent>`, Cursor with its own installer under `/data/home`.
-Later starts reuse it offline, and it updates itself the way that CLI does
-outside a container; a CLI that installs its updates with npm updates this
-same copy. A CLI that cannot be installed (no network on its first start, say)
-is reported in the log, the machine starts without it, and the next start
-tries again. Only selected CLIs are on `PATH`, through `/data/agents/bin`;
-changing the selection removes their commands without deleting installations
-or credentials. The [agent manifest](../crates/headless/container/agents.json)
-names each CLI's package or installer and its commands.
+current release: the npm packages globally, into the image's npm prefix
+`/data/agents/<cpu architecture>/npm`, Cursor with its own installer under
+`/data/home`. Later starts reuse them offline. A CLI that cannot be installed
+(no network on its first start, say) is reported in the log, the machine
+starts without it, and the next start tries again. Only selected CLIs are on
+`PATH`: an npm CLI left out of the selection is uninstalled (its login and
+configuration stay in `/data/home`, and selecting it again reinstalls it), and
+Cursor's commands are linked from `/data/agents/bin` only while it is
+selected. The [agent manifest](../crates/headless/container/agents.json) names
+each CLI's package or installer and its commands.
+
+Updates follow each CLI. Claude Code, Cursor and Grok update themselves in the
+background, into the copy the machine runs. Codex, pi and OpenCode update when
+asked: from Tcode's provider settings, which update an npm install in place,
+or with `codex`, `pi update` or `opencode upgrade` in a terminal pane. Keep
+the image's npm: the Claude Code, OpenCode and Grok updates rely on install
+scripts, which npm 12 skips by default, so an `npm install --global
+npm@latest` would leave those updates incomplete.
 
 For ACP, install the agent's command into `/data/bin`, mount an executable
-there, or run `npm install --global <package>` as `tcode` to persist it under
-`/data/agents/custom`. Node, npm, npx and the system `PATH` remain available even
-with an empty native selection. Install any additional language runtime in a
+there, or run `npm install --global <package>` as `tcode`; global npm
+installs, including those an agent makes itself, persist in the npm prefix and
+are on `PATH`. Node, npm, npx and the system `PATH` remain available even with
+an empty native selection. Install any additional language runtime in a
 derived image. Add the command through Tcode's existing ACP configuration.
 
 ## Login from a Tcode terminal pane
@@ -132,12 +148,12 @@ to `localhost` refer to that browser's computer, not the container; publishing
 
 | Agent | In-container method | API-key alternative | Persistent location under `/data/home` |
 | --- | --- | --- | --- |
-| Claude Code | `claude auth login`: open the printed URL externally and paste the authorization code when offered. | `ANTHROPIC_API_KEY` | `.claude`, `.claude.json` |
-| Codex | `codex login --device-auth`: open the verification URL and enter the code. Enable device-code login in account/workspace security settings first. Default `codex login` uses a localhost callback and needs forwarding or a local login copied into the container. | Set `OPENAI_API_KEY`, then `printenv OPENAI_API_KEY \| codex login --with-api-key` | `.codex/auth.json` |
+| Claude Code | `claude auth login`: open the printed URL externally and paste the authorization code when offered. | `ANTHROPIC_API_KEY` | `.claude` (login in `.claude/.credentials.json`), `.claude.json`, `.config/anthropic` (Console sign-in) |
+| Codex | `codex login --device-auth`: open the verification URL and enter the code. Enable device-code login in account/workspace security settings first. Default `codex login` uses a localhost callback and needs forwarding or a local login copied into the container. | Set `OPENAI_API_KEY`, then `printenv OPENAI_API_KEY \| codex login --with-api-key` | `.codex/auth.json`, `.codex/.credentials.json` (MCP sign-ins) |
 | pi | Run `pi`, then `/login`. Use a device code or paste the final redirect URL/authorization code when prompted. A provider without a paste fallback needs callback forwarding or an API key. | The selected provider's key, e.g. `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | `.pi/agent/auth.json` |
-| OpenCode | `opencode auth login`: paste a provider API key, or use GitHub Copilot's displayed device code. OAuth methods requiring a localhost callback need forwarding or a provider key. | The selected provider's key, e.g. `OPENAI_API_KEY` | `.local/share/opencode/auth.json` |
-| Cursor | `NO_OPEN_BROWSER=1 cursor-agent login`: open the printed Cursor link externally while the CLI waits for browser authentication. | `CURSOR_API_KEY` for unattended operation | `.config/cursor`, `.cursor` |
-| Grok | `grok login --device-auth`: follow the printed device-code flow. Default browser OAuth may need a localhost callback. | `XAI_API_KEY` | `.grok/auth.json` |
+| OpenCode | `opencode auth login`: paste a provider API key, or use GitHub Copilot's displayed device code. OAuth methods requiring a localhost callback need forwarding or a provider key. | The selected provider's key, e.g. `OPENAI_API_KEY` | `.local/share/opencode/auth.json`, `.local/share/opencode/mcp-auth.json` (MCP sign-ins) |
+| Cursor | `NO_OPEN_BROWSER=1 cursor-agent login`: open the printed Cursor link externally while the CLI waits for browser authentication. | `CURSOR_API_KEY` for unattended operation | `.config/cursor/auth.json` (login), `.cursor` (configuration, chats, project data) |
+| Grok | `grok login --device-auth`: follow the printed device-code flow. Default browser OAuth may need a localhost callback. | `XAI_API_KEY` | `.grok/auth.json`, `.grok/mcp_credentials.json` (MCP sign-ins) |
 
 Sources: [Claude authentication](https://code.claude.com/docs/en/authentication),
 [Codex headless authentication](https://developers.openai.com/codex/auth),
@@ -241,10 +257,11 @@ modes, ports and limits.
 
 Back up `/data`, change `TCODE_VERSION` if pinned, then run `docker compose
 pull && docker compose up -d`. Upgrading the image does not reinstall the
-agent CLIs: they live in the volume and update themselves. To reinstall one,
-stop the service, delete its directory under `/data/agents/<cpu architecture>`
-(Cursor: `/data/home/.local/share/cursor-agent` and its links in
-`/data/home/.local/bin`) and start again.
+agent CLIs: they live in the volume (see [Choose agents](#choose-agents) for
+how each updates). To reinstall an npm CLI, leave it out of `TCODE_AGENTS` for
+one start and add it back. To reinstall Cursor, stop the service, delete
+`/data/home/.local/share/cursor-agent` and the `cursor`, `cursor-agent` and
+`agent` links in `/data/home/.local/bin`, and start again.
 
 To build the image from a checkout instead, run from the repository root:
 

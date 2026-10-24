@@ -39,15 +39,18 @@ RUN apt-get update \
     && groupmod --new-name tcode node \
     && usermod --login tcode --home /data/home --shell /bin/bash node
 COPY crates/headless/container/agents.json crates/headless/container/install-agents.mjs /opt/tcode/
-# Agent commands are on PATH only through /data/agents/bin, which holds the
-# selected ones; Cursor's installer also writes $HOME/.local/bin.
+# One global npm prefix per CPU architecture holds the selected npm CLIs and
+# every other global install. /data/agents/bin links the CLIs kept elsewhere
+# (Cursor's, Grok's current build); $HOME/.local/bin stays off PATH, so an
+# unselected Cursor is not on it.
+ARG TARGETARCH
 ENV HOME=/data/home \
     TCODE_DATA_DIR=/data/tcode \
     SHELL=/bin/bash \
     LANG=C.UTF-8 \
-    NPM_CONFIG_PREFIX=/data/agents/custom \
+    NPM_CONFIG_PREFIX=/data/agents/${TARGETARCH}/npm \
     NPM_CONFIG_CACHE=/data/agents/npm-cache \
-    PATH=/data/agents/bin:/data/bin:/data/agents/custom/bin:$PATH
+    PATH=/data/agents/bin:/data/bin:/data/agents/${TARGETARCH}/npm/bin:$PATH
 LABEL org.opencontainers.image.title="tcode-headless" \
       org.opencontainers.image.description="Tcode headless machine with the browser app, for NAS and homelab hosts" \
       org.opencontainers.image.licenses="MIT"

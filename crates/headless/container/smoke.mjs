@@ -139,7 +139,9 @@ try {
   console.log('First start: every CLI installed, browser password, LAN pairing, project ownership and terminal PATH');
   let base = await start(undefined);
   for (const name of commands) exec(`${name} --version`);
-  assert.equal(exec('bash -lc "id -u; command -v codex"'), '1234\n/data/agents/bin/codex');
+  // The npm CLI runs from the global prefix, where npm's own updates land.
+  const [uid, codex, globalCodex] = exec('bash -lc "id -u; command -v codex; echo $(npm prefix --global)/bin/codex"').split('\n');
+  assert.deepEqual([uid, codex], ['1234', globalCodex]);
   assert.equal(exec('bash -lc "locale charmap; date +%Z"'), 'UTF-8\nCST', 'Terminal panes get UTF-8 and TZ');
   await waitForHealthy();
   exec('echo owned > /projects/owned');
@@ -171,7 +173,7 @@ try {
   console.log('Installed CLIs are reused with networking disabled');
   docker('run', '--rm', '--network', 'none', '--entrypoint', 'sh', '--env', 'TCODE_AGENTS=codex',
     '--volume', `${data}:/data`, image, '-ec',
-    'node /opt/tcode/install-agents.mjs /data/agents; codex --version');
+    'node /opt/tcode/install-agents.mjs /data/agents/bin; codex --version');
 
   console.log('Empty selection, custom ACP command, changed UID/GID, same identity');
   base = await start('', '1235', '2346', '0');
