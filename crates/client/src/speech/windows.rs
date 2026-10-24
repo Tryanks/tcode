@@ -6,17 +6,14 @@
 //! WinRT owns capture and requires the online speech privacy setting.
 //! The caller must initialize a COM apartment; the desktop GPUI platform does.
 
-use async_channel::{Receiver, Sender, bounded, unbounded};
+use async_channel::{Receiver, Sender, unbounded};
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
 use windows::{
-    Foundation::{
-        AsyncActionCompletedHandler, AsyncOperationCompletedHandler, EventRegistrationToken,
-        IAsyncAction, IAsyncOperation, TimeSpan, TypedEventHandler,
-    },
+    Foundation::{TimeSpan, TypedEventHandler},
     Globalization::Language,
     Media::SpeechRecognition::{
         SpeechContinuousRecognitionCompletedEventArgs,
@@ -26,7 +23,7 @@ use windows::{
         SpeechRecognizer as WinSpeechRecognizer,
     },
     Win32::Foundation::E_ACCESSDENIED,
-    core::{HRESULT, HSTRING, RuntimeType},
+    core::{HRESULT, HSTRING, Ref},
 };
 
 use super::{SpeechError, SpeechEvent, SpeechRecognizer, SpeechSession};
@@ -111,8 +108,8 @@ impl SpeechRecognizer for SystemRecognizer {
             recognizer
                 .HypothesisGenerated(&TypedEventHandler::new({
                     let messages = messages.clone();
-                    move |_, args: &Option<SpeechRecognitionHypothesisGeneratedEventArgs>| {
-                        if let Some(args) = args {
+                    move |_, args: Ref<SpeechRecognitionHypothesisGeneratedEventArgs>| {
+                        if let Some(args) = args.as_ref() {
                             let text = args.Hypothesis()?.Text()?;
                             _ = messages.try_send(Message::Hypothesis(text));
                         }
@@ -125,8 +122,8 @@ impl SpeechRecognizer for SystemRecognizer {
             continuous
                 .ResultGenerated(&TypedEventHandler::new({
                     let messages = messages.clone();
-                    move |_, args: &Option<SpeechContinuousRecognitionResultGeneratedEventArgs>| {
-                        if let Some(args) = args {
+                    move |_, args: Ref<SpeechContinuousRecognitionResultGeneratedEventArgs>| {
+                        if let Some(args) = args.as_ref() {
                             _ = messages.try_send(Message::Result(args.Result()?));
                         }
                         Ok(())
@@ -138,8 +135,8 @@ impl SpeechRecognizer for SystemRecognizer {
             continuous
                 .Completed(&TypedEventHandler::new({
                     let messages = messages.clone();
-                    move |_, args: &Option<SpeechContinuousRecognitionCompletedEventArgs>| {
-                        if let Some(args) = args {
+                    move |_, args: Ref<SpeechContinuousRecognitionCompletedEventArgs>| {
+                        if let Some(args) = args.as_ref() {
                             _ = messages.try_send(Message::Completed(args.Status()?));
                         }
                         Ok(())
@@ -172,9 +169,9 @@ enum Message {
 struct Session {
     recognizer: WinSpeechRecognizer,
     continuous: SpeechContinuousRecognitionSession,
-    hypothesis_token: Option<EventRegistrationToken>,
-    result_token: Option<EventRegistrationToken>,
-    completed_token: Option<EventRegistrationToken>,
+    hypothesis_token: Option<i64>,
+    result_token: Option<i64>,
+    completed_token: Option<i64>,
     messages: Sender<Message>,
     _task: Option<Pin<Box<dyn Future<Output = ()>>>>,
     levels: Option<cpal::Stream>,
@@ -207,10 +204,9 @@ impl Drop for Session {
         // there is nothing to cancel.
         let recognizer = self.recognizer.clone();
         let closed = self.continuous.CancelAsync().and_then(|action| {
-            action.SetCompleted(&AsyncActionCompletedHandler::new(move |_, _| {
+            action.when(move |_| {
                 _ = recognizer.Close();
-                Ok(())
-            }))
+            })
         });
         if closed.is_err() {
             _ = self.recognizer.Close();
@@ -227,14 +223,18 @@ async fn dictate(
     sink: &SpeechSink,
     separator: &'static str,
 ) -> Result<(), SpeechError> {
-    let compilation = operation(recognizer.CompileConstraintsAsync().map_err(speech_error)?)
+    let compilation = recognizer
+        .CompileConstraintsAsync()
+        .map_err(speech_error)?
         .await
         .map_err(speech_error)?;
     let status = compilation.Status().map_err(speech_error)?;
     if status != SpeechRecognitionResultStatus::Success {
         return Err(status_error(status));
     }
-    action(continuous.StartAsync().map_err(speech_error)?)
+    continuous
+        .StartAsync()
+        .map_err(speech_error)?
         .await
         .map_err(speech_error)?;
     _ = sink.try_send(SpeechEvent::Ready);
@@ -269,7 +269,7 @@ async fn dictate(
             // Stopping flushes the last phrase, then completes the session.
             Message::Finish => {
                 let stopped = match continuous.StopAsync() {
-                    Ok(stop) => action(stop).await,
+                    Ok(stop) => stop.await,
                     Err(error) => Err(error),
                 };
                 // The session may have ended by itself, e.g. after the silence
@@ -354,31 +354,6 @@ fn supported_language(locale: Option<&str>) -> windows::core::Result<Option<Lang
     Ok(fallback)
 }
 
-/// Await `operation` without blocking: its completion handler, which runs on a
-/// WinRT thread, only wakes this future.
-async fn operation<T: RuntimeType + 'static>(
-    operation: IAsyncOperation<T>,
-) -> windows::core::Result<T> {
-    let (done, wait) = bounded(1);
-    operation.SetCompleted(&AsyncOperationCompletedHandler::new(move |_, _| {
-        _ = done.try_send(());
-        Ok(())
-    }))?;
-    _ = wait.recv().await;
-    operation.GetResults()
-}
-
-/// Await `action` like [`operation`].
-async fn action(action: IAsyncAction) -> windows::core::Result<()> {
-    let (done, wait) = bounded(1);
-    action.SetCompleted(&AsyncActionCompletedHandler::new(move |_, _| {
-        _ = done.try_send(());
-        Ok(())
-    }))?;
-    _ = wait.recv().await;
-    action.GetResults()
-}
-
 fn speech_error(error: windows::core::Error) -> SpeechError {
     match error.code() {
         E_ACCESSDENIED => SpeechError::PermissionDenied,
@@ -413,11 +388,15 @@ fn microphone_levels(sink: SpeechSink) -> Result<cpal::Stream, SpeechError> {
         .map_err(|error| SpeechError::Input(error.to_string()))?;
     let sample_format = supported.sample_format();
     let config = supported.into();
+    // The formats WASAPI reports for a shared-mode mix format.
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => level_stream::<f32>(&device, &config, sink),
-        cpal::SampleFormat::I16 => level_stream::<i16>(&device, &config, sink),
-        cpal::SampleFormat::U16 => level_stream::<u16>(&device, &config, sink),
-        cpal::SampleFormat::I32 => level_stream::<i32>(&device, &config, sink),
+        cpal::SampleFormat::F32 => level_stream::<f32>(&device, config, sink),
+        cpal::SampleFormat::F64 => level_stream::<f64>(&device, config, sink),
+        cpal::SampleFormat::U8 => level_stream::<u8>(&device, config, sink),
+        cpal::SampleFormat::I16 => level_stream::<i16>(&device, config, sink),
+        cpal::SampleFormat::I24 => level_stream::<cpal::I24>(&device, config, sink),
+        cpal::SampleFormat::I32 => level_stream::<i32>(&device, config, sink),
+        cpal::SampleFormat::I64 => level_stream::<i64>(&device, config, sink),
         other => Err(SpeechError::Input(format!(
             "unsupported sample format {other}"
         ))),
@@ -430,7 +409,7 @@ fn microphone_levels(sink: SpeechSink) -> Result<cpal::Stream, SpeechError> {
 
 fn level_stream<T>(
     device: &cpal::Device,
-    config: &cpal::StreamConfig,
+    config: cpal::StreamConfig,
     sink: SpeechSink,
 ) -> Result<cpal::Stream, SpeechError>
 where
@@ -439,7 +418,7 @@ where
 {
     use cpal::{Sample as _, traits::DeviceTrait as _};
     let channels = config.channels.max(1) as usize;
-    let mut meter = super::level::LevelMeter::new(config.sample_rate.0.into());
+    let mut meter = super::level::LevelMeter::new(config.sample_rate.into());
     let errors = sink.clone();
     device
         .build_input_stream(
@@ -461,8 +440,9 @@ where
             },
             None,
         )
-        .map_err(|error| match error {
-            cpal::BuildStreamError::DeviceNotAvailable => SpeechError::NoInputDevice,
-            error => SpeechError::Input(error.to_string()),
+        .map_err(|error| match error.kind() {
+            cpal::ErrorKind::DeviceNotAvailable => SpeechError::NoInputDevice,
+            cpal::ErrorKind::PermissionDenied => SpeechError::PermissionDenied,
+            _ => SpeechError::Input(error.to_string()),
         })
 }
