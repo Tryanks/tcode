@@ -386,6 +386,93 @@ pub struct ControlWatch {
     pub once: bool,
 }
 
+/// The semantic keys a [`ControlAction`] records, shared by the host that writes them and the
+/// clients that put them in words. A [`ControlAction::detail`] is data only (a title, an id,
+/// a name, a count, the user's or the model's own words), never a sentence.
+pub mod action {
+    pub const SETTLE: &str = "settle";
+    /// The thread settled itself under the user's consent; detail: the consent quote.
+    pub const SETTLED_ITSELF: &str = "settled_itself";
+    pub const UNSETTLE: &str = "unsettle";
+    pub const ARCHIVE: &str = "archive";
+    pub const UNARCHIVE: &str = "unarchive";
+    pub const PIN: &str = "pin";
+    pub const UNPIN: &str = "unpin";
+    /// Detail: the new title.
+    pub const RENAME: &str = "rename";
+    pub const MARK_READ: &str = "mark_read";
+    pub const MARK_UNREAD: &str = "mark_unread";
+    /// Detail: the note, if any.
+    pub const FOLLOW_UP: &str = "follow_up";
+    pub const FOLLOW_UP_OFF: &str = "follow_up_off";
+    pub const PARK: &str = "park";
+    pub const PARK_OFF: &str = "park_off";
+    pub const KEEP: &str = "keep";
+    pub const KEEP_OFF: &str = "keep_off";
+    /// Detail: the consent quote.
+    pub const SETTLE_SELF: &str = "settle_self";
+    /// Detail: the number of items.
+    pub const RECORD_REVIEW: &str = "record_review";
+    /// Detail: the model's reason.
+    pub const REQUEST_GRANT: &str = "request_grant";
+    /// Detail: the watch id.
+    pub const NOTIFY_WHEN: &str = "notify_when";
+    /// Detail: the removed watch ids.
+    pub const CANCEL_NOTIFY: &str = "cancel_notify";
+    /// Detail: the request id.
+    pub const RESPOND_INPUT: &str = "respond_input";
+    pub const TERMINAL_OPEN: &str = "terminal_open";
+    /// Detail: the terminal id.
+    pub const TERMINAL_INPUT: &str = "terminal_input";
+    /// Detail: the terminal id.
+    pub const TERMINAL_CLOSE: &str = "terminal_close";
+    /// Detail: the deleted thread's title.
+    pub const DELETE_THREADS: &str = "delete_threads";
+    /// Detail: the turn id.
+    pub const REWIND: &str = "rewind";
+    /// Detail: the setting's key.
+    pub const PATCH_SETTINGS: &str = "patch_settings";
+    pub const START_THREAD: &str = "start_thread";
+    pub const SEND_QUEUED: &str = "send_queued";
+    pub const SEND_STEERED: &str = "send_steered";
+    pub const SEND_SCHEDULED: &str = "send_scheduled";
+    pub const INTERRUPT: &str = "interrupt";
+    /// Detail: the turn id.
+    pub const RETRY: &str = "retry";
+    pub const COMPACT: &str = "compact";
+    /// Detail: the model id.
+    pub const SET_MODEL: &str = "set_model";
+    /// Detail: the option id.
+    pub const SET_OPTION: &str = "set_option";
+    pub const FORK: &str = "fork";
+    /// Detail: the queued message id.
+    pub const STEER_QUEUED: &str = "steer_queued";
+    /// Detail: the queued message id.
+    pub const DROP_QUEUED: &str = "drop_queued";
+    /// The pull request operations; detail: the pull request.
+    pub const PR_LINK: &str = "pr_link";
+    pub const PR_UNLINK: &str = "pr_unlink";
+    pub const PR_WATCH: &str = "pr_watch";
+    pub const PR_UNWATCH: &str = "pr_unwatch";
+    pub const PR_REFRESH: &str = "pr_refresh";
+    pub const PR_COMMENT: &str = "pr_comment";
+    pub const PR_REPLY: &str = "pr_reply";
+    pub const PR_RESOLVE: &str = "pr_resolve";
+    /// Detail: the branch.
+    pub const GIT_CHECKOUT: &str = "git_checkout";
+    pub const GIT_MERGE_WORKTREE: &str = "git_merge_worktree";
+    pub const GIT_COMMIT: &str = "git_commit";
+    pub const GIT_COMMIT_PUSH: &str = "git_commit_push";
+    pub const GIT_PUSH: &str = "git_push";
+    pub const GIT_PULL: &str = "git_pull";
+    pub const GIT_PUBLISH_BRANCH: &str = "git_publish_branch";
+    pub const GIT_INITIALIZE: &str = "git_initialize";
+    /// Detail: the project root.
+    pub const CREATE_PROJECT: &str = "create_project";
+    /// Detail: the referenced thread's title.
+    pub const REFERENCE: &str = "reference";
+}
+
 /// One `tcode_control` write, as Settings → Control lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlActivityEntry {

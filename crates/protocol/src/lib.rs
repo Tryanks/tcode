@@ -218,7 +218,7 @@ pub use wire::{
 // injected_tools (InjectedTools), listing every offered server's tools with
 // the servers that offer them (InjectedServer), and
 // SessionStatus gains control; RuntimeNotice gains review_recorded and
-// reference_boundary_crossed.
+// reference_boundary_crossed; AddThreadReference answers ThreadReferenceAdded.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 #[cfg(test)]

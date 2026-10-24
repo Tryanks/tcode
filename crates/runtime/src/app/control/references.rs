@@ -1,6 +1,6 @@
 use super::*;
 use control_mcp::{ReferenceParams, ReferenceResponse};
-use tcode_core::control::{ReferenceOrigin, ThreadReference};
+use tcode_core::control::{ReferenceOrigin, ThreadReference, action};
 
 impl AppState {
     /// Only a thread inside the caller's observe scope can be referenced: `authorize_control`
@@ -40,11 +40,13 @@ impl AppState {
                 }),
             );
         }
-        let detail = match params.reason {
-            Some(reason) => format!("{} ({}): {reason}", target.id, target.title),
-            None => format!("{} ({})", target.id, target.title),
-        };
-        self.audit(caller, &caller.thread_id, "reference", Some(detail), cx);
+        self.audit(
+            caller,
+            &caller.thread_id,
+            action::REFERENCE,
+            Some(target.title.clone()),
+            cx,
+        );
         serde_json::to_value(ReferenceResponse {
             thread_id: target.id,
             title: target.title,
@@ -53,20 +55,25 @@ impl AppState {
         .map_err(|error| error.to_string())
     }
 
-    /// The user named `thread_id` in `session_id`'s composer; a reference across a project or
-    /// provider boundary carries the notice the user saw once.
+    /// The user named `thread_id` in `session_id`'s composer. Whether the client should now
+    /// tell the user, once, that the new reference crosses a project or provider boundary.
     pub fn add_thread_reference(
         &mut self,
         session_id: &str,
         thread_id: &str,
         cx: &mut HostCx,
-    ) -> Result<(), ProtocolError> {
+    ) -> Result<bool, ProtocolError> {
         let target = self.find_meta(thread_id).ok_or_else(|| ProtocolError {
             code: "unknown_session".into(),
             message: "The referenced thread is no longer available.".into(),
         })?;
-        self.add_reference(session_id, &target, ReferenceOrigin::User, cx);
-        Ok(())
+        let added = self.add_reference(session_id, &target, ReferenceOrigin::User, cx);
+        Ok(added
+            && self.find_meta(session_id).is_some_and(|meta| {
+                meta.references
+                    .iter()
+                    .any(|reference| reference.thread_id == target.id && reference.boundary_notice)
+            }))
     }
 
     /// A reference across a project or provider boundary carries a notice; an existing

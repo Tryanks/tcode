@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::orchestrate::approval_request_summary;
 use control_mcp::{CancelNotifyParams, NotifyWhenParams};
-use tcode_core::control::{ControlWatch, WatchEvent};
+use tcode_core::control::{ControlWatch, WatchEvent, action};
 use tcode_core::notice::CONTROL_CALLBACK_PREFIX;
 
 /// How much of a question a callback quotes; the rest is one `get_thread` away.
@@ -89,20 +89,16 @@ impl AppState {
             once: params.once.unwrap_or(false),
         };
         let answer = serde_json::json!(WatchAnswer::from(&watch));
-        let detail = format!(
-            "watch {} on {}: {}",
-            watch.id,
-            watch.thread_ids.join(", "),
-            watch
-                .events
-                .iter()
-                .map(wire_name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let detail = watch.id.clone();
         meta.control_watches.push(watch);
         self.store_meta(meta, cx);
-        self.audit(caller, &caller.thread_id, "notify_when", Some(detail), cx);
+        self.audit(
+            caller,
+            &caller.thread_id,
+            action::NOTIFY_WHEN,
+            Some(detail),
+            cx,
+        );
         Ok(answer)
     }
 
@@ -121,8 +117,14 @@ impl AppState {
             meta.control_watches
                 .retain(|watch| !removed.contains(&watch.id));
             self.store_meta(meta, cx);
-            let detail = format!("removed {}", removed.join(", "));
-            self.audit(caller, &caller.thread_id, "cancel_notify", Some(detail), cx);
+            let detail = removed.join(", ");
+            self.audit(
+                caller,
+                &caller.thread_id,
+                action::CANCEL_NOTIFY,
+                Some(detail),
+                cx,
+            );
         }
         Ok(serde_json::json!(CancelNotifyAnswer { removed, unknown }))
     }

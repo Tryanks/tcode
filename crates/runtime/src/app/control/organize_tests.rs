@@ -469,7 +469,16 @@ fn a_thread_settles_itself_only_after_its_turn_and_only_with_standing_consent() 
                 _ => None,
             })
             .collect();
-        assert_eq!(actions, ["settle_self", "settle_self", "settle"]);
+        use tcode_core::control::action;
+        assert_eq!(
+            actions,
+            [
+                action::SETTLE_SELF,
+                action::SETTLE_SELF,
+                action::SETTLED_ITSELF
+            ],
+            "the self-settle is recorded apart from a settle another thread asked for"
+        );
     });
 }
 

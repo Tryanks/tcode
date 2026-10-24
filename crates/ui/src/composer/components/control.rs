@@ -218,8 +218,9 @@ impl Composer {
         )
     }
 
-    /// Reference `thread_id` from the active thread, telling the user first
-    /// when its content would reach another project's or provider's vendor.
+    /// Reference `thread_id` from the active thread. When the host answers that the new
+    /// reference crosses a project or provider boundary, the user is told once and may take
+    /// it back.
     pub(in super::super) fn reference_thread(
         &mut self,
         thread_id: String,
@@ -230,46 +231,56 @@ impl Composer {
         let Some(session_id) = store.active_session_id() else {
             return;
         };
-        let (Some(from), Some(to)) = (
-            store.thread_meta(&session_id),
-            store.thread_meta(&thread_id),
-        ) else {
-            return;
-        };
-        let crosses = crate::control::crosses_boundary(from, to);
-        let title = to.title.clone();
+        let title = store
+            .thread_meta(&thread_id)
+            .map(|meta| meta.title.clone())
+            .unwrap_or_default();
+        let added = self.workspace_store.update(cx, |store, cx| {
+            store.command(
+                tcode_protocol::Command::AddThreadReference {
+                    session_id: session_id.clone(),
+                    thread_id: thread_id.clone(),
+                },
+                cx,
+            )
+        });
         let store = self.workspace_store.clone();
-        if !crosses {
-            store.update(cx, |store, _| {
-                store.add_thread_reference(session_id, thread_id)
-            });
-            return;
-        }
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let store = store.clone();
-            let session_id = session_id.clone();
-            let thread_id = thread_id.clone();
-            alert
-                .title(crate::tr!("control.reference.notice_title"))
-                .description(crate::tr!(
-                    "control.reference.notice_description",
-                    title = title.as_str()
-                ))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_text(crate::tr!("control.reference.notice_ok"))
-                        .cancel_text(crate::tr!("control.reference.notice_cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, _, cx| {
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(tcode_protocol::CommandResponse::ThreadReferenceAdded {
+                boundary_notice: true,
+            }) = added.await
+            else {
+                return;
+            };
+            let _ = this.update_in(cx, |_, window, cx| {
+                window.open_alert_dialog(cx, move |alert, _, _| {
+                    let store = store.clone();
                     let session_id = session_id.clone();
                     let thread_id = thread_id.clone();
-                    store.update(cx, |store, _| {
-                        store.add_thread_reference(session_id, thread_id)
-                    });
-                    true
+                    alert
+                        .title(crate::tr!("control.reference.notice_title"))
+                        .description(crate::tr!(
+                            "control.reference.notice_description",
+                            title = title.as_str()
+                        ))
+                        .button_props(
+                            DialogButtons::default()
+                                .ok_text(crate::tr!("control.reference.notice_ok"))
+                                .cancel_text(crate::tr!("control.reference.notice_cancel"))
+                                .show_cancel(true),
+                        )
+                        .on_cancel(move |_, _, cx| {
+                            let session_id = session_id.clone();
+                            let thread_id = thread_id.clone();
+                            store.update(cx, |store, _| {
+                                store.remove_thread_reference(session_id, thread_id)
+                            });
+                            true
+                        })
                 })
-        });
+            });
+        })
+        .detach();
     }
 }
 

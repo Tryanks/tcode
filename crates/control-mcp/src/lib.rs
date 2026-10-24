@@ -298,13 +298,16 @@ pub type TokenRegistry = mcp_host::TokenRegistry<tools::Service>;
 /// does not know, which gets `request_grant` alone.
 pub type GrantResolver = Arc<dyn Fn(&str) -> Option<ControlGrant> + Send + Sync>;
 
+/// Tool names with the descriptions a connection listed them with.
+pub type ListedTools = Vec<(String, String)>;
+
 /// The resolver the runtime installs when it attaches the server, and the tools each
 /// thread's latest connection was actually given. Until a resolver is set, and for a thread
 /// it does not know, every connection sees the empty grant.
 #[derive(Clone, Default)]
 pub struct GrantSource {
     resolver: Arc<Mutex<Option<GrantResolver>>>,
-    offered: Arc<Mutex<HashMap<String, Vec<(String, String)>>>>,
+    offered: Arc<Mutex<HashMap<String, ListedTools>>>,
 }
 
 impl GrantSource {
@@ -322,7 +325,7 @@ impl GrantSource {
     /// The tools, with descriptions, the thread's latest connection listed; `None` before
     /// its provider first connected. A grant changed since then shows here only once the
     /// provider connects again.
-    pub fn offered(&self, thread_id: &str) -> Option<Vec<(String, String)>> {
+    pub fn offered(&self, thread_id: &str) -> Option<ListedTools> {
         self.offered.lock().unwrap().get(thread_id).cloned()
     }
 
@@ -330,7 +333,7 @@ impl GrantSource {
         self.offered.lock().unwrap().remove(thread_id);
     }
 
-    fn record_offered(&self, thread_id: &str, tools: Vec<(String, String)>) {
+    fn record_offered(&self, thread_id: &str, tools: ListedTools) {
         self.offered
             .lock()
             .unwrap()

@@ -567,6 +567,11 @@ pub enum CommandResponse {
     },
     ExternalImportStarted(bool),
     ChildrenSettled(SettleChildrenResult),
+    /// `AddThreadReference`: `boundary_notice` is true when this call made a reference that
+    /// crosses a project or provider boundary, which the client tells the user once.
+    ThreadReferenceAdded {
+        boundary_notice: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

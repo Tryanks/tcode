@@ -2380,8 +2380,9 @@ pub enum ContextFreshness {
 pub struct ControlAction {
     pub actor_thread_id: String,
     pub actor_title: String,
-    /// The tool or operation name, for example `settle`.
+    /// A semantic key from `tcode_core::control::action`, which clients put in words.
     pub action: String,
+    /// Data only (a title, an id, a name, a count, someone's own words), never a sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }

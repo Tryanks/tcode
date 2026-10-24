@@ -123,17 +123,11 @@ impl AppState {
         self.validate_command_target(&command).map_err(refusal)?;
         self.respond_user_input(&target, request_id.clone(), params.answers.clone(), &mut cx)
             .map_err(refusal)?;
-        let keys = params
-            .answers
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
         self.audit(
             caller,
             &target,
-            "respond_input",
-            Some(format!("answered {request_id} ({keys})")),
+            action::RESPOND_INPUT,
+            Some(request_id.clone()),
             &mut cx,
         );
         Ok(serde_json::json!({ "thread_id": target, "request_id": request_id, "answered": true }))
@@ -161,7 +155,7 @@ impl AppState {
                 })
                 .map_err(refusal)?;
                 self.new_terminal(&target, &mut cx);
-                self.audit(caller, &target, "terminal", Some("open".into()), &mut cx);
+                self.audit(caller, &target, action::TERMINAL_OPEN, None, &mut cx);
                 TerminalAnswer {
                     thread_id: target,
                     terminal_id: None,
@@ -178,13 +172,12 @@ impl AppState {
                     bytes: text.clone().into_bytes(),
                 })
                 .map_err(refusal)?;
-                let bytes = text.len();
                 self.write_terminal_input(terminal_id, text.into_bytes(), &mut cx);
                 self.audit(
                     caller,
                     &target,
-                    "terminal",
-                    Some(format!("input to terminal {terminal_id} ({bytes} bytes)")),
+                    action::TERMINAL_INPUT,
+                    Some(terminal_id.to_string()),
                     &mut cx,
                 );
                 TerminalAnswer {
@@ -205,8 +198,8 @@ impl AppState {
                 self.audit(
                     caller,
                     &target,
-                    "terminal",
-                    Some(format!("closed terminal {terminal_id}")),
+                    action::TERMINAL_CLOSE,
+                    Some(terminal_id.to_string()),
                     &mut cx,
                 );
                 TerminalAnswer {
@@ -293,11 +286,8 @@ impl AppState {
             self.audit(
                 caller,
                 &caller.thread_id,
-                "delete_threads",
-                Some(format!(
-                    "deleted \"{}\" ({target}) and {descendants} thread(s) under it",
-                    meta.title
-                )),
+                action::DELETE_THREADS,
+                Some(meta.title.clone()),
                 &mut cx,
             );
             results.push(BatchResult {
@@ -346,12 +336,8 @@ impl AppState {
         self.audit(
             caller,
             &target,
-            "rewind",
-            Some(format!(
-                "to turn {} ({})",
-                params.turn,
-                wire_mode(params.mode)
-            )),
+            action::REWIND,
+            Some(params.turn.to_string()),
             &mut cx,
         );
         Ok(serde_json::json!({
@@ -385,17 +371,10 @@ impl AppState {
         self.audit(
             caller,
             &caller.thread_id,
-            "patch_settings",
+            action::PATCH_SETTINGS,
             Some(name.clone()),
             &mut cx,
         );
         Ok(serde_json::json!({ "applied": name }))
     }
-}
-
-fn wire_mode(mode: RewindScope) -> String {
-    serde_json::to_value(mode)
-        .ok()
-        .and_then(|mode| mode.as_str().map(str::to_owned))
-        .unwrap_or_default()
 }

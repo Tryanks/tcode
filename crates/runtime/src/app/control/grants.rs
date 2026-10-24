@@ -48,11 +48,17 @@ impl AppState {
             requested_at: now_secs(),
         };
         let response = pending(&request);
-        let detail = format!("{} — {}", request.grant.describe(), request.reason);
+        let detail = request.reason.clone();
         meta.control_grant_requests.push(request);
         meta.updated_at = now_secs();
         self.store_meta(meta, cx);
-        self.audit(caller, &caller.thread_id, "request_grant", Some(detail), cx);
+        self.audit(
+            caller,
+            &caller.thread_id,
+            action::REQUEST_GRANT,
+            Some(detail),
+            cx,
+        );
         Ok(response)
     }
 

@@ -3,7 +3,7 @@
 
 use super::*;
 use control_mcp::{ControlOp, ToolRequirement};
-use tcode_core::control::{ControlAction, ControlGrant, ControlGrantSource, ControlScope};
+use tcode_core::control::{ControlAction, ControlGrant, ControlGrantSource, ControlScope, action};
 use tcode_core::settings::SettingsPatch;
 use tcode_protocol::{ControlActivityEntry, ControlStatus, ThreadReferenceStatus};
 

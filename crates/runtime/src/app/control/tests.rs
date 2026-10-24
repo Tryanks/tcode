@@ -254,6 +254,20 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
             Ok(()),
             "an orchestrated child is readable across projects"
         );
+        // Every scope keeps the caller's own project: a grant for project b still reads a,
+        // as a search narrowed to the caller's project would.
+        let elsewhere = ControlGrant {
+            scope: ControlScope::Projects(vec!["b".into()]),
+            ..observe.clone()
+        };
+        assert_eq!(
+            state.authorize_control(&caller("a", elsewhere.clone()), &get("same")),
+            Ok(())
+        );
+        assert_eq!(
+            state.authorize_control(&caller("a", elsewhere), &get("other")),
+            Ok(())
+        );
         let host = ControlGrant {
             scope: ControlScope::Host,
             ..observe.clone()
@@ -273,10 +287,29 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
         );
     });
 
-    state.update(cx, |state, cx| {
-        state
-            .add_thread_reference("caller", "referenced", cx)
-            .unwrap();
+    // The user's reference across a project is answered with the notice to show, once.
+    for (id, notice) in [(5, true), (6, false)] {
+        state.dispatch_command(
+            cx,
+            id,
+            Command::AddThreadReference {
+                session_id: "caller".into(),
+                thread_id: "referenced".into(),
+            },
+        );
+        cx.run_until_parked();
+        assert!(
+            cx.drain_outgoing().iter().any(|message| matches!(
+                message,
+                HostMessage::Ack {
+                    id: acked,
+                    result: Ok(CommandResponse::ThreadReferenceAdded { boundary_notice }),
+                } if *acked == id && *boundary_notice == notice
+            )),
+            "reference {id}"
+        );
+    }
+    state.update(cx, |state, _| {
         assert_eq!(
             state.authorize_control(
                 &caller("a", observe.clone()),
