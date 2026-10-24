@@ -343,6 +343,39 @@ pub enum Command {
     SettleSession {
         session_id: String,
     },
+    /// Set or clear the thread's own `tcode_control` grant (its control chip).
+    SetControlGrant {
+        session_id: String,
+        grant: Option<tcode_core::control::ControlGrant>,
+    },
+    /// Answer a grant the thread's model asked for with `request_grant`.
+    RespondControlGrant {
+        session_id: String,
+        request_id: String,
+        approve: bool,
+    },
+    AddThreadReference {
+        session_id: String,
+        thread_id: String,
+    },
+    RemoveThreadReference {
+        session_id: String,
+        thread_id: String,
+    },
+    SetFollowUp {
+        session_id: String,
+        follow_up: Option<tcode_core::control::FollowUp>,
+    },
+    SetParked {
+        session_id: String,
+        parked: bool,
+    },
+    DismissSettleSuggestion {
+        session_id: String,
+    },
+    RevokeSelfSettle {
+        session_id: String,
+    },
     /// Orchestrate `cancel` for a dispatched child: stop it without
     /// delivering its result.
     CancelAgent {
@@ -576,6 +609,14 @@ impl Command {
             | Self::RemoveReviewComment { session_id, .. }
             | Self::SettleChildren { session_id }
             | Self::SettleSession { session_id, .. }
+            | Self::SetControlGrant { session_id, .. }
+            | Self::RespondControlGrant { session_id, .. }
+            | Self::AddThreadReference { session_id, .. }
+            | Self::RemoveThreadReference { session_id, .. }
+            | Self::SetFollowUp { session_id, .. }
+            | Self::SetParked { session_id, .. }
+            | Self::DismissSettleSuggestion { session_id }
+            | Self::RevokeSelfSettle { session_id }
             | Self::CancelAgent { session_id }
             | Self::UnsettleSession { session_id, .. }
             | Self::PinSession { session_id, .. }

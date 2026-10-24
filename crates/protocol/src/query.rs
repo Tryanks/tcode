@@ -108,6 +108,14 @@ pub enum Query {
     },
     /// Every archived thread, most recently archived first.
     ArchivedSessions,
+    /// The latest `tcode_control` writes across every thread, newest first.
+    ControlActivity {
+        limit: u32,
+    },
+    /// Review records stored by `record_review`, newest first.
+    ReviewRecords {
+        limit: u32,
+    },
     /// A read of a pull request linked to the thread, answered from GitHub by the host.
     PullRequest {
         session_id: String,
@@ -168,6 +176,8 @@ pub enum QueryResponse {
     SessionContentHits(Vec<SessionSearchHit>),
     ItemOutput(String),
     ArchivedSessions(crate::ArchivedSessions),
+    ControlActivity(Vec<crate::ControlActivityEntry>),
+    ReviewRecords(Vec<tcode_core::control::ReviewRecord>),
     PullRequest {
         response: Box<crate::PullRequestReadResponse>,
         /// Unix seconds after which the host answers this read afresh.

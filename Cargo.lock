@@ -1820,6 +1820,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
+name = "control-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "log",
+ "mcp-host",
+ "rmcp",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "tcode-core",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11361,6 +11375,7 @@ dependencies = [
  "agent",
  "chrono",
  "log",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "uuid",
@@ -11420,6 +11435,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "computer-use-mcp",
+ "control-mcp",
  "filetime",
  "log",
  "mcp-host",

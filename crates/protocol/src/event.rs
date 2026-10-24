@@ -526,15 +526,50 @@ pub struct SessionStatus {
     pub native_rewind_prefill_available: bool,
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
-    /// The pull request tools offered to this thread's provider, with every text Tcode gives
-    /// its model outside the conversation.
+    /// The MCP tools offered to this thread's provider, with every text Tcode gives its
+    /// model outside the conversation; absent when the provider takes no MCP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_request_tools: Option<InjectedPullRequestTools>,
+    pub injected_tools: Option<InjectedTools>,
+    /// The thread's `tcode_control` grant and what rests on it; absent when the provider
+    /// takes no MCP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<ControlStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InjectedPullRequestTools {
-    /// Each tool's name and the description the model reads.
+pub struct ControlStatus {
+    pub grant: tcode_core::control::ControlGrant,
+    pub source: tcode_core::control::ControlGrantSource,
+    pub pending_requests: Vec<tcode_core::control::ControlGrantRequest>,
+    pub references: Vec<ThreadReferenceStatus>,
+    pub self_settle: Option<tcode_core::control::SelfSettleGrant>,
+    /// Whether the thread's provider is given the `tcode_control` server when it starts.
+    pub tools_offered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadReferenceStatus {
+    pub thread_id: String,
+    pub title: String,
+    /// The referenced thread no longer exists on the host.
+    pub deleted: bool,
+    pub by: tcode_core::control::ReferenceOrigin,
+    pub boundary_notice: bool,
+}
+
+/// One `tcode_control` write, as Settings → Control lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlActivityEntry {
+    pub target_thread_id: String,
+    pub target_title: String,
+    /// Unix milliseconds.
+    pub at: u64,
+    pub action: tcode_core::control::ControlAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectedTools {
+    /// Each tool's name and the description the model reads, across every server offered.
     pub tools: Vec<(String, String)>,
     /// False once the provider took none of Tcode's MCP servers: its model has neither these
     /// tools nor the linking instructions.

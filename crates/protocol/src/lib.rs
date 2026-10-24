@@ -36,16 +36,16 @@ pub use command::{
     TerminalSelection, ThreadExportFormat,
 };
 pub use event::{
-    AcpMarketplaceItem, AgentStatus, ArchivedSessions, EventEnvelope, ExternalImportState,
-    ExternalImportStatus, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
-    IndexSummary, InjectedChannel, InjectedInstructions, InjectedPullRequestTools,
-    MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
-    PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable,
-    ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect,
-    RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
-    ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord, SessionPlan,
-    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    Topic,
+    AcpMarketplaceItem, AgentStatus, ArchivedSessions, ControlActivityEntry, ControlStatus,
+    EventEnvelope, ExternalImportState, ExternalImportStatus, ForkAvailability, GitActionRequest,
+    GitStatusStatus, IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions,
+    InjectedTools, MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge,
+    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog,
+    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
+    RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity,
+    SessionEventRecord, SessionPlan, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
+    TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, Topic,
 };
 pub use query::{
     DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
@@ -204,7 +204,18 @@ pub use wire::{
 // the provider_relay event and timeline entry carry `prompt`, the handoff as
 // sent to the new provider; the agent event stream gains goal_updated,
 // SessionStatus carries the harness's standing goal, and the protocol adds the
-// SetGoal and ClearGoal commands.
+// SetGoal and ClearGoal commands. tcode_control (#929): SessionMeta carries
+// control_grant, control_grant_requests, references, follow_up, parked_at,
+// settle_suggestion_dismissed_at, self_settle, started_by and control_watches;
+// Settings carries control and settlement_automation with the ControlEnabled,
+// ControlDefaultGrant, ControlProjectGrant and SettlementAutomation patches;
+// the agent event stream gains control_action; the protocol adds the
+// SetControlGrant, RespondControlGrant, AddThreadReference,
+// RemoveThreadReference, SetFollowUp, SetParked, DismissSettleSuggestion and
+// RevokeSelfSettle commands and the ControlActivity and ReviewRecords queries;
+// SessionStatus.pull_request_tools (InjectedPullRequestTools) becomes
+// injected_tools (InjectedTools), listing every offered server's tools, and
+// SessionStatus gains control.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 #[cfg(test)]

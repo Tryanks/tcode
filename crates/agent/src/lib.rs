@@ -877,6 +877,7 @@ impl McpRegistration {
     pub const SERVER_NAME_ORCHESTRATE_REPORT: &'static str = "tcode_report";
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
     pub const SERVER_NAME_PULL_REQUESTS: &'static str = "tcode_pull_requests";
+    pub const SERVER_NAME_CONTROL: &'static str = "tcode_control";
 
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token
@@ -1928,6 +1929,9 @@ pub enum AgentEvent {
     ContextWindowChanged {
         window: u64,
     },
+    /// Another thread's model acted on this thread through `tcode_control`. This is
+    /// never emitted by an adapter; the runtime records it in the target thread.
+    ControlAction(ControlAction),
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
     /// Claude `TodoWrite`). Replaces the current turn's plan wholesale.
     PlanUpdated {
@@ -2358,6 +2362,17 @@ pub enum ContextFreshness {
     LastKnown,
     Compacting,
     AwaitingObservation,
+}
+
+/// One `tcode_control` write, as the target thread records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlAction {
+    pub actor_thread_id: String,
+    pub actor_title: String,
+    /// The tool or operation name, for example `settle`.
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

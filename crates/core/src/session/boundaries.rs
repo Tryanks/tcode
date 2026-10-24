@@ -224,7 +224,8 @@ impl TurnBoundaries {
             | AgentEvent::Delta { .. }
             | AgentEvent::ProposedPlanDelta { .. }
             | AgentEvent::ProposedPlan { .. }
-            | AgentEvent::ContextWindowChanged { .. } => self.is_empty(),
+            | AgentEvent::ContextWindowChanged { .. }
+            | AgentEvent::ControlAction(_) => self.is_empty(),
             AgentEvent::ContextCompacted(compaction) => {
                 !(compaction.in_progress && self.compacting) && self.is_empty()
             }
