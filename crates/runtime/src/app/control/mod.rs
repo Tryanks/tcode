@@ -363,6 +363,9 @@ impl AppState {
                 );
             }
         }
+        if op.answers_per_target() {
+            return Ok(());
+        }
         for target in op.target_thread_ids() {
             let Some(meta) = self.find_meta(target) else {
                 return Err(format!("unknown thread: {target}"));
@@ -375,6 +378,26 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    /// One target of a per-item batch ([`ControlOp::answers_per_target`]): its meta, or the
+    /// reason that item is skipped.
+    pub(super) fn batch_target(
+        &self,
+        caller: &Caller,
+        target: &str,
+        reads_content: bool,
+    ) -> Result<SessionMeta, String> {
+        let meta = self
+            .find_meta(target)
+            .ok_or_else(|| "unknown_thread".to_owned())?;
+        if !self.target_reachable(caller, &caller.grant.scope, &meta, reads_content) {
+            return Err(format!(
+                "outside_scope: your grant's scope is {}",
+                caller.grant.scope.describe()
+            ));
+        }
+        Ok(meta)
     }
 
     fn dispatch_control_op(&mut self, caller: &Caller, op: ControlOp, cx: &mut HostCx) -> Answer {

@@ -208,9 +208,12 @@ impl AppState {
                 reason: Some(reason),
                 side_effects: None,
             };
-            let Some(meta) = self.find_meta(&target) else {
-                results.push(skipped("already deleted".into()));
-                continue;
+            let meta = match self.batch_target(caller, &target, false) {
+                Ok(meta) => meta,
+                Err(reason) => {
+                    results.push(skipped(reason));
+                    continue;
+                }
             };
             let ids = descendant_session_ids(&self.sessions, &target);
             if target == caller.thread_id || ids.contains(&caller.thread_id) {

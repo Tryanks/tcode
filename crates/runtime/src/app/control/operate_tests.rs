@@ -165,6 +165,7 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
             state,
             ActiveSession::new(thread("later", "p", ProviderKind::Codex), false, Vec::new()),
         );
+        state.sessions.push(thread("far", "q", ProviderKind::Codex));
     });
     let send = |ids: &[&str], mode: SendMode| {
         ControlOp::SendMessage(SendMessageParams {
@@ -183,7 +184,7 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
                 state,
                 cx,
                 "caller",
-                send(&["running", "settled"], SendMode::Steer),
+                send(&["running", "settled", "far"], SendMode::Steer),
             )
             .unwrap(),
             call(
@@ -208,6 +209,14 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
     assert_eq!(
         steer["results"][1]["side_effects"][0],
         "no turn was running; queued instead"
+    );
+    assert_eq!(
+        steer["results"][2],
+        serde_json::json!({
+            "target": "far",
+            "outcome": "skipped",
+            "reason": "outside_scope: your grant's scope is project",
+        })
     );
     assert_eq!(scheduled["results"][0]["reason"], "scheduled");
     assert!(matches!(

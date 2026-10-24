@@ -405,6 +405,18 @@ fn question(request_id: &str) -> AgentEvent {
     }
 }
 
+fn user_message(text: &str) -> AgentEvent {
+    AgentEvent::ItemCompleted(agent::ThreadItem {
+        id: format!("user-{text}"),
+        parent_item_id: None,
+        content: ItemContent::UserMessage {
+            text: text.into(),
+            context_len: None,
+            attachments: Vec::new(),
+        },
+    })
+}
+
 fn turn_completed() -> AgentEvent {
     AgentEvent::TurnCompleted {
         turn_id: "turn-1".into(),
@@ -435,6 +447,7 @@ fn a_watch_wakes_the_watcher_when_the_thread_asks_and_finishes() {
         let worker = thread("worker", "p");
         state.sessions.push(watcher.clone());
         state.sessions.push(worker.clone());
+        state.sessions.push(thread("far", "elsewhere"));
         park_waiting(state, watcher);
         let _commands = install_live(state, worker);
 
@@ -442,7 +455,7 @@ fn a_watch_wakes_the_watcher_when_the_thread_asks_and_finishes() {
             state,
             "caller",
             ControlOp::NotifyWhen(NotifyWhenParams {
-                thread_ids: vec!["worker".into()],
+                thread_ids: vec!["worker".into(), "far".into()],
                 events: vec![WatchEvent::NeedsInput, WatchEvent::TurnCompleted],
                 once: None,
                 request_id: None,
@@ -451,10 +464,19 @@ fn a_watch_wakes_the_watcher_when_the_thread_asks_and_finishes() {
         )
         .unwrap();
         assert!(watch["id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert_eq!(
+            watch["skipped"],
+            serde_json::json!([{
+                "target": "far",
+                "outcome": "skipped",
+                "reason": "outside_scope: your grant's scope is project",
+            }])
+        );
 
+        state.provider_event_for_test("worker", user_message("Rebase   onto\nthe release branch"), cx);
         state.provider_event_for_test("worker", question("q1"), cx);
         state.provider_event_for_test("worker", turn_completed(), cx);
-        let expected = "[control] thread worker (\"Thread worker\") needs_input: \"Which branch should I rebase onto?\" (request_id: q1)\n\n[control] thread worker (\"Thread worker\") turn_completed: completed";
+        let expected = "[control] thread worker (\"Thread worker\") needs_input: \"Which branch should I rebase onto?\" (request_id: q1)\n\n[control] thread worker (\"Thread worker\") turn_completed: completed, turn 0 from \"Rebase onto the release branch\"";
         assert_eq!(
             queued_texts(state, "caller"),
             vec![(expected.to_owned(), MessageOrigin::Agent)]
@@ -565,11 +587,12 @@ fn watches_survive_a_restart_fire_once_and_cancel() {
         park_waiting(state, caller);
         let _commands = install_live(state, worker);
 
+        state.provider_event_for_test("worker", user_message("Run the tests"), cx);
         state.provider_event_for_test("worker", turn_completed(), cx);
         assert_eq!(
             queued_texts(state, "caller"),
             vec![(
-                "[control] thread worker (\"Thread worker\") turn_completed: completed\n\n[control] thread worker (\"Thread worker\") idle".to_owned(),
+                "[control] thread worker (\"Thread worker\") turn_completed: completed, turn 0 from \"Run the tests\"\n\n[control] thread worker (\"Thread worker\") idle: turn 0 from \"Run the tests\"".to_owned(),
                 MessageOrigin::Agent
             )]
         );
@@ -732,7 +755,7 @@ fn delete_threads_previews_then_deletes_the_tree() {
         state.sessions.push(kid);
         let delete = |dry_run| {
             ControlOp::DeleteThreads(DeleteThreadsParams {
-                thread_ids: vec!["lead".into()],
+                thread_ids: vec!["lead".into(), "gone".into()],
                 remove_worktree: None,
                 dry_run: Some(dry_run),
                 request_id: None,
@@ -749,6 +772,7 @@ fn delete_threads_previews_then_deletes_the_tree() {
 
         let deleted = call(state, "caller", delete(false), cx).unwrap();
         assert_eq!(deleted["results"][0]["outcome"], "applied");
+        assert_eq!(deleted["results"][1]["reason"], "unknown_thread");
         assert!(state.find_meta("lead").is_none() && state.find_meta("kid").is_none());
         let audited = state
             .resident("caller")

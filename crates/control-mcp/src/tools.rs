@@ -240,7 +240,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Register a wake on other threads' events (idle, turn_completed, needs_input, needs_approval, settled, pr_changed) instead of polling. When one fires you receive a message \"[control] thread <id> (\"<title>\") <event>: <detail>\" as from an agent; idle means the thread has no work left, and pr_changed fires for pull requests the watched thread itself watches. once removes the watch after it fires. Returns the watch id for cancel_notify. The watch is stored on this thread and survives a restart."
+        description = "Register a wake on other threads' events (idle, turn_completed, needs_input, needs_approval, settled, pr_changed) instead of polling. When one fires you receive a message \"[control] thread <id> (\"<title>\") <event>: <detail>\" as from an agent; the detail of turn_completed and idle names the turn (numbered as outline numbers them) and quotes the head of the message that started it. idle means the thread has no work left, and pr_changed fires for pull requests the watched thread itself watches. once removes the watch after it fires. Returns the watch id for cancel_notify; a thread that is unknown or outside your grant is listed under skipped with the reason, and no watch is stored when every thread is skipped. The watch is stored on this thread and survives a restart."
     )]
     async fn notify_when(&self, Parameters(p): Parameters<NotifyWhenParams>) -> CallToolResult {
         self.run(ControlOp::NotifyWhen(p)).await

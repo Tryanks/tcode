@@ -211,6 +211,19 @@ impl ControlOp {
         }
     }
 
+    /// Whether the call answers per target, so an unknown or out-of-scope target skips
+    /// that item instead of refusing the whole call.
+    pub fn answers_per_target(&self) -> bool {
+        matches!(
+            self,
+            Self::UpdateThreads(_)
+                | Self::SendMessage(_)
+                | Self::ControlThread(_)
+                | Self::DeleteThreads(_)
+                | Self::NotifyWhen(_)
+        )
+    }
+
     /// Threads the call acts on or reads, as named in its parameters.
     pub fn target_thread_ids(&self) -> Vec<&str> {
         match self {

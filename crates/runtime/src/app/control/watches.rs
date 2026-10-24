@@ -1,11 +1,12 @@
 use super::*;
 use crate::app::orchestrate::approval_request_summary;
-use control_mcp::{CancelNotifyParams, NotifyWhenParams};
+use control_mcp::{BatchResult, CancelNotifyParams, NotifyWhenParams, Outcome};
 use tcode_core::control::{ControlWatch, WatchEvent};
 use tcode_core::notice::CONTROL_CALLBACK_PREFIX;
 
-/// How much of a question a callback quotes; the rest is one `get_thread` away.
-const QUESTION_HEAD_CHARS: usize = 120;
+/// How much of a question or opening message a callback quotes; the rest is one
+/// `get_thread` or `outline` away.
+const QUOTE_HEAD_CHARS: usize = 120;
 
 #[derive(Serialize)]
 struct WatchAnswer<'a> {
@@ -13,6 +14,8 @@ struct WatchAnswer<'a> {
     thread_ids: &'a [String],
     events: &'a BTreeSet<WatchEvent>,
     once: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    skipped: Vec<BatchResult>,
 }
 
 impl<'a> From<&'a ControlWatch> for WatchAnswer<'a> {
@@ -22,6 +25,7 @@ impl<'a> From<&'a ControlWatch> for WatchAnswer<'a> {
             thread_ids: &watch.thread_ids,
             events: &watch.events,
             once: watch.once,
+            skipped: Vec::new(),
         }
     }
 }
@@ -49,6 +53,38 @@ fn one_line_head(text: &str, chars: usize) -> String {
     head
 }
 
+/// `[<status>, ]turn <n> from "<opening message>"`: which turn ended, numbered as `outline`
+/// numbers them, so a watcher can tell one turn of the thread from the next.
+fn last_turn_detail(timeline: &Timeline, event: WatchEvent) -> Option<String> {
+    let turn = timeline.turns.len().checked_sub(1)?;
+    let status = (event == WatchEvent::TurnCompleted)
+        .then_some(timeline.last_turn_status)
+        .flatten()
+        .map(|status| format!("{}, ", wire_name(status)));
+    let opening = timeline
+        .entries
+        .iter()
+        .filter(|entry| entry.turn == turn)
+        .find_map(|entry| match &entry.content {
+            EntryContent::Item(ItemContent::UserMessage {
+                text, context_len, ..
+            }) => {
+                let own = context_len.and_then(|len| text.get(len..)).unwrap_or(text);
+                let (own, _) = tcode_services::thread_index::redact(own);
+                Some(format!(
+                    " from \"{}\"",
+                    one_line_head(&own, QUOTE_HEAD_CHARS)
+                ))
+            }
+            _ => None,
+        });
+    Some(format!(
+        "{}turn {turn}{}",
+        status.unwrap_or_default(),
+        opening.unwrap_or_default()
+    ))
+}
+
 impl AppState {
     pub(super) fn op_notify_when(
         &mut self,
@@ -74,6 +110,22 @@ impl AppState {
         let mut thread_ids = params.thread_ids;
         thread_ids.sort();
         thread_ids.dedup();
+        let mut skipped = Vec::new();
+        thread_ids.retain(|target| match self.batch_target(caller, target, true) {
+            Ok(_) => true,
+            Err(reason) => {
+                skipped.push(BatchResult {
+                    target: target.clone(),
+                    outcome: Outcome::Skipped,
+                    reason: Some(reason),
+                    side_effects: None,
+                });
+                false
+            }
+        });
+        if thread_ids.is_empty() {
+            return Ok(serde_json::json!({ "skipped": skipped }));
+        }
         let watch = ControlWatch {
             id: params
                 .request_id
@@ -82,7 +134,10 @@ impl AppState {
             events: params.events.into_iter().collect(),
             once: params.once.unwrap_or(false),
         };
-        let answer = serde_json::json!(WatchAnswer::from(&watch));
+        let answer = serde_json::json!(WatchAnswer {
+            skipped,
+            ..WatchAnswer::from(&watch)
+        });
         let detail = format!(
             "watch {} on {}: {}",
             watch.id,
@@ -172,17 +227,16 @@ impl AppState {
     fn watch_event_detail(&self, target: &SessionMeta, event: WatchEvent) -> String {
         let resident = self.resident(&target.id);
         let detail = match event {
-            WatchEvent::Idle => None,
-            WatchEvent::TurnCompleted => resident
-                .and_then(|session| session.timeline.last_turn_status)
-                .map(wire_name),
+            WatchEvent::Idle | WatchEvent::TurnCompleted => {
+                resident.and_then(|session| last_turn_detail(&session.timeline, event))
+            }
             WatchEvent::NeedsInput => resident
                 .and_then(|session| session.timeline.pending_user_input.as_ref())
                 .map(|pending| {
                     let question = pending
                         .questions
                         .first()
-                        .map(|question| one_line_head(&question.question, QUESTION_HEAD_CHARS))
+                        .map(|question| one_line_head(&question.question, QUOTE_HEAD_CHARS))
                         .unwrap_or_default();
                     format!("\"{question}\" (request_id: {})", pending.request_id)
                 }),

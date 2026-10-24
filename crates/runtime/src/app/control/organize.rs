@@ -111,8 +111,9 @@ impl AppState {
             reason: Some(reason),
             side_effects: None,
         };
-        let Some(meta) = self.find_meta(&target) else {
-            return skipped("unknown thread".into());
+        let meta = match self.batch_target(caller, &target, false) {
+            Ok(meta) => meta,
+            Err(reason) => return skipped(reason),
         };
         if let Some(expect) = &change.expect
             && !self.expect_holds(&meta, expect, log_ends)

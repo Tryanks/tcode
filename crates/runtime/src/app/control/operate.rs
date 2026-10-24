@@ -306,7 +306,11 @@ impl AppState {
         mode: &SendMode,
         cx: &mut HostCx,
     ) -> BatchResult {
-        if let Some(reason) = self.agent_write_refusal(target) {
+        if let Some(reason) = self
+            .batch_target(caller, target, false)
+            .err()
+            .or_else(|| self.agent_write_refusal(target))
+        {
             return batch(target, Outcome::Skipped, reason);
         }
         self.ensure_resident(target, cx);
@@ -459,7 +463,11 @@ impl AppState {
     ) -> Result<(&'static str, Option<String>), (Outcome, String)> {
         let skipped = |reason: String| (Outcome::Skipped, reason);
         let failed = |reason: String| (Outcome::Failed, reason);
-        if let Some(reason) = self.agent_write_refusal(target) {
+        if let Some(reason) = self
+            .batch_target(caller, target, false)
+            .err()
+            .or_else(|| self.agent_write_refusal(target))
+        {
             return Err(skipped(reason));
         }
         self.ensure_resident(target, cx);
