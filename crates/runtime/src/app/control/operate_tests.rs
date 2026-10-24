@@ -138,6 +138,58 @@ fn start_thread_makes_one_ordinary_thread_across_retries_and_restarts() {
     restarted.read(|state| assert_eq!(started(state).len(), 1));
 }
 
+/// An untitled `start_thread` thread is titled from its first message once the provider
+/// accepts it, as a thread the user started is, though it runs in the background.
+#[test]
+fn an_untitled_started_thread_is_titled_from_its_first_message() {
+    let store = TestStore::new("tcode-control-start-title");
+    let root = store.root().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let cx = &mut TestAppContext::default();
+    let provider = scripted_provider(ProviderKind::Codex);
+    let (commands, events) = (provider.commands.clone(), provider.events.clone());
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*store).clone());
+        state.set_provider_launcher_for_test(provider.launcher);
+        state
+    });
+    let project_id = state.update(cx, |state, cx| {
+        let project_id = state.create_project(root.clone(), cx).unwrap();
+        let mut caller = thread("caller", &project_id, ProviderKind::ClaudeCode);
+        caller.cwd = root.clone();
+        state.persist_meta(&caller, cx);
+        project_id
+    });
+    let mut untitled = start(&project_id);
+    if let ControlOp::StartThread(params) = &mut untitled {
+        params.title = None;
+    }
+    let id = state
+        .update(cx, |state, cx| call(state, cx, "caller", untitled))
+        .unwrap()["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    cx.run_until(|_| !commands.is_empty());
+    let Ok(SessionCommand::SendTurn { delivery_id, .. }) = commands.try_recv() else {
+        panic!("expected the first message to reach the provider");
+    };
+    events
+        .try_send(AgentEvent::TurnAccepted { delivery_id })
+        .unwrap();
+    cx.run_until(|state| {
+        state
+            .find_meta(&id)
+            .is_some_and(|meta| !meta.title.starts_with("New "))
+    });
+    state.read(|state| {
+        assert_eq!(
+            state.find_meta(&id).unwrap().title,
+            "Find out why the sync test flakes"
+        );
+    });
+}
+
 /// `send_message` reaches threads in each mode as the agent's message, reopens a settled
 /// thread and says so, and never counts as the user's activity.
 #[test]
