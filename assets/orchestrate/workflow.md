@@ -75,7 +75,8 @@ inspected or verified, and any material gaps.
 ## Thread handling
 
 Each opened thread returns a `thread_id`. Reuse it with `send`; use `status` or
-`result` when needed, `approve` only within the user's authorization, and
+`result` when needed, `approve` only within the user's authorization, `answer`
+for a child's question from the brief and the user's instructions, and
 `cancel` deliberately. `dispatch`, `send`, `cancel` and `settle` take a list:
 open every child that can start now in one `dispatch` call, and act on every
 child that is ready in one `send`, `cancel` or `settle` call instead of one

@@ -1283,8 +1283,10 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     assert!(!identity.pairing_enabled);
     let migrated = std::fs::read(dir.0.join(HOST_FILE)).unwrap();
     let persisted: Value = serde_json::from_slice(&migrated).unwrap();
+    // Outside a group the file stays version 3, which older builds read.
     assert_eq!(persisted["v"], 3);
     assert_eq!(identity.policy_revision, 0);
+    // A version 3 file that had no policy revision yet loads with no group.
     let mut older_v3 = persisted.clone();
     older_v3.as_object_mut().unwrap().remove("policy_revision");
     std::fs::write(
@@ -1292,12 +1294,13 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
         serde_json::to_vec(&older_v3).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        HostIdentity::load_or_create(&dir.0, "Test Host")
-            .unwrap()
-            .policy_revision,
-        0
-    );
+    let v3 = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
+    assert_eq!(v3.policy_revision, 0);
+    assert!(v3.group.is_none());
+    v3.save().unwrap();
+    let rewritten: Value =
+        serde_json::from_slice(&std::fs::read(dir.0.join(HOST_FILE)).unwrap()).unwrap();
+    assert_eq!(rewritten["v"], 3);
     assert_eq!(persisted["devices"][0]["access"], json!({"type":"full"}));
     for access in [
         None,
@@ -1367,27 +1370,16 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
         }
         assert_eq!(received, bytes);
         drop(item);
-        let mut first = link.read_original(target.clone());
+        let mut first = admitted_original(&link, &target).await;
         first.read().await.unwrap().unwrap();
-        let mut second = link.read_original(target.clone());
+        let mut second = admitted_original(&link, &target).await;
         second.read().await.unwrap().unwrap();
         let mut refused = link.read_original(target.clone());
         assert_eq!(refused.metadata().await.unwrap_err().code, "busy");
         first.cancel();
         assert!(first.read().await.is_err());
         assert_eq!(link.query(Query::Ping).await.unwrap(), QueryResponse::Pong);
-        let mut replacement = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let mut next = link.read_original(target.clone());
-                match next.metadata().await {
-                    Ok(_) => break next,
-                    Err(error) if error.code == "busy" => tokio::task::yield_now().await,
-                    Err(error) => panic!("replacement original: {error:?}"),
-                }
-            }
-        })
-        .await
-        .expect("cancelled admission must be released");
+        let mut replacement = admitted_original(&link, &target).await;
         let mut received = Vec::new();
         while let Some(block) = replacement.read().await.unwrap() {
             received.extend(block);
@@ -1399,6 +1391,27 @@ fn originals_preserve_control_progress_bytes_and_cancelled_admission() {
     });
     host.shutdown();
     original_fixture::stop(runtime, &mux);
+}
+
+/// Opens `target` once the host admits it. A read gives its slot back when the
+/// host sees the client stop the stream, which can trail the client reading
+/// the end or cancelling.
+async fn admitted_original(
+    link: &tcode_client::HostLink,
+    target: &tcode_protocol::OriginalTarget,
+) -> tcode_client::OriginalTransfer {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut next = link.read_original(target.clone());
+            match next.metadata().await {
+                Ok(_) => break next,
+                Err(error) if error.code == "busy" => tokio::task::yield_now().await,
+                Err(error) => panic!("original: {error:?}"),
+            }
+        }
+    })
+    .await
+    .expect("a finished or cancelled read must release its admission")
 }
 
 /// Contract: revoking a project grant prevents a blocked original from completing.

@@ -74,11 +74,7 @@ final class GPUIHostViewController: UIViewController {
         guard started else { return }
         if frameScreen !== screen || frameScene !== scene {
             displayLink?.invalidate()
-            if #available(iOS 27.0, *) {
-                displayLink = scene.displayLink(target: self, selector: #selector(renderFrame))
-            } else {
-                displayLink = screen.displayLink(withTarget: self, selector: #selector(renderFrame))
-            }
+            displayLink = scene.displayLink(target: self, selector: #selector(renderFrame))
             frameScreen = screen
             frameScene = scene
             displayLink?.add(to: .main, forMode: .common)
@@ -138,14 +134,10 @@ final class GPUIHostView: UIView {
     private var touchIdentifiers: [ObjectIdentifier: UInt64] = [:]
     private var keyboardFrameInScreen: CGRect?
     let keyboardProxy = GPUITextInput(frame: .zero)
-    private lazy var pasteControl: UIPasteControl = {
-        let configuration = UIPasteControl.Configuration()
-        configuration.displayMode = .labelOnly
-        let control = UIPasteControl(configuration: configuration)
-        control.target = keyboardProxy
-        control.isHidden = true
-        return control
-    }()
+    // A control's configuration is fixed at creation, so a new style means a
+    // new control.
+    private var pasteControlStyle = PasteControlStyle.unset
+    private lazy var pasteControl = makePasteControl(style: pasteControlStyle)
     // Once it recognizes, UIKit cancels the edge touch in this view, so GPUI
     // sees no pan to fling and no tap; an edge contact that never moves fails
     // it and reaches GPUI unchanged.
@@ -329,10 +321,31 @@ final class GPUIHostView: UIView {
     }
 
     private var pendingPasteFrame = CGRect.zero
+    private var pendingPasteStyle = PasteControlStyle.unset
     private var pasteUpdatePending = false
 
-    func setPasteControl(frame: CGRect) {
+    /// The edit menu's Paste item is UIKit's own control, drawn in the
+    /// menu's colours and corners so it reads as one of the menu's items.
+    private func makePasteControl(style: PasteControlStyle) -> UIPasteControl {
+        let configuration = UIPasteControl.Configuration()
+        configuration.displayMode = .labelOnly
+        if style != .unset {
+            configuration.baseForegroundColor = style.foregroundColor
+            configuration.baseBackgroundColor = style.backgroundColor
+            configuration.cornerStyle = .fixed
+            configuration.cornerRadius = style.cornerRadius
+        }
+        let control = UIPasteControl(configuration: configuration)
+        control.target = keyboardProxy
+        control.isHidden = true
+        return control
+    }
+
+    func setPasteControl(frame: CGRect, style: PasteControlStyle) {
         pendingPasteFrame = frame
+        if !frame.isEmpty {
+            pendingPasteStyle = style
+        }
         guard !pasteUpdatePending else { return }
         pasteUpdatePending = true
         // Render clears the old menu before paint places its replacement. Apply
@@ -340,6 +353,12 @@ final class GPUIHostView: UIView {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.pasteUpdatePending = false
+            if self.pendingPasteStyle != self.pasteControlStyle {
+                self.pasteControlStyle = self.pendingPasteStyle
+                self.pasteControl.removeFromSuperview()
+                self.pasteControl = self.makePasteControl(style: self.pasteControlStyle)
+                self.addSubview(self.pasteControl)
+            }
             self.pasteControl.frame = self.pendingPasteFrame
             self.pasteControl.isHidden = self.pendingPasteFrame.isEmpty || !self.keyboardProxy.isFirstResponder
         }
@@ -568,4 +587,25 @@ func sendKey(
         }
     }
     return handled
+}
+
+/// How the edit menu draws its Paste item; colours are sRGB components.
+struct PasteControlStyle: Equatable {
+    static let unset = PasteControlStyle(foreground: [], background: [], cornerRadius: 0)
+
+    var foreground: [Double]
+    var background: [Double]
+    var cornerRadius: Double
+
+    var foregroundColor: UIColor { Self.color(foreground) }
+    var backgroundColor: UIColor { Self.color(background) }
+
+    private static func color(_ components: [Double]) -> UIColor {
+        UIColor(
+            red: components[0],
+            green: components[1],
+            blue: components[2],
+            alpha: components[3]
+        )
+    }
 }

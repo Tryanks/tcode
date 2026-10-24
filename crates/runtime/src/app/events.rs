@@ -45,14 +45,12 @@ impl AppState {
                 return;
             }
             AgentEvent::BackgroundTasksChanged { count } => {
-                let is_active = self.residents.live.contains_key(session_id);
                 let should_mark_idle = self.resident_mut(session_id).is_some_and(|resident| {
                     resident.background_task_count = *count;
-                    if !is_active && *count > 0 {
+                    if *count > 0 {
                         resident.idle_since = None;
                     }
-                    !is_active
-                        && *count == 0
+                    *count == 0
                         && !resident.turn_in_flight
                         && resident.delivery_in_flight.is_none()
                         && resident.queue.is_empty()
@@ -251,12 +249,9 @@ impl AppState {
 
             // Session bookkeeping side effects.
             AgentEvent::TurnStarted { .. } => {
-                let is_active = self.residents.live.contains_key(session_id);
                 if let Some(resident) = self.resident_mut(session_id) {
                     resident.turn_in_flight = true;
-                    if !is_active {
-                        resident.idle_since = None;
-                    }
+                    resident.idle_since = None;
                 }
             }
             AgentEvent::SessionStarted { resume, model, .. } => {
@@ -566,6 +561,9 @@ impl AppState {
         if let AgentEvent::ApprovalRequested(request) = &event {
             self.deliver_child_approval_callback(session_id, &request.id, cx);
         }
+        if let AgentEvent::UserInputRequested { request_id, .. } = &event {
+            self.deliver_child_user_input_callback(session_id, request_id, cx);
+        }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
             if let Some(resident) = self.resident_mut(session_id) {
@@ -601,8 +599,11 @@ impl AppState {
                 if !restart_deferred {
                     self.ensure_started(session_id, cx);
                 }
-            } else if is_active && self.dispatch_next_queued(session_id, cx).is_err() {
-                self.report_error(RuntimeError::ProcessGone, cx);
+            } else if is_active {
+                if self.dispatch_next_queued(session_id, cx).is_err() {
+                    self.report_error(RuntimeError::ProcessGone, cx);
+                }
+                self.mark_resident_idle(session_id, cx);
             }
             if !is_active {
                 self.on_background_turn_completed(session_id, cx);

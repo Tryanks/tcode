@@ -5,3 +5,7 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+MACOSX_DEPLOYMENT_TARGET = "27.0"
+IPHONEOS_DEPLOYMENT_TARGET = "27.0"

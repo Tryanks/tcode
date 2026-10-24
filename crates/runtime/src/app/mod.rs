@@ -427,6 +427,7 @@ pub struct AppState {
     plugin_catalogs: HashMap<String, plugins::PluginCatalog>,
     mcp: McpWiring,
     callback_approval_requests: HashSet<(String, String)>,
+    callback_user_input_requests: HashSet<(String, String)>,
     /// Live provider approvals for every resident session. This is the sole
     /// host-side authority; persisted timeline approvals remain client state.
     approvals: Revisioned<HashMap<String, Vec<agent::ApprovalRequest>>>,
@@ -464,7 +465,7 @@ pub struct AppState {
     next_import_run_id: u64,
     /// Host-owned content index over this host's own session store. Its cache
     /// lock is only ever taken on the blocking executor, never on the mailbox.
-    session_search: Arc<std::sync::Mutex<SessionSearch>>,
+    session_search: Arc<SessionSearch>,
 }
 
 fn emit_runtime(cx: &mut HostCx, event: RuntimeEvent) {
@@ -556,7 +557,7 @@ impl AppState {
         );
         let (store_writes, store_write_receiver) = smol::channel::unbounded();
         let (store_write_failures, store_write_failure_receiver) = smol::channel::unbounded();
-        let session_search = Arc::new(std::sync::Mutex::new(SessionSearch::new(store.clone())));
+        let session_search = Arc::new(SessionSearch::new(store.clone()));
         Ok(Self {
             store,
             user_directories,
@@ -622,6 +623,7 @@ impl AppState {
             plugin_catalogs: HashMap::new(),
             mcp: McpWiring::default(),
             callback_approval_requests: HashSet::new(),
+            callback_user_input_requests: HashSet::new(),
             approvals: Default::default(),
             git_status: HashMap::new(),
             git_busy: HashSet::new(),

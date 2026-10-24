@@ -17,6 +17,7 @@ The plan behind this model is [#376](https://github.com/Tryanks/tcode/issues/376
 | Device | A desktop, phone or tablet running the Tcode app that opens a machine. A device also has its own key, kept in `device.json` in its data directory. The machine keeps an allow list of device ids; every connection is authenticated by that key, so a device that is not on the list is refused before any application data flows. |
 | Invitation | A `tcode://pair?…` link, shown as a QR code and copyable as text. It carries the machine id, a random 16-byte secret, the Traverse instances the machine publishes to, its current relay and its UDP port — never an IP address or the machine's name; the format is [The invitation link](pair-link.md). Scanning or pasting the link is the whole pairing: an invitation lasts five minutes, admits one device, is replaced by the next one and is invalidated after five wrong secrets. The machine enforces all of this; Traverse never sees an invitation. |
 | Space | A named set of projects on one machine, with a reusable pairing link. A device paired through that link becomes a member and sees only the space's projects and threads. The owner manages the projects and members. |
+| Group | Machines that admit the devices any of them admits, so a device paired with one member reaches every member. Off until a machine creates one; see [Machine groups](#machine-groups). |
 | Traverse | The relay and lookup services a machine publishes to so devices off its network can find and reach it. A machine keeps a list of sources, each switched on or off: **Official** (always first, on by default) uses the relays and lookup service listed in the manifest bundled with Tcode; each **Self-hosted** source is your own `tcode-traverse` instance. With every source off the machine uses no service at all. Traverse sees only encrypted traffic; the machine authenticates devices itself. |
 | Direct / Relay | How one live connection is carried. Direct means the two ends exchange UDP packets with each other; Relay means the packets go through a Traverse relay because no direct path was found. The connection banner and the machine's device list show which one is in use, and it can change while connected. |
 
@@ -84,10 +85,74 @@ joins. Existing members keep access until the owner removes them, deletes the
 space or revokes their device. A removed member can join again with the old
 link if it remains enabled and valid.
 
-`traverse.json` uses version 3 to store spaces and device access. Loading a
-version 2 file migrates existing paired devices to explicit full access and
-starts with no spaces. Existing devices do not become space members as part of
-the migration.
+`traverse.json` uses version 3 to store spaces and device access, and version
+4 once the machine is in a group, which adds the group; an older build reads
+only version 3. Loading a version 2 file migrates existing paired devices to
+explicit full access and starts with no spaces. Existing devices do not become
+space members as part of the migration.
+
+## Machine groups
+
+A group is for one person's machines: a headless machine on a NAS, a desktop,
+a laptop. Pair a phone with any of them and it reaches all of them; remove a
+lost phone on any of them and every one refuses it. No machine is in charge.
+The machine that started the group can stop or leave, and the others carry on.
+
+**The risk is yours to take.** Every member can admit devices into every
+other member, so a compromised member, or a leaked invitation, reaches the
+whole group. Groups are off until you create one; leave them off if you do
+not need them.
+
+Inside a group there is one way in: a member's invitation. A device that
+pairs with it joins the group, and another machine joins with the same kind
+of invitation. Every full-access device of a member is a member; only space
+members stay with their own machine.
+
+### Create or join
+
+1. On the first machine, open **Settings → Remote → Machine group** (on a
+   headless machine, in its logged-in browser) and create a group. Tcode
+   first lists the full-access devices paired with this machine: every
+   member of the group will admit them.
+2. On each other machine, with hosting on, choose **Join group** in the same
+   section and paste an invitation from a machine already in the group (its
+   **Machines** page, or **Settings → Remote** in a headless machine's
+   browser). The join spends that invitation, as a device's pairing would,
+   and lists the devices this machine brings first. If the join finds no
+   path to that machine, type its IP address, as when pairing a device.
+3. A desktop joins together with its own window, so the window reaches every
+   member from **Machines**.
+
+While a machine is in a group, its invitation says so and names the group;
+the link carries the group's id.
+
+### Pair a device
+
+Scan or paste any member's invitation: the device is paired with that
+machine, and the machine tells the others. The device saves every member
+under **Your machines**. A space link never brings a device into the group.
+
+**Accept new devices** governs the group too. While it is off on a machine,
+a device another member admits is not admitted there; it is listed in that
+machine's group section, with **Admit**, and stays out until you admit it.
+
+### Remove and leave
+
+**Remove** under **Connected devices** removes a full-access device from
+every member: each closes its connections and refuses it from the moment it
+hears of the removal. A member that is offline hears it when it next reaches
+another member, and admits the device until then. Only a new pairing brings
+the device back.
+
+**Leave group** on a machine tells the members and forgets the group. The
+machine keeps every device on its allow list, and the other members keep
+theirs. A member can also remove another machine from the group; that
+machine leaves the same way the next time it hears of it.
+
+Members reach each other over `tcode/group/1` on their own UDP port: at the
+relay and addresses each reports for itself and the ones a connection last
+used, and through the lookups of the Traverse instances the dialling machine
+publishes to. They exchange the group when it changes and every five minutes.
 
 ## Use the desktop app as the machine
 
@@ -129,6 +194,10 @@ connect to this machine** stays available. The desktop app accepts native
 devices only; it does not serve the browser app.
 
 ## Run Tcode without the desktop app
+
+For a NAS or homelab, use the published Docker images and the commented
+[Compose template](../docker-compose.yml). The [Docker guide](docker.md)
+covers persistence, agent selection, login and `PUID`/`PGID` ownership.
 
 ### Install and start
 
@@ -319,7 +388,8 @@ commands from the repository root:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.121 --locked
+# The CLI must match the wasm-bindgen version locked in Cargo.lock.
+cargo install wasm-bindgen-cli --locked --version "$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q;}' Cargo.lock)"
 crates/web/build.sh
 cargo build -p tcode-headless --release --features web
 ```
@@ -587,12 +657,15 @@ localhost bypasses, waits for the override before navigation, and clears it when
 the attachment's views are destroyed. The override is process-wide, so embedded
 preview views belong to one attachment.
 
-macOS attached Preview uses per-port forwarding for HTTP(S) loopback URLs:
-`localhost`, IPv4 loopback addresses and `::1`. The requested host and port are
-sent unchanged in the tunnel's opening line. The viewing Mac allocates its own
-loopback port, so a viewer service at the remote port cannot collide with it.
-`localhost` reserves both IPv4 and IPv6 listeners at that port. Numeric loopback
-URLs need that same address to be bindable on the viewing Mac; unassigned
+macOS and iOS attached Preview use per-port forwarding for HTTP(S) loopback
+URLs: `localhost`, IPv4 loopback addresses and `::1`. WebKit applies a website
+store's proxy configuration to public destinations but bypasses destinations on
+the viewing device's own interfaces, so a proxy cannot keep loopback on the
+machine. The requested host and port are sent unchanged in the tunnel's opening
+line. The viewing device allocates its own loopback port, so a viewer service at
+the remote port cannot collide with it. `localhost` reserves both IPv4 and IPv6
+listeners at that port. Numeric loopback URLs need that same address to be
+bindable on the viewing device; unassigned
 addresses such as `127.0.0.2` can report an allocation error. Tcode does not
 add loopback aliases to the OS. No OS DNS, hosts file or proxy settings are
 changed. Public/LAN destinations are **direct from the viewer**, as the Preview
@@ -644,8 +717,8 @@ included. It serves one request per connection and answers ambiguous
 framing (chunked plus `Content-Length`, unknown transfer codings, origin-form
 requests) with `400`. Unsupported proxy facilities fail closed; there is no
 direct-network fallback. Closing the attachment cancels the listener and
-active connections. macOS keeps its per-browser URL mapping over the same
-tunnels.
+active connections. macOS and iOS keep their per-browser URL mapping over the
+same tunnels.
 
 When the main connection reconnects and its saved addresses change, existing
 Preview browsers follow the new connection: their local proxy/forwarding ports,
@@ -655,8 +728,7 @@ interrupted requests or reload pages automatically: use the existing Reload
 action if a page was interrupted. Another machine cannot retarget an existing
 attachment's Preview.
 
-The iOS embedded preview remains unsupported. The browser client cannot
-override its browser's proxy.
+The browser client cannot override its browser's proxy.
 
 ## Security
 
@@ -683,31 +755,32 @@ a trusted LAN.
 ### Keys and files
 
 The machine's `traverse.json` holds its secret key, its name, the allow list
-(device id, name, operating system, first-connection time) and the **Allow
-other devices** switch. `remote.json` holds the browser side: the id and name
-browsers record this machine under, the password hash (randomly salted
-PBKDF2-HMAC-SHA256, 600,000 iterations) and one record per logged-in browser
-with its token hash. The password and the raw tokens are never stored, and
-nothing in `remote.json` is part of the machine's identity. A headless
-machine upgraded from the previous transport therefore gets a new machine id
-the first time it starts — the old `remote.json` seed is not adopted — and
-every device pairs again with a new invitation; the browser password and
-browser logins are kept.
+(device id, name, operating system, first-connection time), the **Allow other
+devices** switch and, in a group, the group's machines and devices.
+`remote.json` holds the browser side: the id and name browsers record this
+machine under, the password hash (randomly salted PBKDF2-HMAC-SHA256, 600,000
+iterations) and one record per logged-in browser with its token hash. The
+password and the raw tokens are never stored, and nothing in `remote.json` is
+part of the machine's identity. A headless machine upgraded from the previous
+transport therefore gets a new machine id the first time it starts — the old
+`remote.json` seed is not adopted — and every device pairs again with a new
+invitation; the browser password and browser logins are kept.
 
 A device's `device.json` holds its secret key, name and platform. `hosts.json`
 holds the machines it paired with: id, name, Traverse URL, relay, direct
-addresses and last connection time — routing hints, not credentials. Pending
-writes are in `outbox-<hex of machine id>.json`. Phone records are in the
-app's private data directory; Android uses its `filesDir`.
+addresses, last connection time and group — routing hints, not credentials.
+Pending writes are in `outbox-<hex of machine id>.json`. Phone records are in
+the app's private data directory; Android uses its `filesDir`.
 
 On Unix, Tcode writes these files with mode `0600`. That is a filesystem
 permission, not encryption. **A stolen `device.json` is that device's
 access:** whoever holds the key can connect to every machine that lists the
-device until the device is removed on each machine. **A stolen
-`traverse.json` is the machine's identity:** its holder can run a machine that
-paired devices would trust. There are no per-device project permissions or
-read-only device roles; a paired device has the same access as the machine's
-own window, including Preview tunnels to the machine's loopback and network.
+device until the device is removed on each machine, or once on any member of a
+group. **A stolen `traverse.json` is the machine's identity:** its holder can
+run a machine that paired devices would trust and, in a group, admit devices
+into every member. There are no per-device project permissions or read-only
+device roles; a paired device has the same access as the machine's own window,
+including Preview tunnels to the machine's loopback and network.
 
 ### Revocation
 
@@ -716,7 +789,8 @@ On the machine, use **Settings → Remote → Connected devices → Remove**
 taken off the allow list and saved, its live connections are closed at once,
 and a new connection from it is refused from that moment. The device shows
 **Access rejected · Pair again** and stops retrying. Pairing it again needs a
-new invitation.
+new invitation. A member of the machine's group is removed from every member
+of the group; see [Remove and leave](#remove-and-leave).
 
 A browser logged in to a headless machine is listed after the native devices
 in the logged-in browser's **Settings → Remote**; **Remove** there
@@ -809,13 +883,18 @@ with **Pair again**; protocol mismatches stop with **Update the app**.
   scroll further back than that. During a large output burst the visible screen
   keeps updating, while scrollback catches up after scrolling has stopped for
   100 ms. This avoids repeatedly sending the whole retained ring between PTY reads.
-- Android has an embedded WebView preview with history, JavaScript automation,
-  navigation errors and visible-page PNG capture. iOS and the browser client
-  retain URL/open/copy actions without an embedded preview backend.
+- Android and iOS have an embedded preview with history, JavaScript automation,
+  navigation errors and visible-page PNG capture.
+- The browser client has no Preview tab. It already reaches the machine by
+  address, so start the dev server listening on the LAN (for example
+  `npm run dev -- --host`) and open `http://<machine-ip>:<port>/` in a new
+  browser tab. The agent's preview tools are answered by a native client
+  attached to the same machine.
 - Phones, tablets and browsers do not run providers, terminals or project files
   locally; the machine does. Every product view is present on them — threads,
-  chat, approvals, the terminal, diff, plan, preview, search, import and export —
-  and what differs is which *operations* the device can perform. A native file
+  chat, approvals, the terminal, diff, plan, preview (except in the browser),
+  search, import and export — and what differs is which *operations* the device
+  can perform. A native file
   dialog, an embedded preview browser, macOS permission grants, dictation and
   "open in editor" need a capability the device either has or does not; where it
   does not, the view says which machine can do it and offers what it can (open
@@ -832,9 +911,10 @@ with **Pair again**; protocol mismatches stop with **Update the app**.
   keystore), `TCODE_ANDROID_KEYSTORE_PASSWORD`, `TCODE_ANDROID_KEY_ALIAS` and
   `TCODE_ANDROID_KEY_PASSWORD` before running `crates/android/host/build.sh
   --release`; with none of them set, Gradle's per-machine debug keystore signs
-  the build. iOS is not published yet; build it from source with
-  `crates/ios/host/build.sh`. For Android, enable USB debugging and authorize
-  your computer, then replace `VERSION` with the downloaded release version:
+  the build. The iOS IPA is unsigned: re-sign it with your own Apple ID, or
+  install it with a sideloading tool such as AltStore or Sideloadly. For
+  Android, enable USB debugging and authorize your computer, then replace
+  `VERSION` with the downloaded release version:
 
   ```sh
   adb install -r tcode-VERSION-android-arm64.apk

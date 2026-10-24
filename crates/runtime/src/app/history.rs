@@ -1222,7 +1222,7 @@ impl AppState {
         task
     }
 
-    fn query_item<T: Send + 'static>(
+    pub(super) fn query_item<T: Send + 'static>(
         &mut self,
         session_id: &str,
         item_id: String,
@@ -1286,13 +1286,12 @@ impl AppState {
         &self,
         path: std::path::PathBuf,
         pixels: u32,
-        crop_to_square: bool,
+        cover: bool,
         cx: &HostCx,
     ) -> HostTask<Result<QueryResponse, ProtocolError>> {
         let data_dir = self.store.root().clone();
-        let task = cx.unblock(move || {
-            tcode_services::image_previews::read(&path, pixels, crop_to_square, &data_dir)
-        });
+        let task = cx
+            .unblock(move || tcode_services::image_previews::read(&path, pixels, cover, &data_dir));
         cx.spawn_background(async move {
             task.await
                 .map(QueryResponse::FileBytes)

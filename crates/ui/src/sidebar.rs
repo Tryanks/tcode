@@ -51,7 +51,7 @@ const PROVIDER_MARK_INSET: f32 = 8.;
 const THREAD_ROW_PADDING_X: f32 = 10.;
 
 /// Left padding on the sidebar's top row so branding clears the native macOS
-/// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
+/// traffic lights (ending near x=72); a small inset elsewhere.
 #[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
 #[cfg(not(target_os = "macos"))]
@@ -2461,6 +2461,14 @@ impl SessionsSidebar {
         )
     }
 
+    fn rename_input(&self, input: &Entity<InputState>, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex_1()
+            .min_w_0()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
+            .child(Input::new(input))
+    }
+
     fn thread_title_or_input(
         &self,
         meta: &SessionMeta,
@@ -2469,12 +2477,7 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let title = if let Some(input) = &state.renaming {
-            div()
-                .flex_1()
-                .min_w_0()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
-                .child(Input::new(input))
-                .into_any_element()
+            self.rename_input(input, cx).into_any_element()
         } else {
             truncated_sidebar_label()
                 .text_size(px(13.))
@@ -2484,10 +2487,9 @@ impl SessionsSidebar {
                 } else {
                     cx.theme().sidebar_foreground
                 })
-                .when(
-                    emphasize_unread && state.show_unread && !meta.is_settled(),
-                    |title| title.font_semibold(),
-                )
+                .when(emphasize_unread && state.show_unread, |title| {
+                    title.font_semibold()
+                })
                 .child(meta.title.clone())
                 .into_any_element()
         };
@@ -3897,6 +3899,10 @@ impl SessionsSidebar {
         let session_id = state.session_id.clone();
         let status = compact_status_line(state, working, cx);
         let click_id = session_id.clone();
+        let renaming = self
+            .renaming
+            .as_ref()
+            .filter(|rename| rename.session_id == session_id);
         let mark = self.provider_mark(
             meta,
             crate::material::LIST_ROW_MIN_HEIGHT,
@@ -3935,6 +3941,13 @@ impl SessionsSidebar {
                 |row| row.bg(cx.theme().primary.opacity(0.06)),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
+                if this
+                    .renaming
+                    .as_ref()
+                    .is_some_and(|rename| rename.session_id == click_id)
+                {
+                    return;
+                }
                 if this.store.read(cx).session_loading()
                     && this.store.read(cx).active_session_id().as_deref() == Some(click_id.as_str())
                 {
@@ -3958,7 +3971,9 @@ impl SessionsSidebar {
                             .w_full()
                             .min_w_0()
                             .gap(px(6.))
-                            .child(
+                            .child(if let Some(rename) = renaming {
+                                self.rename_input(&rename.input, cx).into_any_element()
+                            } else {
                                 truncated_sidebar_label()
                                     .text_size(px(16.))
                                     .line_height(px(21.))
@@ -3968,15 +3983,14 @@ impl SessionsSidebar {
                                         cx.theme().foreground
                                     })
                                     .when(!meta.is_settled(), |title| title.font_medium())
-                                    .when(state.show_unread && !meta.is_settled(), |title| {
-                                        title.font_semibold()
-                                    })
+                                    .when(state.show_unread, |title| title.font_semibold())
                                     .debug_selector({
                                         let id = session_id.clone();
                                         move || format!("compact-title-{id}")
                                     })
-                                    .child(cached.title.clone()),
-                            )
+                                    .child(cached.title.clone())
+                                    .into_any_element()
+                            })
                             .when(meta.pinned_at.is_some() && !meta.is_settled(), |row| {
                                 row.child(
                                     Icon::new(IconName::Pin)
@@ -4786,13 +4800,21 @@ mod tests {
 
     #[gpui::test]
     fn canceling_inline_rename_discards_the_unsaved_title(cx: &mut TestAppContext) {
+        for compact in [false, true] {
+            cancel_inline_rename(cx, compact);
+        }
+    }
+
+    fn cancel_inline_rename(cx: &mut TestAppContext, compact: bool) {
         cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, compact));
         let root = crate::store::tests::scratch_root("sidebar-rename-test");
         let session_store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
         meta.project_id = Some(project.id.clone());
         meta.title = "Original title".into();
+        meta.id = "rename-thread".into();
         let session_id = meta.id.clone();
         let host =
             spawn_host(session_store, HostServices::default()).expect("spawn sidebar test host");
@@ -4817,14 +4839,91 @@ mod tests {
         });
 
         let window_state = cx.new(|_| WindowState::new(false));
-        let (sidebar, cx) = cx
-            .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+        let sidebar = cx.new(|cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+        let (_, cx) =
+            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(360.), px(800.)));
+        window_state.update(cx, |state, cx| {
+            state.set_compact(compact, cx);
+            state.go(crate::window_state::Destination::Threads, cx);
+        });
         draw(cx);
+        if compact {
+            let trigger = cx
+                .debug_bounds("compact-row-rename-thread")
+                .unwrap()
+                .center();
+            let touch = |cx: &mut VisualTestContext, phase, position| {
+                cx.simulate_event(gpui::TouchEvent {
+                    id: gpui::TouchId(1),
+                    phase,
+                    position,
+                    predicted_position: None,
+                    force: None,
+                });
+                draw(cx);
+            };
+            touch(cx, gpui::TouchPhase::Started, trigger);
+            cx.executor().advance_clock(
+                gpui::GestureTuning::default().long_press_duration
+                    + std::time::Duration::from_millis(1),
+            );
+            cx.run_until_parked();
+            draw(cx);
+            touch(cx, gpui::TouchPhase::Ended, trigger);
+            let rename = cx
+                .debug_bounds("menu-item-0")
+                .expect("thread menu opens")
+                .center();
+            touch(cx, gpui::TouchPhase::Started, rename);
+            touch(cx, gpui::TouchPhase::Ended, rename);
+            cx.run_until_parked();
+            draw(cx);
+            cx.simulate_input(" edited");
+            assert_eq!(
+                sidebar.read_with(cx, |sidebar, cx| sidebar
+                    .renaming
+                    .as_ref()
+                    .expect("Rename starts editing")
+                    .input
+                    .read(cx)
+                    .value()
+                    .to_string()),
+                "Original title edited",
+                "Rename mounts a usable input on the phone"
+            );
+            let caret = sidebar.read_with(cx, |sidebar, cx| {
+                sidebar
+                    .renaming
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .read(cx)
+                    .text_bounds()
+                    .unwrap()
+                    .center()
+            });
+            touch(cx, gpui::TouchPhase::Started, caret);
+            touch(cx, gpui::TouchPhase::Ended, caret);
+            assert_eq!(
+                window_state.read_with(cx, |state, _| state.destination()),
+                crate::window_state::Destination::Threads,
+                "tapping the rename editor must not open the thread"
+            );
+            cx.simulate_click(caret, gpui::Modifiers::default());
+            draw(cx);
+            assert_eq!(
+                window_state.read_with(cx, |state, _| state.destination()),
+                crate::window_state::Destination::Threads,
+                "clicking the rename editor must not open the thread"
+            );
+        }
         cx.update(|window, cx| {
             sidebar.update(cx, |sidebar, cx| {
-                sidebar.on_rename(&ThreadRename(session_id.clone()), window, cx);
+                if !compact {
+                    sidebar.on_rename(&ThreadRename(session_id.clone()), window, cx);
+                }
                 let input = sidebar.renaming.as_ref().unwrap().input.clone();
                 input.update(cx, |input, cx| input.set_value("Unsaved title", window, cx));
             });

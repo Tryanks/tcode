@@ -7,6 +7,7 @@ chat:
   discard_delivery: "Discard"
   history_record_too_large: A history record exceeds the 8 MiB response limit.
   relayed: "Relayed from %{from} to %{to}"
+  relay_handoff: "Handoff sent to %{to}"
   model_changed: "Model changed: %{from} → %{to}"
   model_changed_to: "Model changed to %{to}"
   new_thread: "New thread"
@@ -495,13 +496,13 @@ orchestrate:
     title: "Child approvals"
     description: "Choose the child's native permission level and approver; dispatch permission can override the level."
     orchestrator: "Decision-layer approval"
-    orchestrator_description: "Use the provider's native default permission value; the lead answers requests with the approve tool."
+    orchestrator_description: "Use the provider's native default permission value; the lead answers requests with the approve tool and questions with the answer tool."
     auto: "Automatic approval"
-    auto_description: "Use the provider's recommended permission value; the lead answers remaining requests with the approve tool."
+    auto_description: "Use the provider's recommended permission value; the lead answers remaining requests with the approve tool and questions with the answer tool."
     always_allow: "Always allow"
-    always_allow_description: "Use the provider's most permissive permission value; Tcode chooses the broadest native allow option, forwarding requests without one to the lead."
+    always_allow_description: "Use the provider's most permissive permission value; Tcode chooses the broadest native allow option, forwarding requests without one, and questions, to the lead."
     manual: "Manual approval"
-    manual_description: "Use the provider's native default permission value; you answer requests in the child thread."
+    manual_description: "Use the provider's native default permission value; you answer requests and questions in the child thread."
   child_worktrees:
     title: "Isolate children in worktrees"
     description: "When a dispatch cwd is a Git repository root, create a dedicated tcode/<thread-id> branch and worktree for the child. A dispatch can override this with worktree."
@@ -1211,7 +1212,7 @@ image_viewer:
   load_failed: "This image could not be loaded."
 preview:
   external_unavailable: "Open the remote page in Preview first. Its forwarded browser link works only while this preview stays open."
-  remote_forwarding: "Remote loopback URLs are forwarded. Other addresses open from this Mac."
+  remote_forwarding: "Remote loopback URLs are forwarded. Other addresses open from this device."
   load_error: "Could not load %{url}: %{message} (%{code})"
   title: "Preview"
   no_session: "Open a session to use the preview browser."
@@ -1368,6 +1369,7 @@ hosts:
   forget: "Remove"
   actions: "Actions for %{name}"
   pair_again: "Pair again"
+  in_group: "In a machine group"
   local:
     unavailable: "Could not start: %{reason}"
     default_settings: "%{reason}. Its settings could not be read, so the default language and theme are in use."
@@ -1418,6 +1420,9 @@ mobile:
   offline_message: "Offline — you can send when reconnected"
   offline_action: "Offline — available when reconnected"
   queue: "Queue"
+  steer: "Steer"
+  release_to_steer: "Release to steer"
+  release_to_queue: "Release to queue"
   command_requested: "Run command"
   files_requested: "Edit files"
   read_requested: "Read files"
@@ -1527,6 +1532,52 @@ spaces:
     show_qr: "Show QR"
     hide_qr: "Hide QR"
     resume: "Turn on link"
+
+group:
+  section: "MACHINE GROUP"
+  intro: "A group links this machine with your other machines. A device paired with any machine in the group can open every machine in it, and the group carries on when any one machine leaves."
+  risk: "Every machine in the group can let devices into all the others. Join only machines you trust; a group is off until you create or join one."
+  failed: "Could not update the group: %{error}"
+  leave: "Leave group"
+  leave_title: "Leave «%{name}»?"
+  leave_description: "The other machines stop admitting devices through this one. Devices paired here stay paired with this machine."
+  detail_note: "To add a device or another machine, use this machine's invitation: every machine in the group admits a device that pairs with it, and removing a device on any machine removes it from all of them."
+  invitation_note: "This machine is in «%{name}»: a device that pairs with this invitation can open every machine in the group, and another machine can join the group with it."
+  summary:
+    machine_one: "1 machine"
+    machines: "%{count} machines"
+  create:
+    action: "Create group"
+    title: "Create a machine group"
+    placeholder: "Group name"
+    confirm: "Create group"
+  join:
+    action: "Join group"
+    title: "Join a machine group"
+    description: "Paste the invitation of a machine in the group, from its Machines page or Settings → Remote. Like a device pairing, it works once and for five minutes."
+    placeholder: "tcode://pair?…"
+    address: "Machine's IP address (optional)"
+    address_placeholder: "Only when nothing finds the machine, e.g. 192.168.1.20"
+    confirm: "Join group"
+    not_a_group_link: "That is not the invitation of a machine in a group."
+    joined: "Joined «%{name}»"
+  brought:
+    title: "Every machine in the group will admit these devices, which are paired with this machine now:"
+    none: "No devices are paired with this machine yet, so none are brought into the group."
+  machines:
+    title: "Machines"
+    this: "This machine"
+    remove: "Remove"
+    remove_title: "Remove %{name} from the group?"
+    remove_description: "The other machines stop syncing with it and stop admitting the devices it brings from now on. Devices it already brought keep their access."
+  declined:
+    title: "Waiting for this machine"
+    description: "Other machines admitted these devices while this machine was not accepting new devices."
+    admit: "Admit"
+  remove_device:
+    title: "Remove %{name} from the group?"
+    description: "The device is disconnected and unpaired from every machine in «%{group}», not only this one. It can come back only by pairing again."
+    action: "Remove everywhere"
 
 member:
   connection: "Space «%{space}» · %{machine}"

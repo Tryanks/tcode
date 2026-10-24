@@ -680,8 +680,8 @@ impl AppState {
         }));
     }
 
-    /// Search this host's own stored sessions in index order. Both the file
-    /// reads and the cache lock stay on the blocking executor.
+    /// Search this host's own stored sessions in index order, on the blocking
+    /// executor.
     pub fn search_session_content(
         &self,
         query: String,
@@ -702,12 +702,19 @@ impl AppState {
             .cloned()
             .collect::<Vec<_>>();
         let search = self.session_search.clone();
-        executor.unblock(move || {
-            search
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .search(&sessions, &query, limit)
-        })
+        executor.unblock(move || search.search(&sessions, &query, limit))
+    }
+
+    /// Bring every thread's search entries up to date in the background, so
+    /// the first search after an upgrade reads text instead of folding every
+    /// log.
+    pub(crate) fn index_session_search(&self, cx: &mut HostCx) {
+        let search = self.session_search.clone();
+        let ids: Vec<_> = self.sessions.iter().map(|meta| meta.id.clone()).collect();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            host_cx.unblock(move || search.index(&ids)).await;
+        });
     }
 
     /// List one replicated session cwd on the background executor.
@@ -1632,9 +1639,11 @@ impl AppState {
     }
 
     /// Whether a thread shows an unread dot: it has been visited before, its
-    /// update time is newer than that visit, and it is not the active thread.
+    /// update time is newer than that visit, it is not the active thread, and
+    /// it is not settled.
     pub(crate) fn session_unread(&self, meta: &SessionMeta) -> bool {
-        !self.residents.live.contains_key(&meta.id)
+        !meta.is_settled()
+            && !self.residents.live.contains_key(&meta.id)
             && self
                 .settings
                 .last_visited
@@ -1902,7 +1911,6 @@ impl AppState {
             .map(|active| active.meta.id.clone());
         if let Some(session_id) = standing {
             if let Some(mut parked) = self.residents.adopt(&session_id) {
-                parked.idle_since = None;
                 self.restore_terminal_workspace(&mut parked);
                 if self.archived_sharing_affected(&parked.meta) {
                     self.archived_revision += 1;
@@ -2113,7 +2121,6 @@ impl AppState {
                 parked.turn_in_flight,
                 parked.queue.len()
             );
-            parked.idle_since = None;
             let terminal_preferences = self.terminal_preferences_for(&parked);
             let restored_terminal = self.restore_terminal_workspace(&mut parked);
             let mark_idle = !parked.draft

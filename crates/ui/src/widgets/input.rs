@@ -8,9 +8,9 @@ use crate::{
     widgets::menu::ContextMenuExt as _,
 };
 use gpui::{
-    Action, AnyElement, App, DefiniteLength, Edges, Entity, Focusable as _,
-    InteractiveElement as _, IntoElement, LongPressEvent, ParentElement as _, RenderOnce,
-    SharedString, StyleRefinement, Styled, TextAlign, TouchPhase, Window, div,
+    Action, AnyElement, App, DefiniteLength, Edges, Entity, Focusable as _, HitboxBehavior,
+    InteractiveElement as _, IntoElement, LongPressEvent, MouseUpEvent, ParentElement as _,
+    RenderOnce, SharedString, StyleRefinement, Styled, TextAlign, TouchPhase, Window, div,
     prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::StyledExt as _;
@@ -28,6 +28,14 @@ enum InputMenu {
     Paste,
     SelectAll,
 }
+
+/// What a browser's paste event delivered. A page receives the clipboard only
+/// through that event, so on the web this stands in for the editor's Paste,
+/// which reads the clipboard itself: the field's owner can take the images
+/// before the field inserts the text.
+#[derive(Action, Clone, PartialEq)]
+#[action(namespace = tcode_input, no_json)]
+pub(crate) struct BrowserPaste(pub(crate) gpui::ClipboardItem);
 
 pub use gpui_base::input::{Copy, InputEvent, InputState, Paste, SelectAll, TextareaState};
 
@@ -156,8 +164,9 @@ fn render_touch_selection(state: &State, window: &Window, cx: &App) -> Vec<AnyEl
     let editable = capabilities.is_editable();
     let copyable = capabilities.is_copyable();
     // Rendering must not probe the iOS clipboard without user paste intent.
-    // An empty clipboard pastes nothing.
-    let pasteable = editable;
+    // An empty clipboard pastes nothing. A browser hands the clipboard only
+    // to its own paste event, never to a menu the page draws.
+    let pasteable = editable && !cfg!(target_family = "wasm");
 
     let dispatch = move |action: &dyn Action, window: &mut Window, cx: &mut App| {
         focus_handle.dispatch_action(action, window, cx);
@@ -257,7 +266,7 @@ impl RenderOnce for Input {
             gpui_ios::set_paste_input(dispatch_state!(&self.state, |base| base
                 .entity_id()
                 .as_u64()));
-            gpui_ios::set_paste_control_bounds(None);
+            gpui_ios::set_paste_control(None);
         }
         if !focused {
             dispatch_state!(&self.state, |base| base
@@ -323,8 +332,14 @@ impl RenderOnce for Input {
             let focus = base.read(cx).focus_handle(cx);
             let menu_focus = focus.clone();
             let menu_state = base.clone();
+            let paste_state = base.clone();
             let disabled = self.disabled;
             InputBase::new(("input", base.entity_id()))
+                .on_action(move |paste: &BrowserPaste, window, cx| {
+                    paste_state.update(cx, |state, cx| {
+                        gpui::EntityInputHandler::paste(state, paste.0.clone(), window, cx)
+                    })
+                })
                 .on_action(move |action: &InputMenu, window, cx| match action {
                     InputMenu::Cut => {
                         menu_focus.dispatch_action(&gpui_base::input::Cut, window, cx)
@@ -367,8 +382,25 @@ impl RenderOnce for Input {
                 // Register after the editor paints so GPUI uses its configured handler.
                 .child(
                     gpui::canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, cx| {
+                        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                        move |bounds, hitbox, window, cx| {
+                            // gpui-fast-web summons the browser keyboard for a
+                            // tap only when the tap was not default-prevented,
+                            // but GPUI's focus transfer prevents default on
+                            // every press into a focusable element. A tap into
+                            // the focused field after the keyboard was
+                            // dismissed would otherwise leave it closed.
+                            if cfg!(target_family = "wasm") && !disabled {
+                                let focus = focus.clone();
+                                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, _| {
+                                    if phase.bubble()
+                                        && hitbox.is_hovered(window)
+                                        && focus.is_focused(window)
+                                    {
+                                        window.request_virtual_keyboard();
+                                    }
+                                });
+                            }
                             // A long press here selects in this field; the
                             // window selection a message holds goes, as it
                             // would on a tap. No tap precedes a long press.
@@ -433,13 +465,16 @@ impl RenderOnce for Input {
                         copyable && has_selection,
                     )
                     // Offered whenever the text can change, without peeking
-                    // at the clipboard: the synchronous read is always empty
-                    // on the web, and an empty clipboard pastes nothing.
-                    .menu_with_enable(
-                        crate::tr!("edit_menu.paste").into_owned(),
-                        Box::new(InputMenu::Paste),
-                        editable,
-                    )
+                    // at the clipboard: an empty clipboard pastes nothing. A
+                    // browser hands the clipboard only to its own paste
+                    // event, never to a menu the page draws.
+                    .when(!cfg!(target_family = "wasm"), |menu| {
+                        menu.menu_with_enable(
+                            crate::tr!("edit_menu.paste").into_owned(),
+                            Box::new(InputMenu::Paste),
+                            editable,
+                        )
+                    })
                     .separator()
                     .menu_with_enable(
                         crate::tr!("edit_menu.select_all").into_owned(),

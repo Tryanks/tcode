@@ -2,6 +2,7 @@
 #![cfg(target_family = "wasm")]
 
 mod host;
+mod keyboard;
 mod transport;
 
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
@@ -79,9 +80,12 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     // The login page already signed this browser in with the serving
     // machine; the shell reopens that record.
     let initial = tcode_ui::last_host_target(host.as_ref());
-    let platform = Rc::new(gpui_web::WebPlatform::new_with_backend(
+    // CJK the bundled fonts lack is drawn with the browser's own fonts
+    // rather than as missing-glyph boxes.
+    let platform = Rc::new(gpui_web::WebPlatform::new_with_backend_and_font_fallback(
         true,
         gpui_web::WebBackendPreference::Auto,
+        gpui_web::CanvasFontFallback::EmojiAndCjk,
     ));
     let http_client = std::sync::Arc::new(platform.fetch_http_client());
     let application = gpui::Application::with_platform(platform)
@@ -103,10 +107,14 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                     },
                     fonts: vec![
                         Cow::Borrowed(include_bytes!("../assets/NotoSans-Regular.ttf")),
+                        Cow::Borrowed(include_bytes!("../assets/NotoSansSC-Regular.otf")),
                         Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
                     ],
                     theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                     activate: true,
+                    // `sys_locale` reads nothing in a browser; the browser's
+                    // own language is the system one.
+                    system_locale: window().navigator().language(),
                     setup: tcode_ui::ShellSetup {
                         initial,
                         initial_pairing_error: None,
@@ -131,6 +139,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
             }
         });
     APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
+    keyboard::install();
     Ok(())
 }
 

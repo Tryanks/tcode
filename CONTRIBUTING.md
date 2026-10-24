@@ -39,15 +39,17 @@ is derived from it. **Process** is how to build, check and submit work.
 5. **Remote access.** iroh, end to end encrypted, is the only transport for
    native clients; the browser client is a direct-access HTTP entry on the
    machine and does not use iroh. There is no automatic discovery: a device's
-   first contact with a machine is always its invitation, scanned or pasted.
-   An official service, **Traverse**, provides lookup and relay fallback: no
-   accounts, on by default, self-hostable, sees only ciphertext, and never
-   required — on a LAN, direct connections give the full product without it.
-   Abuse is limited without accounts: the relay forwards by destination id and
-   the machine rejects every peer it has not paired; lookup and relay
-   bandwidth are rate-limited per node and per IP; an invitation secret dies
-   after five failures on the machine, which is the only place it is ever
-   checked — the service never sees it; and no SLA is promised. Current status
+   first contact with a machine, or with a group of machines, is always an
+   invitation, scanned or pasted; a machine admits only devices it paired or
+   that a machine in its group admitted. An official service, **Traverse**,
+   provides lookup and relay fallback: no accounts, on by default,
+   self-hostable, sees only ciphertext, and never required — on a LAN, direct
+   connections give the full product without it. Abuse is limited without
+   accounts: the relay forwards by destination id and the machine rejects
+   every peer it has not admitted; lookup and relay bandwidth are rate-limited
+   per node and per IP; an invitation secret dies after five failures on the
+   machine, which is the only place it is ever checked — the service never
+   sees it; and no SLA is promised. Current status
    and plan: [#376](https://github.com/Tryanks/tcode/issues/376).
 
 6. **gpui-base is the infrastructure; no house UI principles.** Tcode follows
@@ -131,7 +133,7 @@ has the detection and sandbox details.
 Platform prerequisites:
 
 - **macOS** — Xcode command-line tools.
-- **Windows** — MSVC toolchain; the WebView2 runtime for the preview browser.
+- **Windows** — MSVC toolchain.
 - **Linux** — a Vulkan driver plus the usual GPUI build deps (`libxkbcommon-dev`,
   `libwayland-dev`, `libxcb*`, `libssl-dev`, `libasound2-dev`, `libfontconfig-dev`).
   The embedded preview browser is compiled out on Linux.
@@ -157,8 +159,11 @@ and blocking work goes through `Host::unblock`. A new approved site carries an
 `allow(clippy::disallowed_methods)` with its reason.
 
 CI also runs `cargo machete` to catch unused dependencies, and checks iOS, Android
-and Web with `RUSTFLAGS='-D warnings'`. Use the commands and tool version in
-[the workflow](.github/workflows/ci.yml) to reproduce those checks. Fix warnings
+and Web with `RUSTFLAGS='-D warnings'`. On Linux it also builds the browser
+bundle, runs Clippy on `tcode-headless --features web` (the container image's
+binary) and checks the container scripts and Compose files. Use the commands and
+tool version in [the workflow](.github/workflows/ci.yml) to reproduce those
+checks. Fix warnings
 at their source; a platform-specific lint exception needs a concrete reason at
 the declaration. For a dependency imported under a different crate name, use
 Cargo's `package` alias or machete's `renamed` metadata so unused imports remain

@@ -28,7 +28,7 @@ desktop = [
 # GPUI's platform file dialogs (`prompt_for_paths` / `prompt_for_new_path`).
 # Guards only the Browse and Save-to-disk actions.
 native-dialogs = []
-# Embedded webview preview backend. Available on macOS, Windows and Android; the panel,
+# Embedded webview preview backend. Available on macOS, Windows, Android and iOS; the panel,
 # its URL field, open-externally and copy-URL are always compiled.
 native-preview = [
     "dep:tcode-traverse",
@@ -40,8 +40,10 @@ native-preview = [
     "dep:preview-mcp",
     "dep:async-lock",
     "dep:objc2-core-foundation",
+    "dep:objc2-core-graphics",
     "dep:objc2-image-io",
     "dep:objc2-web-kit",
+    "dep:objc2-ui-kit",
     "dep:block2",
     "dep:objc2-foundation",
     "dep:webview2-com",
@@ -101,7 +103,7 @@ reqwest = { package = "gpui-pre-reqwest", version = "=0.12.15", default-features
 
 # The preview backend exists only where a system webview can be embedded as a
 # child of the GPUI window, so its whole dependency set is target-scoped.
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "ios"))'.dependencies]
 gpui-kit = { version = "0.8.0", default-features = false, features = ["gpui-fast"], optional = true }
 gpui-webview = { version = "0.8.0", features = ["gpui-fast"], optional = true }
 wry = { version = "0.53.3", package = "lb-wry", features = ["mac-proxy"], optional = true }
@@ -114,22 +116,28 @@ async-lock = { version = "3", optional = true }
 computer-use-mcp = { path = "../computer-use-mcp", optional = true }
 block2 = { version = "0.6.2", optional = true }
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSAppearance", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow", "objc2-core-graphics"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSAppearance", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "NSResponder", "NSGlassEffectView", "NSView", "NSWindow", "objc2-core-graphics"] }
 objc2-foundation = { version = "0.3.2", features = ["NSDictionary", "NSError", "NSString", "NSURLError", "NSURLRequest", "block2"], optional = true }
 
-# The macOS WKWebView snapshot backend, and the navigation delegate the
-# load-error observer patches.
-[target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
+# The WKWebView snapshot backend, the navigation delegates that remote routing
+# installs and the load-error observer patches, and the iOS frame.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-foundation]
 version = "0.3.2"
-features = ["CFData", "CFString"]
+features = ["CFCGTypes", "CFData", "CFString"]
 optional = true
 
-[target.'cfg(target_os = "macos")'.dependencies.objc2-image-io]
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-graphics]
+version = "0.3.2"
+default-features = false
+features = ["std", "CGImage"]
+optional = true
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-image-io]
 version = "0.3.2"
 features = ["CGImageDestination"]
 optional = true
 
-[target.'cfg(target_os = "macos")'.dependencies.objc2-web-kit]
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-web-kit]
 version = "0.3.2"
 features = ["WKNavigationDelegate", "WKNavigationAction", "WKFrameInfo", "WKSnapshotConfiguration", "WKWebView"]
 optional = true
@@ -160,7 +168,7 @@ tcode-services = { path = "../services" }
 name = "markdown_perf"
 harness = false
 
-[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "android"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "android", target_os = "ios"))'.dependencies]
 preview-mcp = { path = "../preview-mcp", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -169,3 +177,7 @@ futures = "0.3"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 gpui-ios = { path = "../platform/gpui-ios" }
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSError", "NSString", "NSURL", "NSURLError", "NSURLRequest", "block2"], optional = true }
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "bitflags", "UIImage", "UIResponder", "UIView", "objc2-core-foundation", "objc2-core-graphics"], optional = true }
+block2 = { version = "0.6.2", optional = true }

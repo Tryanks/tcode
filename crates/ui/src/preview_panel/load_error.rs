@@ -78,13 +78,15 @@ pub(crate) fn forget(raw: &wry::WebView) {
     clear(imp::key(raw));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod imp {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-    use objc2::{ffi, sel};
+    use objc2::{ffi, msg_send, sel};
     use objc2_foundation::{NSError, NSURL, NSURLErrorFailingURLErrorKey};
-    use objc2_web_kit::WKWebView;
+    #[cfg(target_os = "ios")]
+    use wry::WebViewExtIOS as _;
+    #[cfg(target_os = "macos")]
     use wry::WebViewExtMacOS as _;
 
     use super::LoadError;
@@ -211,10 +213,11 @@ mod imp {
     }
 
     fn current_url(webview: *mut AnyObject) -> Option<String> {
-        // SAFETY: WebKit passes the live web view that failed.
-        let webview: &WKWebView = unsafe { webview.cast::<WKWebView>().as_ref() }?;
-        let url = unsafe { webview.URL() }?;
-        url.absoluteString().map(|url| url.to_string())
+        // SAFETY: WebKit passes the live web view that failed. objc2-web-kit
+        // declares WKWebView for macOS only, so `URL` is sent untyped.
+        let webview = unsafe { webview.as_ref() }?;
+        let url: Option<Retained<NSURL>> = unsafe { msg_send![webview, URL] };
+        url?.absoluteString().map(|url| url.to_string())
     }
 }
 

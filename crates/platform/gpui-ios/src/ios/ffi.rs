@@ -7,9 +7,8 @@ use super::IosWindow;
 use crate::text_input::{self, NOT_FOUND, TextRange};
 use anyhow::{Result, anyhow};
 use gpui::{
-    AppLifecyclePhase, Autocapitalize, Edges, Modifiers, PlatformInput, TextInputAction,
-    TextInputConfiguration, TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowInsets, point,
-    px,
+    AppLifecyclePhase, Autocapitalize, Edges, Modifiers, TextInputAction, TextInputConfiguration,
+    TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowInsets, point, px,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -112,7 +111,22 @@ unsafe extern "C" {
     );
     fn gpui_ios_host_open_url(bytes: *const u8, length: usize);
     fn gpui_ios_host_set_paste_input(owner: u64);
-    fn gpui_ios_host_set_paste_control(x: f64, y: f64, width: f64, height: f64);
+    /// Each colour is sRGB red, green, blue and alpha.
+    fn gpui_ios_host_set_paste_control(
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        foreground_red: f64,
+        foreground_green: f64,
+        foreground_blue: f64,
+        foreground_alpha: f64,
+        background_red: f64,
+        background_green: f64,
+        background_blue: f64,
+        background_alpha: f64,
+        corner_radius: f64,
+    );
     fn gpui_ios_host_clipboard_text_length() -> usize;
     fn gpui_ios_host_read_clipboard(bytes: *mut u8, capacity: usize) -> usize;
     fn gpui_ios_host_write_clipboard(bytes: *const u8, length: usize);
@@ -254,15 +268,32 @@ pub(crate) fn host_set_paste_input(owner: u64) {
     unsafe { gpui_ios_host_set_paste_input(owner) };
 }
 
-pub(crate) fn host_set_paste_control_bounds(bounds: Option<gpui::Bounds<gpui::Pixels>>) {
-    let bounds = bounds.unwrap_or_default();
-    // UIKit only updates a subview's geometry; it must not call back into GPUI during paint.
+pub(crate) fn host_set_paste_control(control: Option<crate::PasteControl>) {
+    let control = control.unwrap_or(crate::PasteControl {
+        bounds: gpui::Bounds::default(),
+        foreground: gpui::Hsla::default(),
+        background: gpui::Hsla::default(),
+        corner_radius: gpui::px(0.),
+    });
+    let bounds = control.bounds;
+    let foreground = control.foreground.to_rgb();
+    let background = control.background.to_rgb();
+    // UIKit only updates a subview's geometry and style; it must not call back into GPUI during paint.
     unsafe {
         gpui_ios_host_set_paste_control(
-            f64::from(bounds.origin.x),
-            f64::from(bounds.origin.y),
-            f64::from(bounds.size.width),
-            f64::from(bounds.size.height),
+            bounds.origin.x.into(),
+            bounds.origin.y.into(),
+            bounds.size.width.into(),
+            bounds.size.height.into(),
+            foreground.r.into(),
+            foreground.g.into(),
+            foreground.b.into(),
+            foreground.a.into(),
+            background.r.into(),
+            background.g.into(),
+            background.b.into(),
+            background.a.into(),
+            control.corner_radius.into(),
         )
     };
 }
@@ -307,20 +338,20 @@ fn dispatch_touches(touches: *const GpuiIosTouch, count: usize, phase: TouchPhas
     let touches = unsafe { slice::from_raw_parts(touches, count) };
     with_window(|window| {
         window.touch_activity(count, phase);
-        for touch in touches {
+        window.dispatch_touches(touches.iter().map(|touch| {
             let position = point(px(touch.x as f32), px(touch.y as f32));
             window.set_mouse_position(position);
             let predicted_position = (touch.has_prediction != 0)
                 .then(|| point(px(touch.predicted_x as f32), px(touch.predicted_y as f32)));
             let force = (touch.has_force != 0).then(|| touch.force.clamp(0.0, 1.0));
-            window.dispatch_input(PlatformInput::Touch(TouchEvent {
+            TouchEvent {
                 id: TouchId(touch.identifier),
                 phase,
                 position,
                 predicted_position,
                 force,
-            }));
-        }
+            }
+        }));
     });
 }
 
@@ -686,6 +717,27 @@ pub extern "C" fn gpui_ios_character_at_point(x: f64, y: f64) -> usize {
             .flatten();
     });
     index.unwrap_or(NOT_FOUND)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_move_caret_toward(x: f64, y: f64) {
+    with_window(|window| {
+        window.input_activity();
+        window.with_input_handler(|handler| {
+            let Some(selection) = handler.selected_text_range(true) else {
+                return;
+            };
+            let head = if selection.reversed {
+                selection.range.start
+            } else {
+                selection.range.end
+            };
+            let target = point(px(x as f32), px(y as f32));
+            if let Some(offset) = text_input::caret_toward(handler, head, target) {
+                text_input::select_text(handler, offset..offset);
+            }
+        });
+    });
 }
 
 #[unsafe(no_mangle)]

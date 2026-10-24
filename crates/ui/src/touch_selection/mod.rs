@@ -292,6 +292,104 @@ mod tests {
         }
     }
 
+    /// An input `top` pixels down a phone-sized window.
+    struct PlacedField {
+        input: Entity<InputState>,
+        top: f32,
+    }
+
+    impl Render for PlacedField {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .px_4()
+                .pt(px(self.top))
+                .child(Input::new(&self.input))
+        }
+    }
+
+    /// Long-presses the first word of an input `top` pixels down the window,
+    /// with the window's top `covered` pixels under a status bar, and returns
+    /// the selection, the menu and its items' bounds.
+    fn open_menu_at(
+        cx: &mut TestAppContext,
+        top: f32,
+        covered: f32,
+    ) -> (
+        gpui::Bounds<gpui::Pixels>,
+        gpui::Bounds<gpui::Pixels>,
+        Vec<gpui::Bounds<gpui::Pixels>>,
+    ) {
+        cx.update(crate::theme::init);
+        let (field, cx) = cx.add_window_view(|window, cx| PlacedField {
+            input: cx.new(|cx| InputState::new(window, cx).default_value("quick select value")),
+            top,
+        });
+        let window_size = size(px(390.), px(844.));
+        cx.simulate_resize(window_size);
+        let handle = gpui::VisualContext::window_handle(cx);
+        cx.simulate_window_visual_viewport_change(
+            handle,
+            gpui::Bounds::new(
+                point(px(0.), px(covered)),
+                size(window_size.width, window_size.height - px(covered)),
+            ),
+        );
+        cx.run_until_parked();
+        draw(cx);
+        let input = field.read_with(cx, |field, _| field.input.clone());
+        let first = input
+            .read_with(cx, |state, _| state.range_to_bounds(&(0..1)))
+            .unwrap();
+        long_press(cx, first.center());
+        let selection = input
+            .read_with(cx, |state, _| state.touch_selection())
+            .and_then(|snapshot| snapshot.bounds())
+            .expect("a long press selects a word");
+        let menu = cx.debug_bounds("edit-menu").expect("the menu is open");
+        let items = [
+            "edit-menu-cut",
+            "edit-menu-copy",
+            "edit-menu-paste",
+            "edit-menu-select-all",
+        ]
+        .map(|item| {
+            cx.debug_bounds(item)
+                .unwrap_or_else(|| panic!("{item} is offered"))
+        });
+        assert!(
+            gpui::Bounds::new(point(px(0.), px(covered)), window_size).contains(&menu.origin)
+                && menu.bottom_right().y <= window_size.height
+                && menu.bottom_right().x <= window_size.width,
+            "the menu shows in full: {menu:?}"
+        );
+        (selection, menu, items.to_vec())
+    }
+
+    #[gpui::test]
+    fn the_edit_menu_is_one_row_of_finger_sized_items_above_the_handles(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (selection, menu, items) = open_menu_at(cx, 300., 0.);
+        let row = px(crate::material::TOUCH_TARGET);
+        for item in &items {
+            assert_eq!(item.size.height, row, "{item:?}");
+            assert!(item.size.width >= row, "{item:?}");
+            assert_eq!(item.top(), items[0].top(), "{item:?}");
+        }
+        // The pill hugs its row: nothing but its hairline above or below.
+        assert_eq!(menu.size.height, row + px(2.));
+        assert!(menu.bottom() <= selection.top() - TouchHandle::EXTENT);
+    }
+
+    #[gpui::test]
+    fn the_edit_menu_stays_out_from_under_a_status_bar(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // Room above in the window, but under a status bar: the menu drops
+        // below, clear of the end handle.
+        let (selection, menu, _) = open_menu_at(cx, 90., 60.);
+        assert!(menu.top() >= selection.bottom() + TouchHandle::EXTENT);
+    }
+
     /// A textarea taller than its field, as the composer is.
     struct OverflowingField {
         textarea: Entity<TextareaState>,

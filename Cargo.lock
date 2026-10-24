@@ -165,10 +165,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "shell-words",
  "smol",
  "toml 1.1.6+spec-1.1.0",
  "ureq",
  "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3856,6 +3858,7 @@ dependencies = [
  "gpui-fast",
  "gpui-fast-wgpu",
  "gpui-mobile-pacing",
+ "gpui-mobile-touch",
  "jni 0.22.4",
  "log",
  "ndk 0.9.0",
@@ -4292,12 +4295,14 @@ dependencies = [
  "gpui-fast",
  "gpui-fast-wgpu",
  "gpui-mobile-pacing",
+ "gpui-mobile-touch",
  "libc",
  "log",
  "parking_lot",
  "pathfinder_geometry",
  "raw-window-handle",
  "smallvec",
+ "unicode-segmentation",
  "uuid",
  "zed-font-kit",
 ]
@@ -4339,6 +4344,13 @@ dependencies = [
 [[package]]
 name = "gpui-mobile-pacing"
 version = "0.1.0"
+
+[[package]]
+name = "gpui-mobile-touch"
+version = "0.1.0"
+dependencies = [
+ "gpui-fast",
+]
 
 [[package]]
 name = "gpui-pre"
@@ -7618,17 +7630,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc2-avf-audio"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
-dependencies = [
- "block2 0.6.2",
- "objc2 0.6.5",
- "objc2-foundation 0.3.2",
-]
-
-[[package]]
 name = "objc2-cloud-kit"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7903,7 +7904,6 @@ checksum = "f9eb609f9d2a25e0f8b76954f3acaa58348ce2a91285fe867643b2224ac4d263"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.5",
- "objc2-avf-audio",
  "objc2-foundation 0.3.2",
 ]
 
@@ -7931,6 +7931,7 @@ dependencies = [
  "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
 ]
@@ -11339,7 +11340,6 @@ dependencies = [
  "log",
  "objc2 0.6.5",
  "objc2-av-foundation",
- "objc2-avf-audio",
  "objc2-foundation 0.3.2",
  "objc2-speech",
  "serde",
@@ -11369,11 +11369,13 @@ dependencies = [
 name = "tcode-headless"
 version = "0.1.0"
 dependencies = [
+ "agent",
  "env_logger",
  "qrcode",
  "serde",
  "serde_json",
  "tcode-client",
+ "tcode-core",
  "tcode-protocol",
  "tcode-runtime",
  "tcode-services",
@@ -11566,8 +11568,10 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-image-io",
+ "objc2-ui-kit",
  "objc2-web-kit",
  "percent-encoding",
  "preview-mcp",
