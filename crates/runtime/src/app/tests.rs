@@ -10212,7 +10212,10 @@ fn a_cold_thread_left_before_its_log_is_read_sends_no_window_and_keeps_no_log() 
     send_to_host(&state, cx, 1, subscribe_events("left", None));
     send_to_host(&state, cx, 2, unsubscribe_events("left"));
     state.read(|state| assert!(state.log_hydrations.contains_key("left")));
-    let messages = answered(cx, 1);
+    let mut messages = answered(cx, 1);
+    // The whole log's read can finish after the subscription is answered.
+    cx.run_until(|state| state.log_hydrations.is_empty());
+    messages.extend(cx.drain_outgoing());
 
     assert!(
         messages
@@ -10231,7 +10234,6 @@ fn a_cold_thread_left_before_its_log_is_read_sends_no_window_and_keeps_no_log() 
     );
     state.read(|state| {
         assert!(state.resident("left").is_none());
-        assert!(state.log_hydrations.is_empty());
         assert!(state.event_records.is_empty());
     });
 }
