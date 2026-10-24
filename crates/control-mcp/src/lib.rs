@@ -225,6 +225,12 @@ impl ControlOp {
                 .chain(p.from.as_deref())
                 .chain(p.to.as_deref())
                 .filter_map(|anchor| parse_anchor(anchor).map(|(thread, _)| thread))
+                .chain(
+                    p.cursor
+                        .as_deref()
+                        .and_then(|cursor| cursor.rsplit_once('#'))
+                        .map(|(thread, _)| thread),
+                )
                 .collect(),
             Self::SearchInItem(p) => parse_anchor(&p.anchor)
                 .map(|(thread, _)| vec![thread])

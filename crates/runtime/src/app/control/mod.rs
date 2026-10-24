@@ -26,6 +26,9 @@ pub(super) struct ControlState {
     review_records: Vec<tcode_core::control::ReviewRecord>,
     /// Answers to recent calls that carried a `request_id`, so a retry does not act twice.
     answered: VecDeque<(String, serde_json::Value)>,
+    /// Bytes each caller has read from each thread since the host started, for the hint to
+    /// narrow the query.
+    content_read: HashMap<(String, String), usize>,
 }
 
 impl ControlState {
@@ -34,6 +37,7 @@ impl ControlState {
             activity: VecDeque::new(),
             review_records,
             answered: VecDeque::new(),
+            content_read: HashMap::new(),
         }
     }
 }
@@ -44,6 +48,24 @@ impl ControlState {
 pub(super) enum Answer {
     Now(Result<serde_json::Value, String>),
     Later(HostTask<Result<serde_json::Value, String>>),
+}
+
+/// The part of a call that needs the host state, run on the host thread once the call's
+/// off-thread work has finished; its result is the call's answer.
+async fn finish_on_host(
+    host_cx: HostCx,
+    finish: impl FnOnce(&mut AppState, &mut HostCx) -> Result<serde_json::Value, String>
+    + Send
+    + 'static,
+) -> Result<serde_json::Value, String> {
+    let (answered, answer) = smol::channel::bounded(1);
+    host_cx.enqueue(move |state, cx| {
+        let _ = answered.try_send(finish(state, cx));
+    });
+    answer
+        .recv()
+        .await
+        .unwrap_or_else(|_| Err("the host stopped before the call finished".into()))
 }
 
 /// The thread behind a `tcode_control` call, with the grant in force when it arrived.
@@ -347,10 +369,10 @@ impl AppState {
             ControlOp::UpdateThreads(p) => return self.op_update_threads(caller, p, cx),
             ControlOp::ListProjects(p) => self.op_list_projects(caller, p, cx),
             ControlOp::GetThread(p) => self.op_get_thread(caller, p, cx),
-            ControlOp::Outline(p) => self.op_outline(caller, p, cx),
-            ControlOp::Read(p) => self.op_read(caller, p, cx),
-            ControlOp::SearchInItem(p) => self.op_search_in_item(caller, p, cx),
-            ControlOp::FileHistory(p) => self.op_file_history(caller, p, cx),
+            ControlOp::Outline(p) => return self.op_outline(caller, p, cx),
+            ControlOp::Read(p) => return self.op_read(caller, p, cx),
+            ControlOp::SearchInItem(p) => return self.op_search_in_item(caller, p, cx),
+            ControlOp::FileHistory(p) => return self.op_file_history(caller, p, cx),
             ControlOp::GetPullRequest(p) => self.op_get_pull_request(caller, p, cx),
             ControlOp::ListProviders(p) => self.op_list_providers(caller, p, cx),
             ControlOp::GetSettings(p) => self.op_get_settings(caller, p, cx),

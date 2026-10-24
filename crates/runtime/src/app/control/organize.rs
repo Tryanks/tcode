@@ -71,17 +71,11 @@ impl AppState {
                     .map_err(|error| error.to_string()),
                 error => Err(format!("store write barrier failed: {error:?}")),
             };
-            let (answered, answer) = smol::channel::bounded(1);
-            host_cx.enqueue(move |state, cx| {
-                let result = ends
-                    .map(|ends| state.update_threads(&caller, params, &ends, cx))
-                    .map_err(|error| format!("could not read the threads' logs: {error}"));
-                let _ = answered.try_send(result);
-            });
-            answer
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("the host stopped before the batch applied".into()))
+            finish_on_host(host_cx, move |state, cx| {
+                ends.map(|ends| state.update_threads(&caller, params, &ends, cx))
+                    .map_err(|error| format!("could not read the threads' logs: {error}"))
+            })
+            .await
         }))
     }
 
