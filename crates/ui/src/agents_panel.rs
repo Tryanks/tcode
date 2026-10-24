@@ -831,7 +831,7 @@ impl AgentsPanel {
 
     fn render_caption(label: SharedString, compact: bool, cx: &App) -> AnyElement {
         if compact {
-            material::list_caption(label, cx).into_any_element()
+            material::list_caption(label, true, cx).into_any_element()
         } else {
             div()
                 .px_3()

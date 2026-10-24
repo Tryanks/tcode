@@ -244,6 +244,7 @@ impl TryFrom<ThemeConfig> for Theme {
                 xl: px(config.radius * 2.),
                 ..Default::default()
             },
+            // Sizes and line heights are gpui-base's scale on purpose.
             typography: TypographyTokens {
                 sans: config.font_family.clone().into(),
                 mono: config.mono_font_family.clone().into(),
@@ -348,10 +349,7 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
                         style.bg(theme.scrollbar_thumb_hover).radius(radius.full)
                     }),
             ),
-        resizable: ResizableTheme {
-            handle: Some(theme.border),
-            active_handle: Some(theme.ring),
-        },
+        resizable: ResizableTheme::default(),
         plot: PlotTheme::default(),
     };
     cx.set_global(base_theme);

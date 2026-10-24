@@ -4,14 +4,15 @@
 
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::{
     App, BoxShadow, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement as _,
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled, div,
-    linear_color_stop, linear_gradient, px,
+    linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, Toolbar, v_flex};
+use gpui_base::{StyledExt as _, Toolbar, h_flex, v_flex};
 
 /// Height reserved beneath chat messages for hover-revealed actions.
 pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
@@ -22,15 +23,18 @@ pub(crate) const CHAT_CONTENT_MIN_PADDING: f32 = 24.;
 /// The compact layout's page inset: content is held this far clear of both
 /// window edges. Cards inside that content inset a further [`CARD_INSET`].
 pub(crate) const COMPACT_PAGE_INSET: f32 = 16.;
-/// The touch-target height of a [`list_row`].
+/// The touch-target height of a [`list_row`]. gpui-base carries no
+/// control-height token, so row heights are Tcode's.
 pub(crate) const LIST_ROW_MIN_HEIGHT: f32 = 56.;
 /// Padding inside a card, chip or notice that already sits within a page inset.
 pub(crate) const CARD_INSET: f32 = 12.;
-/// The smallest square a finger can reliably hit.
+/// The smallest square a finger can reliably hit. gpui-base carries no
+/// control-height token (its `TouchHandle::HIT_SIZE` is text selection's own).
 pub(crate) const TOUCH_TARGET: f32 = 44.;
 /// Width of numeric form fields, including their step controls.
 pub(crate) const NUMBER_INPUT_WIDTH: f32 = 96.;
 
+/// The height of a text field. gpui-base carries no control-height token.
 pub(crate) fn input_height(compact: bool) -> f32 {
     if compact { TOUCH_TARGET } else { 32. }
 }
@@ -138,6 +142,125 @@ pub fn overlay_contour(el: Div, cx: &App) -> Div {
         .shadow_xl()
 }
 
+/// Height of the drag handle strip above a compact sheet's title row.
+pub const SHEET_GRABBER_HEIGHT: f32 = 16.;
+/// Height of a compact sheet's title row.
+pub const SHEET_TITLE_HEIGHT: f32 = 48.;
+
+/// The compact bottom sheet's surface: top corners at the sheet radius, opaque
+/// fill, a hairline along its top edge and the large soft shadow.
+pub fn sheet_contour<E: Styled>(el: E, cx: &App) -> E {
+    el.rounded_t(radius_overlay_sheet(cx))
+        .bg(cx.theme().popover)
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .shadow_xl()
+}
+
+/// The window edge a [`floating_panel`] is docked against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// A side panel floating over the content: opaque fill, a medium shadow and a
+/// hairline on the edge that faces the content.
+pub fn floating_panel<E: Styled>(el: E, side: Side, cx: &App) -> E {
+    let el = el.bg(cx.theme().popover).shadow_lg();
+    match side {
+        Side::Left => el.border_r_1(),
+        Side::Right => el.border_l_1(),
+    }
+    .border_color(cx.theme().border)
+}
+
+/// A card inside a page or a chat column: its radius, inset, gap and the muted
+/// wash. [`card_secondary`] and [`card_raised`] change only the fill.
+pub fn card(cx: &App) -> Div {
+    let spacing = &cx.theme().tokens.spacing;
+    v_flex()
+        .rounded(radius_card(cx))
+        .px(px(CARD_INSET))
+        .py(spacing.sm)
+        .gap(spacing.sm)
+        .bg(cx.theme().muted)
+}
+
+/// A [`card`] on the secondary wash.
+pub fn card_secondary(cx: &App) -> Div {
+    card(cx).bg(cx.theme().secondary)
+}
+
+/// A [`card`] lifted off the page: opaque fill, hairline border, small shadow.
+pub fn card_raised(cx: &App) -> Div {
+    card(cx)
+        .bg(cx.theme().popover)
+        .border_1()
+        .border_color(cx.theme().border)
+        .shadow_sm()
+}
+
+/// A dense header strip across the top of a [`card`]: a desktop section bar's
+/// height at the card inset. Callers add the content.
+pub fn card_header_row(cx: &App) -> Div {
+    h_flex()
+        .w_full()
+        .h(px(bar_height(Bar::Section, false)))
+        .px(px(CARD_INSET))
+        .gap(cx.theme().tokens.spacing.sm)
+        .items_center()
+}
+
+/// A banner washed in one semantic `tone` (danger, warning, info). The 10pt
+/// vertical inset has no gpui-base spacing token (it has 8 and 12).
+pub fn notice(tone: Hsla, cx: &App) -> Div {
+    h_flex()
+        .w_full()
+        .rounded(radius_card(cx))
+        .px(px(CARD_INSET))
+        .py(px(10.))
+        .gap(cx.theme().tokens.spacing.sm)
+        .bg(tone.opacity(0.12))
+        .border_1()
+        .border_color(tone.opacity(0.22))
+}
+
+/// The one-line "nothing here" text inside a list or card; a whole empty page
+/// uses [`empty_state`].
+pub fn empty_row(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .w_full()
+        .px(px(CARD_INSET))
+        .py(cx.theme().tokens.spacing.lg)
+        .text_secondary(false, cx)
+        .child(text.into())
+}
+
+/// The vertical space between two sections of a page or a dialog.
+pub fn section_gap(cx: &App) -> Pixels {
+    cx.theme().tokens.spacing.xl
+}
+
+/// One section of a form: an optional caption over its content.
+pub fn section(label: Option<SharedString>, cx: &App) -> Div {
+    v_flex()
+        .w_full()
+        .gap(cx.theme().tokens.spacing.md)
+        .when_some(label, |section, label| {
+            section.child(div().text_caption(cx).child(label))
+        })
+}
+
+/// The hairline between two rows of a list or group, `indent` in from its
+/// leading edge so it starts under the row's text.
+pub fn row_hairline(indent: Pixels, cx: &App) -> Div {
+    div()
+        .w_full()
+        .pl(indent)
+        .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6)))
+}
+
 /// One grouped-list container shared by settings surfaces.
 pub fn group(cx: &App) -> Div {
     v_flex()
@@ -151,21 +274,51 @@ pub fn group(cx: &App) -> Div {
 }
 
 /// Assemble rows into a floating group with inset hairlines between them.
+/// Rows carry their own inset ([`group_row`] for the common one).
 pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
     let mut group = group(cx);
     let last = rows.len().saturating_sub(1);
     for (index, row) in rows.into_iter().enumerate() {
         group = group.child(row);
         if index != last {
-            group = group.child(
-                div()
-                    .w_full()
-                    .pl_3()
-                    .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
-            );
+            group = group.child(row_hairline(px(CARD_INSET), cx));
         }
     }
     group
+}
+
+/// One row inside a [`group`]: label leading, control trailing, at the card
+/// inset. The 10pt vertical inset has no gpui-base spacing token (it has 8
+/// and 12).
+pub fn group_row(cx: &App) -> Div {
+    h_flex()
+        .w_full()
+        .min_h(px(TOUCH_TARGET))
+        .px(px(CARD_INSET))
+        .py(px(10.))
+        .gap(cx.theme().tokens.spacing.md)
+        .items_center()
+}
+
+/// A [`group_row`] for a compact window, where a label column beside a control
+/// has no room: the label sits above a full-width control.
+pub fn group_row_stacked(cx: &App) -> Div {
+    v_flex()
+        .w_full()
+        .min_h(px(TOUCH_TARGET))
+        .px(px(CARD_INSET))
+        .py(px(10.))
+        .gap(cx.theme().tokens.spacing.sm)
+        .items_start()
+}
+
+/// The caption above a [`group`], aligned with its rows' text.
+pub fn group_caption(label: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .pl(px(CARD_INSET))
+        .pb(cx.theme().tokens.spacing.sm)
+        .text_caption(cx)
+        .child(label.into())
 }
 
 /// One row of a navigable content list — a thread, a machine, a project. Plain
@@ -187,11 +340,48 @@ pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stat
         .active(|style| style.bg(cx.theme().list_active))
 }
 
+/// One row of a side panel's list: on a compact layout a [`list_row`]; wide, a
+/// two-line 52pt row at the card inset with a rounded hover fill. Callers add
+/// the content and the click.
+pub fn panel_row(
+    id: impl Into<ElementId>,
+    label: SharedString,
+    compact: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    if compact {
+        return list_row(id, label, cx);
+    }
+    let spacing = &cx.theme().tokens.spacing;
+    accessible_clickable(h_flex(), id, Role::Button, label, cx)
+        .w_full()
+        .min_h(px(52.))
+        .px(px(CARD_INSET))
+        .py(spacing.sm)
+        .gap(spacing.sm)
+        .items_center()
+        .rounded(radius_card(cx))
+        .hover(|style| style.bg(cx.theme().list_hover))
+}
+
+/// One item of a menu or a menu-like picker: its inset, gap, radius and, on a
+/// touch layout, a [`TOUCH_TARGET`] height. The highlight is `muted`; callers
+/// add it with the content, since a disabled item takes none.
+pub fn menu_item_frame(touch: bool, cx: &App) -> Div {
+    let spacing = &cx.theme().tokens.spacing;
+    h_flex()
+        .gap(spacing.sm)
+        .px(spacing.sm)
+        .py(spacing.xs)
+        .when(touch, |item| item.min_h(px(TOUCH_TARGET)))
+        .rounded(radius_button(cx))
+}
+
 /// The three heights a horizontal bar of controls takes. gpui-base's `Toolbar`
 /// is a behaviour primitive (role, roving arrow focus) with no geometry, and
 /// its tokens carry no bar or control height, so the heights live here, once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Bar {
+pub enum Bar {
     /// A window's top strip: the height of the caption cluster
     /// ([`CAPTION_STRIP_HEIGHT`](crate::window_caption::CAPTION_STRIP_HEIGHT)).
     Strip,
@@ -203,7 +393,7 @@ pub(crate) enum Bar {
     Section,
 }
 
-pub(crate) fn bar_height(kind: Bar, compact: bool) -> f32 {
+pub fn bar_height(kind: Bar, compact: bool) -> f32 {
     match (kind, compact) {
         (Bar::Strip, _) => crate::window_caption::CAPTION_STRIP_HEIGHT,
         (Bar::Toolbar | Bar::Section, true) => TOUCH_TARGET,
@@ -216,7 +406,7 @@ pub(crate) fn bar_height(kind: Bar, compact: bool) -> f32 {
 /// header — on gpui-base's [`Toolbar`], which gives it the toolbar role and
 /// roving arrow-key focus. The bar owns its height, inset (`spacing.sm`, the
 /// page inset on a touch layout) and gap; callers add content.
-pub(crate) fn bar(id: impl Into<ElementId>, kind: Bar, compact: bool, cx: &App) -> Toolbar {
+pub fn bar(id: impl Into<ElementId>, kind: Bar, compact: bool, cx: &App) -> Toolbar {
     let spacing = &cx.theme().tokens.spacing;
     let inset = if compact {
         px(COMPACT_PAGE_INSET)
@@ -233,13 +423,12 @@ pub(crate) fn bar(id: impl Into<ElementId>, kind: Bar, compact: bool, cx: &App) 
 }
 
 /// A [`bar`] separated from the content below it by a hairline.
-pub(crate) fn bar_divider_below(bar: Toolbar, cx: &App) -> Toolbar {
+pub fn bar_divider_below(bar: Toolbar, cx: &App) -> Toolbar {
     bar.border_b_1().border_color(cx.theme().border)
 }
 
 /// The title inside a [`bar`]: takes the remaining width and truncates.
-pub(crate) fn bar_title(title: impl Into<SharedString>, cx: &App) -> Div {
-    use crate::typography::TextRole as _;
+pub fn bar_title(title: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .flex_1()
         .min_w_0()
@@ -248,7 +437,8 @@ pub(crate) fn bar_title(title: impl Into<SharedString>, cx: &App) -> Div {
         .child(title.into())
 }
 
-/// The height of a [`selectable_row`].
+/// The height of a [`selectable_row`]. gpui-base carries no control-height
+/// token.
 pub(crate) fn selectable_row_height(compact: bool) -> f32 {
     if compact { TOUCH_TARGET } else { 32. }
 }
@@ -261,28 +451,59 @@ pub(crate) fn selectable_row<E>(el: E, selected: bool, compact: bool, cx: &App) 
 where
     E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
 {
-    let (active, hover) = (cx.theme().list_active, cx.theme().list_hover);
-    el.h(px(selectable_row_height(compact)))
+    selectable_surface(el, selectable_row_height(compact), selected, compact, cx)
+}
+
+/// A [`selectable_row`] holding two lines of text.
+pub fn selectable_row_two_line<E>(el: E, selected: bool, compact: bool, cx: &App) -> E
+where
+    E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
+{
+    selectable_surface(el, if compact { 56. } else { 48. }, selected, compact, cx)
+}
+
+/// The desktop rail's 10pt inset and 6pt gap sit between gpui-base's spacing
+/// tokens; the denser rail is Tcode's.
+fn selectable_surface<E>(el: E, height: f32, selected: bool, compact: bool, cx: &App) -> E
+where
+    E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
+{
+    let theme = cx.theme();
+    let (active, hover) = (theme.list_active, theme.list_hover);
+    let spacing = &theme.tokens.spacing;
+    let (gap, inset) = if compact {
+        (spacing.sm, spacing.md)
+    } else {
+        (px(6.), px(10.))
+    };
+    el.h(px(height))
         .flex()
         .items_center()
-        .gap(px(if compact { 8. } else { 6. }))
-        .px(px(if compact { 12. } else { 10. }))
-        .rounded(cx.theme().tokens.radius.md)
+        .gap(gap)
+        .px(inset)
+        .rounded(theme.tokens.radius.md)
         .when(selected, |row| row.bg(active))
         .when(!selected, |row| row.hover(move |style| style.bg(hover)))
 }
 
-/// The caption above one section of a navigable content list.
-pub fn list_caption(label: SharedString, cx: &App) -> Div {
-    div()
-        .w_full()
-        .px(px(COMPACT_PAGE_INSET))
-        .pt(px(12.))
-        .pb(px(4.))
-        .text_size(px(13.))
-        .font_medium()
-        .text_color(cx.theme().muted_foreground)
-        .child(label)
+/// The caption above one section of a navigable content list: at the page
+/// inset on a compact layout, a desktop section bar's height otherwise.
+pub fn list_caption(label: SharedString, compact: bool, cx: &App) -> Div {
+    let spacing = &cx.theme().tokens.spacing;
+    let caption = div().w_full().text_caption(cx);
+    if compact {
+        caption
+            .px(px(COMPACT_PAGE_INSET))
+            .pt(spacing.md)
+            .pb(spacing.xs)
+    } else {
+        caption
+            .h(px(bar_height(Bar::Section, false)))
+            .px(spacing.md)
+            .flex()
+            .items_center()
+    }
+    .child(label)
 }
 
 /// Stack [`list_row`]s with a hairline between them, indented to the text.
@@ -292,12 +513,7 @@ pub fn plain_list(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
     for (index, row) in rows.into_iter().enumerate() {
         list = list.child(row);
         if index != last {
-            list = list.child(
-                div()
-                    .w_full()
-                    .pl(px(COMPACT_PAGE_INSET))
-                    .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
-            );
+            list = list.child(row_hairline(px(COMPACT_PAGE_INSET), cx));
         }
     }
     list
@@ -331,7 +547,7 @@ pub fn sheet_grabber(cx: &App) -> impl IntoElement {
     div()
         .flex_none()
         .w_full()
-        .h(px(16.))
+        .h(px(SHEET_GRABBER_HEIGHT))
         .flex()
         .items_center()
         .justify_center()
@@ -351,20 +567,21 @@ pub fn empty_state(
     body: impl Into<SharedString>,
     cx: &App,
 ) -> Div {
+    let theme = cx.theme();
+    let (spacing, typography) = (&theme.tokens.spacing, &theme.tokens.typography);
     v_flex()
         .flex_1()
         .min_h_0()
         .items_center()
         .justify_center()
-        .gap(px(10.))
-        .p(px(24.))
-        .child(icon.size(px(24.)).text_color(cx.theme().muted_foreground))
+        .gap(spacing.sm)
+        .p(spacing.xl)
+        .child(icon.size(px(24.)).text_color(theme.muted_foreground))
         .child(
             div()
                 .max_w(px(280.))
                 .text_center()
-                .text_size(px(17.))
-                .line_height(px(22.))
+                .text_token(&typography.lg)
                 .font_semibold()
                 .child(title.into()),
         )
@@ -372,9 +589,8 @@ pub fn empty_state(
             div()
                 .max_w(px(280.))
                 .text_center()
-                .text_size(px(15.))
-                .line_height(px(20.))
-                .text_color(cx.theme().muted_foreground)
+                .text_token(&typography.sm)
+                .text_color(theme.muted_foreground)
                 .child(body.into()),
         )
 }
@@ -427,17 +643,24 @@ pub fn rail_detail(content: impl IntoElement, cx: &App) -> Div {
     )
 }
 
+/// A status badge in one semantic fill.
 pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla, cx: &App) -> Div {
+    let theme = cx.theme();
     div()
         .flex_none()
-        .px_2()
+        .px(theme.tokens.spacing.sm)
         .py(px(1.))
         .rounded(radius_chip(cx))
         .bg(bg)
-        .text_size(px(11.))
+        .text_token(&theme.tokens.typography.xs)
         .font_medium()
         .text_color(fg)
         .child(label.into())
+}
+
+/// A [`semantic_chip`] with no semantic tone.
+pub fn chip(label: impl Into<SharedString>, cx: &App) -> Div {
+    semantic_chip(label, cx.theme().secondary, cx.theme().foreground, cx)
 }
 
 /// Uppercase section label with the design system's 0.08em tracking.

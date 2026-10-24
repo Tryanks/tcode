@@ -988,7 +988,7 @@ impl SessionsSidebar {
                     ThreadSection::Pinned => crate::tr!("sidebar.pinned_count", count = count),
                     _ => crate::tr!("sidebar.active_count", count = count),
                 };
-                let caption = crate::material::list_caption(label.into_owned().into(), cx)
+                let caption = crate::material::list_caption(label.into_owned().into(), true, cx)
                     .text_color(caption_color(*section));
                 self.drop_zone(caption, DropZone::Start(*section), scope, 0., cx)
                     .into_any_element()

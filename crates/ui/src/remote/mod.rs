@@ -622,6 +622,7 @@ impl RemotePanel {
                 v_flex()
                     .child(list_caption(
                         crate::tr!("hosts.saved").into_owned().into(),
+                        true,
                         cx,
                     ))
                     .child(plain_list(rows, cx)),
@@ -729,6 +730,7 @@ impl RemotePanel {
                     .debug_selector(|| "hosts-invitation".into())
                     .child(list_caption(
                         crate::tr!("hosts.invite.section").into_owned().into(),
+                        true,
                         cx,
                     ))
                     .child(body),
@@ -810,6 +812,7 @@ impl RemotePanel {
             .debug_selector(|| "hosts-add-machine".into())
             .child(list_caption(
                 crate::tr!("hosts.pair.title").into_owned().into(),
+                true,
                 cx,
             ))
             .child(plain_list(rows, cx))

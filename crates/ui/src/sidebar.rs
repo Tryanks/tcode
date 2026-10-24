@@ -3590,7 +3590,7 @@ impl SessionsSidebar {
                 self.render_settled_header(key, *count, None, cx)
             }
             CompactListRow::Caption { label, .. } => {
-                crate::material::list_caption(label.clone(), cx).into_any_element()
+                crate::material::list_caption(label.clone(), true, cx).into_any_element()
             }
             CompactListRow::More { key, count } => {
                 self.render_settled_more(key.trim_end_matches("-more"), *count, cx)

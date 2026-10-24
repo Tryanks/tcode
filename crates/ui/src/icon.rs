@@ -40,6 +40,9 @@ impl RenderOnce for IconName {
 }
 
 /// Tcode's SVG icon primitive.
+///
+/// An icon with no explicit size takes the current font size, so an icon next
+/// to text is sized by that text's token; call sites do not size inline icons.
 #[derive(IntoElement)]
 pub struct Icon {
     base: Svg,
@@ -47,18 +50,16 @@ pub struct Icon {
     path: SharedString,
     text_color: Option<Hsla>,
     size: Option<Size>,
-    rotation: Option<Radians>,
 }
 
 impl Default for Icon {
     fn default() -> Self {
         Self {
-            base: svg().flex_none().size_4(),
+            base: svg(),
             style: StyleRefinement::default(),
             path: "".into(),
             text_color: None,
             size: None,
-            rotation: None,
         }
     }
 }
@@ -67,7 +68,6 @@ impl Clone for Icon {
     fn clone(&self) -> Self {
         let mut icon = Self::default().path(self.path.clone());
         icon.style = self.style.clone();
-        icon.rotation = self.rotation;
         icon.size = self.size;
         icon.text_color = self.text_color;
         icon
@@ -158,7 +158,7 @@ impl Render for Icon {
         let text_color = self.text_color.unwrap_or_else(|| cx.theme().foreground);
         let text_size = window.text_style().font_size.to_pixels(window.rem_size());
         let has_base_size = self.style.size.width.is_some() || self.style.size.height.is_some();
-        let mut base = svg().flex_none();
+        let mut base = svg();
         *base.style() = self.style.clone();
 
         base.flex_shrink_0()
@@ -166,9 +166,6 @@ impl Render for Icon {
             .when(!has_base_size, |this| this.size(text_size))
             .when_some(self.size, apply_size)
             .path(self.path.clone())
-            .when_some(self.rotation, |this, rotation| {
-                this.with_transformation(Transformation::rotate(rotation))
-            })
     }
 }
 

@@ -1931,6 +1931,7 @@ mod machines {
                 .debug_selector(|| "hosts-spaces".into())
                 .child(crate::material::list_caption(
                     crate::tr!("spaces.machines.section").into_owned().into(),
+                    true,
                     cx,
                 ))
                 .child(crate::material::plain_list(rows, cx))
