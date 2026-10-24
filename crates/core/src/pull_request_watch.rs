@@ -172,6 +172,31 @@ fn millis(at: &str) -> Option<i64> {
         .map(|at| at.timestamp_millis())
 }
 
+/// The checks that decide "passed": the required ones, or all of them where none is required;
+/// and whether they are the required ones.
+fn gate(checks: &[PullRequestCheck]) -> (Vec<&PullRequestCheck>, bool) {
+    let required: Vec<_> = checks
+        .iter()
+        .filter(|check| check.required == Some(true))
+        .collect();
+    if required.is_empty() {
+        (checks.iter().collect(), false)
+    } else {
+        (required, true)
+    }
+}
+
+fn gate_passed(gate: &[&PullRequestCheck]) -> bool {
+    gate.iter()
+        .all(|check| check.status != CheckStatus::Pending && !check.status.failed())
+}
+
+/// Whether `checks` would be reported passed. A host consults the checks it requires but has
+/// not reported only then: they can only hold that verdict back.
+pub fn checks_pass(checks: &[PullRequestCheck]) -> bool {
+    !checks.is_empty() && gate_passed(&gate(checks).0)
+}
+
 /// Compare a read with what the agent was last told. Each check is reported as soon as it fails,
 /// so a check that never finishes cannot hold the news back. "Passed" is reported once the
 /// required checks all passed, or all checks where none is required. Remarks count when someone
@@ -214,19 +239,8 @@ pub fn evaluate(
         // A check that runs again leaves the list, so a rerun that fails again is reported.
         failed_checks = failed.into_iter().map(|check| check.name).collect();
 
-        let required: Vec<_> = read
-            .checks
-            .iter()
-            .filter(|check| check.required == Some(true))
-            .collect();
-        let gate = if required.is_empty() {
-            read.checks.iter().collect()
-        } else {
-            required.clone()
-        };
-        let passed_now = gate
-            .iter()
-            .all(|check| check.status != CheckStatus::Pending && !check.status.failed());
+        let (gate, required) = gate(&read.checks);
+        let passed_now = gate_passed(&gate);
         let gate_names: Vec<_> = gate.iter().map(|check| check.name.clone()).collect();
         // A watch saved before passed_checks existed takes the current names, so it does not wake.
         let told = if passed && passed_checks.is_empty() {
@@ -236,11 +250,11 @@ pub fn evaluate(
         };
         // A required job created and finished between two passes is never seen pending. Without
         // required checks any check counts, and advisory bots keep adding passed ones: no wake.
-        let gate_grew = !required.is_empty() && gate_names.iter().any(|name| !told.contains(name));
+        let gate_grew = required && gate_names.iter().any(|name| !told.contains(name));
         if passed_now && (!passed || gate_grew) {
             changes.push(WatchChange::ChecksPassed {
                 count: gate.len(),
-                required: !required.is_empty(),
+                required,
             });
         }
         passed = passed_now;

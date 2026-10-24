@@ -15,12 +15,12 @@ use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::process::{ChildOutput, StderrTail, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind,
-    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
-    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus,
-    UserInputDelivery, UserInputOption, UserInputQuestion, file_changes_from_unified_diff,
-    permission_control, selection_str,
+    ApprovalRequest, Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, Goal,
+    GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
+    PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor,
+    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    TurnOptions, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
+    file_changes_from_unified_diff, permission_control, selection_str,
 };
 
 mod developer_instructions;
@@ -602,6 +602,12 @@ enum PendingRequest {
     },
     InjectItems,
     Compact,
+    /// `thread/goal/set` or `thread/goal/clear`; the result arrives again as
+    /// `thread/goal/updated` / `thread/goal/cleared`.
+    GoalChange,
+    /// `thread/goal/get` at startup: the snapshot a resumed thread pushes may
+    /// arrive while startup still waits for its own responses.
+    GoalSnapshot,
 }
 
 struct PendingApproval {
@@ -795,6 +801,10 @@ async fn run_actor(
             commands: provider_commands,
         })
         .await;
+    let thread = json!({ "threadId": actor.thread_id });
+    if let Err(err) = actor.request("thread/goal/get", thread, PendingRequest::GoalSnapshot) {
+        log::debug!("Codex thread/goal/get not sent: {err}");
+    }
     if ready.send(Ok(())).await.is_err() {
         stop_child(&mut actor.child, actor.stdin);
         return;
@@ -1094,6 +1104,21 @@ impl SessionActor for Actor {
                 "thread/compact/start",
                 json!({ "threadId": self.thread_id }),
                 PendingRequest::Compact,
+            ),
+            SessionCommand::SetGoal { objective, status } => {
+                let mut params = json!({ "threadId": self.thread_id, "origin": "user" });
+                if let Some(objective) = objective {
+                    params["objective"] = json!(objective);
+                }
+                if let Some(status) = status {
+                    params["status"] = json!(goal_status_wire(status));
+                }
+                self.request("thread/goal/set", params, PendingRequest::GoalChange)
+            }
+            SessionCommand::ClearGoal => self.request(
+                "thread/goal/clear",
+                json!({ "threadId": self.thread_id, "origin": "user" }),
+                PendingRequest::GoalChange,
             ),
             SessionCommand::Shutdown => Ok(()),
         }
@@ -1811,6 +1836,21 @@ impl Actor {
                 .await;
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let pending = self.pending_requests.remove(&id);
+            if let Some(PendingRequest::GoalSnapshot) = &pending {
+                // A build without goals, or with the feature off, rejects the
+                // request; that is simply a thread without a goal.
+                match value.pointer("/result/goal") {
+                    Some(goal) => {
+                        self.events
+                            .emit(AgentEvent::GoalUpdated {
+                                goal: map_goal(goal),
+                            })
+                            .await
+                    }
+                    None => log::debug!("Codex goal snapshot unavailable: {value}"),
+                }
+                return;
+            }
             if let Some(PendingRequest::SubagentMetadata { parent_id }) = &pending {
                 if let Some(thread) = value.pointer("/result/thread") {
                     self.update_subagent_metadata(parent_id, thread).await;
@@ -2473,6 +2513,18 @@ impl Actor {
                         .await;
                 }
             }
+            "thread/goal/updated" => {
+                if let Some(goal) = params.get("goal").and_then(map_goal) {
+                    self.events
+                        .emit(AgentEvent::GoalUpdated { goal: Some(goal) })
+                        .await;
+                }
+            }
+            "thread/goal/cleared" => {
+                self.events
+                    .emit(AgentEvent::GoalUpdated { goal: None })
+                    .await;
+            }
             "thread/closed" => {
                 self.events
                     .emit(AgentEvent::Warning {
@@ -3094,6 +3146,8 @@ fn pending_name(request: Option<&PendingRequest>) -> &'static str {
         Some(PendingRequest::GuardianApproval { .. }) => "thread/approveGuardianDeniedAction",
         Some(PendingRequest::InjectItems) => "thread/inject_items",
         Some(PendingRequest::Compact) => "thread/compact/start",
+        Some(PendingRequest::GoalChange) => "thread/goal",
+        Some(PendingRequest::GoalSnapshot) => "thread/goal/get",
         None => "unknown",
     }
 }
@@ -3722,6 +3776,40 @@ fn tool_output(item: &Value) -> Option<String> {
 
 /// Map one `turn/plan/updated` step, falling back to `pending` status and
 /// `"step"` text when those fields are absent or unusable.
+/// A `ThreadGoal`; `null` (no goal) maps to `None`.
+fn map_goal(goal: &Value) -> Option<Goal> {
+    let status = match goal.get("status")?.as_str()? {
+        "active" => GoalStatus::Active,
+        "paused" => GoalStatus::Paused,
+        "blocked" => GoalStatus::Blocked,
+        "usageLimited" => GoalStatus::UsageLimited,
+        "budgetLimited" => GoalStatus::BudgetLimited,
+        "complete" => GoalStatus::Complete,
+        _ => return None,
+    };
+    let count = |field: &str| goal.get(field).and_then(Value::as_u64);
+    Some(Goal {
+        objective: goal.get("objective")?.as_str()?.to_owned(),
+        status,
+        tokens_used: count("tokensUsed"),
+        token_budget: count("tokenBudget"),
+        time_used_secs: count("timeUsedSeconds"),
+        checks: None,
+        last_check: None,
+    })
+}
+
+fn goal_status_wire(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Active => "active",
+        GoalStatus::Paused => "paused",
+        GoalStatus::Blocked => "blocked",
+        GoalStatus::UsageLimited => "usageLimited",
+        GoalStatus::BudgetLimited => "budgetLimited",
+        GoalStatus::Complete => "complete",
+    }
+}
+
 fn map_plan_step(step: &Value) -> PlanStep {
     let text = step
         .get("step")
@@ -4494,6 +4582,86 @@ mod tests {
                     assert_eq!(request["params"][field], "T1");
                 }
             }
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    /// Shapes from the 0.164.0 app-server schema (`ThreadGoalSetParams`,
+    /// `ThreadGoalUpdatedNotification`, `ThreadGoalClearedNotification`).
+    #[test]
+    fn goal_commands_and_notifications_use_the_thread_goal_wire() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for (command, expected) in [
+                (
+                    SessionCommand::SetGoal {
+                        objective: Some("Ship the goal strip".into()),
+                        status: None,
+                    },
+                    json!({"method":"thread/goal/set", "params":{
+                        "threadId":"thread-1", "origin":"user", "objective":"Ship the goal strip"
+                    }}),
+                ),
+                (
+                    SessionCommand::SetGoal {
+                        objective: None,
+                        status: Some(GoalStatus::Paused),
+                    },
+                    json!({"method":"thread/goal/set", "params":{
+                        "threadId":"thread-1", "origin":"user", "status":"paused"
+                    }}),
+                ),
+                (
+                    SessionCommand::ClearGoal,
+                    json!({"method":"thread/goal/clear", "params":{
+                        "threadId":"thread-1", "origin":"user"
+                    }}),
+                ),
+            ] {
+                actor.handle_command(command).await.unwrap();
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected echoed request")
+                };
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], expected["method"]);
+                assert_eq!(request["params"], expected["params"]);
+            }
+            let goal = json!({
+                "threadId":"thread-1", "objective":"Ship the goal strip", "status":"budgetLimited",
+                "tokenBudget":50000, "tokensUsed":63876, "timeUsedSeconds":120,
+                "createdAt":1, "updatedAt":2
+            });
+            for line in [
+                json!({"method":"thread/goal/updated", "params":{
+                    "threadId":"thread_child", "turnId":null, "goal":goal
+                }}),
+                json!({"method":"thread/goal/updated", "params":{
+                    "threadId":"thread-1", "turnId":"T1", "goal":goal
+                }}),
+                json!({"method":"thread/goal/cleared", "params":{"threadId":"thread-1"}}),
+            ] {
+                actor.handle_line(&line.to_string()).await;
+            }
+            assert_eq!(
+                events.try_recv().unwrap(),
+                AgentEvent::GoalUpdated {
+                    goal: Some(Goal {
+                        objective: "Ship the goal strip".into(),
+                        status: GoalStatus::BudgetLimited,
+                        tokens_used: Some(63876),
+                        token_budget: Some(50000),
+                        time_used_secs: Some(120),
+                        checks: None,
+                        last_check: None,
+                    })
+                }
+            );
+            assert_eq!(
+                events.try_recv().unwrap(),
+                AgentEvent::GoalUpdated { goal: None }
+            );
+            assert!(events.try_recv().is_err());
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });

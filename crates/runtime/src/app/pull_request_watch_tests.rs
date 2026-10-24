@@ -17,6 +17,7 @@ const ACTIVITY: &str = "PullRequestWatchActivity";
 const THREADS: &str = "PullRequestWatchThreads";
 const TAIL: &str = "PullRequestWatchThreadComments";
 const FINGERPRINTS: &str = "PullRequestWatchFingerprints";
+const BRANCH: &str = "GET /repos/sample/project/branches/main";
 
 struct ReviewThread {
     id: &'static str,
@@ -28,6 +29,10 @@ struct Host {
     state: &'static str,
     head: &'static str,
     checks: Vec<Value>,
+    /// The checks main's branch protection requires.
+    protected: Vec<&'static str>,
+    /// The checks a ruleset on main requires.
+    ruled: Vec<&'static str>,
     mergeable: &'static str,
     comments: Vec<Value>,
     /// The comment list always has another page.
@@ -50,6 +55,11 @@ fn check(name: &str, conclusion: &str) -> Value {
         "detailsUrl": format!("https://ci.test/{name}"),
     })
 }
+fn required(name: &str, conclusion: &str) -> Value {
+    let mut check = check(name, conclusion);
+    check["isRequired"] = json!(true);
+    check
+}
 fn comment(id: &str, author: &str, at: &str) -> Value {
     json!({
         "id": id,
@@ -61,6 +71,15 @@ fn comment(id: &str, author: &str, at: &str) -> Value {
     })
 }
 fn reply(host: &Mutex<Host>, exchange: fixture::Exchange) {
+    if exchange.request.starts_with(BRANCH) {
+        let mut host = host.lock().unwrap();
+        host.requests.push(BRANCH.into());
+        let body = json!({"name": "main", "protection": {
+            "enabled": true,
+            "required_status_checks": {"contexts": host.protected},
+        }});
+        return exchange.reply(200, "", &serde_json::to_vec(&body).unwrap());
+    }
     let sent: Value = serde_json::from_slice(&exchange.body).unwrap();
     let operation = sent["query"]
         .as_str()
@@ -147,6 +166,11 @@ fn reply(host: &Mutex<Host>, exchange: fixture::Exchange) {
                 "mergeable": host.mergeable,
                 "headRefOid": host.head,
                 "baseRefName": "main",
+                "baseRef": {"rules": {"nodes": [{"parameters": {"requiredStatusChecks": host
+                    .ruled
+                    .iter()
+                    .map(|context| json!({"context": context}))
+                    .collect::<Vec<_>>()}}]}},
                 "author": {"login": "tcode-bot"},
                 "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": page(&host.checks, false)}}}]},
             }},
@@ -456,6 +480,8 @@ impl Default for Host {
             state: "OPEN",
             head: "1111111aaaa",
             checks: Vec::new(),
+            protected: Vec::new(),
+            ruled: Vec::new(),
             mergeable: "MERGEABLE",
             comments: Vec::new(),
             endless_comments: false,
@@ -607,6 +633,48 @@ fn a_merge_the_sync_records_wakes_the_watching_thread_once_and_ends_the_watch() 
         harness.commands.is_empty(),
         "the merge wakes the thread once"
     );
+}
+
+/// GitHub creates a job that waits on others only once they finish, so a check main requires can
+/// be missing from the head while every check reported so far has passed.
+#[test]
+fn checks_pass_only_once_every_check_main_requires_has_reported() {
+    let mut harness = Harness::new("tcode-watch-required");
+    harness.host().protected = vec!["Web", "Linux x64"];
+    harness.host().ruled = vec!["macOS arm64"];
+    harness.host().checks = vec![
+        required("Web", "SUCCESS"),
+        check("Linux x64 / tests", "PENDING"),
+        check("macOS arm64 / tests", "PENDING"),
+    ];
+    harness.watch_thread("thread", START);
+    harness.pass();
+    assert!(
+        harness.commands.is_empty(),
+        "Linux x64, which the branch protection requires, has not reported"
+    );
+    harness.host().checks[1] = check("Linux x64 / tests", "SUCCESS");
+    harness.host().checks.push(required("Linux x64", "SUCCESS"));
+    harness.pass();
+    assert!(
+        harness.commands.is_empty(),
+        "macOS arm64, which the ruleset requires, has not reported"
+    );
+
+    harness.host().checks[2] = check("macOS arm64 / tests", "SUCCESS");
+    harness
+        .host()
+        .checks
+        .push(required("macOS arm64", "SUCCESS"));
+    harness.pass();
+    let (delivery, text) = harness.delivered();
+    assert!(
+        text.contains("- All 3 required checks passed on 1111111."),
+        "{text}"
+    );
+    harness.accept(delivery);
+    harness.pass();
+    assert!(harness.commands.is_empty(), "the pass is told once");
 }
 
 #[test]

@@ -3,6 +3,7 @@
 pub mod acp;
 pub mod attachments;
 pub mod git;
+pub mod notice;
 pub mod permissions;
 pub mod project;
 pub mod provider_colors;

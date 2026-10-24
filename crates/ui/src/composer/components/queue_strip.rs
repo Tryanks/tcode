@@ -110,7 +110,14 @@ impl Composer {
                             .truncate()
                             .text_size(px(13.))
                             .text_color(cx.theme().foreground)
-                            .child(truncate_queued(&message.text)),
+                            .child(truncate_queued(
+                                &tcode_core::notice::host_notice(&message.text).map_or_else(
+                                    || message.text.clone(),
+                                    |notice| {
+                                        crate::chat::components::disclosure::notice_label(&notice)
+                                    },
+                                ),
+                            )),
                     )
                     .when_some(countdown, |row, countdown| {
                         row.child(

@@ -38,7 +38,8 @@ use gpui_base::{ElementExt as _, Scrollbar, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
 use tcode_core::git::GitAction;
-use tcode_core::session::{EntryContent, OrchestrateCallback, Timeline, TimelineEntry};
+use tcode_core::notice::{HostNotice, OrchestrateCallback};
+use tcode_core::session::{EntryContent, SteeringStatus, Timeline, TimelineEntry};
 use tcode_core::ui::RightTab;
 
 use crate::commit_dialog::CommitDialog;
@@ -77,9 +78,10 @@ use self::model::{
     LimitResumeAction, ListSync, RowPart, RowRenderArgs, Segment, TimelineContinuity, TimelineRow,
     TurnIndexCache, activity_run_duration_ms, displayed_error_text, divergent_served_model,
     format_elapsed_deciseconds, latest_message_ids, limit_resume_action, live_edit_counts,
-    live_edit_rows, partition_activity_run, plain_text_as_markdown, row_of_entry, rows_of_turn,
-    segment_entries, start_hub_projects, timeline_overdraw, user_callback, user_content,
-    user_visible_text, work_log_capsule_label, work_log_counts, work_log_key, work_log_outcome,
+    live_edit_rows, notice_keys, partition_activity_run, plain_text_as_markdown, row_of_entry,
+    rows_of_turn, segment_entries, start_hub_projects, timeline_overdraw, user_content,
+    user_notice, user_visible_text, work_log_capsule_label, work_log_counts, work_log_key,
+    work_log_outcome,
 };
 use self::residency::{
     MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_row_window, viewport_row_window,
@@ -1503,56 +1505,11 @@ impl ChatView {
                     }
                 }
                 Segment::User(entry) => {
-                    let (text, steering, context_len, attachments) =
-                        user_content(&entry.content).expect("user segment");
-                    // A child-thread callback is a centered disclosure row, not a
-                    // bubble, and carries no action row; any context the turn
-                    // injected before it is disclosed above it.
-                    if let Some(callback) = user_callback(&entry.content) {
-                        if let Some(context) = context_len
-                            .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
-                            .map(|len| &text[..len])
-                        {
-                            column = column.child(self.compose_disclosure(
-                                index,
-                                format!("orchestrate-context-{}", entry.id),
-                                injected_context_label(context).into(),
-                                context,
-                                cx,
-                            ));
-                        }
-                        column = column
-                            .child(self.compose_callback_row(index, &entry.id, &callback, cx));
-                    } else if let Some((number, notice)) =
-                        tcode_core::pull_request_watch::parse_message(user_visible_text(
-                            text,
-                            context_len,
-                        ))
-                        .filter(|_| steering.is_none())
-                    {
-                        // A watch's message is the host's, never a user bubble.
-                        column = column.child(self.compose_watch_update(
-                            (index, &entry.id, text, context_len),
-                            number,
-                            &notice,
-                            cx,
-                        ));
-                    } else {
-                        column = column.child(self.compose_user(
-                            (
-                                index,
-                                &entry.id,
-                                text,
-                                cwd,
-                                context_len,
-                                attachments,
-                                steering,
-                                pinned.0 == Some(entry.id.as_str()),
-                            ),
-                            window,
-                            cx,
-                        ));
-                    }
+                    column = column.child(self.compose_user_entry(
+                        (index, entry, cwd, pinned.0 == Some(entry.id.as_str())),
+                        window,
+                        cx,
+                    ));
                 }
                 Segment::Assistant(entry) => {
                     let EntryContent::Item(ItemContent::AssistantMessage { text }) = &entry.content
@@ -1795,26 +1752,8 @@ impl ChatView {
         // order holds without making their request-time position look
         // model-visible.
         for entry in segment_entries(entries, turn.running).pending_steers {
-            let EntryContent::Steer {
-                text,
-                status,
-                context_len,
-                attachments,
-            } = &entry.content
-            else {
-                unreachable!();
-            };
-            column = column.child(self.compose_user(
-                (
-                    index,
-                    &entry.id,
-                    text,
-                    cwd,
-                    *context_len,
-                    attachments,
-                    Some(*status),
-                    pinned.0 == Some(entry.id.as_str()),
-                ),
+            column = column.child(self.compose_user_entry(
+                (index, entry, cwd, pinned.0 == Some(entry.id.as_str())),
                 window,
                 cx,
             ));
@@ -1993,54 +1932,90 @@ impl ChatView {
             .into_any_element()
     }
 
-    fn compose_watch_update(
+    /// A user-role entry, sent or still steering: the notice the host wrote,
+    /// or else the user's bubble.
+    fn compose_user_entry(
         &self,
-        (turn, entry_id, text, context_len): (usize, &str, &str, Option<usize>),
-        number: u64,
-        notice: &tcode_core::pull_request_watch::WatchNotice,
+        (turn, entry, cwd, pinned): (usize, &TimelineEntry, &Path, bool),
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let (text, steering, context_len, attachments) =
+            user_content(&entry.content).expect("a user entry");
+        let Some(notice) = user_notice(&entry.content) else {
+            return self.compose_user(
+                (
+                    turn,
+                    &entry.id,
+                    text,
+                    cwd,
+                    context_len,
+                    attachments,
+                    steering,
+                    pinned,
+                ),
+                window,
+                cx,
+            );
+        };
+        // A notice is the host's, never the user's words: centered disclosure
+        // rows without an action row, below any context the turn injected.
         let context = context_len
             .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
             .map(|len| &text[..len]);
-        let label = crate::tr!(
-            "pull_requests.update_label",
-            number = number.to_string(),
-            kinds = crate::pull_requests::watch_notice_kinds(notice)
-        )
-        .into_owned();
-        v_flex()
+        let pending = steering == Some(SteeringStatus::Pending);
+        let label = |label: String| -> SharedString {
+            if pending {
+                format!("{label} · {}", crate::tr!("chat.steering")).into()
+            } else {
+                label.into()
+            }
+        };
+        let mut column = v_flex()
             .w_full()
             .gap_2()
             .when_some(context, |column, context| {
                 column.child(self.compose_disclosure(
                     turn,
-                    format!("orchestrate-context-{entry_id}"),
+                    format!("orchestrate-context-{}", entry.id),
                     injected_context_label(context).into(),
                     context,
                     cx,
                 ))
-            })
-            .child(self.compose_disclosure(
-                turn,
-                format!("pull-request-update-{entry_id}"),
-                label.into(),
-                user_visible_text(text, context_len),
-                cx,
-            ))
-            .into_any_element()
+            });
+        let mut keys = notice_keys(&notice, &entry.id).into_iter();
+        let mut key = || keys.next().expect("a key per notice row");
+        let visible = user_visible_text(text, context_len);
+        match &notice {
+            HostNotice::Orchestrate(callbacks) => {
+                for callback in callbacks {
+                    let label = label(components::disclosure::callback_label(callback));
+                    column =
+                        column.child(self.compose_callback_row(turn, key(), label, callback, cx));
+                }
+            }
+            HostNotice::PullRequest { .. } | HostNotice::ReportReminder => {
+                column = column.child(self.compose_disclosure(
+                    turn,
+                    key(),
+                    label(components::disclosure::notice_label(&notice)),
+                    visible,
+                    cx,
+                ));
+            }
+        }
+        column.into_any_element()
     }
 
     fn compose_callback_row(
         &self,
         turn: usize,
-        entry_id: &str,
+        key: String,
+        label: SharedString,
         callback: &OrchestrateCallback,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let key = format!("orchestrate-callback-{entry_id}");
         let expanded = self.expanded.contains(&key);
-        let toggle_key = key;
         let child_id = callback.child_id.clone();
         let exists = {
             let store = self.workspace_store.read(cx);
@@ -2056,8 +2031,10 @@ impl ChatView {
                 crate::agents_panel::open_agent(&store, child_id.clone(), cx);
             }) as components::subagent::ClickHandler
         });
+        let toggle_key = key.clone();
         components::disclosure::callback_row(
-            entry_id,
+            &key,
+            label,
             callback,
             expanded,
             cx.listener(move |this, _, _, cx| {
@@ -4560,6 +4537,62 @@ mod tests {
         });
 
         assert!(cx.debug_bounds("steering-steer").is_some());
+    }
+
+    /// The host steers its notices into a running turn: steered or still
+    /// pending, a notice is a disclosure row per notice, never the user's bubble.
+    #[gpui::test]
+    fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+        use tcode_core::session::SteeringStatus;
+
+        let steer = |text: String, status| EntryContent::Steer {
+            text,
+            status,
+            context_len: None,
+            attachments: Vec::new(),
+        };
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries.extend([
+            entry("user", user_item("go")),
+            entry(
+                "wake",
+                steer(
+                    tcode_core::pull_request_watch::merged_message(5, "https://x/pull/5"),
+                    SteeringStatus::Accepted,
+                ),
+            ),
+            entry("assistant", assistant("On it.")),
+            entry(
+                "results",
+                steer(
+                    "[orchestrate] thread a (\"First\") reported.\nResult (reported via report_result):\none\n\n[orchestrate] thread b (\"Second\") failed.\nthe provider closed".into(),
+                    SteeringStatus::Pending,
+                ),
+            ),
+        ]);
+
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (_view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw(cx);
+
+        for row in [
+            "disclosure-pull-request-update-wake",
+            "disclosure-orchestrate-callback-results-0",
+            "disclosure-orchestrate-callback-results-1",
+        ] {
+            assert!(cx.debug_bounds(row).is_some(), "{row} is not a disclosure");
+        }
+        for bubble in ["steering-wake", "steering-results"] {
+            assert!(cx.debug_bounds(bubble).is_none(), "{bubble} is a bubble");
+        }
     }
 
     #[gpui::test]
