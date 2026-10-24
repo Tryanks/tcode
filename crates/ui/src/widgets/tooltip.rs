@@ -1,4 +1,4 @@
-use crate::{theme::ActiveTheme as _, widgets::Kbd};
+use crate::{theme::ActiveTheme as _, typography::TextRole as _, widgets::Kbd};
 use gpui::{
     Action, AnyElement, AnyView, App, AppContext as _, Context, IntoElement, ParentElement as _,
     Render, SharedString, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
@@ -81,11 +81,11 @@ impl Render for Tooltip {
             .border_1()
             .border_color(cx.theme().border)
             .shadow_md()
-            .rounded(cx.theme().tokens.radius.sm)
+            .rounded(crate::material::radius_chip(cx))
             .justify_between()
             .py_0p5()
             .px_2()
-            .text_sm()
+            .text_token(&cx.theme().tokens.typography.sm)
             .gap_3()
             .refine_style(&self.style)
             .child(div().child(match &self.content {
@@ -95,7 +95,7 @@ impl Render for Tooltip {
             .when_some(key_binding, |this, kbd| {
                 this.child(
                     div()
-                        .text_xs()
+                        .text_token(&cx.theme().tokens.typography.xs)
                         .flex_shrink_0()
                         .text_color(cx.theme().muted_foreground)
                         .child(kbd.appearance(false)),

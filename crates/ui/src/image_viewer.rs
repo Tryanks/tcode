@@ -23,6 +23,8 @@ use crate::icon::IconName;
 use crate::overlay::OverlayExt as _;
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
 
 actions!(image_viewer, [ZoomIn, ZoomOut, ZoomToFit, ActualSize]);
 
@@ -45,9 +47,6 @@ const MAX_ZOOM: f32 = 8.;
 const WHEEL_LINE: Pixels = px(20.);
 /// Pointer travel before a press is a drag rather than the click it began as.
 const DRAG_SLOP: Pixels = px(4.);
-/// The toolbar is one of the shell's top strips, the height the window's
-/// own controls expect.
-const TOOLBAR_HEIGHT: Pixels = px(crate::window_caption::CAPTION_STRIP_HEIGHT);
 const STAGE_MARGIN: Pixels = px(16.);
 /// How long keys, buttons and double-clicks take to reach their placement.
 const GLIDE: Duration = Duration::from_millis(200);
@@ -186,7 +185,9 @@ pub(crate) fn unpreviewed(
     cx: &App,
 ) -> impl Fn() -> gpui::AnyElement + 'static {
     let color = cx.theme().muted_foreground;
-    let surface = framed.then(|| (cx.theme().muted, cx.theme().tokens.radius.md));
+    let surface = framed.then(|| (cx.theme().muted, crate::material::radius_card(cx)));
+    let caption_text = cx.theme().tokens.typography.xs;
+    let spacing_xs = cx.theme().tokens.spacing.xs;
     let caption =
         caption.then(|| SharedString::from(crate::tr!("markdown.open_image").into_owned()));
     move || {
@@ -194,7 +195,7 @@ pub(crate) fn unpreviewed(
             .size_full()
             .items_center()
             .justify_center()
-            .gap_1()
+            .gap(spacing_xs)
             .text_color(color)
             .when_some(surface, |tile, (background, radius)| {
                 tile.rounded(radius).bg(background)
@@ -202,11 +203,10 @@ pub(crate) fn unpreviewed(
             .child(
                 crate::icon::Icon::default()
                     .path("icons/image.svg")
-                    .small()
                     .text_color(color),
             )
             .when_some(caption.clone(), |tile, caption| {
-                tile.child(div().text_xs().child(caption))
+                tile.child(div().text_token(&caption_text).child(caption))
             })
             .into_any_element()
     }
@@ -646,7 +646,12 @@ impl Render for ImageViewer {
         };
         // The frame is centred on the stage, so the band the toolbar takes
         // above it is mirrored below.
-        let band = insets.top.max(insets.bottom) + TOOLBAR_HEIGHT + STAGE_MARGIN;
+        let band = insets.top.max(insets.bottom)
+            + px(crate::material::bar_height(
+                crate::material::Bar::Strip,
+                compact,
+            ))
+            + STAGE_MARGIN;
         self.frame = size(
             (viewport.width - insets.left - insets.right - STAGE_MARGIN * 2.).max(px(1.)),
             (viewport.height - band * 2.).max(px(1.)),
@@ -697,15 +702,18 @@ impl Render for ImageViewer {
                             Some(OriginalState::Failed(_) | OriginalState::Cancelled)
                         )
                     {
-                        el.child(div().text_sm().text_color(muted).child(
-                            match &self.original_state {
-                                Some(OriginalState::Failed(message)) => message.clone(),
-                                Some(OriginalState::Cancelled) => {
-                                    crate::tr!("image_viewer.cancelled").into_owned().into()
-                                }
-                                _ => crate::tr!("image_viewer.load_failed").into_owned().into(),
-                            },
-                        ))
+                        el.child(
+                            div()
+                                .text_token(&cx.theme().tokens.typography.sm)
+                                .text_color(muted)
+                                .child(match &self.original_state {
+                                    Some(OriginalState::Failed(message)) => message.clone(),
+                                    Some(OriginalState::Cancelled) => {
+                                        crate::tr!("image_viewer.cancelled").into_owned().into()
+                                    }
+                                    _ => crate::tr!("image_viewer.load_failed").into_owned().into(),
+                                }),
+                        )
                     } else if self.target.is_none() || self.remote_progress {
                         el.child(crate::widgets::Spinner::new())
                     } else {
@@ -745,7 +753,7 @@ impl Render for ImageViewer {
                         | OriginalState::Failed(_)
                 )
             );
-        let transfer_controls = div()
+        let transfer_controls = crate::material::overlay_contour(div(), cx)
             .absolute()
             .bottom(insets.bottom + STAGE_MARGIN)
             .left(insets.left + STAGE_MARGIN)
@@ -753,18 +761,15 @@ impl Render for ImageViewer {
             .flex()
             .items_center()
             .justify_center()
-            .gap_2()
-            .p_2()
-            .rounded_lg()
-            .bg(cx.theme().popover)
+            .gap(cx.theme().tokens.spacing.sm)
+            .p(cx.theme().tokens.spacing.sm)
+            .rounded(crate::material::radius_overlay(cx))
             .text_color(cx.theme().foreground)
-            .border_1()
-            .border_color(cx.theme().border)
             .occlude()
             .when_some(self.original_state.as_ref(), |panel, state| match state {
                 OriginalState::Loading { received, total } => panel
                     .child(
-                        div().text_xs().child(match total {
+                        div().text_secondary(false, cx).child(match total {
                             Some(total) => crate::tr!(
                                 "image_viewer.progress",
                                 received = received.to_string(),
@@ -775,90 +780,83 @@ impl Render for ImageViewer {
                         }),
                     )
                     .child(
-                        gpui_base::Button::new("image-viewer-cancel")
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .bg(cx.theme().secondary)
-                            .child(crate::tr!("image_viewer.cancel").into_owned())
+                        Button::new("image-viewer-cancel")
+                            .secondary()
+                            .small()
+                            .label(crate::tr!("image_viewer.cancel"))
                             .on_click(cx.listener(|this, _, _, cx| this.cancel_original(cx))),
                     ),
                 OriginalState::Cancelled | OriginalState::Failed(_) => panel.child(
-                    gpui_base::Button::new("image-viewer-retry")
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .bg(cx.theme().secondary)
-                        .child(crate::tr!("image_viewer.retry").into_owned())
+                    Button::new("image-viewer-retry")
+                        .secondary()
+                        .small()
+                        .label(crate::tr!("image_viewer.retry"))
                         .on_click(cx.listener(|this, _, _, cx| this.start_original(cx))),
                 ),
                 OriginalState::Complete => panel,
             });
 
+        let traffic_lights = crate::window_caption::traffic_light_inset(window);
+        let bar = crate::material::bar_divider_below(
+            crate::material::bar(
+                "image-viewer-toolbar",
+                crate::material::Bar::Strip,
+                compact,
+                cx,
+            ),
+            cx,
+        )
+        .when(traffic_lights > Pixels::ZERO, |bar| bar.pl(traffic_lights))
+        .bg(cx.theme().popover)
+        .child(crate::material::bar_title(self.title.clone(), cx))
+        .child(
+            crate::material::toolbar_icon_button(
+                "image-viewer-zoom-out",
+                IconName::ZoomOut,
+                crate::tr!("image_viewer.zoom_out").into_owned(),
+                compact,
+            )
+            .disabled(!zoomed)
+            .on_click(cx.listener(|this, _, _, cx| this.step(1. / ZOOM_STEP, cx))),
+        )
+        .child(
+            // Fixed so the zoom controls hold still as the percentage changes.
+            div()
+                .w(px(48.))
+                .text_center()
+                .text_secondary(false, cx)
+                .children(percent),
+        )
+        .child(
+            crate::material::toolbar_icon_button(
+                "image-viewer-zoom-in",
+                IconName::ZoomIn,
+                crate::tr!("image_viewer.zoom_in").into_owned(),
+                compact,
+            )
+            .disabled(self.placement.zoom >= self.max_zoom())
+            .on_click(cx.listener(|this, _, _, cx| this.step(ZOOM_STEP, cx))),
+        )
+        .child(fit_or_actual)
+        .child(
+            crate::material::toolbar_icon_button(
+                "image-viewer-close",
+                IconName::Close,
+                crate::tr!("image_viewer.close").into_owned(),
+                compact,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.cancel_original(cx);
+                window.close_dialog(cx);
+            })),
+        );
         let toolbar = div()
             .absolute()
             .top(insets.top)
             .left(insets.left)
             .right(insets.right)
-            .h(TOOLBAR_HEIGHT)
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .pl(crate::window_caption::traffic_light_inset(window).max(px(8.)))
             .occlude()
-            .bg(cx.theme().popover)
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .child(self.title.clone()),
-            )
-            .child(
-                crate::material::toolbar_icon_button(
-                    "image-viewer-zoom-out",
-                    IconName::ZoomOut,
-                    crate::tr!("image_viewer.zoom_out").into_owned(),
-                    compact,
-                )
-                .disabled(!zoomed)
-                .on_click(cx.listener(|this, _, _, cx| this.step(1. / ZOOM_STEP, cx))),
-            )
-            .child(
-                div()
-                    .w(px(48.))
-                    .text_center()
-                    .text_xs()
-                    .text_color(muted)
-                    .children(percent),
-            )
-            .child(
-                crate::material::toolbar_icon_button(
-                    "image-viewer-zoom-in",
-                    IconName::ZoomIn,
-                    crate::tr!("image_viewer.zoom_in").into_owned(),
-                    compact,
-                )
-                .disabled(self.placement.zoom >= self.max_zoom())
-                .on_click(cx.listener(|this, _, _, cx| this.step(ZOOM_STEP, cx))),
-            )
-            .child(fit_or_actual)
-            .child(
-                crate::material::toolbar_icon_button(
-                    "image-viewer-close",
-                    IconName::Close,
-                    crate::tr!("image_viewer.close").into_owned(),
-                    compact,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.cancel_original(cx);
-                    window.close_dialog(cx);
-                })),
-            );
+            .child(bar);
 
         div()
             .id("image-viewer")

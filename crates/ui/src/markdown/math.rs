@@ -10,11 +10,12 @@ use crate::{
     icon::IconName,
     scroll::ScrollableElement as _,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::copy::{action_button, copy_button},
 };
 use gpui::{
     AnyElement, App, Entity, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    SharedString, Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_base::h_flex;
 use latex_rust::{MathBox, MathFont, MathStyle, layout, parse};
@@ -99,7 +100,7 @@ pub(super) fn block(
         #[cfg(test)]
         let selector = format!("markdown-math-toggle-{path}");
         let button = action_button(format!("math-toggle-{path}"), icon, label.into_owned(), cx)
-            .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)))
+            .touch(compact)
             .on_click(move |_, window, cx| {
                 crate::widgets::stop_click_propagation(window, cx);
                 gpui_base::TextSelection::clear(window, cx);
@@ -137,13 +138,12 @@ pub(super) fn block(
         .when(beside, |actions| actions.flex_none().mt_1())
         .items_center()
         .block_mouse_except_scroll()
-        .rounded(cx.theme().tokens.radius.md)
+        .rounded(crate::material::radius_card(cx))
         .bg(cx.theme().tokens.colors.muted)
         .when(tree.is_none(), |actions| {
             actions.pl_2().child(
                 div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_secondary(false, cx)
                     .child(crate::tr!("markdown.math_error").into_owned()),
             )
         })

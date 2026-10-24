@@ -10,14 +10,16 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, Styled as _, Task, Window, div, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{DeviceAccess, GroupAction, GroupInfo, GroupMachineInfo, HostingState};
 
 use super::spaces::{Spaces, SpacesObserver};
 use crate::icon::IconName;
+use crate::material::{CARD_INSET, group_caption, group_row, notice, section_gap};
 use crate::overlay::{DialogActions, DialogButtons, Notification, OverlayExt as _};
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::ButtonVariant;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
@@ -76,11 +78,10 @@ impl GroupSection {
         };
         let id = machine.id.clone();
         let name = machine.name.clone();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let spaces = spaces.clone();
             let id = id.clone();
             alert
-                .bg(cx.theme().popover)
                 .title(crate::tr!("group.machines.remove_title", name = name.clone()).into_owned())
                 .description(crate::tr!("group.machines.remove_description"))
                 .button_props(
@@ -105,10 +106,9 @@ impl GroupSection {
             return;
         };
         let name = group.name.clone();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let spaces = spaces.clone();
             alert
-                .bg(cx.theme().popover)
                 .title(crate::tr!("group.leave_title", name = name.clone()).into_owned())
                 .description(crate::tr!("group.leave_description"))
                 .button_props(
@@ -127,35 +127,26 @@ impl GroupSection {
         });
     }
 
-    fn note(text: SharedString, cx: &App) -> AnyElement {
+    fn note(text: SharedString, compact: bool, cx: &App) -> AnyElement {
         div()
-            .text_size(px(13.))
-            .text_color(cx.theme().muted_foreground)
+            .text_secondary(compact, cx)
             .child(text)
             .into_any_element()
     }
 
-    fn subheading(label: SharedString, cx: &App) -> AnyElement {
-        div()
-            .text_size(px(13.))
-            .font_medium()
-            .text_color(cx.theme().muted_foreground)
-            .child(label)
-            .into_any_element()
-    }
-
-    fn intro(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn intro(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .w_full()
-            .p_3()
-            .gap_3()
+            .p(px(CARD_INSET))
+            .gap(cx.theme().tokens.spacing.md)
             .child(Self::note(
                 crate::tr!("group.intro").into_owned().into(),
+                compact,
                 cx,
             ))
             .child(
                 div()
-                    .text_size(px(13.))
+                    .text_secondary(compact, cx)
                     .text_color(cx.theme().warning_foreground)
                     .child(crate::tr!("group.risk")),
             )
@@ -189,21 +180,22 @@ impl GroupSection {
             .into_any_element()
     }
 
-    fn machines_block(&self, group: &GroupInfo, cx: &mut Context<Self>) -> AnyElement {
+    fn machines_block(
+        &self,
+        group: &GroupInfo,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut rows = v_flex().w_full();
         for machine in &group.machines {
             let remove = machine.clone();
             rows = rows.child(
-                h_flex()
-                    .w_full()
-                    .min_h(px(36.))
-                    .gap_3()
-                    .items_center()
+                group_row(cx)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(15.))
+                            .text_body(compact, cx)
                             .truncate()
                             .child(machine.name.clone()),
                     )
@@ -211,8 +203,7 @@ impl GroupSection {
                         row.child(
                             div()
                                 .flex_none()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
+                                .text_secondary(compact, cx)
                                 .child(crate::tr!("group.machines.this")),
                         )
                     })
@@ -237,16 +228,17 @@ impl GroupSection {
         }
         v_flex()
             .w_full()
-            .gap_1()
-            .child(Self::subheading(
-                crate::tr!("group.machines.title").into_owned().into(),
-                cx,
-            ))
+            .child(group_caption(crate::tr!("group.machines.title"), cx))
             .child(rows)
             .into_any_element()
     }
 
-    fn declined_block(&self, group: &GroupInfo, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn declined_block(
+        &self,
+        group: &GroupInfo,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if group.declined.is_empty() {
             return None;
         }
@@ -254,16 +246,12 @@ impl GroupSection {
         for device in &group.declined {
             let id = device.id.clone();
             rows = rows.child(
-                h_flex()
-                    .w_full()
-                    .min_h(px(36.))
-                    .gap_3()
-                    .items_center()
+                group_row(cx)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(15.))
+                            .text_body(compact, cx)
                             .truncate()
                             .child(super::device_label(
                                 &device.name,
@@ -285,37 +273,31 @@ impl GroupSection {
         Some(
             v_flex()
                 .w_full()
-                .gap_1()
-                .child(Self::subheading(
-                    crate::tr!("group.declined.title").into_owned().into(),
-                    cx,
-                ))
-                .child(Self::note(
+                .child(group_caption(crate::tr!("group.declined.title"), cx))
+                .child(div().px(px(CARD_INSET)).child(Self::note(
                     crate::tr!("group.declined.description").into_owned().into(),
+                    compact,
                     cx,
-                ))
+                )))
                 .child(rows)
                 .into_any_element(),
         )
     }
 
-    fn detail(&self, group: &GroupInfo, cx: &mut Context<Self>) -> AnyElement {
+    /// The group's name, notes and actions sit at the card inset; the machine
+    /// and device lists are [`group_row`]s, which carry that inset themselves.
+    fn detail(&self, group: &GroupInfo, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let leave = group.clone();
         v_flex()
             .w_full()
-            .p_3()
-            .gap_5()
+            .py(px(CARD_INSET))
+            .gap(section_gap(cx))
             .debug_selector(|| "group-detail".into())
             .child(
                 v_flex()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_medium()
-                            .truncate()
-                            .child(group.name.clone()),
-                    )
+                    .px(px(CARD_INSET))
+                    .gap(cx.theme().tokens.spacing.xxs)
+                    .child(div().text_title(cx).truncate().child(group.name.clone()))
                     .child(Self::note(
                         if group.machines.len() == 1 {
                             crate::tr!("group.summary.machine_one")
@@ -324,17 +306,19 @@ impl GroupSection {
                         }
                         .into_owned()
                         .into(),
+                        compact,
                         cx,
                     )),
             )
-            .child(Self::note(
+            .child(div().px(px(CARD_INSET)).child(Self::note(
                 crate::tr!("group.detail_note").into_owned().into(),
+                compact,
                 cx,
-            ))
-            .child(self.machines_block(group, cx))
-            .children(self.declined_block(group, cx))
+            )))
+            .child(self.machines_block(group, compact, cx))
+            .children(self.declined_block(group, compact, cx))
             .child(
-                h_flex().child(
+                h_flex().px(px(CARD_INSET)).child(
                     Button::new("group-leave")
                         .ghost()
                         .compact()
@@ -350,7 +334,8 @@ impl GroupSection {
 }
 
 impl gpui::Render for GroupSection {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let spaces = self.spaces(cx);
         self.observer.watch(spaces.as_ref(), cx);
         let Some(spaces) = spaces else {
@@ -358,21 +343,13 @@ impl gpui::Render for GroupSection {
         };
         let group = spaces.read(cx).group().cloned();
         let body = match &group {
-            Some(group) => self.detail(group, cx),
-            None => self.intro(cx),
+            Some(group) => self.detail(group, compact, cx),
+            None => self.intro(compact, cx),
         };
         v_flex()
             .w_full()
             .debug_selector(|| "group-section".into())
-            .child(
-                div()
-                    .pl_3()
-                    .pb(px(6.))
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("group.section")),
-            )
+            .child(group_caption(crate::tr!("group.section"), cx))
             .child(crate::material::group(cx).child(body))
             .into_any_element()
     }
@@ -413,19 +390,14 @@ fn brought(spaces: &Entity<Spaces>, cx: &App) -> Vec<String> {
 /// The warning every create and join carries: the devices this machine
 /// brings, which every member admits once confirmed.
 fn brought_warning(devices: &[String], cx: &App) -> AnyElement {
-    v_flex()
-        .w_full()
-        .gap_2()
-        .p_3()
-        .rounded(crate::material::radius_chip(cx))
-        .border_1()
-        .border_color(cx.theme().warning.opacity(0.5))
-        .bg(cx.theme().warning.opacity(0.08))
+    notice(cx.theme().warning, cx)
+        .flex_col()
+        .items_start()
+        .text_body(false, cx)
         .debug_selector(|| "group-brought".into())
         .child(
             div()
-                .text_size(px(13.))
-                .font_medium()
+                .text_caption(cx)
                 .text_color(cx.theme().warning_foreground)
                 .child(if devices.is_empty() {
                     crate::tr!("group.brought.none")
@@ -436,17 +408,8 @@ fn brought_warning(devices: &[String], cx: &App) -> AnyElement {
         .children(
             devices
                 .iter()
-                .map(|label| div().text_size(px(13.)).child(format!("• {label}"))),
+                .map(|label| div().child(format!("• {label}"))),
         )
-        .into_any_element()
-}
-
-fn field_label(label: SharedString, cx: &App) -> AnyElement {
-    div()
-        .text_size(px(13.))
-        .font_medium()
-        .text_color(cx.theme().muted_foreground)
-        .child(label)
         .into_any_element()
 }
 
@@ -475,7 +438,6 @@ fn open_create(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
         let ok = submit.clone();
         let create = submit.clone();
         dialog
-            .w(px(460.))
             .title(crate::tr!("group.create.title").into_owned())
             .on_ok(move |_, window, cx| ok(window, cx))
             .content(move |content, _, cx| {
@@ -571,7 +533,6 @@ fn open_join(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
         let ok = submit.clone();
         let join = submit.clone();
         dialog
-            .w(px(460.))
             .title(crate::tr!("group.join.title").into_owned())
             .on_ok(move |_, window, cx| ok(window, cx))
             .content(move |content, _, cx| {
@@ -581,15 +542,15 @@ fn open_join(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
                         .debug_selector(|| "group-join-dialog".into())
                         .child(
                             div()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
+                                .text_secondary(false, cx)
                                 .child(crate::tr!("group.join.description")),
                         )
                         .child(Input::new(&link_field))
-                        .child(field_label(
-                            crate::tr!("group.join.address").into_owned().into(),
-                            cx,
-                        ))
+                        .child(
+                            div()
+                                .text_caption(cx)
+                                .child(crate::tr!("group.join.address")),
+                        )
                         .child(Input::new(&address_field))
                         .child(brought_warning(&brought, cx)),
                 )
@@ -626,10 +587,9 @@ pub(crate) fn confirm_group_removal(
     cx: &mut App,
 ) {
     let on_ok = Rc::new(on_ok);
-    window.open_alert_dialog(cx, move |alert, _, cx| {
+    window.open_alert_dialog(cx, move |alert, _, _| {
         let on_ok = on_ok.clone();
         alert
-            .bg(cx.theme().popover)
             .title(crate::tr!("group.remove_device.title", name = device_name.clone()).into_owned())
             .description(
                 crate::tr!(
@@ -654,10 +614,9 @@ pub(crate) fn confirm_group_removal(
 
 /// Under a machine's invitation while the machine is in a group: pairing
 /// with it is joining the group, for a device and for another machine.
-pub(crate) fn invitation_note(group: &str, cx: &App) -> AnyElement {
+pub(crate) fn invitation_note(group: &str, compact: bool, cx: &App) -> AnyElement {
     div()
-        .text_size(px(13.))
-        .text_color(cx.theme().muted_foreground)
+        .text_secondary(compact, cx)
         .debug_selector(|| "group-invitation-note".into())
         .child(crate::tr!("group.invitation_note", name = group.to_owned()).into_owned())
         .into_any_element()

@@ -1,20 +1,33 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Edges, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, StyleRefinement, Styled, WeakFocusHandle,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, FocusHandle, InteractiveElement as _, IntoElement, ParentElement,
+    Pixels, RenderOnce, SharedString, StyleRefinement, Styled, WeakFocusHandle, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::{
     icon::IconName,
     sizing::Sizable as _,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{Button, ButtonVariant, ButtonVariants as _},
 };
 use gpui_base::StyledExt as _;
 
 use super::OverlayExt as _;
+
+/// gpui-base's `Dialog` is an unstyled host with no width; these two widths
+/// are Tcode's, named here once. Forms take the default; content dialogs take
+/// [`Dialog::wide`], which matches the palette so the app has one wide
+/// overlay width.
+const DIALOG_WIDTH: f32 = 448.;
+const DIALOG_WIDE_WIDTH: f32 = 640.;
+
+/// gpui `list`/`uniform_list` need a definite height and `DialogContent` is
+/// `flex_1`, which the builder cannot read back; the two list dialogs (ACP
+/// agents, plugins) share this one height.
+pub(crate) const DIALOG_LIST_HEIGHT: f32 = 456.;
 
 type Decision = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) -> bool>;
 type Closed = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -128,6 +141,7 @@ impl RenderOnce for DialogContent {
 #[derive(IntoElement)]
 pub struct DialogActions {
     style: StyleRefinement,
+    leading: Vec<AnyElement>,
     children: Vec<AnyElement>,
 }
 
@@ -135,8 +149,17 @@ impl DialogActions {
     pub fn new() -> Self {
         Self {
             style: StyleRefinement::default(),
+            leading: Vec::new(),
             children: Vec::new(),
         }
+    }
+
+    /// Actions on the left of the row, wrapping before they push the trailing
+    /// actions (the element's children) off the right edge.
+    pub fn leading(mut self, children: impl IntoIterator<Item = impl IntoElement>) -> Self {
+        self.leading
+            .extend(children.into_iter().map(IntoElement::into_any_element));
+        self
     }
 }
 
@@ -161,9 +184,19 @@ impl Styled for DialogActions {
 impl RenderOnce for DialogActions {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         gpui_base::h_flex()
+            .items_center()
             .gap_2()
             .justify_end()
             .refine_style(&self.style)
+            .when(!self.leading.is_empty(), |el| {
+                el.child(
+                    gpui_base::h_flex()
+                        .flex_1()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(self.leading),
+                )
+            })
             .children(self.children)
     }
 }
@@ -248,7 +281,7 @@ impl Dialog {
             footer: None,
             content: None,
             children: Vec::new(),
-            width: px(448.),
+            width: px(DIALOG_WIDTH),
             max_width: None,
             close_button: true,
             fill: false,
@@ -304,6 +337,10 @@ impl Dialog {
     }
     pub fn width(self, width: impl Into<Pixels>) -> Self {
         self.w(width)
+    }
+    /// The content-dialog width; forms keep the default.
+    pub fn wide(self) -> Self {
+        self.w(px(DIALOG_WIDE_WIDTH))
     }
     pub fn max_w(mut self, width: impl Into<Pixels>) -> Self {
         self.max_width = Some(width.into());
@@ -375,8 +412,8 @@ impl RenderOnce for Dialog {
         // `flex_1 min_h_0`, so a scrolling body shrinks into it.
         let width = crate::sizing::fit_viewport(f32::from(self.width), viewport.width);
         let x = viewport.width / 2. - width / 2.;
-        let y = viewport.height / 10. + px(self.layer as f32 * 16.);
-        let padding = Edges::all(px(16.));
+        let inset = cx.theme().tokens.spacing.lg;
+        let y = viewport.height / 10. + inset * self.layer as f32;
         let content = self
             .content
             .map(|builder| builder(DialogContent::new(), window, cx));
@@ -397,12 +434,12 @@ impl RenderOnce for Dialog {
                     .top(y)
                     .w(width)
                     .when_some(self.max_width, |el, width| el.max_w(width))
-                    .max_h(viewport.height - y - px(16.))
+                    .max_h(viewport.height - y - inset)
                     .min_h_24()
                     .flex()
                     .flex_col()
-                    .gap_4()
-                    .p(padding.top)
+                    .gap(inset)
+                    .p(inset)
                     .bg(cx.theme().popover)
                     .border_1()
                     .border_color(cx.theme().border)
@@ -412,7 +449,14 @@ impl RenderOnce for Dialog {
             .occlude()
             .refine_style(&self.style)
             .when_some(self.title, |el, title| {
-                el.child(div().pr_8().text_lg().font_semibold().child(title))
+                // `pr_8` keeps a long title clear of the close button.
+                el.child(
+                    div()
+                        .pr_8()
+                        .text_token(&cx.theme().tokens.typography.lg)
+                        .font_semibold()
+                        .child(title),
+                )
             })
             .when_some(content, |el, content| el.child(content))
             .when(!self.children.is_empty(), |el| el.children(self.children))
@@ -485,6 +529,10 @@ impl AlertDialog {
         self.base = self.base.width(width);
         self
     }
+    pub fn wide(mut self) -> Self {
+        self.base = self.base.wide();
+        self
+    }
     pub fn show_cancel(mut self, value: bool) -> Self {
         self.button_props.show_cancel = value;
         self
@@ -519,7 +567,7 @@ impl AlertDialog {
         self
     }
 
-    pub(crate) fn build_surface(mut self, _window: &mut Window, _cx: &mut App) -> Dialog {
+    pub(crate) fn build_surface(mut self, _window: &mut Window, cx: &mut App) -> Dialog {
         let on_ok = self.button_props.on_ok.clone();
         let on_cancel = self.button_props.on_cancel.clone();
         let cancel = self.button_props.show_cancel.then(|| {
@@ -557,6 +605,7 @@ impl AlertDialog {
                 .child(ok)
                 .into_any_element()
         });
+        let typography = &cx.theme().tokens.typography;
         self.base.button_props = self.button_props;
         self.base.title = None;
         self.base.footer = Some(footer);
@@ -566,10 +615,15 @@ impl AlertDialog {
                 .flex_col()
                 .gap_2()
                 .when_some(self.title, |el, title| {
-                    el.child(div().text_lg().font_semibold().child(title))
+                    el.child(
+                        div()
+                            .text_token(&typography.lg)
+                            .font_semibold()
+                            .child(title),
+                    )
                 })
                 .when_some(self.description, |el, description| {
-                    el.child(div().text_sm().child(description))
+                    el.child(div().text_token(&typography.sm).child(description))
                 })
                 .into_any_element(),
         );

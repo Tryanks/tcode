@@ -49,6 +49,7 @@ pub trait ButtonVariants: Sized {
 enum ButtonRounded {
     #[default]
     Medium,
+    Chip,
     Size(Pixels),
     /// One radius per corner, for a button that fills the end of a bar and
     /// takes the bar's own corners on that side.
@@ -73,6 +74,11 @@ pub struct Button {
     rounded: ButtonRounded,
     outline: bool,
     compact: bool,
+    /// Owes a finger a [`TOUCH_TARGET`](crate::material::TOUCH_TARGET)
+    /// square whatever the button's size draws.
+    touch: bool,
+    /// The composer's chip control: 28 tall at the chip radius.
+    chip: bool,
     loading: bool,
     size: Size,
     tooltip: Option<SharedString>,
@@ -85,6 +91,9 @@ pub struct Button {
 }
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+/// Height of a [`Button::chip`].
+const CHIP_HEIGHT: f32 = 28.;
 
 impl Button {
     pub fn new(id: impl Into<ElementId>) -> Self {
@@ -99,6 +108,8 @@ impl Button {
             rounded: ButtonRounded::Medium,
             outline: false,
             compact: false,
+            touch: false,
+            chip: false,
             loading: false,
             size: Size::Medium,
             tooltip: None,
@@ -110,6 +121,20 @@ impl Button {
     }
     pub fn outline(mut self) -> Self {
         self.outline = true;
+        self
+    }
+    /// Keep a [`TOUCH_TARGET`](crate::material::TOUCH_TARGET) hit box on a
+    /// touch layout; the button's size still decides what it draws.
+    pub fn touch(mut self, touch: bool) -> Self {
+        self.touch = touch;
+        self
+    }
+    /// The chip form used by the composer's inline controls: 28pt tall at the
+    /// chip radius. gpui-base's `Button` carries no sizes, so this is the one
+    /// place the chip's geometry is written.
+    pub fn chip(mut self) -> Self {
+        self.chip = true;
+        self.rounded = ButtonRounded::Chip;
         self
     }
     pub fn rounded(mut self, rounded: impl Into<Pixels>) -> Self {
@@ -240,7 +265,7 @@ impl StatefulInteractiveElement for Button {
 }
 
 impl RenderOnce for Button {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let transparent = theme.background.opacity(0.);
         let (bg, fg, hover, border) = match self.variant {
@@ -295,15 +320,22 @@ impl RenderOnce for Button {
         };
         let corners = match self.rounded {
             ButtonRounded::Medium => Corners::all(theme.tokens.radius.md),
+            ButtonRounded::Chip => Corners::all(crate::material::radius_chip(cx)),
             ButtonRounded::Size(value) => Corners::all(value),
             ButtonRounded::Corners(corners) => corners,
         };
         let icon_only = self.label.is_none() && self.children.is_empty();
+        // A custom size sets the hit box, not the glyph: a 44pt touch control
+        // keeps the medium icon rather than a 33pt one.
         let icon_size = match self.size {
-            Size::Size(v) => Size::Size(v * 0.75),
+            Size::Size(_) => Size::Medium,
             size => size,
         };
+        // A caller that colours the button's text (a muted disclosure label)
+        // keeps that colour; the variant supplies the default.
+        let fg = self.base.style().text.color.unwrap_or(fg);
         let accessibility_label = self.aria_label.clone().or_else(|| self.label.clone());
+        let ring = crate::material::focus_ring(cx);
         let press = self
             .press_then
             .filter(|_| !self.disabled && !self.loading)
@@ -352,21 +384,27 @@ impl RenderOnce for Button {
             .rounded_tr(corners.top_right)
             .rounded_bl(corners.bottom_left)
             .rounded_br(corners.bottom_right)
-            .when(icon_only, |this| match self.size {
+            .when(self.chip, |this| this.h(px(CHIP_HEIGHT)).px_2())
+            .when(!self.chip && icon_only, |this| match self.size {
                 Size::XSmall => this.size_5(),
                 Size::Small => this.size_6(),
                 Size::Size(v) => this.size(v),
                 _ => this.size_8(),
             })
             .when(
-                !icon_only && !matches!(self.variant, ButtonVariant::Text),
+                !self.chip && !icon_only && !matches!(self.variant, ButtonVariant::Text),
                 |this| match self.size {
                     Size::XSmall => this.h_5().px_1(),
                     Size::Small => this.h_6().px_2(),
-                    Size::Size(v) => this.px(v * 0.2),
+                    Size::Size(v) => this.h(v).px(v * 0.2),
                     _ => this.h_8().px(if self.compact { px(8.) } else { px(10.) }),
                 },
             )
+            .when(self.touch, |this| {
+                this.min_w(px(crate::material::TOUCH_TARGET))
+                    .min_h(px(crate::material::TOUCH_TARGET))
+            })
+            .focus_visible(move |style| style.shadow(vec![ring]))
             .when(
                 matches!(self.variant, ButtonVariant::Default) || self.outline,
                 |this| this.border_1(),

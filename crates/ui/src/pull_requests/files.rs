@@ -34,6 +34,7 @@ use crate::{
     overlay::{Notification, OverlayExt as _},
     sizing::Sizable as _,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         Popover,
         button::{Button, ButtonVariants as _},
@@ -578,7 +579,10 @@ impl PullRequestView {
         .into_owned();
         let open = page.files_view.off_diff_open;
         let muted = cx.theme().muted_foreground;
+        let xs = cx.theme().tokens.typography.xs;
         Some(
+            // `card` insets its content, and these rows are full-bleed hover targets that
+            // carry the card inset themselves (`card_header_row`).
             v_flex()
                 .flex_none()
                 .mx_2()
@@ -586,30 +590,31 @@ impl PullRequestView {
                 .rounded(material::radius_card(cx))
                 .bg(cx.theme().muted)
                 .child(
-                    h_flex()
-                        .id("pr-off-diff")
-                        .h(px(28.))
-                        .px_3()
-                        .gap_2()
-                        .items_center()
-                        .text_size(px(12.))
-                        .cursor_pointer()
-                        .child(
-                            Icon::new(if open {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .size(px(12.))
-                            .text_color(muted),
-                        )
-                        .child(label)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(page) = this.page_mut() {
-                                page.files_view.off_diff_open = !page.files_view.off_diff_open;
-                            }
-                            cx.notify();
-                        })),
+                    material::accessible_clickable(
+                        material::card_header_row(cx),
+                        "pr-off-diff",
+                        gpui::Role::Button,
+                        label.clone(),
+                        cx,
+                    )
+                    .aria_expanded(open)
+                    .text_token(&xs)
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .text_color(muted),
+                    )
+                    .child(label)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(page) = this.page_mut() {
+                            page.files_view.off_diff_open = !page.files_view.off_diff_open;
+                        }
+                        cx.notify();
+                    })),
                 )
                 .child(
                     gpui_base::Collapsible::new().open(open).content(
@@ -633,43 +638,46 @@ impl PullRequestView {
                                     })
                                     .unwrap_or_default();
                                 let id = thread.id.clone();
-                                h_flex()
-                                    .id(SharedString::from(format!("pr-off-diff-{}", thread.id)))
-                                    .h(px(28.))
-                                    .px_3()
-                                    .gap_2()
-                                    .items_center()
-                                    .text_size(px(12.))
-                                    .cursor_pointer()
-                                    .hover(|row| row.bg(cx.theme().list_hover))
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .max_w(px(220.))
-                                            .truncate()
-                                            .font_family(cx.theme().mono_font_family.clone())
-                                            .child(line),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_color(muted)
-                                            .child(excerpt),
-                                    )
-                                    .when(thread.outdated, |row| {
-                                        row.child(material::semantic_chip(
-                                            crate::tr!("pull_requests.conversation.outdated")
-                                                .into_owned(),
-                                            cx.theme().secondary,
-                                            muted,
-                                            cx,
-                                        ))
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                material::accessible_clickable(
+                                    material::card_header_row(cx),
+                                    SharedString::from(format!("pr-off-diff-{}", thread.id)),
+                                    gpui::Role::Button,
+                                    format!("{line} {excerpt}"),
+                                    cx,
+                                )
+                                .text_token(&xs)
+                                .cursor_pointer()
+                                .hover(|row| row.bg(cx.theme().list_hover))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .max_w(px(220.))
+                                        .truncate()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .child(line),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(muted)
+                                        .child(excerpt),
+                                )
+                                .when(thread.outdated, |row| {
+                                    row.child(material::semantic_chip(
+                                        crate::tr!("pull_requests.conversation.outdated")
+                                            .into_owned(),
+                                        cx.theme().secondary,
+                                        muted,
+                                        cx,
+                                    ))
+                                })
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.show_thread(&id, cx);
-                                    }))
+                                    },
+                                ))
                             })),
                     ),
                 )
@@ -700,7 +708,6 @@ impl PullRequestView {
                     .flex_none()
                     .child(
                         Icon::new(IconName::CircleQuestionMark)
-                            .size(px(14.))
                             .text_color(cx.theme().muted_foreground),
                     )
                     .tooltip(move |window, cx| {
@@ -747,7 +754,7 @@ impl PullRequestView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(11.))
+                .text_token(&cx.theme().tokens.typography.xs)
                 .when(compact, |cell| cell.size(px(material::TOUCH_TARGET)))
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(checkbox)
@@ -824,8 +831,7 @@ impl PullRequestView {
             div()
                 .id("pr-viewed-counter")
                 .flex_none()
-                .text_size(px(11.))
-                .text_color(cx.theme().muted_foreground)
+                .text_secondary(compact, cx)
                 .child(counter)
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         });
@@ -869,16 +875,7 @@ impl PullRequestView {
                 crate::tr!("diff.toggle_invisibles").into_owned(),
             ),
         ];
-        let mut toolbar = h_flex()
-            .flex_none()
-            .h(px(if compact { material::TOUCH_TARGET } else { 40. }))
-            .w_full()
-            .px(px(if compact {
-                material::COMPACT_PAGE_INSET
-            } else {
-                8.
-            }))
-            .gap_1()
+        let mut toolbar = material::bar("pr-files-toolbar", material::Bar::Toolbar, compact, cx)
             .items_center()
             .when(!wide_column, |toolbar| {
                 toolbar.child(self.file_jump(count_label, cx))
@@ -1039,75 +1036,67 @@ impl PullRequestView {
             .as_ref()
             .map(|previous| format!("{previous} → {}", file.path))
             .unwrap_or_else(|| file.path.clone());
-        h_flex()
-            .id(SharedString::from(format!(
-                "pr-file-row-{in_popover}-{index}"
-            )))
-            .w_full()
-            .h(px(if compact { 44. } else { 28. }))
-            .px_2()
-            .gap_2()
-            .items_center()
-            .rounded(cx.theme().tokens.radius.sm)
-            .cursor_pointer()
-            .hover(|row| row.bg(cx.theme().list_hover))
-            .when(top == Some(index) && !in_popover, |row| {
-                row.bg(cx.theme().list_active)
-            })
-            .child(
-                Icon::new(IconName::File)
-                    .size(px(12.))
-                    .text_color(kind_rail(file.kind, cx).unwrap_or(muted)),
-            )
-            // gpui-base has no start truncation: the directory gives way first, then the name.
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_size(px(12.))
-                    .child(
-                        div()
-                            .flex_shrink(8.)
-                            .min_w_0()
-                            .truncate()
-                            .text_color(muted)
-                            .child(directory),
-                    )
-                    .child(div().flex_shrink(1.).min_w_0().truncate().child(name)),
-            )
-            .children(
-                availability.map(|(icon, color)| Icon::new(icon).size(px(12.)).text_color(color)),
-            )
-            .child(
-                h_flex()
-                    .flex_none()
-                    .gap_1()
-                    .text_size(px(11.))
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .child(
-                        div()
-                            .text_color(cx.theme().success)
-                            .child(format!("+{}", file.additions)),
-                    )
-                    .child(
-                        div()
-                            .text_color(cx.theme().danger)
-                            .child(format!("−{}", file.deletions)),
-                    ),
-            )
-            .children(
-                self.viewed_box(index, false, cx)
-                    .filter(|_| !in_popover || compact),
-            )
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.scroll_to(index, cx);
-                if in_popover {
-                    window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx);
-                }
-            }))
-            .into_any_element()
+        material::selectable_row(
+            material::accessible_clickable(
+                h_flex(),
+                SharedString::from(format!("pr-file-row-{in_popover}-{index}")),
+                gpui::Role::Button,
+                file.path.clone(),
+                cx,
+            ),
+            top == Some(index) && !in_popover,
+            compact,
+            cx,
+        )
+        .w_full()
+        .text_token(&cx.theme().tokens.typography.xs)
+        .cursor_pointer()
+        .child(Icon::new(IconName::File).text_color(kind_rail(file.kind, cx).unwrap_or(muted)))
+        // gpui-base has no start truncation: the directory gives way first, then the name.
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_shrink(8.)
+                        .min_w_0()
+                        .truncate()
+                        .text_color(muted)
+                        .child(directory),
+                )
+                .child(div().flex_shrink(1.).min_w_0().truncate().child(name)),
+        )
+        .children(availability.map(|(icon, color)| Icon::new(icon).text_color(color)))
+        .child(
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .text_meta_mono(false, cx)
+                .child(
+                    div()
+                        .text_color(cx.theme().success)
+                        .child(format!("+{}", file.additions)),
+                )
+                .child(
+                    div()
+                        .text_color(cx.theme().danger)
+                        .child(format!("−{}", file.deletions)),
+                ),
+        )
+        .children(
+            self.viewed_box(index, false, cx)
+                .filter(|_| !in_popover || compact),
+        )
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.scroll_to(index, cx);
+            if in_popover {
+                window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx);
+            }
+        }))
+        .into_any_element()
     }
 
     fn filter_input(
@@ -1136,10 +1125,10 @@ impl PullRequestView {
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .text_size(px(13.))
-                    .child(Icon::new(IconName::Files).size(px(14.)))
+                    .text_body(false, cx)
+                    .child(Icon::new(IconName::Files))
                     .child(label)
-                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+                    .child(Icon::new(IconName::ChevronDown).text_color(muted)),
             );
         let popover = Popover::new("pr-file-jump-popover").trigger(trigger);
         let popover = if compact {
@@ -1155,7 +1144,6 @@ impl PullRequestView {
                     v_flex()
                         .w(px(360.))
                         .max_h(px(420.))
-                        .p_1()
                         .gap_1()
                         .child(
                             Input::new(&input)
@@ -1164,11 +1152,6 @@ impl PullRequestView {
                         .child(view.file_list("pr-file-jump-rows", &filter, true, cx))
                 })
             })
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
-            .rounded(material::radius_overlay(cx))
             .into_any_element()
     }
 
@@ -1184,13 +1167,7 @@ impl PullRequestView {
             .border_color(cx.theme().border)
             .p_1()
             .gap_1()
-            .child(
-                div()
-                    .px_2()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(count),
-            )
+            .child(div().px_2().text_secondary(false, cx).child(count))
             .child(Input::new(&input).placeholder(crate::tr!("pull_requests.files.filter")))
             .child(self.file_list("pr-file-column-rows", &filter, false, cx))
             .into_any_element()
@@ -1281,16 +1258,11 @@ impl PullRequestView {
             || page.files_view.page_error.is_some())
         .then(|| {
             let failed = page.files_view.page_error.is_some();
-            h_flex()
-                .flex_none()
-                .h(px(40.))
-                .px_3()
-                .gap_2()
+            material::bar("pr-files-footer", material::Bar::Toolbar, compact, cx)
                 .items_center()
-                .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground)
+                .text_secondary(compact, cx)
                 .when(!failed, |row| {
-                    row.child(crate::widgets::spinner::Spinner::new().small())
+                    row.child(crate::widgets::spinner::Spinner::new())
                         .child(crate::tr!("pull_requests.files.loading_more"))
                 })
                 .when(failed, |row| {
@@ -1379,20 +1351,17 @@ impl PullRequestView {
             PullRequestPatch::Hunks(_) => return div().into_any_element(),
         };
         let url = self.file_url(&entry.path, cx);
-        h_flex()
+        // A file with no patch keeps a block about a short hunk's height in the list; no
+        // owner carries a placeholder height.
+        material::card(cx)
+            .flex_row()
             .min_w_full()
             .min_h(px(72.))
             .my_1()
-            .px_3()
-            .py_2()
-            .gap_2()
             .items_center()
-            .rounded(material::radius_card(cx))
-            .bg(cx.theme().muted)
-            .text_size(px(12.))
-            .text_color(cx.theme().muted_foreground)
+            .text_secondary(false, cx)
             .font_family(cx.theme().font_family.clone())
-            .child(Icon::new(icon).size(px(14.)))
+            .child(Icon::new(icon))
             .child(div().flex_1().min_w_0().child(text))
             .children(url.map(|url| {
                 let host_name = self.host_name(cx);
@@ -1482,8 +1451,7 @@ impl DiffListHost for PullRequestView {
         h_flex()
             .min_w_0()
             .gap_1()
-            .text_size(px(13.))
-            .line_height(px(18.))
+            .text_body(false, cx)
             .font_weight(gpui::FontWeight::MEDIUM)
             .children(entry.previous_path.as_ref().map(|previous| {
                 div()
@@ -1515,7 +1483,6 @@ impl DiffListHost for PullRequestView {
                     } else {
                         IconName::ChevronDown
                     })
-                    .size(px(12.))
                     .text_color(cx.theme().muted_foreground),
                 )
                 .tooltip(move |window, cx| {
@@ -1537,8 +1504,7 @@ impl DiffListHost for PullRequestView {
         let path = &self.files_of()?.get(file)?.path;
         (self.viewed_state(path) == Viewed::Changed).then(|| {
             div()
-                .text_size(px(11.))
-                .line_height(px(18.))
+                .text_secondary(false, cx)
                 .text_color(cx.theme().warning)
                 .child(crate::tr!("pull_requests.files.changed_since_viewed"))
                 .into_any_element()

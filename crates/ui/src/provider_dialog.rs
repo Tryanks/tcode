@@ -10,8 +10,9 @@ use crate::scroll::ScrollableElement as _;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use crate::overlay::{DialogButtons, OverlayExt as _};
+use crate::overlay::{DialogActions, DialogButtons, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::switch::Switch;
@@ -24,7 +25,7 @@ use gpui::{
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
 
@@ -408,26 +409,6 @@ impl ProviderDialog {
         cx.notify();
     }
 
-    fn section(
-        &self,
-        label: SharedString,
-        children: Vec<AnyElement>,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        v_flex()
-            .w_full()
-            .gap_3()
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(label),
-            )
-            .children(children)
-            .into_any_element()
-    }
-
     fn field_block(
         &self,
         label: SharedString,
@@ -438,40 +419,36 @@ impl ProviderDialog {
         v_flex()
             .w_full()
             .gap_1p5()
-            .child(div().text_size(px(13.)).font_medium().child(label))
+            .child(div().text_caption(cx).child(label))
             .child(control)
             .when(!help.is_empty(), |this| {
-                this.child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(help),
-                )
+                this.child(div().text_secondary(false, cx).child(help))
             })
             .into_any_element()
     }
 
     fn render_identity(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.section(
-            crate::tr!("providers.dialog.identity").into_owned().into(),
-            vec![
-                self.field_block(
-                    crate::tr!("providers.display_name").into_owned().into(),
-                    crate::tr!("providers.display_name_help")
-                        .into_owned()
-                        .into(),
-                    Input::new(&self.display_name).into_any_element(),
-                    cx,
-                ),
-                self.field_block(
-                    crate::tr!("providers.accent").into_owned().into(),
-                    crate::tr!("providers.accent_help").into_owned().into(),
-                    self.render_accent(cx),
-                    cx,
-                ),
-            ],
+        crate::material::section(
+            Some(crate::tr!("providers.dialog.identity").into_owned().into()),
             cx,
         )
+        .children([
+            self.field_block(
+                crate::tr!("providers.display_name").into_owned().into(),
+                crate::tr!("providers.display_name_help")
+                    .into_owned()
+                    .into(),
+                Input::new(&self.display_name).into_any_element(),
+                cx,
+            ),
+            self.field_block(
+                crate::tr!("providers.accent").into_owned().into(),
+                crate::tr!("providers.accent_help").into_owned().into(),
+                self.render_accent(cx),
+                cx,
+            ),
+        ])
+        .into_any_element()
     }
 
     fn render_accent(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -481,9 +458,16 @@ impl ProviderDialog {
             let hex = (*preset).to_string();
             let selected = current.as_deref() == Some(*preset);
             let value = u32::from_str_radix(preset.trim_start_matches('#'), 16).unwrap_or(0);
+            let label: SharedString = crate::tr!("providers.accent_select", color = hex.clone())
+                .into_owned()
+                .into();
+            let ring = crate::material::focus_ring(cx);
+            let dialog = cx.entity().downgrade();
             swatches = swatches.child(
-                div()
-                    .id(("accent", index))
+                gpui_base::ColorSwatch::new(("accent", index), rgb(value).into())
+                    .selected(selected)
+                    .accessibility_label(label.clone())
+                    // A swatch is its colour at a fixed size; there is no token for it.
                     .size(px(22.))
                     .rounded_full()
                     .cursor_pointer()
@@ -491,18 +475,16 @@ impl ProviderDialog {
                     .when(selected, |s| {
                         s.border_2().border_color(cx.theme().foreground)
                     })
-                    .tooltip({
-                        let hex = hex.clone();
-                        move |window, cx| {
-                            let label = crate::tr!("providers.accent_select", color = hex.clone())
-                                .into_owned();
-                            crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
-                        }
+                    .focus_visible(move |style| style.shadow(vec![ring]))
+                    .tooltip(move |window, cx| {
+                        crate::widgets::tooltip::Tooltip::new(label.clone()).build(window, cx)
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.accent = Some(hex.clone());
-                        cx.notify();
-                    })),
+                    .on_click(move |_, _, _, cx| {
+                        _ = dialog.update(cx, |this, cx| {
+                            this.accent = Some(hex.clone());
+                            cx.notify();
+                        });
+                    }),
             );
         }
         swatches = swatches.child(
@@ -572,17 +554,19 @@ impl ProviderDialog {
                 ),
             );
         }
-        self.section(
-            crate::tr!("providers.dialog.connection")
-                .into_owned()
-                .into(),
-            blocks,
+        crate::material::section(
+            Some(
+                crate::tr!("providers.dialog.connection")
+                    .into_owned()
+                    .into(),
+            ),
             cx,
         )
+        .children(blocks)
+        .into_any_element()
     }
 
     fn render_env(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
         let mut block = v_flex().w_full().gap_2().child(
             h_flex()
                 .w_full()
@@ -590,8 +574,7 @@ impl ProviderDialog {
                 .justify_between()
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .font_medium()
+                        .text_caption(cx)
                         .child(crate::tr!("providers.env.title")),
                 )
                 .child(
@@ -609,8 +592,7 @@ impl ProviderDialog {
         if self.env_rows.is_empty() {
             block = block.child(
                 div()
-                    .text_size(px(13.))
-                    .text_color(muted)
+                    .text_secondary(false, cx)
                     .child(crate::tr!("providers.env.empty_help")),
             );
         } else {
@@ -646,8 +628,7 @@ impl ProviderDialog {
         block
             .child(
                 div()
-                    .text_size(px(13.))
-                    .text_color(muted)
+                    .text_secondary(false, cx)
                     .child(crate::tr!("providers.env.security_help")),
             )
             .into_any_element()
@@ -659,19 +640,20 @@ impl ProviderDialog {
             &self.custom_models,
             &self.hidden_models,
         );
-        let muted = cx.theme().muted_foreground;
-
-        let mut block = v_flex().w_full().gap_1().child(
-            div()
-                .pb_1()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(if rows.len() == 1 {
-                    crate::tr!("providers.models.count_one", count = 1).into_owned()
-                } else {
-                    crate::tr!("providers.models.count", count = rows.len()).into_owned()
-                }),
-        );
+        let mut block =
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    div()
+                        .pb_1()
+                        .text_secondary(false, cx)
+                        .child(if rows.len() == 1 {
+                            crate::tr!("providers.models.count_one", count = 1).into_owned()
+                        } else {
+                            crate::tr!("providers.models.count", count = rows.len()).into_owned()
+                        }),
+                );
 
         for (index, row) in rows.iter().enumerate() {
             block = block.child(self.render_model_row(index, row, cx));
@@ -703,16 +685,17 @@ impl ProviderDialog {
         if let Some(error) = &self.slug_error {
             block = block.child(
                 div()
-                    .text_size(px(13.))
+                    .text_secondary(false, cx)
                     .text_color(cx.theme().danger_foreground)
                     .child(error.clone()),
             );
         }
-        self.section(
-            crate::tr!("providers.models.title").into_owned().into(),
-            vec![block.into_any_element()],
+        crate::material::section(
+            Some(crate::tr!("providers.models.title").into_owned().into()),
             cx,
         )
+        .child(block)
+        .into_any_element()
     }
 
     fn render_model_row(
@@ -768,9 +751,9 @@ impl ProviderDialog {
                     .min_w_0()
                     .gap_1p5()
                     .items_center()
+                    .text_body(false, cx)
                     .child(
                         div()
-                            .text_size(px(13.))
                             .when(hidden, |d| d.text_color(muted))
                             .child(name.clone()),
                     )
@@ -779,7 +762,7 @@ impl ProviderDialog {
                             div()
                                 .id(("model-info", index))
                                 .flex_none()
-                                .child(Icon::new(IconName::Info).xsmall().text_color(muted))
+                                .child(Icon::new(IconName::Info).text_color(muted))
                                 .tooltip(move |window, cx| {
                                     crate::widgets::tooltip::Tooltip::new(capabilities.clone())
                                         .build(window, cx)
@@ -845,21 +828,17 @@ impl ProviderDialog {
 }
 
 impl Render for ProviderDialog {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The dialog's content_builder path has no built-in scroll, so cap and
-        // scroll the form body ourselves — against the window, not a constant.
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("provider-dialog-body")
             .w_full()
-            .max_h(crate::sizing::fit_viewport(
-                520.,
-                window.viewport_size().height,
-            ))
+            .flex_1()
+            .min_h_0()
             .overflow_y_scroll_area()
             .child(
                 v_flex()
                     .w_full()
-                    .gap(px(20.))
+                    .gap(crate::material::section_gap(cx))
                     .child(self.render_identity(cx))
                     .child(self.render_connection(cx))
                     .child(self.render_models(cx)),
@@ -868,11 +847,7 @@ impl Render for ProviderDialog {
 }
 
 /// The dialog footer: Delete (user profiles only, left) + Cancel / Save (right).
-pub fn render_footer(
-    dialog: &Entity<ProviderDialog>,
-    _window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
+pub fn render_footer(dialog: &Entity<ProviderDialog>, cx: &mut App) -> AnyElement {
     let (is_user, profile_id, store, manage_plugins) = {
         let d = dialog.read(cx);
         (
@@ -884,7 +859,7 @@ pub fn render_footer(
     };
     let save_dialog = dialog.clone();
 
-    let mut left = h_flex().flex_1().flex_wrap().gap_2().child(
+    let mut leading = vec![
         Button::new("provider-manage-plugins")
             .debug_selector(|| "provider-manage-plugins".into())
             .ghost()
@@ -894,11 +869,11 @@ pub fn render_footer(
                 window.close_dialog(cx);
                 manage_plugins(cx);
             }),
-    );
+    ];
     if is_user {
         let delete_id = profile_id.clone();
         let delete_store = store.clone();
-        left = left.child(
+        leading.push(
             Button::new("delete-profile")
                 .danger()
                 .icon(IconName::Delete)
@@ -906,8 +881,7 @@ pub fn render_footer(
                 .on_click(move |_, window, cx| {
                     let delete_id = delete_id.clone();
                     let delete_store = delete_store.clone();
-                    window.open_alert_dialog(cx, move |alert, _, cx| {
-                        let alert = alert.bg(cx.theme().popover);
+                    window.open_alert_dialog(cx, move |alert, _, _| {
                         let delete_id = delete_id.clone();
                         let delete_store = delete_store.clone();
                         alert
@@ -933,11 +907,9 @@ pub fn render_footer(
         );
     }
 
-    h_flex()
+    DialogActions::new()
         .w_full()
-        .items_center()
-        .gap_2()
-        .child(left)
+        .leading(leading)
         .child(
             Button::new("provider-cancel")
                 .ghost()

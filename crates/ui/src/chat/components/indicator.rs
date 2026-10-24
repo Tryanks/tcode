@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, ElementId, Entity,
@@ -9,7 +10,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex};
+use gpui_base::h_flex;
 
 use super::super::model::{
     TurnTimeClause, format_elapsed_deciseconds, format_local_time, turn_time_breakdown,
@@ -83,9 +84,7 @@ pub(crate) fn shimmer_label(id: SharedString, label: Cow<'static, str>, cx: &App
 
     h_flex()
         .gap(px(0.))
-        .text_size(px(13.))
-        .line_height(px(18.))
-        .font_medium()
+        .text_body(false, cx)
         .children(char_starts.iter().enumerate().map(|(index, &start)| {
             let end = char_starts.get(index + 1).copied().unwrap_or(label.len());
             let glyph = SharedString::from(label[start..end].to_owned());
@@ -150,11 +149,9 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
         ))
         .child(
             div()
-                .font_family(cx.theme().mono_font_family.clone())
-                .text_size(px(12.))
-                .line_height(px(18.))
+                .text_meta_mono(false, cx)
                 // Flex has no text baselines (taffy sees opaque boxes), so the
-                // 12px digits render top-aligned beside the 13px label; drop
+                // smaller digits render top-aligned beside the label; drop
                 // them onto the label's baseline. Measured against DM Sans at
                 // 2x; both fonts ship with the app.
                 .relative()
@@ -176,7 +173,7 @@ pub(crate) fn turn_working_indicator(
     h_flex()
         .gap_2()
         .items_center()
-        .text_size(px(12.5))
+        .text_body(false, cx)
         .text_color(cx.theme().muted_foreground)
         .child(WorkingIndicator {
             id: SharedString::from(format!("working-{turn}")).into(),
@@ -190,9 +187,7 @@ pub(crate) fn turn_working_indicator(
                     .gap_1()
                     .items_center()
                     .text_color(cx.theme().warning)
-                    .child(
-                        crate::icon::Icon::new(crate::icon::IconName::TriangleAlert).size(px(12.)),
-                    )
+                    .child(crate::icon::Icon::new(crate::icon::IconName::TriangleAlert))
                     .child(served)
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)),
             )
@@ -205,19 +200,16 @@ pub(crate) fn turn_time_footer(
     id: SharedString,
     clauses: Vec<TurnTimeClause>,
     breakdown: Option<String>,
-    muted: Hsla,
-    warning: Hsla,
-    mono: SharedString,
+    cx: &App,
 ) -> AnyElement {
+    let warning = cx.theme().warning;
     let last = clauses.len().saturating_sub(1);
     h_flex()
         .id(id)
         .w_full()
         .gap_1p5()
         .items_start()
-        .text_size(px(11.))
-        .font_family(mono)
-        .text_color(muted)
+        .text_meta_mono(false, cx)
         .debug_selector(|| "turn-time-row".into())
         .when_some(breakdown, |row, breakdown| {
             row.tooltip(move |window, cx| Tooltip::new(breakdown.clone()).build(window, cx))
@@ -262,9 +254,7 @@ pub(crate) fn finished_turn_time(
             requested_model,
         ),
         turn_time_breakdown(turn.timing),
-        cx.theme().muted_foreground,
-        cx.theme().warning,
-        cx.theme().mono_font_family.clone(),
+        cx,
     )
 }
 
@@ -288,15 +278,12 @@ mod tests {
             // The turn column stacks the footer under the answer, so the row is
             // content-height there; reproduce that rather than letting the window
             // stretch it and mask a wrap.
-            use crate::theme::ActiveTheme as _;
             use gpui::{ParentElement as _, Styled as _};
             gpui_base::v_flex().size_full().child(turn_time_footer(
                 "turn-time-probe".into(),
                 self.clauses.clone(),
                 None,
-                cx.theme().muted_foreground,
-                cx.theme().warning,
-                cx.theme().mono_font_family.clone(),
+                cx,
             ))
         }
     }

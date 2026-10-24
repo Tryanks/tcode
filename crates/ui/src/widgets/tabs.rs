@@ -9,6 +9,7 @@ use crate::{
     material::{self, TOUCH_TARGET, focus_ring},
     scroll::{ScrollArea, ScrollableElement as _},
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         Tooltip,
         menu::{ContextMenuExt as _, PopupMenu},
@@ -195,7 +196,7 @@ struct Metrics {
     pad: f32,
     /// The bar's height, for horizontal forms.
     bar: f32,
-    text: f32,
+    /// An icon-only tab's glyph; beside a label the icon takes the text size.
     icon: f32,
 }
 
@@ -205,14 +206,12 @@ fn metrics(form: Form, compact: bool) -> Metrics {
             item: 28.,
             pad: 10.,
             bar: 40.,
-            text: 13.,
             icon: 16.,
         },
         (Form::Underline, true) => Metrics {
             item: TOUCH_TARGET,
             pad: 12.,
             bar: TOUCH_TARGET,
-            text: 15.,
             icon: 18.,
         },
         (Form::Segmented, compact) => {
@@ -221,7 +220,6 @@ fn metrics(form: Form, compact: bool) -> Metrics {
                 item,
                 pad: if compact { 14. } else { 12. },
                 bar: item + 2. * TRACK_INSET,
-                text: if compact { 15. } else { 13. },
                 icon: if compact { 18. } else { 16. },
             }
         }
@@ -229,7 +227,6 @@ fn metrics(form: Form, compact: bool) -> Metrics {
             item: material::selectable_row_height(compact),
             pad: 0.,
             bar: 0.,
-            text: if compact { 15. } else { 13. },
             icon: if compact { 20. } else { 16. },
         },
     }
@@ -375,7 +372,12 @@ fn render_item(
         .gap(gap)
         .when_some(icon, |this, icon| {
             let color = icon.explicit_text_color().unwrap_or(icon_fg);
-            this.child(icon.size(px(m.icon)).flex_none().text_color(color))
+            let icon = if icon_only {
+                icon.size(px(m.icon))
+            } else {
+                icon
+            };
+            this.child(icon.flex_none().text_color(color))
         })
         .when(!icon_only, |this| {
             this.child(
@@ -459,8 +461,7 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
         .flex()
         .items_center()
         .flex_none()
-        .text_size(px(m.text))
-        .rounded(surface_radius(form, cx));
+        .text_body(compact, cx);
     match form {
         // Only a rail may change weight with selection: its labels do not
         // share a line.
@@ -485,6 +486,7 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
                     return segment(this, selected, true, compact, cx);
                 }
                 this.h(px(m.item))
+                    .rounded(surface_radius(form, cx))
                     .when(!selected, |this| {
                         this.hover(move |style| style.bg(theme.muted).text_color(foreground))
                     })
@@ -509,7 +511,7 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
 fn surface_radius(form: Form, cx: &App) -> Pixels {
     match form {
         Form::Segmented => segment_radius(cx),
-        Form::Underline | Form::Rail => cx.theme().tokens.radius.md,
+        Form::Underline | Form::Rail => material::radius_button(cx),
     }
 }
 
@@ -518,7 +520,7 @@ const TRACK_INSET: f32 = 2.;
 
 /// A segment's corners sit concentric inside the track's.
 fn segment_radius(cx: &App) -> Pixels {
-    cx.theme().tokens.radius.md - px(TRACK_INSET)
+    material::radius_input(cx) - px(TRACK_INSET)
 }
 
 /// The pill track shared by [`TabBar::segmented`] and
@@ -548,7 +550,7 @@ pub(crate) fn segmented_track(
                 .flex_shrink_0()
                 .gap(px(2.))
                 .p(px(TRACK_INSET))
-                .rounded(cx.theme().tokens.radius.md)
+                .rounded(material::radius_input(cx))
                 .bg(cx.theme().secondary),
         )
 }

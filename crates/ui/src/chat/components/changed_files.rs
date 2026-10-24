@@ -4,19 +4,21 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::icon::{Icon, IconName};
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::theme::HighlightTheme;
+use crate::typography::TextRole as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::{ContextMenuExt as _, PopupMenu};
-use crate::widgets::tooltip::Tooltip;
 use agent::{ChangeCompleteness, FileChange, FileChangeKind};
 use gpui::{
     AnyElement, App, Axis, ClickEvent, Div, ElementId, HighlightStyle, Hsla,
     InteractiveElement as _, IntoElement as _, ListHorizontalSizingBehavior, ListSizingBehavior,
-    ParentElement as _, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledText, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px,
     uniform_list,
 };
-use gpui_base::{ScrollableMask, StyledExt as _, h_flex, v_flex};
+use gpui_base::{ScrollableMask, h_flex, v_flex};
 
 use super::super::model::{LiveEditRow, diff_stats};
 use crate::diff::model::{DiffColors, FileDiffInput, RenderedRow, build_file, display_columns};
@@ -40,7 +42,6 @@ pub(crate) fn changed_files(
     handlers: ChangedFilesHandlers,
     cx: &App,
 ) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
     let ChangedFilesHandlers {
         view_diff,
         toggle_more,
@@ -68,9 +69,7 @@ pub(crate) fn changed_files(
                 .min_w_0()
                 .gap_1p5()
                 .items_center()
-                .text_size(px(11.5))
-                .font_medium()
-                .text_color(muted)
+                .text_caption(cx)
                 .child(crate::tr!("chat.changed_files", count = changes.len()))
                 .when(completeness == ChangeCompleteness::Partial, |header| {
                     header.child(crate::tr!("chat.changed_files_partial"))
@@ -87,16 +86,15 @@ pub(crate) fn changed_files(
                         .child(format!("-{total_del}")),
                 ),
         )
-        .child({
-            let tooltip = crate::tr!("chat.view_diff_tooltip").into_owned();
+        .child(
             quiet_control(
                 ("view-diff", index),
                 crate::tr!("chat.view_diff").into_owned().into(),
                 view_diff,
                 cx,
             )
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-        });
+            .tooltip(crate::tr!("chat.view_diff_tooltip").into_owned()),
+        );
 
     let mut content = v_flex().w_full().gap_1p5().pt(px(2.)).child(header);
 
@@ -114,55 +112,44 @@ pub(crate) fn changed_files(
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| display.clone());
         let (added, deleted) = diff_stats(change.diff.as_deref());
-        let chip = h_flex()
-            .h(px(22.))
-            .px_2()
-            .gap_1()
-            .items_center()
-            .rounded(crate::material::radius_chip(cx))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(crate::material::content_surface(cx))
-            .font_family(cx.theme().mono_font_family.clone())
-            .text_size(px(11.5))
-            .child(name)
-            .child(
-                div()
-                    .text_color(cx.theme().success)
-                    .child(format!("+{added}")),
-            )
-            .child(
-                div()
-                    .text_color(cx.theme().danger)
-                    .child(format!("-{deleted}")),
-            );
+        let chip = Button::new(SharedString::from(format!(
+            "changed-file-chip-{index}-{file_index}"
+        )))
+        .ghost()
+        .outline()
+        .chip()
+        .aria_label(format!("{}: {display}", crate::tr!("chat.view_diff")))
+        .font_family(cx.theme().mono_font_family.clone())
+        .text_token(&cx.theme().tokens.typography.xs)
+        .child(name)
+        .child(
+            div()
+                .text_color(cx.theme().success)
+                .child(format!("+{added}")),
+        )
+        .child(
+            div()
+                .text_color(cx.theme().danger)
+                .child(format!("-{deleted}")),
+        );
         body = body.child(
-            crate::material::accessible_clickable(
-                chip,
-                SharedString::from(format!("changed-file-chip-{index}-{file_index}")),
-                Role::Button,
-                format!("{}: {display}", crate::tr!("chat.view_diff")),
-                cx,
-            )
-            .cursor_pointer()
-            .hover(|chip| chip.bg(cx.theme().accent))
-            .on_click(on_click)
-            .context_menu({
-                let path = change.path.clone();
-                let cwd = cwd.to_path_buf();
-                move |menu, _, _| {
-                    menu.menu(
-                        crate::tr!("chat.view_diff").into_owned(),
-                        Box::new(super::super::OpenFileDiff {
-                            turn: index,
-                            path: path.clone(),
-                        }),
-                    )
-                    .separator()
-                    .path_items(&path, Some(&cwd))
-                }
-            })
-            .into_any_element(),
+            chip.on_click(on_click)
+                .context_menu({
+                    let path = change.path.clone();
+                    let cwd = cwd.to_path_buf();
+                    move |menu, _, _| {
+                        menu.menu(
+                            crate::tr!("chat.view_diff").into_owned(),
+                            Box::new(super::super::OpenFileDiff {
+                                turn: index,
+                                path: path.clone(),
+                            }),
+                        )
+                        .separator()
+                        .path_items(&path, Some(&cwd))
+                    }
+                })
+                .into_any_element(),
         );
     }
     if changes.len() > 3 {
@@ -194,19 +181,16 @@ pub(crate) fn quiet_control(
     label: SharedString,
     on_click: ClickHandler,
     cx: &App,
-) -> Stateful<Div> {
-    let foreground = cx.theme().foreground;
-    crate::material::accessible_clickable(h_flex(), id, Role::Button, label.clone(), cx)
-        .h(px(22.))
-        .px_1p5()
-        .items_center()
-        .rounded(crate::material::radius_chip(cx))
-        .text_size(px(11.5))
-        .text_color(cx.theme().muted_foreground)
-        .cursor_pointer()
-        .hover(move |control| control.text_color(foreground))
+) -> Button {
+    // The label is a child rather than `.label()`: a quiet control stays
+    // muted, and `Button` paints its label in the variant's foreground.
+    Button::new(id)
+        .ghost()
+        .small()
+        .aria_label(label.clone())
+        .text_token(&cx.theme().tokens.typography.xs)
         .on_click(on_click)
-        .child(label)
+        .child(div().text_color(cx.theme().muted_foreground).child(label))
 }
 
 /// The `+N -N` pair, `flex_none` so it never gives ground to a long path.
@@ -216,11 +200,12 @@ fn diff_counts_colored(
     added_color: gpui::Hsla,
     deleted_color: gpui::Hsla,
     mono: SharedString,
+    cx: &App,
 ) -> Div {
     h_flex()
         .flex_none()
         .gap_2()
-        .text_size(px(11.5))
+        .text_token(&cx.theme().tokens.typography.xs)
         .font_family(mono)
         .child(div().text_color(added_color).child(format!("+{added}")))
         .child(div().text_color(deleted_color).child(format!("-{deleted}")))
@@ -258,7 +243,7 @@ pub(crate) fn file_edit_row(
 ) -> AnyElement {
     let style = FileEditRowStyle::from_theme(cx);
     let expandable = row.counts.is_some();
-    let header = file_edit_row_header(row, expanded, expandable, &style);
+    let header = file_edit_row_header(row, expanded, expandable, &style, cx);
     let path_menu = {
         let path = row.path.clone();
         let cwd = cwd.to_path_buf();
@@ -298,20 +283,20 @@ fn file_edit_row_header(
     expanded: bool,
     expandable: bool,
     style: &FileEditRowStyle,
+    cx: &App,
 ) -> Div {
     h_flex()
         .w_full()
-        .min_h(px(28.))
+        .min_h(px(crate::material::bar_height(
+            crate::material::Bar::Section,
+            false,
+        )))
         .px_1()
         .gap_2()
         .items_center()
-        .text_size(px(12.5))
+        .text_body(false, cx)
         .debug_selector(|| "file-edit-row".into())
-        .child(
-            Icon::new(IconName::File)
-                .size(px(13.))
-                .text_color(style.muted),
-        )
+        .child(Icon::new(IconName::File).text_color(style.muted))
         .child(
             h_flex()
                 .min_w_0()
@@ -342,6 +327,7 @@ fn file_edit_row_header(
                     style.added,
                     style.deleted,
                     style.mono.clone(),
+                    cx,
                 )
                 .debug_selector(|| "file-edit-counts".into()),
             )
@@ -353,7 +339,6 @@ fn file_edit_row_header(
                 } else {
                     IconName::ChevronRight
                 })
-                .size(px(13.))
                 .text_color(style.muted),
             )
         })
@@ -531,17 +516,15 @@ fn render_inline_diff_row(index: usize, row: &RenderedRow, cx: &App) -> AnyEleme
             .w(px(36.))
             .px_1()
             .text_right()
-            .text_size(px(10.5))
-            .text_color(cx.theme().muted_foreground)
+            .text_secondary(false, cx)
             .child(line.map(|line| line.to_string()).unwrap_or_default())
     };
 
     h_flex()
         .debug_selector(move || format!("file-edit-diff-line-{index}"))
         .min_w_full()
-        .min_h(px(18.))
         .font_family(cx.theme().mono_font_family.clone())
-        .text_size(px(11.5))
+        .text_token(&cx.theme().tokens.typography.xs)
         .items_start()
         .border_l_2()
         .border_color(accent.unwrap_or(gpui::transparent_black()))

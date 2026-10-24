@@ -5,13 +5,14 @@ use crate::{
     material,
     theme::ActiveTheme as _,
     touch_selection::{EditMenuItem, TouchSelectionOverlay},
+    typography::TextRole as _,
     widgets::menu::ContextMenuExt as _,
 };
 use gpui::{
     Action, AnyElement, App, DefiniteLength, Edges, Entity, Focusable as _, HitboxBehavior,
     InteractiveElement as _, IntoElement, LongPressEvent, MouseUpEvent, ParentElement as _,
     RenderOnce, SharedString, StyleRefinement, Styled, TextAlign, TouchPhase, Window, div,
-    prelude::FluentBuilder as _, px, rems,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::StyledExt as _;
 use gpui_base::{InputBase, RoleOverride};
@@ -360,8 +361,7 @@ impl RenderOnce for Input {
                 .size_full()
                 .items_center()
                 // The editor inherits ambient typography unless the frame pins it.
-                .line_height(rems(1.25))
-                .text_sm()
+                .text_token(&theme.tokens.typography.sm)
                 .rounded(material::radius_input(cx))
                 .when(!multi_line, |this| {
                     this.h(px(material::input_height(compact))).px(px(10.))

@@ -8,9 +8,11 @@ use gpui::{
 };
 use std::time::Duration;
 
+/// A rotating loader icon. With no explicit size it takes the current font
+/// size, like [`Icon`].
 #[derive(IntoElement)]
 pub struct Spinner {
-    size: Size,
+    size: Option<Size>,
     icon: Icon,
     color: Option<Hsla>,
 }
@@ -18,7 +20,7 @@ pub struct Spinner {
 impl Spinner {
     pub fn new() -> Self {
         Self {
-            size: Size::Medium,
+            size: None,
             icon: Icon::new(IconName::Loader),
             color: None,
         }
@@ -43,7 +45,7 @@ impl Default for Spinner {
 
 impl Sizable for Spinner {
     fn with_size(mut self, size: impl Into<Size>) -> Self {
-        self.size = size.into();
+        self.size = Some(size.into());
         self
     }
 }
@@ -52,7 +54,7 @@ impl RenderOnce for Spinner {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         div().child(
             self.icon
-                .with_size(self.size)
+                .when_some(self.size, |icon, size| icon.with_size(size))
                 .when_some(self.color, |icon, color| icon.text_color(color))
                 .with_animation(
                     "circle",

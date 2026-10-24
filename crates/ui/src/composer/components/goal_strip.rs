@@ -87,33 +87,20 @@ impl Composer {
             .w_full()
             .gap_1()
             .items_center()
-            .child(Icon::new(icon).xsmall().text_color(color))
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(11.))
-                    .text_color(muted)
-                    .child(crate::tr!(
-                        "composer.goal_header",
-                        status = status_label(goal.status)
-                    )),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(11.))
-                    .text_color(muted)
-                    .child(usage),
-            )
+            .text_secondary(touch, cx)
+            .child(Icon::new(icon).text_color(color))
+            .child(div().flex_none().child(crate::tr!(
+                "composer.goal_header",
+                status = status_label(goal.status)
+            )))
+            .child(div().flex_1().min_w_0().truncate().child(usage))
             .when_some(pause, |row, (icon, status, label)| {
                 row.child(
                     Button::new("goal-pause")
                         .debug_selector(|| "goal-pause".into())
                         .ghost()
                         .xsmall()
-                        .when(touch, |button| button.min_w(px(44.)).min_h(px(44.)))
+                        .touch(touch)
                         .icon(icon)
                         .disabled(!enabled)
                         .tooltip(crate::tr!(label))
@@ -128,7 +115,7 @@ impl Composer {
                     .debug_selector(|| "goal-edit".into())
                     .ghost()
                     .xsmall()
-                    .when(touch, |button| button.min_w(px(44.)).min_h(px(44.)))
+                    .touch(touch)
                     .icon(IconName::Pencil)
                     .disabled(!enabled)
                     .tooltip(crate::tr!("composer.goal_edit"))
@@ -142,7 +129,7 @@ impl Composer {
                     .debug_selector(|| "goal-clear".into())
                     .ghost()
                     .xsmall()
-                    .when(touch, |button| button.min_w(px(44.)).min_h(px(44.)))
+                    .touch(touch)
                     .icon(IconName::Close)
                     .disabled(!enabled)
                     .tooltip(crate::tr!("composer.goal_clear"))
@@ -163,7 +150,7 @@ impl Composer {
                     div()
                         .w_full()
                         .line_clamp(3)
-                        .text_size(px(13.))
+                        .text_body(touch, cx)
                         .text_color(theme.foreground)
                         .child(objective.clone()),
                 )
@@ -172,8 +159,7 @@ impl Composer {
                         div()
                             .w_full()
                             .line_clamp(2)
-                            .text_size(px(12.))
-                            .text_color(muted)
+                            .text_secondary(touch, cx)
                             .child(crate::tr!("composer.goal_last_check", reason = reason)),
                     )
                 })

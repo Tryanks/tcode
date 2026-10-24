@@ -10,6 +10,7 @@ use crate::icon::{Icon, IconName};
 use crate::material;
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::{ContextMenuExt as _, CopyText, PopupMenu};
 use crate::workspace_walk::relativize_to_workspace;
@@ -360,8 +361,7 @@ pub(crate) trait DiffListHost: Sized + 'static {
         div()
             .min_w_0()
             .truncate()
-            .text_size(px(13.))
-            .line_height(px(18.))
+            .text_body(false, cx)
             .font_medium()
             .text_color(cx.theme().foreground)
             .child(path)
@@ -417,12 +417,9 @@ pub(crate) fn selection_row(
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
-    h_flex()
+    material::card(cx)
+        .flex_row()
         .min_w_full()
-        .px_3()
-        .py_1()
-        .bg(cx.theme().muted)
-        .rounded(material::radius_card(cx))
         .font_family(cx.theme().font_family.clone())
         .child(
             Button::new(id)
@@ -480,7 +477,7 @@ pub(crate) fn render_list<H: DiffListHost>(
     // wheel/trackpad deltas (or Shift-wheel) still scroll this viewport.
     div()
         .id(id)
-        .text_size(px(13.))
+        .text_size(cx.theme().tokens.typography.mono_md.size)
         .font_family(cx.theme().mono_font_family.clone())
         .debug_selector(move || id.into())
         .key_context("TcodeDiff")
@@ -667,7 +664,7 @@ fn measure_content_width(
                 .text_system()
                 .shape_line(
                     text.clone().into(),
-                    px(13.),
+                    cx.theme().tokens.typography.mono_md.size,
                     &[gpui::TextRun {
                         len: text.len(),
                         font: font.clone(),
@@ -713,8 +710,7 @@ fn render_item<H: DiffListHost>(
             .min_w_full()
             .px_3()
             .py_1()
-            .text_size(px(11.))
-            .text_color(cx.theme().muted_foreground)
+            .text_secondary(false, cx)
             .bg(cx.theme().muted.opacity(0.45))
             .child(diff.files[*file].hunks[*hunk].header.clone())
             .into_any_element(),
@@ -798,7 +794,8 @@ fn render_file_header<H: DiffListHost>(
         )
     });
     let menu = host.file_menu(file_index, cx);
-    let header = h_flex()
+    let header = material::card_secondary(cx)
+        .flex_row()
         .id(("diff-file-header", file_index))
         // A header spans what the list shows and moves with it, not with its lines, so the path,
         // the counts and the menu stay in view however far a long line reaches.
@@ -809,13 +806,9 @@ fn render_file_header<H: DiffListHost>(
                 header.min_w_full()
             }
         })
-        .h(px(34.))
-        .px_3()
-        .gap_2()
         .items_center()
-        .bg(cx.theme().secondary)
-        .rounded(material::radius_card(cx))
         .relative()
+        // The change kind's accent rail; no owner draws an accent edge on a card.
         .when_some(kind_rail(kind, cx), |this, color| {
             this.child(
                 div()
@@ -830,14 +823,13 @@ fn render_file_header<H: DiffListHost>(
         })
         .font_family(cx.theme().font_family.clone())
         .children(host.header_leading(file_index, cx))
-        .child(Icon::new(IconName::File).xsmall().text_color(muted))
+        .child(Icon::new(IconName::File).text_color(muted))
         .child(host.header_title(file_index, cx))
         .when_some(kind_label, |this, (label, foreground)| {
             this.child(
                 div()
                     .flex_none()
-                    .text_size(px(11.))
-                    .line_height(px(18.))
+                    .text_secondary(false, cx)
                     .text_color(foreground)
                     .child(label),
             )
@@ -848,7 +840,7 @@ fn render_file_header<H: DiffListHost>(
             h_flex()
                 .flex_none()
                 .gap_2()
-                .text_size(px(13.))
+                .text_meta_mono(false, cx)
                 .child(
                     div()
                         .text_color(cx.theme().success)
@@ -877,12 +869,13 @@ fn render_gap<H: DiffListHost>(
 ) -> AnyElement {
     let row = h_flex()
         .min_w_full()
+        // A fold row is as tall as its small expand controls; no row owner
+        // is this dense.
         .h(px(24.))
         .px_3()
         .items_center()
         .bg(cx.theme().muted)
-        .text_size(px(11.))
-        .text_color(cx.theme().muted_foreground)
+        .text_secondary(false, cx)
         .font_family(cx.theme().font_family.clone());
     let label = crate::tr!("diff.unmodified_lines", count = count);
     match host.gap_state(file_index, expandable) {
@@ -952,22 +945,12 @@ fn render_gap<H: DiffListHost>(
 /// A notice is prose, not code: it wraps inside the panel instead of running off the right
 /// edge with the sentence cut in half.
 pub(crate) fn render_notice(message: impl Into<gpui::SharedString>, cx: &App) -> gpui::Div {
-    h_flex()
-        .w_full()
-        .px(px(material::CARD_INSET))
-        .py_2()
-        .gap_1p5()
+    material::notice(cx.theme().warning, cx)
         .items_start()
-        .bg(cx.theme().warning.opacity(0.12))
-        .rounded(material::radius_card(cx))
-        .text_size(px(11.))
+        .text_token(&cx.theme().tokens.typography.xs)
         .text_color(cx.theme().warning_foreground)
         .font_family(cx.theme().font_family.clone())
-        .child(
-            div()
-                .flex_none()
-                .child(Icon::new(IconName::TriangleAlert).xsmall()),
-        )
+        .child(div().flex_none().child(Icon::new(IconName::TriangleAlert)))
         .child(div().flex_1().min_w_0().child(message.into()))
 }
 
@@ -1049,6 +1032,8 @@ fn render_code_row<H: DiffListHost>(
             .w(px(if split { 42. } else { 44. }))
             .px_1()
             .text_right()
+            // A five-digit line number overflows the split gutter at `xs`, so
+            // the gutter keeps the denser size.
             .text_size(px(11.))
             .text_color(cx.theme().muted_foreground)
             .child(line.map(|value| value.to_string()).unwrap_or_default())

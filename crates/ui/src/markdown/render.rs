@@ -42,9 +42,6 @@ const BLOCK_OVERDRAW: Pixels = px(300.);
 const CODE_LINES_PER_ITEM: usize = 32;
 const LIST_ITEMS_PER_ITEM: usize = 8;
 const TABLE_BORDER_PX: f32 = 1.;
-const HEADING_BASE_FONT_SIZE: Pixels = px(15.);
-const INLINE_CODE_FONT_SIZE: Pixels = px(13.);
-const INLINE_CODE_RADIUS: Pixels = px(4.);
 type HighlightRuns = Vec<(Range<usize>, HighlightStyle)>;
 type SharedHighlightRuns = Arc<highlight::HighlightedSource>;
 type LinkRuns = Vec<(Range<usize>, super::nodes::LinkMark)>;
@@ -778,15 +775,16 @@ fn render_block(
                 6 => (1., FontWeight::MEDIUM),
                 _ => (1., FontWeight::NORMAL),
             };
+            let typography = &cx.theme().tokens.typography;
             // In a chat message a heading is a section label, not a title page.
             let size = if state.read(cx).compact_headings {
                 match level {
-                    1 => px(17.),
-                    2 => px(15.),
-                    _ => px(13.5),
+                    1 => typography.lg.size,
+                    2 => typography.md.size,
+                    _ => typography.sm.size,
                 }
             } else {
-                HEADING_BASE_FONT_SIZE * scale
+                typography.md.size * scale
             };
             div()
                 .id(options.path.clone())
@@ -1171,9 +1169,9 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
                 font_overrides: code_fonts,
                 code_style: Some(InlineCodeStyle {
                     font_family: cx.theme().mono_font_family.clone(),
-                    font_size: INLINE_CODE_FONT_SIZE,
+                    font_size: cx.theme().tokens.typography.mono_md.size,
                     background: cx.theme().tokens.colors.muted,
-                    radius: INLINE_CODE_RADIUS,
+                    radius: crate::material::radius_chip(cx),
                 }),
             });
             continue;
@@ -1427,7 +1425,7 @@ fn render_code_lines(
             .min_h(px(18.))
             .whitespace_normal()
             .font_family(mono_font_family.clone())
-            .text_size(INLINE_CODE_FONT_SIZE)
+            .text_size(cx.theme().tokens.typography.mono_md.size)
             .child(Inline::new(
                 ix,
                 view.clone(),
@@ -1569,7 +1567,7 @@ fn render_code_block(
             .w_full()
             .whitespace_normal()
             .font_family(cx.theme().mono_font_family.clone())
-            .text_size(INLINE_CODE_FONT_SIZE)
+            .text_size(cx.theme().tokens.typography.mono_md.size)
             .child(CodeSliceMeasure {
                 measurement: measurement.clone(),
                 code: code.clone(),
@@ -1580,7 +1578,7 @@ fn render_code_block(
     } else {
         render_code_lines(code, span.clone(), view, cx)
     };
-    let radius = cx.theme().tokens.radius.md;
+    let radius = crate::material::radius_card(cx);
     // The whole fence, not the painted span: a long block is split across
     // list items and the menu copies the code a reader sees as one block.
     let whole_code = prepared.text.clone();
@@ -1612,7 +1610,7 @@ fn render_code_block(
             .block_mouse_except_scroll()
             .top_1()
             .right_1()
-            .rounded(cx.theme().tokens.radius.md)
+            .rounded(crate::material::radius_card(cx))
             .bg(cx.theme().tokens.colors.muted)
             .child(button);
         #[cfg(test)]
@@ -1714,7 +1712,7 @@ fn render_diagram(
         .child(
             div()
                 .p_3()
-                .rounded(cx.theme().tokens.radius.md)
+                .rounded(crate::material::radius_card(cx))
                 .bg(cx.theme().tokens.colors.muted)
                 .child(FittedImage::new(
                     source,
@@ -1881,7 +1879,7 @@ fn render_scroll_table(
         .w(px(total_width))
         .border_1()
         .border_color(cx.theme().border)
-        .rounded(cx.theme().tokens.radius.md)
+        .rounded(crate::material::radius_card(cx))
         .overflow_hidden()
         .children(rows);
     #[cfg(test)]

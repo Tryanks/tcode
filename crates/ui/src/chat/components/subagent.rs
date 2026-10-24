@@ -1,9 +1,7 @@
+use crate::material::semantic_chip;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::spinner::Spinner;
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
@@ -55,59 +53,34 @@ pub(crate) fn subagent_row(
         description = one_line(description)
     )
     .into_owned();
+    let theme = cx.theme();
     let lifecycle: AnyElement = match status {
-        ItemStatus::InProgress => Spinner::new()
-            .xsmall()
-            .color(cx.theme().primary)
-            .into_any_element(),
-        ItemStatus::Completed => h_flex()
-            .h(px(22.))
-            .px_2()
-            .gap_1()
-            .items_center()
-            .rounded(crate::material::radius_chip(cx))
-            .bg(cx.theme().success.opacity(0.12))
-            .text_color(cx.theme().success)
-            .text_size(px(11.5))
-            .child(Icon::new(IconName::Check).size(px(12.)))
-            .child(crate::tr!("chat.subagent_completed"))
-            .into_any_element(),
-        ItemStatus::Interrupted => h_flex()
-            .h(px(22.))
-            .px_2()
-            .gap_1()
-            .items_center()
-            .rounded(crate::material::radius_chip(cx))
-            .bg(cx.theme().warning.opacity(0.12))
-            .text_color(cx.theme().warning)
-            .text_size(px(11.5))
-            .child(
-                Icon::new(IconName::CircleX)
-                    .size(px(12.))
-                    .text_color(cx.theme().warning),
-            )
-            .child(crate::tr!("chat.subagent_interrupted"))
-            .into_any_element(),
-        ItemStatus::Failed | ItemStatus::Declined => h_flex()
-            .h(px(22.))
-            .px_2()
-            .gap_1()
-            .items_center()
-            .rounded(crate::material::radius_chip(cx))
-            .bg(cx.theme().danger.opacity(0.12))
-            .text_color(cx.theme().danger)
-            .text_size(px(11.5))
-            .child(
-                Icon::new(IconName::CircleX)
-                    .size(px(12.))
-                    .text_color(cx.theme().danger),
-            )
-            .child(crate::tr!("chat.subagent_failed"))
-            .into_any_element(),
+        ItemStatus::InProgress => Spinner::new().color(theme.primary).into_any_element(),
+        ItemStatus::Completed => semantic_chip(
+            crate::tr!("chat.subagent_completed"),
+            theme.success.opacity(0.12),
+            theme.success,
+            cx,
+        )
+        .into_any_element(),
+        ItemStatus::Interrupted => semantic_chip(
+            crate::tr!("chat.subagent_interrupted"),
+            theme.warning.opacity(0.12),
+            theme.warning,
+            cx,
+        )
+        .into_any_element(),
+        ItemStatus::Failed | ItemStatus::Declined => semantic_chip(
+            crate::tr!("chat.subagent_failed"),
+            theme.danger.opacity(0.12),
+            theme.danger,
+            cx,
+        )
+        .into_any_element(),
     };
     let row = h_flex()
         .w_full()
-        .h(px(44.))
+        .h(px(crate::material::TOUCH_TARGET))
         .min_w_0()
         .gap_2()
         .items_center()
@@ -116,20 +89,13 @@ pub(crate) fn subagent_row(
         .border_1()
         .border_color(cx.theme().border)
         .bg(crate::material::content_surface(cx))
-        .text_size(px(13.))
+        .text_body(false, cx)
         .child(lifecycle)
         .child(div().flex_none().font_medium().child(agent_type.clone()))
         .when_some(model_chip(model, effort), |row, chip| {
             row.child(
-                div()
-                    .flex_none()
-                    .px_2()
-                    .rounded(crate::material::radius_chip(cx))
-                    .bg(cx.theme().muted.opacity(0.4))
-                    .text_color(muted)
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(px(11.5))
-                    .child(chip),
+                semantic_chip(chip, theme.muted.opacity(0.4), muted, cx)
+                    .font_family(theme.mono_font_family.clone()),
             )
         })
         .child(
@@ -150,9 +116,7 @@ pub(crate) fn subagent_row(
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_color(muted)
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_size(px(11.5))
+                        .text_meta_mono(false, cx)
                         .child(one_line(summary)),
                 )
             },

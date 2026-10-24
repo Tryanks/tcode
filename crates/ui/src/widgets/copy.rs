@@ -4,10 +4,7 @@
 
 use std::time::Duration;
 
-use gpui::{
-    App, ClickEvent, Context, SharedString, Styled as _, Task, Window, prelude::FluentBuilder as _,
-    px,
-};
+use gpui::{App, ClickEvent, Context, SharedString, Styled as _, Task, Window};
 
 use crate::{
     icon::{Icon, IconName},
@@ -25,7 +22,6 @@ pub(crate) fn action_button(
     Button::new(id.into())
         .ghost()
         .small()
-        .rounded(crate::material::radius_chip(cx))
         .icon(Icon::new(icon).text_color(cx.theme().muted_foreground))
         .tooltip(label.into())
 }
@@ -51,7 +47,7 @@ pub(crate) fn copy_button(
         },
         cx,
     )
-    .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)))
+    .touch(compact)
     .on_click(on_copy)
 }
 

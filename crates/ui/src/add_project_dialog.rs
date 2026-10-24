@@ -14,13 +14,14 @@ use crate::overlay::{DialogActions, OverlayExt as _};
 use crate::scroll::ScrollableElement as _;
 use crate::sizing::fit_viewport;
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::progress::Progress;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -31,8 +32,10 @@ use tcode_protocol::{CommandResponse, ExternalImportState, ExternalThread, Recen
 const RECENT_LIMIT: usize = 15;
 const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;
 const RECENT_VIEWPORT_MAX_HEIGHT: f32 = 390.;
-/// Reserve room for the project inputs and footer so recents scroll instead
-/// of pushing the Open button off a short window.
+/// The recents list needs a definite height to scroll, and the dialog's flex
+/// content height is not readable from its builder; reserve room for the
+/// project inputs and footer so recents scroll instead of pushing the Open
+/// button off a short window.
 const RECENT_VIEWPORT_CHROME: f32 = 380.;
 
 enum RecentState {
@@ -61,19 +64,14 @@ pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut 
     dialog.update(cx, |dialog, cx| dialog.scan(cx));
     let content = dialog.clone();
     let footer = dialog.clone();
-    window.open_dialog(cx, move |builder, window, cx| {
+    window.open_dialog(cx, move |builder, _, _| {
         let dialog_content = content.clone();
         let confirm = content.clone();
         builder
-            .w(px(680.))
-            .rounded(crate::material::radius_overlay(cx))
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
+            .wide()
             .title(crate::tr!("sidebar.add_project").into_owned())
             .content(move |content_el, _, _| content_el.child(dialog_content.clone()))
-            .footer(render_add_footer(&footer, window, cx))
+            .footer(render_add_footer(&footer))
             .on_ok(move |_, window, cx| {
                 confirm.update(cx, |dialog, cx| {
                     if dialog
@@ -309,15 +307,9 @@ impl AddProjectDialog {
                 let store = dialog.store.clone();
                 let progress = cx.new(|cx| ImportProgress::new(store, project_id, cx));
                 let content = progress.clone();
-                window.open_dialog(cx, move |builder, _, cx| {
+                window.open_dialog(cx, move |builder, _, _| {
                     let progress_content = content.clone();
                     builder
-                        .w(px(480.))
-                        .rounded(crate::material::radius_overlay(cx))
-                        .bg(cx.theme().popover)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .shadow_xl()
                         .title(crate::tr!("sidebar.importing").into_owned())
                         .close_button(false)
                         .overlay_closable(false)
@@ -332,25 +324,22 @@ impl AddProjectDialog {
     fn render_recent(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         match &self.recent {
             RecentState::Loading => v_flex()
-                .gap_3()
-                .py_4()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!("sidebar.recent_loading"))
+                .child(crate::material::empty_row(
+                    crate::tr!("sidebar.recent_loading"),
+                    cx,
+                ))
                 .child(Progress::new("recent-directories-loading").loading(true))
                 .into_any_element(),
-            RecentState::Failed(error) => div()
-                .py_4()
-                .text_size(px(13.))
-                .text_color(cx.theme().danger)
-                .child(crate::tr!("sidebar.recent_failed", reason = error.clone()).into_owned())
-                .into_any_element(),
-            RecentState::Ready(recent) if recent.is_empty() => div()
-                .py_4()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!("sidebar.recent_empty"))
-                .into_any_element(),
+            RecentState::Failed(error) => crate::material::empty_row(
+                crate::tr!("sidebar.recent_failed", reason = error.clone()).into_owned(),
+                cx,
+            )
+            .text_color(cx.theme().danger)
+            .into_any_element(),
+            RecentState::Ready(recent) if recent.is_empty() => {
+                crate::material::empty_row(crate::tr!("sidebar.recent_empty"), cx)
+                    .into_any_element()
+            }
             RecentState::Ready(recent) => {
                 // Keep the viewport and the flex column separate. Putting the
                 // max height on the column itself lets flexbox shrink every row
@@ -365,49 +354,34 @@ impl AddProjectDialog {
                     let ago = humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
                     let counts = tool_counts(&recent.threads);
                     rows = rows.child(
-                        crate::material::accessible_clickable(
-                            v_flex(),
+                        crate::material::panel_row(
                             format!("recent-directory-{index}"),
-                            Role::Button,
-                            accessible_name,
+                            accessible_name.into(),
+                            false,
                             cx,
                         )
                         .flex_none()
-                        .gap_1()
-                        .px_3()
-                        .py_2()
-                        .rounded(crate::material::radius_card(cx))
-                        .text_size(px(13.))
                         .cursor_pointer()
-                        .hover(|style| style.bg(cx.theme().list_hover))
                         .on_click(cx.listener(move |dialog, _, window, cx| {
                             dialog.choose_recent(selected.clone(), window, cx);
                         }))
                         .child(
-                            h_flex()
-                                .w_full()
-                                .justify_between()
-                                .gap_3()
-                                .child(div().font_bold().child(name))
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
                                 .child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(ago),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(path),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(counts),
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .gap_3()
+                                        .child(div().text_body(false, cx).font_bold().child(name))
+                                        .child(
+                                            div().flex_none().text_secondary(false, cx).child(ago),
+                                        ),
+                                )
+                                .child(div().text_secondary(false, cx).child(path))
+                                .child(div().text_secondary(false, cx).child(counts)),
                         ),
                     );
                 }
@@ -459,8 +433,7 @@ impl Render for AddProjectDialog {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .font_semibold()
+                            .text_caption(cx)
                             .child(crate::tr!("sidebar.create_new_project")),
                     )
                     .child(
@@ -476,12 +449,7 @@ impl Render for AddProjectDialog {
                                     })),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(destination_hint),
-                    ),
+                    .child(div().text_secondary(false, cx).child(destination_hint)),
             )
             .child(
                 v_flex()
@@ -494,7 +462,6 @@ impl Render for AddProjectDialog {
                             .when(can_browse, |row| {
                                 row.child(
                                     Button::new("browse-project-directory")
-                                        .rounded(crate::material::radius_button(cx))
                                         .label(crate::tr!("sidebar.browse"))
                                         .on_click(cx.listener(|dialog, _, window, cx| {
                                             dialog.browse_clicked(window, cx);
@@ -503,17 +470,12 @@ impl Render for AddProjectDialog {
                             }),
                     )
                     .when_some(path_hint, |column, hint| {
-                        column.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(hint),
-                        )
+                        column.child(div().text_secondary(false, cx).child(hint))
                     })
                     .when_some(self.error.clone(), |column, error| {
                         column.child(
                             div()
-                                .text_size(px(11.))
+                                .text_secondary(false, cx)
                                 .text_color(cx.theme().danger)
                                 .child(error),
                         )
@@ -525,11 +487,10 @@ impl Render for AddProjectDialog {
                     .child(
                         v_flex()
                             .gap_0p5()
-                            .child(div().text_size(px(13.)).font_semibold().child(recent_label))
+                            .child(div().text_caption(cx).child(recent_label))
                             .child(
                                 div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
+                                    .text_secondary(false, cx)
                                     .child(crate::tr!("sidebar.recent_import_hint")),
                             ),
                     )
@@ -602,35 +563,23 @@ impl Render for ImportProgress {
             .py_2()
             .child(Progress::new("external-import-progress").value(percent))
             .when_some(running, |column, (done, total, tool)| {
-                column.child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!(
-                            "sidebar.import_progress",
-                            done = done,
-                            total = total,
-                            tool = tool
-                        )),
-                )
+                column.child(div().text_secondary(false, cx).child(crate::tr!(
+                    "sidebar.import_progress",
+                    done = done,
+                    total = total,
+                    tool = tool
+                )))
             })
             .when_some(summary, |column, (imported, skipped)| {
                 column
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_semibold()
-                            .text_color(cx.theme().foreground)
-                            .child(crate::tr!(
-                                "sidebar.import_summary",
-                                imported = imported,
-                                skipped = skipped
-                            )),
-                    )
+                    .child(div().text_title(cx).child(crate::tr!(
+                        "sidebar.import_summary",
+                        imported = imported,
+                        skipped = skipped
+                    )))
                     .child(
                         h_flex().w_full().justify_end().child(
                             Button::new("external-import-ok")
-                                .rounded(crate::material::radius_button(cx))
                                 .primary()
                                 .label(crate::tr!("sidebar.import_ok"))
                                 .on_click(move |_, window, cx| {
@@ -645,16 +594,11 @@ impl Render for ImportProgress {
     }
 }
 
-fn render_add_footer(
-    dialog: &Entity<AddProjectDialog>,
-    _window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
+fn render_add_footer(dialog: &Entity<AddProjectDialog>) -> AnyElement {
     let open = dialog.clone();
     DialogActions::new()
         .child(
             Button::new("add-project-cancel")
-                .rounded(crate::material::radius_button(cx))
                 .label(crate::tr!("sidebar.cancel"))
                 .on_click(move |_, window, cx| {
                     window.close_dialog(cx);
@@ -662,7 +606,6 @@ fn render_add_footer(
         )
         .child(
             Button::new("add-project-open")
-                .rounded(crate::material::radius_button(cx))
                 .primary()
                 .label(crate::tr!("sidebar.open"))
                 .on_click(move |_, window, cx| {

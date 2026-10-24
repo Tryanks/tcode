@@ -58,7 +58,6 @@ impl Composer {
     ) -> AnyElement {
         let request_id = pending.request_id.clone();
         let blocking = pending.delivery.is_blocking();
-        let touch = if self.compact { 44. } else { 24. };
         // Hiding is local to this client; the question stays open on the host,
         // so a way back remains while the sidebar still asks for an answer.
         if !blocking && self.ui_dismissed_request_id.as_ref() == Some(&request_id) {
@@ -69,7 +68,7 @@ impl Composer {
                         .debug_selector(|| "ui-reveal".into())
                         .ghost()
                         .xsmall()
-                        .when(self.compact, |button| button.min_h(px(touch)))
+                        .touch(self.compact)
                         .icon(IconName::Info)
                         .label(crate::tr!("userinput.async_header"))
                         .tooltip(crate::tr!("userinput.answer"))
@@ -96,9 +95,7 @@ impl Composer {
             .debug_selector(|| "ui-toggle".into())
             .ghost()
             .xsmall()
-            .when(self.compact, |button| {
-                button.min_w(px(touch)).min_h(px(touch))
-            })
+            .touch(self.compact)
             .icon(if expanded {
                 IconName::ChevronDown
             } else {
@@ -119,85 +116,84 @@ impl Composer {
         } else {
             crate::tr!("userinput.async_header").into_owned()
         };
-        let mut strip = h_flex()
-            .id("ui-strip")
-            .w_full()
-            .gap_2()
-            .items_center()
-            .cursor_pointer()
-            .child(Icon::new(IconName::Info).small().text_color(primary))
-            .child(
+        let mut strip = crate::material::accessible_clickable(
+            h_flex(),
+            "ui-strip",
+            Role::Button,
+            title.clone(),
+            cx,
+        )
+        .w_full()
+        .gap_2()
+        .items_center()
+        .cursor_pointer()
+        .child(Icon::new(IconName::Info).text_color(primary))
+        .child(
+            div()
+                .flex_none()
+                .max_w_1_2()
+                .truncate()
+                .text_title(cx)
+                .child(title),
+        )
+        .when(!expanded, |strip| {
+            strip.child(
                 div()
-                    .flex_none()
-                    .max_w_1_2()
+                    .flex_1()
+                    .min_w_0()
                     .truncate()
-                    .text_size(px(13.))
-                    .font_medium()
-                    .child(title),
+                    .text_body(self.compact, cx)
+                    .text_color(muted)
+                    .child(question.question.clone()),
             )
-            .when(!expanded, |strip| {
-                strip.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(13.))
-                        .text_color(muted)
-                        .child(question.question.clone()),
+        })
+        .when(expanded, |strip| strip.child(div().flex_1()))
+        .when(total > 1, |strip| {
+            let questions_previous = questions.clone();
+            let questions_next = questions.clone();
+            strip
+                .child(
+                    Button::new("ui-prev")
+                        .debug_selector(|| "ui-prev".into())
+                        .ghost()
+                        .xsmall()
+                        .touch(self.compact)
+                        .icon(IconName::ChevronLeft)
+                        .disabled(index == 0)
+                        .tooltip(crate::tr!("userinput.previous"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            crate::widgets::stop_click_propagation(window, cx);
+                            this.ui_expanded = true;
+                            this.ui_go(-1, &questions_previous, window, cx);
+                        })),
                 )
-            })
-            .when(expanded, |strip| strip.child(div().flex_1()))
-            .when(total > 1, |strip| {
-                let questions_previous = questions.clone();
-                let questions_next = questions.clone();
-                strip
-                    .child(
-                        Button::new("ui-prev")
-                            .debug_selector(|| "ui-prev".into())
-                            .ghost()
-                            .xsmall()
-                            .when(self.compact, |button| {
-                                button.min_w(px(touch)).min_h(px(touch))
-                            })
-                            .icon(IconName::ChevronLeft)
-                            .disabled(index == 0)
-                            .tooltip(crate::tr!("userinput.previous"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                crate::widgets::stop_click_propagation(window, cx);
-                                this.ui_expanded = true;
-                                this.ui_go(-1, &questions_previous, window, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child(crate::tr!(
-                                "userinput.question_count",
-                                index = index + 1,
-                                total = total
-                            )),
-                    )
-                    .child(
-                        Button::new("ui-next")
-                            .debug_selector(|| "ui-next".into())
-                            .ghost()
-                            .xsmall()
-                            .when(self.compact, |button| {
-                                button.min_w(px(touch)).min_h(px(touch))
-                            })
-                            .icon(IconName::ChevronRight)
-                            .disabled(index + 1 >= total)
-                            .tooltip(crate::tr!("userinput.next_question"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                crate::widgets::stop_click_propagation(window, cx);
-                                this.ui_expanded = true;
-                                this.ui_go(1, &questions_next, window, cx);
-                            })),
-                    )
-            })
-            .child(toggle);
+                .child(
+                    div()
+                        .flex_none()
+                        .text_secondary(self.compact, cx)
+                        .child(crate::tr!(
+                            "userinput.question_count",
+                            index = index + 1,
+                            total = total
+                        )),
+                )
+                .child(
+                    Button::new("ui-next")
+                        .debug_selector(|| "ui-next".into())
+                        .ghost()
+                        .xsmall()
+                        .touch(self.compact)
+                        .icon(IconName::ChevronRight)
+                        .disabled(index + 1 >= total)
+                        .tooltip(crate::tr!("userinput.next_question"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            crate::widgets::stop_click_propagation(window, cx);
+                            this.ui_expanded = true;
+                            this.ui_go(1, &questions_next, window, cx);
+                        })),
+                )
+        })
+        .child(toggle);
         if !blocking {
             let request_dismiss = request_id.clone();
             strip = strip.child(
@@ -205,9 +201,7 @@ impl Composer {
                     .debug_selector(|| "ui-dismiss".into())
                     .ghost()
                     .xsmall()
-                    .when(self.compact, |button| {
-                        button.min_w(px(touch)).min_h(px(touch))
-                    })
+                    .touch(self.compact)
                     .icon(IconName::Close)
                     .tooltip(crate::tr!("userinput.dismiss"))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -222,17 +216,7 @@ impl Composer {
             cx.notify();
         }));
 
-        let card = v_flex()
-            .w_full()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .rounded(crate::material::radius_card(cx))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .shadow_sm()
-            .child(strip);
+        let card = crate::material::card_raised(cx).w_full().child(strip);
         if !expanded {
             return card.into_any_element();
         }
@@ -242,7 +226,12 @@ impl Composer {
             .get(&question.id)
             .cloned()
             .unwrap_or_default();
-        let mut options = v_flex().w_full().gap_1();
+        let mut options = v_flex()
+            .id("ui-options")
+            .role(Role::ListBox)
+            .aria_label(question.question.clone())
+            .w_full()
+            .gap_1();
         for (opt_index, option) in question.options.iter().enumerate() {
             let is_selected = selected.iter().any(|l| l == &option.label);
             let label = option.label.clone();
@@ -266,20 +255,24 @@ impl Composer {
                         .child(div().size(px(6.)).rounded_full().bg(gpui::white()))
                 });
             options = options.child(
-                h_flex()
+                crate::material::menu_item_frame(self.compact, cx)
                     .id(("ui-opt", opt_index))
+                    .role(Role::ListBoxOption)
+                    .aria_label(option.label.clone())
+                    .aria_selected(is_selected)
                     .flex_none()
                     .w_full()
-                    .min_h(px(if self.compact { 48. } else { 28. }))
-                    .px_2()
-                    .py_1()
-                    .gap_2()
                     .items_start()
-                    .rounded(crate::material::radius_chip(cx))
+                    .text_body(self.compact, cx)
                     .cursor_pointer()
                     .when(is_selected, |s| s.bg(cx.theme().list_active))
                     .hover(|s| s.bg(cx.theme().muted))
-                    .child(div().flex_none().pt(px(2.)).child(mark))
+                    .child(
+                        div()
+                            .flex_none()
+                            .pt(cx.theme().tokens.spacing.xxs)
+                            .child(mark),
+                    )
                     .child(
                         v_flex()
                             .flex_1()
@@ -289,7 +282,6 @@ impl Composer {
                                 h_flex()
                                     .gap_1p5()
                                     .items_center()
-                                    .text_size(px(13.))
                                     // Digits select only while the agent is
                                     // blocked; the composer keeps them otherwise.
                                     .when(blocking, |row| {
@@ -300,13 +292,12 @@ impl Composer {
                                                 .child(format!("{}", opt_index + 1)),
                                         )
                                     })
-                                    .child(div().font_medium().child(option.label.clone())),
+                                    .child(div().child(option.label.clone())),
                             )
                             .when(!option.description.is_empty(), |this| {
                                 this.child(
                                     div()
-                                        .text_size(px(13.))
-                                        .text_color(muted)
+                                        .text_secondary(self.compact, cx)
                                         .child(option.description.clone()),
                                 )
                             }),
@@ -338,7 +329,11 @@ impl Composer {
                 v_flex()
                     .w_full()
                     .gap_2()
-                    .child(div().text_size(px(13.)).child(question.question.clone()))
+                    .child(
+                        div()
+                            .text_body(self.compact, cx)
+                            .child(question.question.clone()),
+                    )
                     .when(!question.options.is_empty(), |this| this.child(options)),
             );
 
@@ -364,9 +359,7 @@ impl Composer {
                 Button::new("ui-custom-submit")
                     .ghost()
                     .xsmall()
-                    .when(self.compact, |button| {
-                        button.min_w(px(touch)).min_h(px(touch))
-                    })
+                    .touch(self.compact)
                     .icon(IconName::ArrowUp)
                     .disabled(!custom_has_text)
                     .tooltip(crate::tr!("userinput.submit_custom"))
@@ -395,18 +388,15 @@ impl Composer {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(11.))
-                    .text_color(muted)
+                    .text_secondary(self.compact, cx)
                     .children(hint),
             )
             .when(multi && all_answered, |this| {
                 this.child(
                     Button::new("ui-done")
                         .primary()
-                        .small()
-                        .h(px(28.))
-                        .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
-                        .rounded(crate::material::radius_input(cx))
+                        .chip()
+                        .touch(self.compact)
                         .label(crate::tr!("userinput.done"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.ui_submit(&questions_submit, request_id.clone(), window, cx);

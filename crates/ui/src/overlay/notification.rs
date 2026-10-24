@@ -21,6 +21,7 @@ use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{Button, ButtonVariants as _},
 };
 use gpui_base::StyledExt as _;
@@ -246,6 +247,7 @@ impl Render for Notification {
                     (!matches!(kind, NotificationType::Info)).then(|| kind.icon(cx))
                 })
             });
+            let spacing = &cx.theme().tokens.spacing;
             return div()
                 .id("compact-toast")
                 .debug_selector(|| "compact-toast".into())
@@ -253,11 +255,12 @@ impl Render for Notification {
                 .occlude()
                 .flex()
                 .items_center()
-                .gap_2()
-                .min_h(px(44.))
+                .gap(spacing.sm)
+                .min_h(px(crate::material::TOUCH_TARGET))
                 .max_w_full()
-                .py(px(12.))
-                .px(px(16.))
+                .py(spacing.md)
+                .px(spacing.lg)
+                .text_body(true, cx)
                 .rounded_full()
                 .bg(cx.theme().popover)
                 .shadow_lg()
@@ -274,18 +277,13 @@ impl Render for Notification {
                 }))
                 .children(icon)
                 .child(
-                    div()
-                        .min_w_0()
-                        .text_size(px(15.))
-                        .line_height(px(20.))
-                        .line_clamp(2)
-                        .child(
-                            self.compact_message
-                                .clone()
-                                .or_else(|| self.message.clone())
-                                .or_else(|| self.title.clone())
-                                .unwrap_or_default(),
-                        ),
+                    div().min_w_0().line_clamp(2).child(
+                        self.compact_message
+                            .clone()
+                            .or_else(|| self.message.clone())
+                            .or_else(|| self.title.clone())
+                            .unwrap_or_default(),
+                    ),
                 )
                 .children(action)
                 .with_animation(
@@ -311,16 +309,18 @@ impl Render for Notification {
             .clone()
             .or_else(|| self.type_.map(|kind| kind.icon(cx)));
         let has_icon = icon.is_some();
+        let spacing = &cx.theme().tokens.spacing;
         BaseToast::new("notification")
             .debug_selector(|| "wide-toast".into())
             .transition_status(self.transition_status)
             .flex()
             .items_start()
-            .gap_3()
+            .gap(spacing.md)
             .relative()
             .occlude()
             .w_full()
-            .p_4()
+            .p(spacing.lg)
+            .text_body(false, cx)
             .rounded(crate::material::radius_overlay(cx))
             .border_1()
             .border_color(cx.theme().border)
@@ -333,13 +333,11 @@ impl Render for Notification {
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .gap_1()
+                    .gap(spacing.xs)
                     .when_some(self.title.clone(), |el, title| {
-                        el.child(div().text_sm().font_semibold().child(title))
+                        el.child(div().font_semibold().child(title))
                     })
-                    .when_some(self.message.clone(), |el, message| {
-                        el.child(div().text_sm().child(message))
-                    })
+                    .when_some(self.message.clone(), |el, message| el.child(message))
                     .when_some(content, |el, content| el.child(content))
                     .when(!has_icon, |el| el),
             )

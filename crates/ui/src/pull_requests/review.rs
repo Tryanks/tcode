@@ -28,6 +28,7 @@ use crate::{
     overlay::{Notification, OverlayExt as _},
     sizing::Sizable as _,
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         Popover,
         button::{Button, ButtonVariants as _},
@@ -251,12 +252,8 @@ impl PullRequestView {
                         .unwrap_or_else(|| div().into_any_element())
                 };
                 rows.push(
-                    div()
+                    material::card(cx)
                         .min_w_full()
-                        .px_3()
-                        .py_2()
-                        .bg(cx.theme().muted)
-                        .rounded(material::radius_card(cx))
                         .child(element)
                         .into_any_element(),
                 );
@@ -290,7 +287,7 @@ impl PullRequestView {
         comment: &PullRequestReviewDraftComment,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
+        let compact = self.compact(cx);
         let id = comment.id;
         let slot = Slot::Pending(id);
         let editing = self
@@ -312,7 +309,7 @@ impl PullRequestView {
             let state = self.markdown(&format!("pending-{id}"), &comment.body, cx);
             Some(
                 div()
-                    .text_size(px(13.))
+                    .text_body(compact, cx)
                     .child(MarkdownView::new(&state).compact_headings(true))
                     .into_any_element(),
             )
@@ -325,20 +322,16 @@ impl PullRequestView {
             line = comment.end_line.to_string()
         )
         .into_owned();
-        v_flex()
+        material::card(cx)
             .id(SharedString::from(format!("pr-pending-{id}")))
             .role(gpui::Role::Group)
             .aria_label(label)
             .min_w_full()
             .my_1()
-            .px_3()
-            .py_2()
-            .gap_1()
             .relative()
-            .rounded(material::radius_card(cx))
-            .bg(cx.theme().muted)
             .font_family(cx.theme().font_family.clone())
             .child(
+                // The pending marker's edge rail; no owner draws an accent edge on a card.
                 div()
                     .absolute()
                     .left(px(0.))
@@ -352,8 +345,7 @@ impl PullRequestView {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .text_size(px(11.))
-                    .text_color(muted)
+                    .text_secondary(compact, cx)
                     .child(material::semantic_chip(
                         crate::tr!("pull_requests.review.pending").into_owned(),
                         cx.theme().info.opacity(0.1),
@@ -475,13 +467,10 @@ impl PullRequestView {
             .map(|comment| {
                 let id = comment.id;
                 let removed = comment.clone();
-                h_flex()
+                material::card_header_row(cx)
                     .id(SharedString::from(format!("pr-off-diff-pending-{id}")))
-                    .min_h(px(28.))
-                    .px_3()
-                    .gap_2()
-                    .items_center()
-                    .text_size(px(12.))
+                    .text_secondary(false, cx)
+                    .text_color(cx.theme().foreground)
                     .child(material::semantic_chip(
                         crate::tr!("pull_requests.review.pending").into_owned(),
                         cx.theme().info.opacity(0.1),
@@ -507,7 +496,7 @@ impl PullRequestView {
                     .when(!comment.placed, |row| {
                         row.child(
                             div()
-                                .text_size(px(11.))
+                                .flex_none()
                                 .text_color(cx.theme().warning)
                                 .child(crate::tr!("pull_requests.review.line_changed")),
                         )
@@ -610,53 +599,45 @@ impl PullRequestView {
             .label(crate::tr!("pull_requests.review.finish"))
             .on_click(cx.listener(|this, _, window, cx| this.open_review(window, cx)));
         Some(
-            h_flex()
-                .id("pr-review-bar")
-                .role(gpui::Role::Group)
-                .aria_label(
-                    crate::tr!("pull_requests.review.bar_label", count = count.to_string())
-                        .into_owned(),
+            material::bar_divider_below(
+                material::bar("pr-review-bar", material::Bar::Toolbar, compact, cx),
+                cx,
+            )
+            .aria_label(
+                crate::tr!("pull_requests.review.bar_label", count = count.to_string())
+                    .into_owned(),
+            )
+            .items_center()
+            .bg(cx.theme().muted)
+            .text_secondary(compact, cx)
+            .text_color(cx.theme().foreground)
+            .child(Icon::new(IconName::MessageSquare).text_color(cx.theme().muted_foreground))
+            .child(div().min_w_0().truncate().child(summary))
+            .when(stale, |bar| {
+                bar.child(
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
+                        .items_center()
+                        .text_color(cx.theme().warning)
+                        .child(Icon::new(IconName::TriangleAlert))
+                        .child(crate::tr!("pull_requests.review.head_changed")),
                 )
-                .flex_none()
-                .h(px(if compact { material::TOUCH_TARGET } else { 36. }))
-                .px_3()
-                .gap_2()
-                .items_center()
-                .bg(cx.theme().muted)
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .text_size(px(12.))
-                .child(
-                    Icon::new(IconName::MessageSquare)
-                        .size(px(14.))
-                        .text_color(cx.theme().muted_foreground),
+            })
+            .child(div().flex_1())
+            .when(!compact, |bar| {
+                bar.child(
+                    Button::new("pr-review-discard")
+                        .ghost()
+                        .xsmall()
+                        .label(crate::tr!("pull_requests.review.discard"))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.confirm_discard(window, cx)),
+                        ),
                 )
-                .child(div().min_w_0().truncate().child(summary))
-                .when(stale, |bar| {
-                    bar.child(
-                        h_flex()
-                            .flex_none()
-                            .gap_1()
-                            .items_center()
-                            .text_color(cx.theme().warning)
-                            .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
-                            .child(crate::tr!("pull_requests.review.head_changed")),
-                    )
-                })
-                .child(div().flex_1())
-                .when(!compact, |bar| {
-                    bar.child(
-                        Button::new("pr-review-discard")
-                            .ghost()
-                            .xsmall()
-                            .label(crate::tr!("pull_requests.review.discard"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.confirm_discard(window, cx)),
-                            ),
-                    )
-                })
-                .child(self.review_popover(Some(finish), cx))
-                .into_any_element(),
+            })
+            .child(self.review_popover(Some(finish), cx))
+            .into_any_element(),
         )
     }
 
@@ -896,10 +877,9 @@ impl PullRequestView {
             .to_string();
         let host_name = self.host_name(cx);
         let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
+        window.open_alert_dialog(cx, move |alert, _, _| {
             let view = view.clone();
             alert
-                .bg(cx.theme().popover)
                 .title(crate::tr!("pull_requests.review.discard_title"))
                 .description(crate::tr!(
                     "pull_requests.review.discard_desc",
@@ -945,7 +925,6 @@ impl PullRequestView {
         let submittable = this.submittable(cx);
         let busy = this.busy("review");
         let moving = this.busy("move");
-        let muted = cx.theme().muted_foreground;
         let comments = draft.as_ref().map_or(0, |draft| draft.comments.len());
         let unplaced = draft.as_ref().map_or(0, |draft| {
             draft
@@ -1085,20 +1064,18 @@ impl PullRequestView {
         let discard_view = view.clone();
         v_flex()
             .id("pr-review-sheet-body")
-            .w(px(if compact { 0. } else { 440. }))
+            // Popover sizes to its content; the anchored sheet's width is its own.
+            .when(!compact, |sheet| sheet.w(px(440.)))
             .when(compact, |sheet| sheet.w_full())
             .p_3()
             .gap_3()
             .font_family(cx.theme().font_family.clone())
             .when(!compact, |sheet| {
                 sheet.child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(
-                            crate::tr!("pull_requests.review.sheet_title", number = number.clone())
-                                .into_owned(),
-                        ),
+                    div().text_title(cx).child(
+                        crate::tr!("pull_requests.review.sheet_title", number = number.clone())
+                            .into_owned(),
+                    ),
                 )
             })
             .children(stale_notice)
@@ -1108,8 +1085,7 @@ impl PullRequestView {
                     h_flex()
                         .gap_2()
                         .items_center()
-                        .text_size(px(12.))
-                        .text_color(muted)
+                        .text_secondary(compact, cx)
                         .child(if comments == 1 {
                             crate::tr!("pull_requests.review.pending_count_one").into_owned()
                         } else {
@@ -1147,14 +1123,13 @@ impl PullRequestView {
             )
             .child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(muted)
+                    .text_secondary(compact, cx)
                     .child(crate::tr!(caption, host_name = host_name.clone())),
             )
             .when(unplaced > 0, |sheet| {
                 sheet.child(
                     div()
-                        .text_size(px(11.))
+                        .text_secondary(compact, cx)
                         .text_color(cx.theme().warning)
                         .child(if unplaced == 1 {
                             crate::tr!("pull_requests.review.unplaced_one").into_owned()
@@ -1212,9 +1187,8 @@ impl PullRequestView {
                 .py_2()
                 .gap_2()
                 .items_center()
-                .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground)
-                .child(Icon::new(IconName::MessageSquare).size(px(14.)))
+                .text_secondary(self.compact(cx), cx)
+                .child(Icon::new(IconName::MessageSquare))
                 .child(
                     crate::tr!(
                         "pull_requests.review.pending_line",

@@ -157,18 +157,15 @@ impl RenderOnce for EditMenu {
                 bottom_right: corner(ix == last),
             };
             let selector = item.selector;
-            // This is a finger's menu wherever it shows: a touch-target row,
-            // its text at the 17px UIKit draws its own Paste item at, which
-            // takes no font. Button's named sizes pin their own 32px height
-            // over the caller's; a custom size leaves the height to the
-            // caller. Pressing an item leaves focus on the text it acts on:
-            // an input keeps its keyboard, and a message keeps answering the
-            // menu's actions.
+            // This is a finger's menu wherever it shows: a touch-target row.
+            // Its text is 17pt because UIKit draws its own Paste item at that
+            // size and takes no font; no typography token is 17. Pressing an
+            // item leaves focus on the text it acts on: an input keeps its
+            // keyboard, and a message keeps answering the menu's actions.
             let button = Button::new(ix)
                 .ghost()
                 .with_size(px(material::TOUCH_TARGET))
-                .h(px(material::TOUCH_TARGET))
-                .min_w(px(material::TOUCH_TARGET))
+                .touch(true)
                 .text_size(px(17.))
                 .rounded_corners(corners)
                 .tab_stop(false)

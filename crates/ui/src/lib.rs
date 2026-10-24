@@ -68,6 +68,7 @@ mod thread_export;
 pub mod time;
 pub(crate) mod toast;
 mod touch_selection;
+pub mod typography;
 pub(crate) mod usage;
 pub mod widgets;
 mod window_caption;

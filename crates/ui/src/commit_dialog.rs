@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::checkbox::Checkbox;
 use crate::widgets::input::{Textarea, TextareaState};
@@ -16,7 +17,7 @@ use gpui::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Styled as _, Task, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use tcode_core::git::{GitAction, GitFileEntry, feature_branch_name, included_paths};
 
@@ -178,15 +179,14 @@ impl CommitDialog {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(13.))
-                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_code(cx)
                     .child(path),
             )
             .when(file.insertions > 0, |this| {
                 this.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.))
+                        .text_secondary(false, cx)
                         .text_color(cx.theme().success)
                         .child(format!("+{}", file.insertions)),
                 )
@@ -195,7 +195,7 @@ impl CommitDialog {
                 this.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.))
+                        .text_secondary(false, cx)
                         .text_color(cx.theme().danger)
                         .child(format!("-{}", file.deletions)),
                 )
@@ -215,14 +215,8 @@ impl Render for CommitDialog {
             .w_full()
             .gap_1p5()
             .items_center()
-            .text_size(px(13.))
-            .text_color(muted)
-            .child(
-                Icon::empty()
-                    .path("icons/git-branch.svg")
-                    .xsmall()
-                    .text_color(muted),
-            )
+            .text_secondary(false, cx)
+            .child(Icon::empty().path("icons/git-branch.svg"))
             .child(crate::tr!("git.commit.branch"))
             .child(
                 div()
@@ -236,59 +230,50 @@ impl Render for CommitDialog {
         if self.on_default_branch {
             let create = self.create_feature_branch;
             body = body.child(
-                v_flex()
-                    .w_full()
-                    .p_3()
-                    .gap_2()
-                    .rounded(crate::material::radius_card(cx))
-                    .border_1()
-                    .border_color(cx.theme().warning)
-                    .bg(cx.theme().warning.opacity(0.08))
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .items_center()
-                            .text_size(px(13.))
-                            .font_medium()
-                            .text_color(cx.theme().warning)
-                            .child(Icon::new(IconName::TriangleAlert).xsmall())
-                            .child(crate::tr!("git.commit.default_warning_title")),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(muted)
-                            .child(crate::tr!("git.commit.default_warning_body")),
-                    )
-                    .child(
-                        Checkbox::new("commit-feature-branch")
-                            .checked(create)
-                            .label(crate::tr!("git.commit.create_feature_branch").into_owned())
-                            .on_click(cx.listener(|dialog, checked: &bool, _window, cx| {
-                                dialog.create_feature_branch = *checked;
-                                cx.notify();
-                            })),
-                    ),
+                crate::material::notice(cx.theme().warning, cx).child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(cx.theme().tokens.spacing.sm)
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .text_title(cx)
+                                .text_color(cx.theme().warning)
+                                .child(Icon::new(IconName::TriangleAlert))
+                                .child(crate::tr!("git.commit.default_warning_title")),
+                        )
+                        .child(
+                            div()
+                                .text_body(false, cx)
+                                .text_color(muted)
+                                .child(crate::tr!("git.commit.default_warning_body")),
+                        )
+                        .child(
+                            Checkbox::new("commit-feature-branch")
+                                .checked(create)
+                                .label(crate::tr!("git.commit.create_feature_branch").into_owned())
+                                .on_click(cx.listener(|dialog, checked: &bool, _window, cx| {
+                                    dialog.create_feature_branch = *checked;
+                                    cx.notify();
+                                })),
+                        ),
+                ),
             );
         }
 
-        let files_header = h_flex().w_full().justify_between().items_center().child(
-            div()
-                .text_size(px(11.))
-                .font_medium()
-                .text_color(muted)
-                .child(crate::tr!(
+        let files_header =
+            h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .child(div().text_caption(cx).child(crate::tr!(
                     "git.commit.files_count",
                     count = self.files.len()
-                )),
-        );
+                )));
         let file_list = if self.files.is_empty() {
-            div()
-                .p_2()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(crate::tr!("git.commit.no_changes"))
-                .into_any_element()
+            crate::material::empty_row(crate::tr!("git.commit.no_changes"), cx).into_any_element()
         } else {
             crate::scroll::VirtualList::uniform(
                 "commit-files",
@@ -306,6 +291,8 @@ impl Render for CommitDialog {
                 }),
             )
             .w_full()
+            // The list scrolls inside the dialog after a handful of rows so the
+            // message field stays on screen; no owner sizes a list in a form.
             .max_h(px(180.))
             .into_any_element()
         };
@@ -319,7 +306,11 @@ impl Render for CommitDialog {
                     .pt_1()
                     .px_1()
                     // The last file row carries its gap.
-                    .pb(px(if self.files.is_empty() { 4. } else { 2. }))
+                    .pb(if self.files.is_empty() {
+                        cx.theme().tokens.spacing.xs
+                    } else {
+                        cx.theme().tokens.spacing.xxs
+                    })
                     .child(file_list),
             ),
         );
@@ -330,14 +321,11 @@ impl Render for CommitDialog {
             .items_center()
             .child(
                 div()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(muted)
+                    .text_caption(cx)
                     .child(crate::tr!("git.commit.message_label")),
             )
             .child(
                 Button::new("commit-regenerate")
-                    .rounded(crate::material::radius_button(cx))
                     .ghost()
                     .xsmall()
                     .icon(IconName::Undo)
@@ -359,14 +347,7 @@ impl Render for CommitDialog {
                 .child(Textarea::new(&self.message)),
         );
 
-        crate::material::overlay_contour(
-            div()
-                .w_full()
-                .min_w(px(520.))
-                .rounded(crate::material::radius_overlay(cx)),
-            cx,
-        )
-        .child(body)
+        body
     }
 }
 

@@ -3,12 +3,13 @@ use std::rc::Rc;
 
 use crate::overlay::{Notification, NotificationType};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::spinner::Spinner;
 use crate::{icon::IconName, sizing::Sizable as _};
 use gpui::{
     App, ClipboardItem, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -60,16 +61,17 @@ pub fn notification(
     if loading_title.is_some() || detail.is_some() || progress.is_some() {
         notification = notification.content(move |_, window, cx| {
             let has_loading_title = loading_title.is_some();
+            let spacing = &cx.theme().tokens.spacing;
             let mut content = v_flex()
-                .gap_2()
-                .when(!has_loading_title, |content| content.mt_2())
+                .gap(spacing.sm)
+                .when(!has_loading_title, |content| content.mt(spacing.sm))
                 .when_some(loading_title.clone(), |content, title| {
                     content.child(
                         h_flex()
-                            .gap_3()
-                            .items_center()
-                            .child(Spinner::new().small())
-                            .child(div().text_size(px(14.)).child(title)),
+                            .gap(spacing.md)
+                            .text_body(false, cx)
+                            .child(Spinner::new())
+                            .child(title),
                     )
                 });
             if let Some(value) = progress {
@@ -103,11 +105,10 @@ pub fn notification(
                         div()
                             .id(("toast-detail-scroll", id as usize))
                             .max_h_40()
-                            .p_2()
+                            .p(cx.theme().tokens.spacing.sm)
                             .rounded(crate::material::radius_input(cx))
                             .bg(cx.theme().muted)
-                            .text_xs()
-                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_code(cx)
                             .overflow_y_scroll_area()
                             .child(detail.clone()),
                     );

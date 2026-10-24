@@ -1,6 +1,7 @@
 mod dialog;
 mod notification;
 
+pub(crate) use dialog::DIALOG_LIST_HEIGHT;
 pub use dialog::{AlertDialog, Dialog, DialogActions, DialogButtons, DialogContent};
 pub use notification::{Notification, NotificationType};
 
@@ -168,6 +169,7 @@ impl Render for Overlays {
         // pinned to the corner would sit under the status bar.
         let compact = crate::window_seam::window_is_compact(window, cx);
         let seam = crate::window_seam::content_insets(window);
+        let inset = px(crate::material::COMPACT_PAGE_INSET);
         div()
             .absolute()
             .inset_0()
@@ -190,17 +192,17 @@ impl Render for Overlays {
                     .debug_selector(|| "notification-position".into())
                     .absolute()
                     .when(compact, |el| {
-                        el.left(seam.left + px(16.))
-                            .right(seam.right + px(16.))
-                            .bottom(seam.bottom + px(16.))
+                        el.left(seam.left + inset)
+                            .right(seam.right + inset)
+                            .bottom(seam.bottom + inset)
                             .flex()
                             .justify_center()
                     })
                     .when(!compact, |el| {
                         el.top_0()
                             .right_0()
-                            .mt(seam.top + px(16.))
-                            .mr(seam.right + px(16.))
+                            .mt(seam.top + inset)
+                            .mr(seam.right + inset)
                     })
                     .child(self.notifications.clone()),
             )

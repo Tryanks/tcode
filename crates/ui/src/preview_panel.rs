@@ -48,20 +48,18 @@
 use gpui::{
     AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
-use gpui_base::{h_flex, v_flex};
+use gpui_base::v_flex;
 use tcode_protocol::PreviewResponse;
 
+use crate::icon::IconName;
 use crate::material;
 use crate::store::WorkspaceStore;
-use crate::theme::ActiveTheme as _;
-use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::menu::DropdownMenu as _;
 use crate::window_caption;
 use crate::window_state::{Route, WindowState};
-use crate::{icon::IconName, sizing::Sizable as _};
 
 /// Whether this client can embed a browser. Views ask before offering an action
 /// that needs one, so nothing renders an enabled control that cannot work.
@@ -321,10 +319,8 @@ impl PreviewPanel {
 
     fn render_chrome(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Windows: an open Preview tab is the rightmost column, so its
-        // chrome row hosts the caption buttons. The row is normally only as
-        // tall as its controls — pin it to the shell's 52px top strip and
-        // drop the trailing/vertical padding on the caption side so the
-        // buttons reach the window's true top-right corner.
+        // chrome row is a top strip hosting the caption buttons, which reach
+        // the window's true top-right corner.
         let hosts_caption = {
             let (diff_open, right_tab) = self.store.read(cx).window_caption_state();
             window_caption::hosts_caption_for_state(
@@ -345,25 +341,13 @@ impl PreviewPanel {
         // Close is a right-panel affordance — the Panel page's Back leaves it —
         // so it is not drawn here at all.
         let compact = self.window_state.read(cx).compact;
-        h_flex()
-            .flex_none()
-            .w_full()
-            .gap_1()
-            .p_1()
-            .when(compact, |chrome| {
-                chrome
-                    .h(px(material::TOUCH_TARGET))
-                    .py_0()
-                    .px(px(material::COMPACT_PAGE_INSET))
-                    .gap_2()
-            })
-            .when(hosts_caption, |chrome| {
-                chrome
-                    .h(px(window_caption::CAPTION_STRIP_HEIGHT))
-                    .pt_0()
-                    .pb_0()
-                    .pr_0()
-            })
+        let kind = if hosts_caption {
+            material::Bar::Strip
+        } else {
+            material::Bar::Toolbar
+        };
+        material::bar("preview-chrome", kind, compact, cx)
+            .when(hosts_caption, |chrome| chrome.pr_0())
             // Back / forward / reload drive a page. Without a backend they are
             // absent rather than present-but-dead.
             .children(self.history_controls(cx))
@@ -452,13 +436,13 @@ impl PreviewPanel {
             })
             .when(!compact, |chrome| {
                 chrome.child(
-                    Button::new("preview-close")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::Close)
-                        .tooltip(crate::tr!("preview.close"))
-                        .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
+                    material::toolbar_icon_button(
+                        "preview-close",
+                        IconName::Close,
+                        crate::tr!("preview.close"),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
                 )
             })
             .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
@@ -479,18 +463,20 @@ impl PreviewPanel {
     }
 
     #[cfg(preview_backend)]
-    fn render_note(&self, title: String, detail: Option<String>, cx: &Context<Self>) -> AnyElement {
-        v_flex()
-            .flex_1()
-            .gap_2()
-            .items_center()
-            .justify_center()
-            .px_8()
-            .text_center()
-            .text_color(cx.theme().muted_foreground)
-            .child(title)
-            .children(detail.map(|detail| div().text_size(px(13.)).child(detail)))
-            .into_any_element()
+    fn render_note(
+        &self,
+        icon: IconName,
+        title: String,
+        detail: Option<String>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        material::empty_state(
+            crate::icon::Icon::new(icon),
+            title,
+            detail.unwrap_or_default(),
+            cx,
+        )
+        .into_any_element()
     }
 }
 
@@ -499,14 +485,12 @@ impl Render for PreviewPanel {
         // When the embedded browser is turned off in Settings → Browser, hide
         // the chrome and webview entirely and show a quiet placeholder.
         if !self.store.read(cx).preview_browser_settings().enabled {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .px_8()
-                .text_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!("browser.disabled_panel"));
+            return v_flex().size_full().child(material::empty_state(
+                crate::icon::Icon::new(IconName::EyeOff),
+                crate::tr!("browser.disabled_panel"),
+                "",
+                cx,
+            ));
         }
         let active = self.active_key(cx);
         let current_url = active

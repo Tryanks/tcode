@@ -64,13 +64,11 @@ impl Composer {
             return None;
         }
 
-        let muted = cx.theme().muted_foreground;
         let mut strip = v_flex().w_full().gap_1().child(
             div()
                 .flex_none()
                 .px_1()
-                .text_size(px(11.))
-                .text_color(muted)
+                .text_secondary(self.compact, cx)
                 .child(crate::tr!("composer.queued_count", count = queued.len())),
         );
 
@@ -108,7 +106,7 @@ impl Composer {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.))
+                            .text_body(self.compact, cx)
                             .text_color(cx.theme().foreground)
                             .child(truncate_queued(
                                 &tcode_core::notice::host_notice(&message.text).map_or_else(
@@ -123,8 +121,7 @@ impl Composer {
                         row.child(
                             div()
                                 .flex_none()
-                                .text_size(px(12.))
-                                .text_color(muted)
+                                .text_secondary(self.compact, cx)
                                 .child(countdown),
                         )
                     })
@@ -133,7 +130,7 @@ impl Composer {
                             .debug_selector(move || format!("queue-steer-{id}"))
                             .ghost()
                             .xsmall()
-                            .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
+                            .touch(self.compact)
                             .icon(IconName::ArrowUp)
                             // Scheduled rows always support send-now: the
                             // runtime removes the deadline and uses the normal
@@ -152,7 +149,7 @@ impl Composer {
                             .debug_selector(move || format!("queue-drop-{id}"))
                             .ghost()
                             .xsmall()
-                            .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
+                            .touch(self.compact)
                             .icon(IconName::Close)
                             .disabled(!editable || !self.interactive(cx))
                             .tooltip(crate::tr!("composer.drop_queued"))
@@ -199,6 +196,8 @@ impl Composer {
             div()
                 .id("queued-messages-scroll")
                 .w_full()
+                // A few queued rows before the strip scrolls, so the field
+                // under it stays in reach; no owner sizes a composer strip.
                 .max_h(px(180.))
                 .overflow_y_scroll_area()
                 .child(strip)

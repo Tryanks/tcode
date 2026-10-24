@@ -1,15 +1,13 @@
+use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 use crate::widgets::spinner::Spinner;
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
 use agent::{PlanStep, PlanStepStatus};
 use gpui::{
     AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
-use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
+use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 
 use crate::material;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
@@ -39,11 +37,15 @@ impl PlanPanel {
         }
     }
 
-    fn render_steps(&self, steps: &[PlanStep], cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
+    fn render_steps(
+        &self,
+        steps: &[PlanStep],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut steps_col = v_flex().w_full().min_w_0().gap_1();
         for (index, step) in steps.iter().enumerate() {
-            steps_col = steps_col.child(self.render_step(index, step, cx));
+            steps_col = steps_col.child(self.render_step(index, step, compact, cx));
         }
         let steps_col = material::rail_detail(steps_col, cx);
         v_flex()
@@ -52,42 +54,34 @@ impl PlanPanel {
             .child(
                 div()
                     .pt_1()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(muted)
+                    .text_caption(cx)
                     .child(crate::tr!("tasks.steps")),
             )
             .child(steps_col)
             .into_any_element()
     }
 
-    fn render_step(&self, index: usize, step: &PlanStep, cx: &mut Context<Self>) -> AnyElement {
+    fn render_step(
+        &self,
+        index: usize,
+        step: &PlanStep,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let primary = cx.theme().primary;
 
         let marker: AnyElement = match step.status {
             PlanStepStatus::Completed => Icon::new(IconName::CircleCheck)
-                .xsmall()
                 .text_color(muted)
                 .into_any_element(),
-            PlanStepStatus::InProgress => Spinner::new().xsmall().color(primary).into_any_element(),
-            PlanStepStatus::Pending => div()
-                .size(px(14.))
-                .rounded_full()
-                .border_1()
-                .border_color(muted)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(div().size(px(4.)).rounded_full().bg(muted))
+            PlanStepStatus::InProgress => Spinner::new().color(primary).into_any_element(),
+            PlanStepStatus::Pending => Icon::new(IconName::CircleDot)
+                .text_color(muted)
                 .into_any_element(),
         };
 
-        let mut text = div()
-            .flex_1()
-            .min_w_0()
-            .text_size(px(13.))
-            .child(step.step.clone());
+        let mut text = div().flex_1().min_w_0().child(step.step.clone());
         if step.status == PlanStepStatus::Completed {
             text = text.line_through().text_color(muted);
         }
@@ -99,31 +93,30 @@ impl PlanPanel {
             .py_1()
             .gap_2()
             .items_start()
-            .child(div().flex_none().pt(px(1.)).child(marker))
+            .text_body(compact, cx)
+            .child(
+                // One body line tall, so the marker centres on the first line.
+                h_flex()
+                    .flex_none()
+                    .h(if compact {
+                        cx.theme().tokens.typography.md.line_height
+                    } else {
+                        cx.theme().tokens.typography.sm.line_height
+                    })
+                    .child(marker),
+            )
             .child(text)
             .into_any_element()
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .child(
-                div()
-                    .text_size(px(15.))
-                    .font_medium()
-                    .child(crate::tr!("tasks.empty_title")),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("tasks.empty_desc")),
-            )
-            .into_any_element()
+        material::empty_state(
+            Icon::new(IconName::ListOrdered),
+            crate::tr!("tasks.empty_title"),
+            crate::tr!("tasks.empty_desc"),
+            cx,
+        )
+        .into_any_element()
     }
 }
 
@@ -141,15 +134,19 @@ impl Render for PlanPanel {
 
         // A compact page is inset from the window edges; the right column keeps
         // its denser padding.
-        let inset = if crate::window_seam::window_is_compact(window, cx) {
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        let inset = if compact {
             material::COMPACT_PAGE_INSET
         } else {
             material::CARD_INSET
         };
-        let mut column = v_flex().w_full().min_w_0().px(px(inset)).py_3().gap_3();
-        if !steps.is_empty() {
-            column = column.child(self.render_steps(&steps, cx));
-        }
+        let column = v_flex()
+            .w_full()
+            .min_w_0()
+            .px(px(inset))
+            .py_3()
+            .gap_3()
+            .child(self.render_steps(&steps, compact, cx));
 
         v_flex().size_full().child(crate::scroll::page_viewport(
             "plan-scroll-bounce",

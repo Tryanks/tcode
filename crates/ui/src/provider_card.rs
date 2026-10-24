@@ -15,18 +15,19 @@ use crate::{
     sizing::Sizable as _,
     store::{TopicKind, WorkspaceStore, observe_store_topics},
     theme::ActiveTheme as _,
+    typography::TextRole as _,
     widgets::{
         button::{Button, ButtonVariants as _},
         switch::Switch,
     },
 };
 use gpui::{
-    AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement as _,
+    Render, StatefulInteractiveElement as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui::{Styled as _, rgb};
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_core::settings::builtin_provider_color;
@@ -91,15 +92,12 @@ impl ProviderCard {
                 cx,
             )
         });
-        window.open_dialog(cx, move |dlg, window, cx| {
+        window.open_dialog(cx, move |dlg, _, cx| {
             let content = dialog.clone();
             dlg.title(title.clone())
-                .w(px(560.))
-                // Opaque panel over the library's translucent default.
-                .bg(cx.theme().popover)
-                .shadow_xl()
+                .wide()
                 .content(move |content_el, _window, _cx| content_el.child(content.clone()))
-                .footer(crate::provider_dialog::render_footer(&dialog, window, cx))
+                .footer(crate::provider_dialog::render_footer(&dialog, cx))
         });
     }
 
@@ -123,75 +121,67 @@ impl ProviderCard {
         let update_available = provider_version
             .as_ref()
             .is_some_and(|v| v.update_available);
-        let muted = cx.theme().muted_foreground;
         let accent = store.provider_profile_accent(&self.profile_id);
 
-        let provider_icon = provider_glyph(provider).small();
+        let provider_icon = provider_glyph(provider);
         let provider_icon = match accent {
             Some(accent) => provider_icon.text_color(rgb(accent)),
             None => provider_icon,
         };
-        let glyph = div().flex_none().size(px(20.)).child(provider_icon);
+        let glyph = div().flex_none().text_body(false, cx).child(provider_icon);
 
         let title = h_flex()
             .gap_2()
             .items_center()
-            .child(div().text_size(px(15.)).font_semibold().child(name.clone()))
+            .child(div().text_title(cx).child(name.clone()))
             .when_some(version, |this, version| {
                 this.child(
                     div()
-                        .font_family("monospace")
-                        .text_size(px(11.))
-                        .text_color(muted)
+                        .text_meta_mono(false, cx)
                         .child(format!("v{}", version.trim_start_matches('v'))),
                 )
             });
 
         // The row body (glyph + text) is the primary "configure" affordance;
         // the update popover, gear and switch trail it as their own controls.
-        let body = h_flex()
-            .id(gpui::SharedString::from(format!(
-                "configure-{}",
-                self.profile_id
-            )))
-            .flex_1()
-            .min_w_0()
-            .gap_3()
-            .items_center()
-            .cursor_pointer()
-            .child(div().flex_none().child(glyph))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(title)
-                    .child(self.render_summary_line(&summary, cx))
-                    .when(!provider.caps().mcp_servers, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(muted)
-                                .child(crate::tr!("providers.mcp_unavailable")),
-                        )
-                    }),
-            )
-            .tooltip({
-                let name = name.clone();
-                move |window, cx| {
-                    let label = crate::tr!("providers.configure", name = name.clone()).into_owned();
-                    crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
-                }
-            })
-            .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx)));
+        let body = crate::material::accessible_clickable(
+            h_flex(),
+            gpui::SharedString::from(format!("configure-{}", self.profile_id)),
+            gpui::Role::Button,
+            crate::tr!("providers.configure", name = name.clone()),
+            cx,
+        )
+        .flex_1()
+        .min_w_0()
+        .gap_3()
+        .items_center()
+        .cursor_pointer()
+        .child(glyph)
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_0p5()
+                .child(title)
+                .child(self.render_summary_line(&summary, cx))
+                .when(!provider.caps().mcp_servers, |this| {
+                    this.child(
+                        div()
+                            .text_secondary(false, cx)
+                            .child(crate::tr!("providers.mcp_unavailable")),
+                    )
+                }),
+        )
+        .tooltip({
+            let name = name.clone();
+            move |window, cx| {
+                let label = crate::tr!("providers.configure", name = name.clone()).into_owned();
+                crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
+            }
+        })
+        .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx)));
 
-        h_flex()
-            .w_full()
-            .min_h(px(44.))
-            .px_3()
-            .py_3()
-            .gap_3()
-            .items_center()
+        crate::material::group_row(cx)
             .child(body)
             .when(update_available, |this| {
                 this.child(self.render_update_popover(cx))
@@ -249,24 +239,21 @@ impl ProviderCard {
             ),
             StatusDot::Amber => (cx.theme().muted, muted),
         };
-        let mut line = h_flex()
-            .flex_none()
+        let (lead, rest) = match &summary.email {
+            Some(_) => summary
+                .headline
+                .split_once(EMAIL_SLOT)
+                .map(|(prefix, suffix)| (prefix.trim_end().to_string(), Some(suffix)))
+                .unwrap_or((summary.headline.clone(), Some(""))),
+            None => (summary.headline.clone(), None),
+        };
+        let mut line = crate::material::semantic_chip(lead, status_bg, status_fg, cx)
+            .flex()
             .items_center()
-            .gap_1()
-            .px_2()
-            .py(px(1.))
-            .rounded_full()
-            .bg(status_bg)
-            .text_size(px(11.))
-            .font_medium()
-            .text_color(status_fg);
+            .gap_1();
 
-        match &summary.email {
-            Some(email) => {
-                let (prefix, suffix) = summary
-                    .headline
-                    .split_once(EMAIL_SLOT)
-                    .unwrap_or((summary.headline.as_str(), ""));
+        if let (Some(email), Some(suffix)) = (&summary.email, rest) {
+            {
                 let revealed = self.email_revealed;
                 let shown = if revealed {
                     email.clone()
@@ -274,23 +261,15 @@ impl ProviderCard {
                     redact_email(email)
                 };
                 line = line
-                    .child(div().child(prefix.trim_end().to_string()))
                     .child(
-                        div()
-                            .id("reveal-email")
-                            .px_1()
-                            .rounded(crate::material::radius_button(cx))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .child(shown)
-                            .tooltip(move |window, cx| {
-                                let label = if revealed {
-                                    crate::tr!("providers.hide_email")
-                                } else {
-                                    crate::tr!("providers.reveal_email")
-                                }
-                                .into_owned();
-                                crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
+                        Button::new("reveal-email")
+                            .text()
+                            .xsmall()
+                            .label(shown)
+                            .tooltip(if revealed {
+                                crate::tr!("providers.hide_email")
+                            } else {
+                                crate::tr!("providers.reveal_email")
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.email_revealed = !this.email_revealed;
@@ -299,7 +278,6 @@ impl ProviderCard {
                     )
                     .child(div().child(suffix.trim_start().to_string()));
             }
-            None => line = line.child(div().child(summary.headline.clone())),
         }
         if !summary.detail.is_empty() {
             line = line.child(div().child(format!("· {}", summary.detail)));
@@ -333,7 +311,6 @@ impl ProviderCard {
             .content(move |_, _, cx| {
                 let store = store.clone();
                 let command = command.clone();
-                let muted = cx.theme().muted_foreground;
                 // The Popover panel supplies the fill, border, shadow and p_3
                 // padding; the pane itself stays transparent (single surface).
                 let mut pane = v_flex()
@@ -341,19 +318,16 @@ impl ProviderCard {
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .font_semibold()
+                            .text_title(cx)
                             .child(crate::tr!("providers.update_title")),
                     )
-                    .child(div().text_size(px(13.)).text_color(muted).child(
-                        if command.is_none() {
-                            crate::tr!("providers.update_unmanaged")
-                        } else if requires_terminal {
-                            crate::tr!("providers.update_terminal")
-                        } else {
-                            crate::tr!("providers.update_message")
-                        },
-                    ));
+                    .child(div().text_secondary(false, cx).child(if command.is_none() {
+                        crate::tr!("providers.update_unmanaged")
+                    } else if requires_terminal {
+                        crate::tr!("providers.update_terminal")
+                    } else {
+                        crate::tr!("providers.update_message")
+                    }));
                 if command.is_some() && !requires_terminal {
                     pane = pane.child(
                         Button::new("update-now")
@@ -378,13 +352,11 @@ impl ProviderCard {
                 if let Some(command) = command {
                     let copy = command.clone();
                     pane = pane
-                        .child(div().pt_1().text_size(px(11.)).text_color(muted).child(
-                            if requires_terminal {
-                                crate::tr!("providers.update_command")
-                            } else {
-                                crate::tr!("providers.update_manual")
-                            },
-                        ))
+                        .child(div().pt_1().text_caption(cx).child(if requires_terminal {
+                            crate::tr!("providers.update_command")
+                        } else {
+                            crate::tr!("providers.update_manual")
+                        }))
                         .child(
                             h_flex()
                                 .w_full()
@@ -402,8 +374,7 @@ impl ProviderCard {
                                         .min_w_0()
                                         .overflow_hidden()
                                         .text_ellipsis()
-                                        .font_family("monospace")
-                                        .text_size(px(11.))
+                                        .text_code(cx)
                                         .child(summary.clone().unwrap_or_else(|| command.clone())),
                                 )
                                 .child(

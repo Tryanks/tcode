@@ -1,13 +1,14 @@
 //! Read-only system grants from the attached agent host, on every client.
 use gpui::{
     Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Subscription, Task,
-    Window, div, px,
+    Window, div,
 };
-use gpui_base::{h_flex, v_flex};
+use gpui_base::h_flex;
 use tcode_core::permissions::ComputerUsePermissions;
 
 use crate::{
-    sizing::Sizable as _, store::WorkspaceStore, theme::ActiveTheme as _, widgets::button::Button,
+    sizing::Sizable as _, store::WorkspaceStore, theme::ActiveTheme as _,
+    typography::TextRole as _, widgets::button::Button,
 };
 
 pub(crate) struct HostPermissions {
@@ -68,7 +69,8 @@ impl HostPermissions {
 
 impl Render for HostPermissions {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut body = v_flex().w_full().gap_3().p_3().text_size(px(13.));
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        let mut body = crate::material::group_row_stacked(cx).text_body(compact, cx);
         match &self.result {
             Some(Ok(ComputerUsePermissions::MacOs(status))) => {
                 for (name, granted) in [
@@ -104,13 +106,13 @@ impl Render for HostPermissions {
                 }
                 if let Some(host) = self.store.read(cx).remote_host_name() {
                     body =
-                        body.child(div().text_color(cx.theme().muted_foreground).child(
+                        body.child(div().text_secondary(compact, cx).child(
                             crate::tr!("permissions.manage_on_host", host = host).into_owned(),
                         ));
                 }
                 body = body.child(
                     div()
-                        .text_color(cx.theme().muted_foreground)
+                        .text_secondary(compact, cx)
                         .child(crate::tr!("permissions.restart_on_host")),
                 );
             }
@@ -127,11 +129,7 @@ impl Render for HostPermissions {
                             .text_color(cx.theme().danger_foreground)
                             .child(crate::tr!("permissions.check_failed")),
                     )
-                    .child(
-                        div()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(error.clone()),
-                    );
+                    .child(div().text_secondary(compact, cx).child(error.clone()));
             }
             None => {
                 body = body.child(crate::tr!(if self.connected {
@@ -141,7 +139,6 @@ impl Render for HostPermissions {
                 }));
             }
         }
-        let compact = crate::window_seam::window_is_compact(window, cx);
         let mut button = Button::new("host-permissions-recheck")
             .outline()
             .small()
