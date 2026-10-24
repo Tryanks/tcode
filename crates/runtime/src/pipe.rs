@@ -914,6 +914,26 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                     .map(|()| CommandResponse::Unit),
             );
         }
+        Command::SetGoal {
+            session_id,
+            objective,
+            status,
+        } => {
+            return CommandOutcome::Immediate(
+                app.change_goal(
+                    &session_id,
+                    agent::SessionCommand::SetGoal { objective, status },
+                    cx,
+                )
+                .map(|()| CommandResponse::Unit),
+            );
+        }
+        Command::ClearGoal { session_id } => {
+            return CommandOutcome::Immediate(
+                app.change_goal(&session_id, agent::SessionCommand::ClearGoal, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::RespondApproval {
             session_id,
             request_id,

@@ -119,6 +119,7 @@ impl Composer {
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
                 let composer = self.workspace_store.read(cx).composer_state();
                 let compact_offered = compact_offered(&composer);
+                let goal_offered = goal_offered(&composer).is_some();
                 let mut builtins: Vec<(&str, Option<&str>, &str, MenuAccept)> = vec![
                     (
                         "model",
@@ -147,6 +148,14 @@ impl Composer {
                         MenuAccept::CompactContext,
                     ));
                 }
+                if goal_offered {
+                    builtins.push((
+                        "goal",
+                        None,
+                        "composer.cmd_goal_desc",
+                        MenuAccept::InsertGoal,
+                    ));
+                }
                 let mut rows: Vec<MenuRow> = builtins
                     .into_iter()
                     .filter(|(name, _, _, _)| fuzzy_score(&trigger.query, name).is_some())
@@ -166,7 +175,8 @@ impl Composer {
                 // Provider-native slash commands (Claude `slash_commands`, which
                 // include its skills), shown after the built-in group, fuzzily
                 // filtered without truncation. The provider's own `compact` is
-                // what the built-in row runs, so it is not listed twice.
+                // what the built-in row runs, so it is not listed twice; nor is
+                // its own `goal`.
                 let commands = composer.provider_commands;
                 rows.extend(
                     filter_provider_commands(
@@ -176,6 +186,7 @@ impl Composer {
                     )
                     .into_iter()
                     .filter(|c| !(compact_offered && c.name == "compact"))
+                    .filter(|c| !(goal_offered && c.name == "goal"))
                     .map(|c| MenuRow {
                         primary: format!("/{}", c.name),
                         secondary: c.description.clone().unwrap_or_else(|| {
@@ -230,6 +241,7 @@ impl Composer {
             }
             MenuAccept::InsertOrchestrate => self.replace_trigger("/orchestrate ", window, cx),
             MenuAccept::InsertLater => self.replace_trigger("/later ", window, cx),
+            MenuAccept::InsertGoal => self.replace_trigger("/goal ", window, cx),
             MenuAccept::OpenModelPicker => {
                 self.replace_trigger("", window, cx);
                 self.model_picker_token = self.model_picker_token.wrapping_add(1);
