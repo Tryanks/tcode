@@ -1211,7 +1211,7 @@ image_viewer:
   load_failed: "This image could not be loaded."
 preview:
   external_unavailable: "Open the remote page in Preview first. Its forwarded browser link works only while this preview stays open."
-  remote_forwarding: "Remote loopback URLs are forwarded. Other addresses open from this Mac."
+  remote_forwarding: "Remote loopback URLs are forwarded. Other addresses open from this device."
   load_error: "Could not load %{url}: %{message} (%{code})"
   title: "Preview"
   no_session: "Open a session to use the preview browser."

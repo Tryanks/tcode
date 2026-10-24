@@ -49,10 +49,7 @@ use crate::diff::DiffPanel;
 use crate::icon::{Icon, IconName};
 use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
-#[cfg(all(
-    feature = "native-preview",
-    any(target_os = "macos", target_os = "windows", target_os = "android")
-))]
+#[cfg(preview_backend)]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::remote::{AttachmentTarget, RemotePanel};
 use crate::runtime_event::{
@@ -507,10 +504,7 @@ impl AppShell {
             .map(|attachment| attachment.link.link())
     }
 
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     #[allow(private_interfaces)]
     #[doc(hidden)]
     pub fn preview_lifecycle(&self, cx: &App) -> Option<Entity<BrowserLifecycle>> {
@@ -6310,10 +6304,7 @@ mod tests {
     /// The one Back chain: overlays first, then one step of the window's
     /// history, and `false` only at the root — where the platform closes the
     /// app. Leaving a page never touches the attachment.
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    #[cfg(preview_backend)]
     #[gpui::test]
     fn compact_preview_release_and_navigation(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();

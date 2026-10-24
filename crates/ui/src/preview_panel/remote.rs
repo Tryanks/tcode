@@ -1,4 +1,4 @@
-//! The macOS slot's native navigation boundary. The transport owns URL identity;
+//! The WebKit slot's native navigation boundary. The transport owns URL identity;
 //! this adapter preserves WebKit requests and resumes them on GPUI's foreground.
 use std::{
     cell::{Cell, RefCell},
@@ -15,13 +15,21 @@ use objc2::{
 use objc2_foundation::{
     NSMutableCopying as _, NSObject, NSObjectProtocol, NSString, NSURL, NSURLRequest,
 };
-use objc2_web_kit::{
-    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKWebView,
-};
+#[cfg(target_os = "macos")]
+use objc2_web_kit::WKWebView;
+use objc2_web_kit::{WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate};
 use tcode_traverse::preview::PreviewRoutes;
+#[cfg(target_os = "ios")]
+use wry::WebViewExtIOS as _;
+#[cfg(target_os = "macos")]
 use wry::WebViewExtMacOS as _;
 
 use super::lifecycle::BrowserLifecycle;
+
+/// objc2-web-kit declares WKWebView, and the delegate methods that take one,
+/// for macOS only.
+#[cfg(target_os = "ios")]
+type WKWebView = AnyObject;
 
 pub(super) struct RemoteBrowser {
     pub(super) routes: Rc<RefCell<PreviewRoutes>>,
@@ -99,7 +107,8 @@ define_class!(
                     }
                 }
             }
-            unsafe { self.ivars().original.webView_decidePolicyForNavigationAction_decisionHandler(webview, action, handler); }
+            let original: &ProtocolObject<dyn WKNavigationDelegate> = &self.ivars().original;
+            unsafe { msg_send![original, webView: webview, decidePolicyForNavigationAction: action, decisionHandler: handler] }
         }
     }
 );

@@ -169,7 +169,7 @@ system libraries and a Vulkan driver.
 
 For an unsigned macOS build, remove quarantine after installing the app with
 `xattr -dr com.apple.quarantine /Applications/Tcode.app`. The embedded preview
-browser is available on macOS, Windows and Android.
+browser is available on macOS, Windows, Android and iOS.
 
 Each release uses the native application icon format for its platform: `.icns`
 inside the macOS app bundle, an `.ico` resource embedded directly in the Windows
