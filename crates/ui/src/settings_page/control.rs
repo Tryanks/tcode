@@ -183,50 +183,31 @@ impl SettingsPage {
         let project_rows = self.control_project_rows(&control, projects, compact, cx);
         let thread_rows = self.control_thread_rows(compact, cx);
         let activity_rows = self.control_activity_rows(compact, cx);
-        let caption = |text: std::borrow::Cow<'static, str>, cx: &App| {
-            crate::material::group_caption(text, cx)
-        };
+        let default_heading = vec![
+            self.row_frame(cx)
+                .child(self.row_labels(
+                    crate::control::grant_summary(&control.default_grant),
+                    crate::tr!("control.settings.default_grant_description"),
+                    default_reset,
+                    cx,
+                ))
+                .into_any_element(),
+        ];
         v_flex()
             .gap(crate::material::section_gap(cx))
+            .child(self.settings_group(crate::tr!("control.title"), general, cx))
             .child(
-                v_flex()
-                    .child(caption(crate::tr!("control.title"), cx))
-                    .child(self.grouped_plain(general, cx)),
+                self.settings_group(
+                    crate::tr!("control.settings.default_grant"),
+                    default_heading,
+                    cx,
+                )
+                .gap_2()
+                .child(default_editor),
             )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(caption(crate::tr!("control.settings.default_grant"), cx))
-                    .child(self.grouped_plain(
-                        vec![
-                            self.row_frame(cx)
-                                .child(self.row_labels(
-                                    crate::control::grant_summary(&control.default_grant),
-                                    crate::tr!("control.settings.default_grant_description"),
-                                    default_reset,
-                                    cx,
-                                ))
-                                .into_any_element(),
-                        ],
-                        cx,
-                    ))
-                    .child(default_editor),
-            )
-            .child(
-                v_flex()
-                    .child(caption(crate::tr!("control.settings.overrides"), cx))
-                    .child(self.grouped_plain(project_rows, cx)),
-            )
-            .child(
-                v_flex()
-                    .child(caption(crate::tr!("control.settings.threads"), cx))
-                    .child(self.grouped_plain(thread_rows, cx)),
-            )
-            .child(
-                v_flex()
-                    .child(caption(crate::tr!("control.settings.activity"), cx))
-                    .child(self.grouped_plain(activity_rows, cx)),
-            )
+            .child(self.settings_group(crate::tr!("control.settings.overrides"), project_rows, cx))
+            .child(self.settings_group(crate::tr!("control.settings.threads"), thread_rows, cx))
+            .child(self.settings_group(crate::tr!("control.settings.activity"), activity_rows, cx))
     }
 
     fn control_project_rows(

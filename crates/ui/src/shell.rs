@@ -1793,7 +1793,7 @@ impl AppShell {
         let title = if destination == Destination::SettingsSection
             && self.destination(cx) == Destination::SettingsThreadRules
         {
-            crate::tr!("settings.thread_behavior").into_owned().into()
+            crate::tr!("settings.threads").into_owned().into()
         } else if detail {
             settings.read(cx).section_title(cx)
         } else {
@@ -6561,6 +6561,10 @@ mod tests {
         assert!(
             cx.debug_bounds("settings-device-caption").is_some(),
             "the rail carries the settings group captions instead"
+        );
+        assert!(
+            cx.debug_bounds("settings-nav-threads").is_some(),
+            "thread settings are a rail page of their own, as on a phone"
         );
         let general = cx
             .debug_bounds("settings-nav-general")

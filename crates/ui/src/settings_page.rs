@@ -61,7 +61,7 @@ const CONTENT_MAX_WIDTH: f32 = 768.;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     General,
-    ThreadBehavior,
+    Threads,
     ProjectThreadRules,
     Providers,
     SourceControl,
@@ -74,6 +74,7 @@ enum Section {
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     Remote,
     Archived,
+    Maintenance,
 }
 
 /// Navigation order, shared by the desktop rail and the compact section list.
@@ -82,33 +83,35 @@ enum Section {
 /// headless listener in a browser. Choosing a machine, and the invitation other
 /// devices pair with, live in `crate::remote`.
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-const SECTIONS: [Section; 12] = [
+const SECTIONS: [Section; 13] = [
     Section::General,
     Section::Remote,
-    Section::ThreadBehavior,
+    Section::Threads,
+    Section::Control,
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
     Section::Orchestrate,
-    Section::Control,
     Section::Plugins,
+    Section::Archived,
     Section::ComputerUse,
     Section::Browser,
-    Section::Archived,
+    Section::Maintenance,
 ];
 #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
-const SECTIONS: [Section; 11] = [
+const SECTIONS: [Section; 12] = [
     Section::General,
-    Section::ThreadBehavior,
+    Section::Threads,
+    Section::Control,
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
     Section::Orchestrate,
-    Section::Control,
     Section::Plugins,
+    Section::Archived,
     Section::ComputerUse,
     Section::Browser,
-    Section::Archived,
+    Section::Maintenance,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,7 +172,7 @@ impl Section {
                     SectionGroup::Device
                 }
             }
-            Self::ThreadBehavior
+            Self::Threads
             | Self::ProjectThreadRules
             | Self::SourceControl
             | Self::Providers
@@ -179,14 +182,16 @@ impl Section {
             | Self::Orchestrate
             | Self::Control
             | Self::Plugins
-            | Self::Archived => SectionGroup::Machine,
+            | Self::Archived
+            | Self::Maintenance => SectionGroup::Machine,
         }
     }
 
-    /// Sections that configure the screen and browser the agent drives, and so
-    /// share the machine group's collapsible **Advanced** subgroup.
+    /// Sections that configure the screen and browser the agent drives, and
+    /// the machine's upkeep, which share the machine group's collapsible
+    /// **Advanced** subgroup.
     fn advanced(self) -> bool {
-        matches!(self, Self::ComputerUse | Self::Browser)
+        matches!(self, Self::ComputerUse | Self::Browser | Self::Maintenance)
     }
 
     /// A section is navigable when at least one row can do real work for this
@@ -197,7 +202,7 @@ impl Section {
             Self::Browser => cx.preview_backend,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => cx.hosting,
-            Self::ThreadBehavior
+            Self::Threads
             | Self::ProjectThreadRules
             | Self::General
             | Self::SourceControl
@@ -207,14 +212,22 @@ impl Section {
             | Self::Orchestrate
             | Self::Control
             | Self::Plugins
-            | Self::Archived => true,
+            | Self::Archived
+            | Self::Maintenance => true,
         }
+    }
+
+    /// Whether this client may open the section: it [`applies`](Self::applies),
+    /// and a shared-space member (`full_scope == false`) manages only this
+    /// device's settings and the space's archived threads.
+    fn available(self, cx: &SettingsCapabilities, full_scope: bool) -> bool {
+        self.applies(cx) && (full_scope || matches!(self, Self::General | Self::Archived))
     }
 
     fn id(self) -> &'static str {
         match self {
             Self::General => "settings-nav-general",
-            Self::ThreadBehavior => "settings-nav-thread-behavior",
+            Self::Threads => "settings-nav-threads",
             Self::ProjectThreadRules => "settings-nav-project-rules",
             Self::SourceControl => "settings-nav-source-control",
             Self::Providers => "settings-nav-providers",
@@ -227,13 +240,14 @@ impl Section {
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => "settings-nav-remote",
             Self::Archived => "settings-nav-archived",
+            Self::Maintenance => "settings-nav-maintenance",
         }
     }
 
     fn icon(self) -> IconName {
         match self {
             Self::General => IconName::Settings,
-            Self::ThreadBehavior | Self::ProjectThreadRules => IconName::Inbox,
+            Self::Threads | Self::ProjectThreadRules => IconName::MessageSquare,
             Self::SourceControl => IconName::Github,
             Self::Providers => IconName::Bot,
             Self::Usage => IconName::ChartPie,
@@ -245,15 +259,14 @@ impl Section {
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => IconName::Network,
             Self::Archived => IconName::Inbox,
+            Self::Maintenance => IconName::Settings2,
         }
     }
 
     fn label(self) -> SharedString {
         match self {
             Self::General => crate::tr!("settings.general"),
-            Self::ThreadBehavior | Self::ProjectThreadRules => {
-                crate::tr!("settings.thread_behavior")
-            }
+            Self::Threads | Self::ProjectThreadRules => crate::tr!("settings.threads"),
             Self::SourceControl => crate::tr!("settings.source_control"),
             Self::Providers => crate::tr!("settings.providers"),
             Self::Usage => crate::tr!("settings.usage"),
@@ -265,6 +278,7 @@ impl Section {
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => crate::tr!("settings.remote"),
             Self::Archived => crate::tr!("settings.archived"),
+            Self::Maintenance => crate::tr!("settings.maintenance"),
         }
         .into_owned()
         .into()
@@ -401,10 +415,7 @@ pub struct SettingsPage {
 
 impl SettingsPage {
     fn section_applies(&self, section: &Section, cx: &App) -> bool {
-        (section != &Section::ThreadBehavior || self.window_state.read(cx).compact)
-            && section.applies(&self.capabilities)
-            && (self.store.read(cx).scope().is_full()
-                || matches!(section, Section::General | Section::Archived))
+        section.available(&self.capabilities, self.store.read(cx).scope().is_full())
     }
     fn take_requested_section(
         window_state: &Entity<WindowState>,
@@ -424,7 +435,8 @@ impl SettingsPage {
                 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
                 "remote" => Section::Remote,
                 "archived" => Section::Archived,
-                "thread_behavior" => Section::ThreadBehavior,
+                "thread_behavior" | "threads" => Section::Threads,
+                "maintenance" => Section::Maintenance,
                 _ => Section::General,
             })
     }
@@ -532,18 +544,11 @@ impl SettingsPage {
         // Consume relaunch and in-app navigation requests through the same
         // channel used by in-app Settings links.
         let requested_section = Self::take_requested_section(&window_state, cx);
+        let full_scope = store.read(cx).scope().is_full();
         let section = requested_section
-            .filter(|section| {
-                section.applies(&capabilities)
-                    && (store.read(cx).scope().is_full()
-                        || matches!(section, Section::General | Section::Archived))
-            })
+            .filter(|section| section.available(&capabilities, full_scope))
             .unwrap_or(Section::General);
-        if requested_section.is_some_and(|section| {
-            !section.applies(&capabilities)
-                || (!store.read(cx).scope().is_full()
-                    && !matches!(section, Section::General | Section::Archived))
-        }) {
+        if requested_section.is_some_and(|section| !section.available(&capabilities, full_scope)) {
             Self::return_to_settings_root(&window_state, cx);
         }
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
@@ -886,7 +891,7 @@ impl SettingsPage {
             && self.window_state.read(cx).destination()
                 != crate::window_state::Destination::SettingsThreadRules
         {
-            return Section::ThreadBehavior.label();
+            return Section::Threads.label();
         }
         // The phone page names just the project: the nav bar has no room for
         // the dialog's sentence-long title.
@@ -1286,7 +1291,7 @@ impl SettingsPage {
         }
         let column = match self.section {
             Section::General => self.render_general(cx),
-            Section::ThreadBehavior => self.render_thread_behavior(cx),
+            Section::Threads => self.render_threads(cx),
             Section::ProjectThreadRules => v_flex().children(self.project_rules_editor.clone()),
             Section::SourceControl => self.render_source_control(cx),
             Section::Providers => self.render_providers(window, cx),
@@ -1299,6 +1304,7 @@ impl SettingsPage {
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Remote => v_flex().child(self.hosting_panel.clone()),
             Section::Archived => self.render_archived(cx),
+            Section::Maintenance => self.render_maintenance(cx),
         };
         let scroll = if self.section == Section::ProjectThreadRules {
             &self.project_rules_scroll
@@ -1345,6 +1351,19 @@ impl SettingsPage {
         .into_any_element()
     }
 
+    /// A captioned group of settings rows: the unit every settings page is
+    /// composed of.
+    fn settings_group(
+        &self,
+        caption: impl Into<SharedString>,
+        rows: Vec<AnyElement>,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
+        v_flex()
+            .child(crate::material::group_caption(caption, cx))
+            .child(self.grouped_plain(rows, cx))
+    }
+
     fn render_general(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let store = self.store.read(cx);
         let settings = store.settings();
@@ -1372,140 +1391,26 @@ impl SettingsPage {
                 cx,
                 WorkspaceStore::set_sidebar_provider_marks,
             ),
+        ];
+        let device = vec![
             self.device_name_row(device_name_overridden, cx),
             self.remote_attachment_limit_row(attachment_limit_overridden, cx),
         ];
-        if !self.store.read(cx).scope().is_full() {
-            return v_flex().gap(crate::material::section_gap(cx)).child(
-                v_flex()
-                    .child(crate::material::group_caption(
-                        crate::tr!("settings.appearance_section"),
-                        cx,
-                    ))
-                    .child(self.grouped_plain(appearance, cx)),
-            );
-        }
-        let delete_confirm_reset = self.reset_action(
-            "reset-delete-confirm",
-            settings.skip_delete_confirmation,
-            cx,
-            |this, _, cx| {
-                this.dispatch_settings(|store| store.set_skip_delete_confirmation(false), cx)
-            },
-        );
-        let auto_open_task_panel_reset = self.reset_action(
-            "reset-auto-open-task-panel",
-            settings.auto_open_task_panel,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_auto_open_task_panel(false), cx),
-        );
-        let live_command_panel_reset = self.reset_action(
-            "reset-live-command-panel",
-            settings.live_command_panel_disabled,
-            cx,
-            |this, _, cx| {
-                this.dispatch_settings(|store| store.set_live_command_panel_disabled(false), cx)
-            },
-        );
-        let abort_on_fallback_reset = self.reset_action(
-            "reset-abort-on-model-fallback",
-            !settings.abort_on_model_fallback,
-            cx,
-            |this, _, cx| {
-                this.dispatch_settings(|store| store.set_abort_on_model_fallback(true), cx)
-            },
-        );
-        let resume_on_limit_reset_reset = self.reset_action(
-            "reset-resume-on-limit-reset",
-            !settings.resume_on_limit_reset,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_resume_on_limit_reset(true), cx),
-        );
-        let mut conversation = vec![
-            self.title_generation_row(cx),
-            self.toggle_row(
-                "delete-confirm",
-                crate::tr!("settings.delete_confirmation.title"),
-                crate::tr!("settings.delete_confirmation.description"),
-                !settings.skip_delete_confirmation,
-                delete_confirm_reset,
-                cx,
-                |store, checked| store.set_skip_delete_confirmation(!checked),
-            ),
-            self.toggle_row(
-                "auto-open-task-panel",
-                crate::tr!("settings.auto_open_task_panel.title"),
-                crate::tr!("settings.auto_open_task_panel.description"),
-                settings.auto_open_task_panel,
-                auto_open_task_panel_reset,
-                cx,
-                WorkspaceStore::set_auto_open_task_panel,
-            ),
-            self.toggle_row(
-                "live-command-panel",
-                crate::tr!("settings.live_command_panel.title"),
-                crate::tr!("settings.live_command_panel.description"),
-                !settings.live_command_panel_disabled,
-                live_command_panel_reset,
-                cx,
-                |store, checked| store.set_live_command_panel_disabled(!checked),
-            ),
-            self.toggle_row(
-                "abort-on-model-fallback",
-                crate::tr!("settings.abort_on_model_fallback.title"),
-                crate::tr!("settings.abort_on_model_fallback.description"),
-                settings.abort_on_model_fallback,
-                abort_on_fallback_reset,
-                cx,
-                WorkspaceStore::set_abort_on_model_fallback,
-            ),
-            self.toggle_row(
-                "resume-on-limit-reset",
-                crate::tr!("settings.resume_on_limit_reset.title"),
-                crate::tr!("settings.resume_on_limit_reset.description"),
-                settings.resume_on_limit_reset,
-                resume_on_limit_reset_reset,
-                cx,
-                WorkspaceStore::set_resume_on_limit_reset,
-            ),
-        ];
-        if settings.abort_on_model_fallback {
-            let advisor_reset = self.reset_action(
-                "reset-fallback-review-advisor",
-                settings.fallback_review_advisor,
-                cx,
-                |this, _, cx| {
-                    this.dispatch_settings(|store| store.set_fallback_review_advisor(false), cx)
-                },
-            );
-            conversation.push(self.toggle_row(
-                "fallback-review-advisor",
-                crate::tr!("settings.fallback_review_advisor.title"),
-                crate::tr!("settings.fallback_review_advisor.description"),
-                settings.fallback_review_advisor,
-                advisor_reset,
-                cx,
-                WorkspaceStore::set_fallback_review_advisor,
-            ));
-            conversation.push(self.fallback_review_model_row(cx));
-        }
-        let word_wrap_reset = self.reset_action(
-            "reset-word-wrap",
-            settings.word_wrap_diffs,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_word_wrap_diffs(false), cx),
-        );
-        let provider_updates_reset = self.reset_action(
-            "reset-provider-update-checks",
-            settings.provider_update_checks_disabled,
-            cx,
-            |this, _, cx| {
-                this.dispatch_settings(|store| store.set_provider_update_checks_disabled(false), cx)
-            },
-        );
+        v_flex()
+            .gap(crate::material::section_gap(cx))
+            .child(self.settings_group(crate::tr!("settings.appearance_section"), appearance, cx))
+            .child(self.settings_group(crate::tr!("settings.device_section"), device, cx))
+    }
+
+    fn render_maintenance(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let throttle_disabled = self
+            .store
+            .read(cx)
+            .settings()
+            .inactive_frame_throttle_disabled;
         let frame_throttle_reset = self.reset_action(
             "reset-inactive-frame-throttle",
-            settings.inactive_frame_throttle_disabled,
+            throttle_disabled,
             cx,
             |this, _, cx| {
                 this.dispatch_settings(
@@ -1514,80 +1419,28 @@ impl SettingsPage {
                 )
             },
         );
-        let workspace = vec![
-            self.toggle_row(
-                "word-wrap",
-                crate::tr!("settings.word_wrap.title"),
-                crate::tr!("settings.word_wrap.description"),
-                settings.word_wrap_diffs,
-                word_wrap_reset,
-                cx,
-                WorkspaceStore::set_word_wrap_diffs,
-            ),
-            self.toggle_row(
-                "provider-update-checks",
-                crate::tr!("settings.provider_updates.title"),
-                crate::tr!("settings.provider_updates.description"),
-                // Stored inverted: checked = enabled.
-                !settings.provider_update_checks_disabled,
-                provider_updates_reset,
-                cx,
-                |store, checked| store.set_provider_update_checks_disabled(!checked),
-            ),
-            self.toggle_row(
-                "inactive-frame-throttle",
-                crate::tr!("settings.inactive_frame_throttle.title"),
-                crate::tr!("settings.inactive_frame_throttle.description"),
-                // Stored inverted: checked = enabled.
-                !settings.inactive_frame_throttle_disabled,
-                frame_throttle_reset,
-                cx,
-                |store, checked| store.set_inactive_frame_throttle_disabled(!checked),
-            ),
-        ];
+        let performance = vec![self.toggle_row(
+            "inactive-frame-throttle",
+            crate::tr!("settings.inactive_frame_throttle.title"),
+            crate::tr!("settings.inactive_frame_throttle.description"),
+            // Stored inverted: checked = enabled.
+            !throttle_disabled,
+            frame_throttle_reset,
+            cx,
+            |store, checked| store.set_inactive_frame_throttle_disabled(!checked),
+        )];
         v_flex()
             .gap(crate::material::section_gap(cx))
-            .child(
-                v_flex()
-                    .child(crate::material::group_caption(
-                        crate::tr!("settings.appearance_section"),
-                        cx,
-                    ))
-                    .child(self.grouped_plain(appearance, cx)),
-            )
-            .child(
-                v_flex()
-                    .child(crate::material::group_caption(
-                        crate::tr!("settings.conversation_section"),
-                        cx,
-                    ))
-                    .child(self.grouped_plain(conversation, cx)),
-            )
-            .when(
-                !self.window_state.read(cx).compact && self.store.read(cx).scope().is_full(),
-                |column| column.child(self.render_thread_behavior(cx)),
-            )
-            .child(
-                v_flex()
-                    .child(crate::material::group_caption(
-                        crate::tr!("settings.workspace_section"),
-                        cx,
-                    ))
-                    .child(self.grouped_plain(workspace, cx)),
-            )
-            .child(
-                v_flex()
-                    .child(crate::material::group_caption(
-                        crate::tr!("settings.reset_section"),
-                        cx,
-                    ))
-                    .child(self.grouped_plain(vec![self.restore_all_row(cx)], cx)),
-            )
+            .child(self.settings_group(crate::tr!("settings.performance_section"), performance, cx))
+            .child(self.settings_group(
+                crate::tr!("settings.reset_section"),
+                vec![self.restore_all_row(cx)],
+                cx,
+            ))
     }
 
-    /// The whole-app escape hatch, parked at the foot of General: the per-item
-    /// buttons cover single settings, this one covers the rest and keeps its
-    /// confirm dialog.
+    /// The whole-settings escape hatch: the per-item buttons cover single
+    /// settings, this one covers the rest and keeps its confirm dialog.
     fn restore_all_row(&self, cx: &mut Context<Self>) -> AnyElement {
         self.row_frame(cx)
             .child(self.row_labels(
@@ -1856,6 +1709,30 @@ impl SettingsPage {
                 })),
         );
 
+        let update_checks_disabled = self
+            .store
+            .read(cx)
+            .settings()
+            .provider_update_checks_disabled;
+        let provider_updates_reset = self.reset_action(
+            "reset-provider-update-checks",
+            update_checks_disabled,
+            cx,
+            |this, _, cx| {
+                this.dispatch_settings(|store| store.set_provider_update_checks_disabled(false), cx)
+            },
+        );
+        let updates = vec![self.toggle_row(
+            "provider-update-checks",
+            crate::tr!("settings.provider_updates.title"),
+            crate::tr!("settings.provider_updates.description"),
+            // Stored inverted: checked = enabled.
+            !update_checks_disabled,
+            provider_updates_reset,
+            cx,
+            |store, checked| store.set_provider_update_checks_disabled(!checked),
+        )];
+
         let provider_rows: Vec<AnyElement> = self
             .provider_cards
             .iter()
@@ -1893,7 +1770,13 @@ impl SettingsPage {
         for (_, card) in &self.acp_cards {
             section = section.child(card.clone());
         }
-        section
+        // The update toggle follows the cards it governs; above them its caption
+        // would stack straight under the page's own header row.
+        section.child(
+            div()
+                .pt(crate::material::section_gap(cx))
+                .child(self.settings_group(crate::tr!("settings.updates_section"), updates, cx)),
+        )
     }
 
     /// Show the rate-limit windows each enabled Codex / Claude Code profile
@@ -2977,14 +2860,14 @@ impl SettingsPage {
             && self.window_state.read(cx).destination()
                 == crate::window_state::Destination::SettingsThreadRules
         {
-            let column = self.render_thread_behavior(cx);
+            let column = self.render_threads(cx);
             return self.render_content_column(column, &self.content_scroll, cx);
         }
         if self.section == Section::ProjectThreadRules
             && self.window_state.read(cx).destination()
                 != crate::window_state::Destination::SettingsThreadRules
         {
-            self.section = Section::ThreadBehavior;
+            self.section = Section::Threads;
             self.project_rules_editor = None;
         }
         self.render_content(window, cx)
@@ -3331,6 +3214,7 @@ mod tests {
                 "settings-device-caption",
                 "settings-machine-caption",
                 "settings-nav-general",
+                "settings-nav-threads",
                 "settings-nav-providers",
                 "settings-nav-usage",
                 "settings-nav-orchestrate",
@@ -3350,10 +3234,9 @@ mod tests {
                 cx.debug_bounds("settings-advanced-toggle").is_some(),
                 "{capabilities:?}: advanced disclosure remains available in either state"
             );
-            assert_eq!(
-                cx.debug_bounds("settings-nav-computer-use").is_some(),
-                !folded
-            );
+            for advanced in ["settings-nav-computer-use", "settings-nav-maintenance"] {
+                assert_eq!(cx.debug_bounds(advanced).is_some(), !folded, "{advanced}");
+            }
             if folded {
                 let toggle = cx.debug_bounds("settings-advanced-toggle").unwrap();
                 cx.simulate_click(toggle.center(), gpui::Modifiers::default());
@@ -3363,6 +3246,7 @@ mod tests {
                     _ = window.draw(cx);
                 });
                 assert!(cx.debug_bounds("settings-nav-computer-use").is_some());
+                assert!(cx.debug_bounds("settings-nav-maintenance").is_some());
                 assert!(cx.debug_bounds("settings-nav-browser").is_none());
             }
         }
