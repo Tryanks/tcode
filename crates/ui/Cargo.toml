@@ -87,7 +87,7 @@ imara-diff = "0.2"
 similar = { version = "3.2", features = ["unicode"] }
 unicode-segmentation = "1"
 unicode-width = "0.2"
-latex-rust = "2.1.0"
+latex-rust = "3.0.1"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 web-time = "1"
