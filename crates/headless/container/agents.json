@@ -4,5 +4,5 @@
   "pi": { "package": "@earendil-works/pi-coding-agent", "commands": ["pi"] },
   "opencode": { "package": "opencode-ai", "commands": ["opencode"] },
   "cursor": { "installer": "https://cursor.com/install", "commands": ["cursor-agent", "agent"] },
-  "grok": { "package": "@xai-official/grok", "commands": ["grok"] }
+  "grok": { "package": "@xai-official/grok", "commands": ["grok"], "current": ".grok/bin/grok" }
 }
