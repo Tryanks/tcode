@@ -8,23 +8,97 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use agent::ItemContent;
+use serde::{Deserialize, Serialize};
 use tcode_core::project::SessionMeta;
-use tcode_core::session::{EntryContent, StoredEvent, Timeline};
+use tcode_core::session::EntryContent;
 use tcode_protocol::SessionSearchHit;
 
-use crate::store::{IndexedEntry, SessionStore};
+use crate::store::{EventLog, IndexedEntry, SearchMatch, SessionStore};
+use crate::thread_index::IndexedLog;
 
 /// The rules entries are extracted by. A change to them, or to what the fold
 /// settles an entry to show, must change this so every thread is extracted
 /// again.
-const EXTRACTION_VERSION: u32 = 1;
+const EXTRACTION_VERSION: u32 = 2;
+
+/// The kind of entry a search hit comes from, as a filter names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchKind {
+    UserMessage,
+    AssistantMessage,
+    ToolCall,
+    CommandExecution,
+    FileChange,
+    Steer,
+    Other,
+}
+
+impl SearchKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserMessage => "user_message",
+            Self::AssistantMessage => "assistant_message",
+            Self::ToolCall => "tool_call",
+            Self::CommandExecution => "command_execution",
+            Self::FileChange => "file_change",
+            Self::Steer => "steer",
+            Self::Other => "other",
+        }
+    }
+
+    fn parse(text: &str) -> Self {
+        match text {
+            "user_message" => Self::UserMessage,
+            "assistant_message" => Self::AssistantMessage,
+            "tool_call" => Self::ToolCall,
+            "command_execution" => Self::CommandExecution,
+            "file_change" => Self::FileChange,
+            "steer" => Self::Steer,
+            _ => Self::Other,
+        }
+    }
+}
 
 /// One final, folded timeline entry that contributes to content search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchableEntry {
     pub entry_id: String,
+    pub position: u64,
     pub turn: usize,
+    pub kind: SearchKind,
     pub text: String,
+}
+
+/// What a scoped search is narrowed to and which page of it is wanted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchFilter {
+    /// Only these threads, visited in the order the sessions are supplied.
+    pub thread_ids: Option<Vec<String>>,
+    pub kinds: Option<Vec<SearchKind>>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    pub hit: SessionSearchHit,
+    /// The log row that first recorded the entry: the hit's anchor.
+    pub position: u64,
+    pub kind: SearchKind,
+}
+
+/// The requested page of hits and the counts over every hit the filter
+/// admits, so a caller sees where matches cluster before paging.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    pub per_thread: Vec<(String, usize)>,
+    /// (thread, turn, hits in that turn).
+    pub per_turn: Vec<(String, usize, usize)>,
+    pub total: usize,
+    /// Hits exist beyond the returned page.
+    pub truncated: bool,
 }
 
 /// Content search over one [`SessionStore`].
@@ -63,20 +137,14 @@ impl SessionSearch {
                 log::warn!("cannot search session {}: {error}", meta.id);
                 continue;
             }
-            let visited =
-                self.store
-                    .visit_search_matches(&meta.id, &folded, |entry_id, turn, text| {
-                        if let Some(snippet) = match_snippet(text, query, 140) {
-                            hits.push(SessionSearchHit {
-                                session_id: meta.id.clone(),
-                                session_title: meta.title.clone(),
-                                entry_id: entry_id.to_owned(),
-                                turn,
-                                snippet,
-                            });
-                        }
-                        hits.len() < limit
-                    });
+            let visited = self
+                .store
+                .visit_search_matches(&meta.id, &folded, |matched| {
+                    if let Some(snippet) = match_snippet(matched.text, query, 140) {
+                        hits.push(protocol_hit(meta, &matched, snippet));
+                    }
+                    hits.len() < limit
+                });
             if let Err(error) = visited {
                 log::warn!("cannot search session {}: {error}", meta.id);
             }
@@ -85,6 +153,78 @@ impl SessionSearch {
             }
         }
         hits
+    }
+
+    /// [`SessionSearch::search`] narrowed by `filter`, counting every hit it
+    /// admits and returning the page `filter` asks for.
+    pub fn search_filtered(
+        &self,
+        sessions: &[SessionMeta],
+        query: &str,
+        filter: &SearchFilter,
+    ) -> SearchResults {
+        let mut results = SearchResults::default();
+        let query = query.trim();
+        if query.is_empty() {
+            return results;
+        }
+        let folded = query.to_lowercase();
+        for meta in sessions {
+            if filter
+                .thread_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&meta.id))
+            {
+                continue;
+            }
+            if let Err(error) = self.refresh(&meta.id) {
+                log::warn!("cannot search session {}: {error}", meta.id);
+                continue;
+            }
+            let mut in_thread = 0;
+            let visited = self
+                .store
+                .visit_search_matches(&meta.id, &folded, |matched| {
+                    let kind = SearchKind::parse(matched.kind);
+                    if filter
+                        .kinds
+                        .as_ref()
+                        .is_some_and(|kinds| !kinds.contains(&kind))
+                    {
+                        return true;
+                    }
+                    let Some(snippet) = match_snippet(matched.text, query, 140) else {
+                        return true;
+                    };
+                    in_thread += 1;
+                    match results
+                        .per_turn
+                        .iter_mut()
+                        .find(|(id, turn, _)| *id == meta.id && *turn == matched.turn)
+                    {
+                        Some((_, _, count)) => *count += 1,
+                        None => results.per_turn.push((meta.id.clone(), matched.turn, 1)),
+                    }
+                    let index = results.total;
+                    results.total += 1;
+                    if index >= filter.offset && results.hits.len() < filter.limit {
+                        results.hits.push(SearchHit {
+                            hit: protocol_hit(meta, &matched, snippet),
+                            position: matched.position,
+                            kind,
+                        });
+                    }
+                    true
+                });
+            if let Err(error) = visited {
+                log::warn!("cannot search session {}: {error}", meta.id);
+            }
+            if in_thread > 0 {
+                results.per_thread.push((meta.id.clone(), in_thread));
+            }
+        }
+        results.truncated = results.total > filter.offset + results.hits.len();
+        results
     }
 
     /// Extract the entries of each thread in `ids` whose log changed since,
@@ -135,8 +275,8 @@ impl SessionSearch {
             return Ok(false);
         }
         let source = self.store.search_source(id)?;
-        let events = self.store.read_log_until(id, source.end)?.records;
-        let entries = extract_searchable_entries(&events);
+        let log = self.store.read_log_until(id, source.end)?;
+        let entries = extract_searchable_entries(&log);
         let folded: Vec<String> = entries.iter().map(|entry| fold(&entry.text)).collect();
         self.store.replace_search_entries(
             id,
@@ -147,13 +287,29 @@ impl SessionSearch {
                 .zip(&folded)
                 .map(|(entry, folded)| IndexedEntry {
                     entry_id: &entry.entry_id,
+                    position: entry.position,
                     turn: entry.turn,
+                    kind: entry.kind.as_str(),
                     text: &entry.text,
                     folded,
                 }),
         )?;
         verified(self);
         Ok(true)
+    }
+}
+
+fn protocol_hit(
+    meta: &SessionMeta,
+    matched: &SearchMatch<'_>,
+    snippet: String,
+) -> SessionSearchHit {
+    SessionSearchHit {
+        session_id: meta.id.clone(),
+        session_title: meta.title.clone(),
+        entry_id: matched.entry_id.to_owned(),
+        turn: matched.turn,
+        snippet,
     }
 }
 
@@ -170,23 +326,19 @@ fn fold(text: &str) -> String {
 ///
 /// Folding first deduplicates streaming deltas and item lifecycle updates, so
 /// callers index what the chat ultimately displays rather than every wire event.
-pub fn extract_searchable_entries(events: &[StoredEvent]) -> Vec<SearchableEntry> {
-    let timeline = Timeline::fold_events(events.iter().cloned());
+pub fn extract_searchable_entries(log: &EventLog) -> Vec<SearchableEntry> {
+    let indexed = IndexedLog::build(log);
     let mut entries = Vec::new();
-    for entry in &timeline.entries {
-        let text = match &entry.content {
-            EntryContent::Item(content) => searchable_item_text(content),
-            EntryContent::Steer {
-                text, attachments, ..
-            } => Some(join_parts(
-                std::iter::once(text.as_str()).chain(attachments.iter().map(String::as_str)),
-            )),
-            _ => None,
+    for (position, entry) in indexed.entries() {
+        let Some((kind, text)) = searchable_text(&entry.content) else {
+            continue;
         };
-        if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+        if !text.trim().is_empty() {
             entries.push(SearchableEntry {
                 entry_id: entry.id.clone(),
+                position,
                 turn: entry.turn,
+                kind,
                 text,
             });
         }
@@ -195,37 +347,64 @@ pub fn extract_searchable_entries(events: &[StoredEvent]) -> Vec<SearchableEntry
     entries
 }
 
-fn searchable_item_text(content: &ItemContent) -> Option<String> {
-    match content {
+/// Tool and command output are not indexed: they dominate a log's bytes and
+/// are searched inside one item instead.
+fn searchable_text(content: &EntryContent) -> Option<(SearchKind, String)> {
+    let item = match content {
+        EntryContent::Item(item) => item,
+        EntryContent::Steer {
+            text, attachments, ..
+        } => {
+            return Some((
+                SearchKind::Steer,
+                join_parts(
+                    std::iter::once(text.as_str()).chain(attachments.iter().map(String::as_str)),
+                ),
+            ));
+        }
+        _ => return None,
+    };
+    Some(match item {
         ItemContent::UserMessage {
             text, attachments, ..
-        } => Some(join_parts(
-            std::iter::once(text.as_str()).chain(attachments.iter().map(String::as_str)),
-        )),
-        ItemContent::AssistantMessage { text } => Some(text.clone()),
-        ItemContent::CommandExecution { command, .. } => Some(command.clone()),
-        ItemContent::FileChange { changes, .. } => Some(join_parts(
-            changes.iter().map(|change| change.path.as_str()),
-        )),
-        ItemContent::ToolCall { name, input, .. } => Some(format!("{name} {input}")),
+        } => (
+            SearchKind::UserMessage,
+            join_parts(
+                std::iter::once(text.as_str()).chain(attachments.iter().map(String::as_str)),
+            ),
+        ),
+        ItemContent::AssistantMessage { text } => (SearchKind::AssistantMessage, text.clone()),
+        ItemContent::CommandExecution { command, .. } => {
+            (SearchKind::CommandExecution, command.clone())
+        }
+        ItemContent::FileChange { changes, .. } => (
+            SearchKind::FileChange,
+            join_parts(changes.iter().map(|change| change.path.as_str())),
+        ),
+        ItemContent::ToolCall { name, input, .. } => {
+            (SearchKind::ToolCall, format!("{name} {input}"))
+        }
         ItemContent::Subagent {
             agent_type,
             description,
             summary,
             ..
-        } => Some(join_parts(
-            [agent_type.as_str(), description.as_str()]
-                .into_iter()
-                .chain(summary.iter().map(String::as_str)),
-        )),
-        ItemContent::ImageRead { path, .. } => Some(path.clone()),
-        ItemContent::WebSearch { query } => Some(query.clone()),
+        } => (
+            SearchKind::Other,
+            join_parts(
+                [agent_type.as_str(), description.as_str()]
+                    .into_iter()
+                    .chain(summary.iter().map(String::as_str)),
+            ),
+        ),
+        ItemContent::ImageRead { path, .. } => (SearchKind::Other, path.clone()),
+        ItemContent::WebSearch { query } => (SearchKind::Other, query.clone()),
         ItemContent::Other {
             provider_kind,
             summary,
-        } => Some(format!("{provider_kind} {summary}")),
-        ItemContent::Reasoning { .. } => None,
-    }
+        } => (SearchKind::Other, format!("{provider_kind} {summary}")),
+        ItemContent::Reasoning { .. } => return None,
+    })
 }
 
 fn join_parts<'a>(parts: impl Iterator<Item = &'a str>) -> String {
@@ -291,6 +470,7 @@ mod tests {
     use agent::{AgentEvent, ItemStatus, ProviderKind, ThreadItem};
     use serde_json::json;
     use tcode_core::project::SessionMeta;
+    use tcode_core::session::StoredEvent;
 
     use crate::store::Mutation;
 
@@ -523,6 +703,164 @@ mod tests {
         assert!(hits[0].snippet.contains("AUTH.rs"));
         assert!(hits[0].snippet.chars().count() <= 142);
         assert!(hits[0].snippet.starts_with('…') && hits[0].snippet.ends_with('…'));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A scoped search counts every hit the filter admits per thread and per
+    /// turn, pages through them in log order, and anchors each hit to the row
+    /// that recorded its entry.
+    #[test]
+    fn search_filtered_scopes_to_threads_and_kinds_and_counts_per_turn() {
+        let root = std::env::temp_dir().join(format!("tcode-search-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let a = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
+        let b = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
+        let user = |id: &str, text: &str| {
+            completed(
+                id,
+                ItemContent::UserMessage {
+                    text: text.into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            )
+            .event
+        };
+        let reply = |id: &str, text: &str| {
+            completed(id, ItemContent::AssistantMessage { text: text.into() }).event
+        };
+        let turn = |id: &str, done: bool| {
+            if done {
+                AgentEvent::TurnCompleted {
+                    turn_id: id.into(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                }
+            } else {
+                AgentEvent::TurnStarted { turn_id: id.into() }
+            }
+        };
+        let events_a = [
+            user("u0", "auth.rs is broken"),
+            turn("one", false),
+            completed(
+                "c0",
+                ItemContent::CommandExecution {
+                    command: "rg auth.rs".into(),
+                    output: "auth.rs:1".into(),
+                    exit_code: Some(0),
+                    status: ItemStatus::Completed,
+                },
+            )
+            .event,
+            reply("a0", "auth.rs fixed"),
+            turn("one", true),
+            user("u1", "more auth.rs"),
+            turn("two", false),
+            completed(
+                "t1",
+                ItemContent::ToolCall {
+                    image_reads: Vec::new(),
+                    name: "read_file".into(),
+                    input: json!({"path": "auth.rs"}),
+                    output: Some("auth.rs output".into()),
+                    status: ItemStatus::Completed,
+                },
+            )
+            .event,
+            turn("two", true),
+        ];
+        for (ts, event) in events_a.iter().enumerate() {
+            store.append_event(&a.id, ts as u64, event).unwrap();
+        }
+        store
+            .append_event(&b.id, 1, &reply("b0", "auth.rs in b"))
+            .unwrap();
+        let search = SessionSearch::new(store.clone());
+        let sessions = [a.clone(), b.clone()];
+        let all = |limit: usize, offset: usize| SearchFilter {
+            thread_ids: None,
+            kinds: None,
+            limit,
+            offset,
+        };
+
+        let results = search.search_filtered(&sessions, "AUTH.rs", &all(10, 0));
+        assert_eq!(results.total, 6);
+        assert!(!results.truncated);
+        assert_eq!(
+            results.per_thread,
+            vec![(a.id.clone(), 5), (b.id.clone(), 1)]
+        );
+        assert_eq!(
+            results.per_turn,
+            vec![
+                (a.id.clone(), 0, 3),
+                (a.id.clone(), 1, 2),
+                (b.id.clone(), 0, 1)
+            ]
+        );
+        assert_eq!(
+            results
+                .hits
+                .iter()
+                .map(|hit| (hit.hit.entry_id.as_str(), hit.position, hit.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("u0", 0, SearchKind::UserMessage),
+                ("c0", 2, SearchKind::CommandExecution),
+                ("a0", 3, SearchKind::AssistantMessage),
+                ("u1", 5, SearchKind::UserMessage),
+                ("t1", 7, SearchKind::ToolCall),
+                ("b0", 0, SearchKind::AssistantMessage),
+            ]
+        );
+        assert_eq!(results.hits[1].hit.snippet, "rg auth.rs");
+
+        let scoped = search.search_filtered(
+            &sessions,
+            "auth.rs",
+            &SearchFilter {
+                thread_ids: Some(vec![b.id.clone()]),
+                ..all(10, 0)
+            },
+        );
+        assert_eq!(scoped.total, 1);
+        assert_eq!(scoped.hits[0].hit.session_id, b.id);
+        assert_eq!(scoped.per_thread, vec![(b.id.clone(), 1)]);
+
+        let kinds = search.search_filtered(
+            &sessions,
+            "auth.rs",
+            &SearchFilter {
+                kinds: Some(vec![SearchKind::UserMessage, SearchKind::Steer]),
+                ..all(10, 0)
+            },
+        );
+        assert_eq!(kinds.total, 2);
+        assert_eq!(
+            kinds.per_turn,
+            vec![(a.id.clone(), 0, 1), (a.id.clone(), 1, 1)]
+        );
+        assert!(
+            kinds
+                .hits
+                .iter()
+                .all(|hit| hit.kind == SearchKind::UserMessage)
+        );
+
+        let page = search.search_filtered(&sessions, "auth.rs", &all(2, 2));
+        assert_eq!(
+            page.hits
+                .iter()
+                .map(|hit| hit.hit.entry_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a0", "u1"]
+        );
+        assert_eq!((page.total, page.truncated), (6, true));
+        let last = search.search_filtered(&sessions, "auth.rs", &all(10, 5));
+        assert_eq!((last.hits.len(), last.truncated), (1, false));
+        assert_eq!(search.search(&sessions, "auth.rs", 50).len(), 6);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
