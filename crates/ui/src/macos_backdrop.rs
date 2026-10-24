@@ -1,26 +1,25 @@
-//! The macOS window backdrop: one semantic `NSVisualEffectView` under the GPUI
-//! view, left exactly as AppKit builds it.
+//! The macOS window backdrop: one Liquid Glass `NSGlassEffectView` under the
+//! GPUI view, left exactly as AppKit builds it.
 //!
-//! GPUI's own `WindowBackgroundAppearance::Blurred` strips the material's tint
-//! layers and relies on the `.selection` material for the blur; on macOS 27
-//! `.selection` no longer carries a backdrop layer at all, so that path renders
-//! no blur (#445). A stock semantic material blurs on every release, follows the
-//! window's active state, and honours Reduce Transparency and the macOS 27
-//! Liquid Glass slider without any tint of our own on top.
+//! GPUI's `WindowBackgroundAppearance::Blurred` strips its material down to a
+//! colorless blur and has no Liquid Glass option, so the window opens
+//! `Transparent` and the system glass goes underneath instead. The glass
+//! carries its own tint, honours Reduce Transparency and the Liquid Glass
+//! slider, and follows the appearance it is given.
 
 use gpui::{App, Global, Window};
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly as _};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization as _, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSAutoresizingMaskOptions, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView, NSWindowOrderingMode,
+    NSAutoresizingMaskOptions, NSGlassEffectView, NSGlassEffectViewStyle, NSView,
+    NSWindowOrderingMode,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::theme::ThemeMode;
 
-struct SystemBackdrop(Retained<NSVisualEffectView>);
+struct SystemBackdrop(Retained<NSGlassEffectView>);
 impl Global for SystemBackdrop {}
 
 /// Whether the window carries a system material that already tints the
@@ -29,7 +28,7 @@ pub(crate) fn installed(cx: &App) -> bool {
     cx.has_global::<SystemBackdrop>()
 }
 
-/// Slide the material under GPUI's view. A no-op if the native window cannot be
+/// Slide the glass under GPUI's view. A no-op if the native window cannot be
 /// reached, in which case the theme canvas keeps tinting the transparent window.
 pub(crate) fn install(window: &Window, cx: &mut App) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
@@ -46,21 +45,18 @@ pub(crate) fn install(window: &Window, cx: &mut App) {
     let Some(content) = gpui_view.window().and_then(|window| window.contentView()) else {
         return;
     };
-    let effect =
-        NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content.bounds());
-    effect.setMaterial(NSVisualEffectMaterial::Sidebar);
-    effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-    effect.setState(NSVisualEffectState::FollowsWindowActiveState);
-    effect.setAutoresizingMask(
+    let glass = NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), content.bounds());
+    glass.setStyle(NSGlassEffectViewStyle::Regular);
+    glass.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
-    content.addSubview_positioned_relativeTo(&effect, NSWindowOrderingMode::Below, None);
-    cx.set_global(SystemBackdrop(effect));
+    content.addSubview_positioned_relativeTo(&glass, NSWindowOrderingMode::Below, None);
+    cx.set_global(SystemBackdrop(glass));
 }
 
-/// The material follows the window's appearance, but the theme mode can be
-/// forced from Settings; pin the material to the theme so a dark palette never
-/// sits on a light material.
+/// The glass follows the window's appearance, but the theme mode can be forced
+/// from Settings; pin the glass to the theme so a dark palette never sits on
+/// light glass.
 pub(crate) fn sync_appearance(mode: ThemeMode, cx: &App) {
     let Some(backdrop) = cx.try_global::<SystemBackdrop>() else {
         return;

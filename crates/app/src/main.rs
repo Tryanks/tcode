@@ -38,8 +38,8 @@ fn main_window_background() -> WindowBackgroundAppearance {
     if cfg!(target_os = "windows") {
         WindowBackgroundAppearance::Blurred
     } else if vibrancy_enabled() {
-        // `run_shell` slides a stock `NSVisualEffectView` under a transparent
-        // window; GPUI's `Blurred` material stopped blurring on macOS 27.
+        // `run_shell` slides Liquid Glass under a transparent window; GPUI's
+        // `Blurred` is a colorless blur with no glass option.
         WindowBackgroundAppearance::Transparent
     } else {
         WindowBackgroundAppearance::Opaque
