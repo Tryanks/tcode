@@ -251,7 +251,6 @@ jobs:
     timeout-minutes: 30
     env:
       RUSTFLAGS: -D warnings
-      IPHONEOS_DEPLOYMENT_TARGET: '26.0'
     steps:
       - uses: actions/checkout@v7
 

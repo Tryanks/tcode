@@ -81,7 +81,7 @@ enum WebViewSlot {
     },
     Ready {
         view: Entity<WebView>,
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         remote: Option<super::remote::RemoteBrowser>,
     },
 }
@@ -272,7 +272,7 @@ impl BrowserLifecycle {
                 // asynchronous didStart, so a wait_for issued right after
                 // this navigation cannot fail on the old record.
                 load_error::forget(raw);
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let mapped = match self
                     .remote_browser(key)
                     .map(|remote| remote.navigate(url))
@@ -284,7 +284,7 @@ impl BrowserLifecycle {
                         return availability;
                     }
                 };
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let url = mapped.as_deref().unwrap_or(url);
                 match raw.load_url(url) {
                     Ok(()) => {
@@ -358,6 +358,11 @@ impl BrowserLifecycle {
         if let Err(error) = view.set_bounds(rect) {
             log::debug!("preview: failed to size hidden webview {key}: {error}");
         }
+        #[cfg(target_os = "ios")]
+        super::ios::set_frame(
+            view.raw(),
+            gpui::Bounds::new(gpui::point(gpui::px(-20000.), gpui::px(-20000.)), size),
+        );
     }
 
     /// Hide children that cannot remain mounted, without showing a newly
@@ -436,7 +441,7 @@ impl BrowserLifecycle {
     /// The last navigation failure the platform reported for this browser, if
     /// the current page is still the one it left behind.
     pub(super) fn load_error(&self, key: &str, cx: &App) -> Option<LoadError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if let Some(remote) = self.remote_browser(key) {
             let routes = remote.routes.borrow();
             if let Some(message) = routes.error() {
@@ -452,7 +457,7 @@ impl BrowserLifecycle {
         Some(error)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn remote_browser(&self, key: &str) -> Option<&super::remote::RemoteBrowser> {
         match self.slots.get(key)? {
             WebViewSlot::Ready { remote, .. } => remote.as_ref(),
@@ -462,14 +467,14 @@ impl BrowserLifecycle {
     }
 
     pub(super) fn logical_url(&self, _key: &str, actual: &str) -> String {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if let Some(remote) = self.remote_browser(_key) {
             return remote.routes.borrow().logical_url(actual);
         }
         actual.into()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub(super) fn remote_url(&self, key: &str) -> Option<String> {
         self.remote_browser(key)?
             .routes
@@ -478,7 +483,7 @@ impl BrowserLifecycle {
             .map(str::to_owned)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub(super) fn external_url(&self, key: &str, logical: &str) -> Option<String> {
         match self.remote_browser(key) {
             Some(remote) => remote.routes.borrow().external_url(logical),
@@ -746,8 +751,10 @@ mod platform {
             }
         };
         load_error::install(webview.read(cx).raw());
+        #[cfg(target_os = "ios")]
+        super::super::ios::adopt(webview.read(cx).raw());
         webview.update(cx, |view, _| set_webview_visible(view, false));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         let remote = lifecycle
             .endpoint
             .clone()
@@ -756,7 +763,7 @@ mod platform {
             key.to_string(),
             WebViewSlot::Ready {
                 view: webview.clone(),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
                 remote,
             },
         );

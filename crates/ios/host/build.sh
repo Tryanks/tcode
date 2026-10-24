@@ -23,8 +23,8 @@ esac
 case "$MODE" in
     --simulator)
         RUST_TARGET="aarch64-apple-ios-sim"
-        SIMULATOR_OS="${TCODE_IOS_SIMULATOR_OS:-26.5}"
-        DESTINATION="platform=iOS Simulator,name=iPhone 17,OS=$SIMULATOR_OS"
+        SIMULATOR_OS="${TCODE_IOS_SIMULATOR_OS:-27.0}"
+        DESTINATION="platform=iOS Simulator,name=iPhone 18 Pro,OS=$SIMULATOR_OS"
         SDK="iphonesimulator"
         PRODUCT_DIR="Debug-iphonesimulator"
         CODE_SIGNING_ALLOWED="YES"
@@ -44,8 +44,6 @@ esac
 
 echo "Building tcode-ios for $RUST_TARGET ($RUST_PROFILE)"
 cd "$WORKSPACE_DIR"
-# Keep Rust/C static objects compatible with the host's deployment target.
-export IPHONEOS_DEPLOYMENT_TARGET="26.0"
 if [[ "$RUST_PROFILE" == "release" ]]; then
     cargo build -p tcode-ios --target "$RUST_TARGET" --release
 else
