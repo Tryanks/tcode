@@ -4,7 +4,8 @@ use std::path::Path;
 
 use agent::{ChangeCompleteness, FileChange, ProviderKind, TurnStatus};
 use gpui::{AnyElement, App, Div, Entity, Window};
-use tcode_core::session::{OrchestrateCallback, SteeringStatus, TimelineEntry};
+use tcode_core::notice::OrchestrateCallback;
+use tcode_core::session::{SteeringStatus, TimelineEntry};
 
 use crate::chat::components::{
     activity, assistant, bubble, changed_files, disclosure, dividers, error_card, indicator,
@@ -140,5 +141,6 @@ pub fn model_change_divider(id: &str, cx: &App) -> AnyElement {
 }
 
 pub fn callback(id: &str, callback: &OrchestrateCallback, expanded: bool, cx: &App) -> AnyElement {
-    disclosure::callback_row(id, callback, expanded, |_, _, _| {}, None, cx)
+    let label = disclosure::callback_label(callback).into();
+    disclosure::callback_row(id, label, callback, expanded, |_, _, _| {}, None, cx)
 }

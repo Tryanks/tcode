@@ -10,7 +10,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 
-use tcode_core::session::OrchestrateCallback;
+use tcode_core::notice::{CallbackEvent, HostNotice, OrchestrateCallback};
 
 use super::super::model::one_line;
 
@@ -18,30 +18,53 @@ const CALLBACK_TITLE_MAX_CHARS: usize = 24;
 const DISCLOSURE_LINE_HEIGHT: f32 = 20.;
 const DISCLOSURE_CARD_MAX_HEIGHT: f32 = 320.;
 
+/// One line naming a notice. A row per callback names only its callback.
+pub(crate) fn notice_label(notice: &HostNotice) -> String {
+    match notice {
+        HostNotice::Orchestrate(callbacks) => callbacks
+            .iter()
+            .map(callback_label)
+            .collect::<Vec<_>>()
+            .join(" · "),
+        HostNotice::PullRequest { number, notice } => crate::tr!(
+            "pull_requests.update_label",
+            number = number.to_string(),
+            kinds = crate::pull_requests::watch_notice_kinds(notice)
+        )
+        .into_owned(),
+        HostNotice::ReportReminder => crate::tr!("chat.report_reminder").into_owned(),
+    }
+}
+
+pub(crate) fn callback_label(callback: &OrchestrateCallback) -> String {
+    let title = truncate_chars(&callback.title, CALLBACK_TITLE_MAX_CHARS);
+    let event = match &callback.event {
+        CallbackEvent::Ended(state) => localized_callback_state(state),
+        CallbackEvent::Approval => crate::tr!("chat.orchestrate_state_approval"),
+        CallbackEvent::Question => crate::tr!("chat.orchestrate_state_question"),
+    };
+    format!("{title} {event}")
+}
+
 /// `on_open` opens the child the callback reports on, while it still exists.
 pub(crate) fn callback_row(
-    entry_id: &str,
+    key: &str,
+    label: SharedString,
     callback: &OrchestrateCallback,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_open: Option<super::subagent::ClickHandler>,
     cx: &App,
 ) -> AnyElement {
-    let title = truncate_chars(&callback.title, CALLBACK_TITLE_MAX_CHARS);
-    let label = SharedString::from(format!(
-        "{title} {}",
-        localized_callback_state(&callback.state)
-    ));
     let body = if callback.body.trim().is_empty() {
         crate::tr!("chat.orchestrate_callback_empty").into_owned()
     } else {
         callback.body.clone()
     };
-    let key = format!("orchestrate-callback-{entry_id}");
     let open = on_open.map(|on_open| {
         crate::material::accessible_clickable(
             h_flex(),
-            SharedString::from(format!("callback-open-{entry_id}")),
+            SharedString::from(format!("callback-open-{key}")),
             Role::Link,
             SharedString::from(crate::tr!("agents.open").into_owned()),
             cx,
@@ -59,7 +82,7 @@ pub(crate) fn callback_row(
         .child(crate::tr!("agents.open_child"))
         .into_any_element()
     });
-    disclosure_with(&key, label, &body, expanded, on_toggle, open, cx)
+    disclosure_with(key, label, &body, expanded, on_toggle, open, cx)
 }
 
 /// A centered disclosure notification with a height-capped verbatim body: the
@@ -106,6 +129,10 @@ fn disclosure_with(
     .cursor_pointer()
     .hover(|row| row.bg(cx.theme().accent))
     .on_click(on_toggle)
+    .debug_selector({
+        let selector = format!("disclosure-{key}");
+        move || selector
+    })
     .child(Icon::new(chevron(expanded)).size(px(12.)).text_color(muted))
     .child(label);
 
@@ -156,6 +183,9 @@ pub(crate) fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
 fn localized_callback_state(state: &str) -> Cow<'static, str> {
     match state {
         "completed" => crate::tr!("chat.orchestrate_state_completed"),
+        "reported" => crate::tr!("chat.orchestrate_state_reported"),
+        "updated" => crate::tr!("chat.orchestrate_state_updated"),
+        "unreported" => crate::tr!("chat.orchestrate_state_unreported"),
         "failed" => crate::tr!("chat.orchestrate_state_failed"),
         other => Cow::Owned(other.to_string()),
     }

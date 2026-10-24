@@ -12,6 +12,7 @@ use gpui::{
 };
 use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
+use tcode_core::notice::HostNotice;
 use tcode_core::session::EntryContent;
 use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
 use tcode_core::ui::RightTab;
@@ -213,8 +214,13 @@ impl Agents {
         let mut results = std::collections::HashMap::new();
         store.with_active_timeline(|timeline| {
             for entry in &timeline.entries {
-                if let Some(callback) = crate::chat::model::user_callback(&entry.content) {
-                    let report = compact(callback.report());
+                let Some(HostNotice::Orchestrate(callbacks)) =
+                    crate::chat::model::user_notice(&entry.content)
+                else {
+                    continue;
+                };
+                for callback in callbacks {
+                    let report = compact(callback.report().unwrap_or_default());
                     if !report.is_empty() {
                         results.insert(callback.child_id, report);
                     }

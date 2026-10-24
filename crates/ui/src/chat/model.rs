@@ -6,11 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agent::{FileChange, ItemContent, ItemStatus, TurnStatus};
+use tcode_core::notice::{HostNotice, host_notice};
 use tcode_core::project::{Project, SessionMeta};
-use tcode_core::session::{
-    EntryContent, OrchestrateCallback, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming,
-    parse_orchestrate_callback,
-};
+use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming};
 
 /// The row, its turn, the entries it renders (a Work Log header's whole run),
 /// the turn's entries for the trailer (empty unless the row is the turn's
@@ -1173,6 +1171,9 @@ fn index_rows_from(
                             entry.id.hash(&mut content);
                             text.len().hash(&mut content);
                             status.hash(&mut content);
+                            for key in disclosure_keys(&entry.content, &entry.id) {
+                                expanded.contains(&key).hash(&mut content);
+                            }
                         }
                     }
                     entries[turn_range.clone()]
@@ -1260,23 +1261,34 @@ pub(crate) fn work_log_key(turn: usize, segment_id: &str) -> String {
     format!("worklog-{turn}-{segment_id}")
 }
 
-/// The child-thread callback a user message holds, read past any injected context the turn
-/// carried (the pull request instructions precede a callback like any other queued message).
-pub(crate) fn user_callback(content: &EntryContent) -> Option<OrchestrateCallback> {
+/// The notice the host wrote as a user message, read past any injected context the turn
+/// carried (the pull request instructions precede a notice like any other queued message).
+pub(crate) fn user_notice(content: &EntryContent) -> Option<HostNotice> {
     let (text, _, context_len, _) = user_content(content)?;
-    parse_orchestrate_callback(user_visible_text(text, context_len))
+    host_notice(user_visible_text(text, context_len))
+}
+
+/// The expansion key of each disclosure row a notice renders as, in order.
+pub(crate) fn notice_keys(notice: &HostNotice, entry_id: &str) -> Vec<String> {
+    match notice {
+        HostNotice::Orchestrate(callbacks) => (0..callbacks.len())
+            .map(|index| format!("orchestrate-callback-{entry_id}-{index}"))
+            .collect(),
+        HostNotice::PullRequest { .. } => vec![format!("pull-request-update-{entry_id}")],
+        HostNotice::ReportReminder => vec![format!("report-reminder-{entry_id}")],
+    }
 }
 
 /// The per-entry expansion keys of a user message's disclosure rows: its injected context
-/// (annotated with a `context_len`) and its child-thread callback. Empty for an ordinary user
-/// message, which stays a plain bubble.
+/// (annotated with a `context_len`) and its notice. Empty for an ordinary user message,
+/// which stays a plain bubble.
 fn disclosure_keys(content: &EntryContent, entry_id: &str) -> Vec<String> {
     let mut keys = Vec::new();
     if user_content(content).is_some_and(|(_, _, context_len, _)| context_len.is_some()) {
         keys.push(format!("orchestrate-context-{entry_id}"));
     }
-    if user_callback(content).is_some() {
-        keys.push(format!("orchestrate-callback-{entry_id}"));
+    if let Some(notice) = user_notice(content) {
+        keys.extend(notice_keys(&notice, entry_id));
     }
     keys
 }
@@ -1606,19 +1618,21 @@ mod tests {
             context_len: Some(context.len()),
             attachments: Vec::new(),
         });
-        let parsed = user_callback(&content).expect("the visible text is the callback");
-        assert_eq!(parsed.child_id, "child-7");
-        assert_eq!(parsed.body, "Done.");
+        let Some(HostNotice::Orchestrate(parsed)) = user_notice(&content) else {
+            panic!("the visible text is the callback");
+        };
+        assert_eq!(parsed[0].child_id, "child-7");
+        assert_eq!(parsed[0].body, "Done.");
         assert_eq!(
             disclosure_keys(&content, "u1"),
-            ["orchestrate-context-u1", "orchestrate-callback-u1"]
+            ["orchestrate-context-u1", "orchestrate-callback-u1-0"]
         );
         let plain = EntryContent::Item(ItemContent::UserMessage {
             text: format!("{context}fix the build"),
             context_len: Some(context.len()),
             attachments: Vec::new(),
         });
-        assert!(user_callback(&plain).is_none());
+        assert!(user_notice(&plain).is_none());
         assert_eq!(disclosure_keys(&plain, "u2"), ["orchestrate-context-u2"]);
     }
     use std::collections::HashSet;

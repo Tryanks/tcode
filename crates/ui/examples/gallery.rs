@@ -9,7 +9,8 @@ use gpui::{
     WindowBounds, WindowOptions, div, px, size,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use tcode_core::session::{EntryContent, OrchestrateCallback, TimelineEntry};
+use tcode_core::notice::{CallbackEvent, OrchestrateCallback};
+use tcode_core::session::{EntryContent, TimelineEntry};
 use tcode_ui::icon::IconName;
 use tcode_ui::sizing::Sizable as _;
 use tcode_ui::theme::{self, ActiveTheme as _, ThemeMode};
@@ -168,7 +169,7 @@ impl Render for Gallery {
         let callback = OrchestrateCallback {
             child_id: "child-gallery".into(),
             title: "Audit the extracted chat components".into(),
-            state: "completed".into(),
+            event: CallbackEvent::Ended("reported".into()),
             body: "Checked the activity, work-log, and disclosure render paths.\nAll fixtures are isolated from live session state.".into(),
         };
 

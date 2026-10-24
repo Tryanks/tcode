@@ -3326,14 +3326,19 @@ impl WorkspaceStore {
             .get(self.selected_session_id.as_ref()?)?
             .history
             .as_ref()?;
-        let author = held.authors.get(entry_id)?;
+        let attribution = &held.attribution;
+        // The lead's messages to a child carry no author: they are no member's.
+        if attribution.origins.get(entry_id) == Some(&tcode_core::session::MessageOrigin::Agent) {
+            return Some(crate::tr!("chat.from_orchestrator").into_owned());
+        }
+        let author = attribution.authors.get(entry_id)?;
         let own_id = self.client_host.as_ref().map(|host| host.device_id());
         // The host attributes only space members' messages. An unattributed
         // one is the owner's, which is someone else only from inside a space.
         let other = author.as_ref().map_or(!self.scope.is_full(), |author| {
             own_id.as_deref() != Some(author.device_id.as_str())
         });
-        (held.distinct_authors.len() > 1 || other).then(|| {
+        (attribution.distinct_authors.len() > 1 || other).then(|| {
             author
                 .as_ref()
                 .map(|author| author.name.clone())
@@ -5495,6 +5500,24 @@ pub(crate) mod tests {
             assert_eq!(
                 store.message_byline("member").as_deref(),
                 Some("Alex's laptop")
+            );
+
+            // An orchestrator's message to its child is no member's, the owner's included.
+            let mut lead = message("lead", None);
+            lead.origin = Some(tcode_core::session::MessageOrigin::Agent);
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "shared".into(),
+                    },
+                    event: ServerEvent::SessionEvent(lead),
+                },
+                cx,
+            );
+            assert_eq!(
+                store.message_byline("lead").as_deref(),
+                Some(crate::tr!("chat.from_orchestrator").as_ref())
             );
         });
     }

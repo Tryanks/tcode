@@ -1460,88 +1460,10 @@ impl Timeline {
     }
 }
 
-/// The prefix every orchestrate child-thread callback user message opens with.
-/// Callbacks are injected verbatim (see the runtime's `assemble_callback_text`);
-/// the UI reparses that shape to render a disclosure row instead of a bubble.
-pub const ORCHESTRATE_CALLBACK_PREFIX: &str = "[orchestrate] thread ";
-
-/// Opens a callback body carrying the report the child chose with
-/// `report_result`.
-pub const ORCHESTRATE_REPORT_LABEL: &str = "Result (reported via report_result):\n";
-/// Opens a callback body carrying a child's final message because it went
-/// quiet twice without calling `report_result`.
-pub const ORCHESTRATE_FALLBACK_LABEL: &str =
-    "Final message (the child ended without report_result; this is a fallback, not its report):\n";
-/// Opens the line before the tail of a final message too long to deliver whole.
-pub const ORCHESTRATE_OUTPUT_TAIL_LABEL: &str = "Final output tail (";
-
 /// The tool a dispatched child reports through, as every provider names it:
 /// Claude Code `mcp__tcode_report__report_result`, Codex `tcode_report/report_result`.
 pub fn is_report_result_tool(name: &str) -> bool {
     name.ends_with("report_result") && name.contains("tcode_report")
-}
-
-/// The parts of an orchestrate child-thread callback user message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrchestrateCallback {
-    /// The child session id the callback reports on.
-    pub child_id: String,
-    /// The child thread's title (may itself contain quotes).
-    pub title: String,
-    /// The reported state word (`completed` / `failed` / …).
-    pub state: String,
-    /// Everything after the first line — the digest body (empty when absent).
-    pub body: String,
-}
-
-impl OrchestrateCallback {
-    /// The child's own words without the labels the callback frames them
-    /// with: its report, or else its final message.
-    pub fn report(&self) -> &str {
-        if let Some(report) = self.body.strip_prefix(ORCHESTRATE_REPORT_LABEL) {
-            return report;
-        }
-        let body = self
-            .body
-            .strip_prefix(ORCHESTRATE_FALLBACK_LABEL)
-            .unwrap_or(&self.body);
-        if body.starts_with(ORCHESTRATE_OUTPUT_TAIL_LABEL) {
-            return body.split_once('\n').map_or("", |(_, tail)| tail);
-        }
-        body
-    }
-}
-
-/// Parse a user-message text that a child-thread callback injected, mirroring
-/// the runtime's `[orchestrate] thread {id} ("{title}") {state}.{tokens}\n{body}`
-/// wire format. Returns `None` for any text that is not a callback, so callers
-/// fall back to the plain bubble. Works on historical logs too: it reads the
-/// stored text and never depends on any stored annotation.
-pub fn parse_orchestrate_callback(text: &str) -> Option<OrchestrateCallback> {
-    let (first_line, body) = match text.split_once('\n') {
-        Some((line, body)) => (line, body),
-        None => (text, ""),
-    };
-    let rest = first_line.strip_prefix(ORCHESTRATE_CALLBACK_PREFIX)?;
-    // `{child_id} ("{title}") {state}.…` — the id has no spaces, so the first
-    // ` ("` opens the title and the last `") ` closes it (titles may contain
-    // quotes, but the trailing state word never does).
-    let open = rest.find(" (\"")?;
-    let child_id = rest[..open].to_string();
-    let after = &rest[open + 3..];
-    let close = after.rfind("\") ")?;
-    let title = after[..close].to_string();
-    let tail = &after[close + 3..];
-    let state = tail.split('.').next().unwrap_or("").trim().to_string();
-    if child_id.is_empty() || state.is_empty() {
-        return None;
-    }
-    Some(OrchestrateCallback {
-        child_id,
-        title,
-        state,
-        body: body.to_string(),
-    })
 }
 
 /// Merge an authoritative item snapshot over an existing entry, keeping
@@ -2823,38 +2745,6 @@ mod tests {
                 ..
             }) if summary == "pong" && model == "opus" && effort == "high"
         ));
-    }
-
-    #[test]
-    fn parse_orchestrate_callback_reads_the_wire_format() {
-        // Normal callback: id, quoted title, state word, and a multi-line body.
-        let normal = parse_orchestrate_callback(
-            "[orchestrate] thread child-7 (\"Investigate zed terminal\") completed. tokens: input 5, output 3, total 8.\nHere is the report.\nSecond line.",
-        )
-        .expect("normal callback parses");
-        assert_eq!(normal.child_id, "child-7");
-        assert_eq!(normal.title, "Investigate zed terminal");
-        assert_eq!(normal.state, "completed");
-        assert_eq!(normal.body, "Here is the report.\nSecond line.");
-
-        // A title that itself contains quotes survives (the last `") ` closes it).
-        let quoted = parse_orchestrate_callback(
-            "[orchestrate] thread abc (\"He said \"hi\" twice\") failed.\nbody",
-        )
-        .expect("quoted-title callback parses");
-        assert_eq!(quoted.title, "He said \"hi\" twice");
-        assert_eq!(quoted.state, "failed");
-        assert_eq!(quoted.body, "body");
-
-        // Missing body (no newline) → empty body, still parses.
-        let no_body = parse_orchestrate_callback("[orchestrate] thread c (\"Title\") completed.")
-            .expect("bodyless callback parses");
-        assert_eq!(no_body.body, "");
-        assert_eq!(no_body.state, "completed");
-
-        // Non-matching text (an ordinary user message) is not a callback.
-        assert!(parse_orchestrate_callback("Please run the tests").is_none());
-        assert!(parse_orchestrate_callback("[orchestrate] thread only-a-header").is_none());
     }
 
     #[test]
