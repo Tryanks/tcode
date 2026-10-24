@@ -13,7 +13,7 @@ pub mod js;
 pub mod ports;
 mod tools;
 
-pub use tools::INSTRUCTIONS;
+pub use tools::{INSTRUCTIONS, tool_descriptions};
 
 /// Fixed preview canvas presets as `(id, portrait_width, portrait_height)` in
 /// CSS pixels.

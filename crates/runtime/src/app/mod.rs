@@ -246,6 +246,7 @@ mod approvals;
 mod authorization;
 mod command_output;
 mod command_validation;
+mod control;
 mod diff_pass;
 mod events;
 mod git;
@@ -284,8 +285,8 @@ use active_session::{
 use orchestrate::McpWiring;
 pub use providers::ProviderCatalog;
 use providers::{
-    computer_use_attaches, effort_selection, normalized_selections, provider_secret_names,
-    session_options,
+    McpServers, computer_use_attaches, effort_selection, normalized_selections,
+    provider_secret_names, session_options,
 };
 pub use revisioned::Revisioned;
 pub use session_index::SessionIndex;
@@ -426,6 +427,7 @@ pub struct AppState {
     /// Native plugin catalogs by profile id, listed on demand.
     plugin_catalogs: HashMap<String, plugins::PluginCatalog>,
     mcp: McpWiring,
+    control: control::ControlState,
     callback_approval_requests: HashSet<(String, String)>,
     callback_user_input_requests: HashSet<(String, String)>,
     /// Live provider approvals for every resident session. This is the sole
@@ -622,6 +624,7 @@ impl AppState {
             acp_installing: std::collections::HashSet::new(),
             plugin_catalogs: HashMap::new(),
             mcp: McpWiring::default(),
+            control: control::ControlState::default(),
             callback_approval_requests: HashSet::new(),
             callback_user_input_requests: HashSet::new(),
             approvals: Default::default(),

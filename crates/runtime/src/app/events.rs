@@ -529,6 +529,7 @@ impl AppState {
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
+            | AgentEvent::ControlAction(_)
             | AgentEvent::ProposedPlanDelta { .. }
             | AgentEvent::ProposedPlan { .. }
             | AgentEvent::ProviderStartFailed { .. } => {}
@@ -900,7 +901,7 @@ impl AppState {
                 }
             };
             let options =
-                session_options(&title_meta, &settings, launch_env, None, None, None, None);
+                session_options(&title_meta, &settings, launch_env, McpServers::default());
             let title = generate_ai_title(
                 provider_launcher,
                 title_meta.provider,
@@ -953,7 +954,7 @@ impl AppState {
                 }
             };
             let options =
-                session_options(&review_meta, &settings, launch_env, None, None, None, None);
+                session_options(&review_meta, &settings, launch_env, McpServers::default());
             let review = run_fallback_review(
                 provider_launcher,
                 review_meta.provider,

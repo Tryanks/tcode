@@ -954,7 +954,11 @@ impl AppState {
             self.providers.invalidate_profile_reads(&id);
         }
         let hosts_changed = self.settings.source_control.hosts != settings.source_control.hosts;
+        let control_changed = self.settings.control != settings.control;
         self.settings = settings;
+        if control_changed {
+            self.refresh_control_grants();
+        }
         self.forge
             .configure(self.settings.source_control.hosts.clone());
         if hosts_changed {
@@ -1286,6 +1290,7 @@ impl AppState {
             self.revoke_preview_registration(id);
             self.revoke_pull_request_registration(id);
             self.revoke_orchestrate_child_registration(id);
+            self.revoke_control_registration(id);
         }
         for id in &ids {
             self.close_orchestrator_children(id, cx);

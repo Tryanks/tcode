@@ -29,6 +29,7 @@ chat:
   context_compacting: "Compacting context…"
   context_pre_tokens: "%{tokens} tokens before compaction"
   context_compacted: "Context compacted"
+  control_action: "%{actor}: %{action}"
   context_window_changed: "Context window set to %{window}"
   previous_logs: "+%{count} previous log entries"
   hide_previous_logs: "Hide %{count} previous log entries"

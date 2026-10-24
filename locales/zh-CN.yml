@@ -29,6 +29,7 @@ chat:
   context_compacting: "正在压缩上下文…"
   context_pre_tokens: "压缩前 %{tokens} 个令牌"
   context_compacted: "上下文已压缩"
+  control_action: "%{actor}：%{action}"
   context_window_changed: "上下文长度已修改为 %{window}"
   previous_logs: "前面还有 %{count} 条日志"
   hide_previous_logs: "收起前面的 %{count} 条日志"

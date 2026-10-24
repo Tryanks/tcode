@@ -34,6 +34,7 @@ pub(crate) enum Segment<'a> {
     ModelChange(&'a TimelineEntry),
     ContextCompacted(&'a TimelineEntry),
     ContextWindowChanged(&'a TimelineEntry),
+    ControlAction(&'a TimelineEntry),
     User(&'a TimelineEntry),
     Assistant(&'a TimelineEntry),
     Error(&'a TimelineEntry),
@@ -251,6 +252,9 @@ pub(crate) fn segment_entries<'a>(
                     Segment::ContextWindowChanged(entry),
                 );
             }
+            EntryContent::ControlAction(_) => {
+                single(&mut segments, &mut ranges, Segment::ControlAction(entry));
+            }
             EntryContent::Item(ItemContent::AssistantMessage { .. }) => {
                 single(&mut segments, &mut ranges, Segment::Assistant(entry));
             }
@@ -311,6 +315,7 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             EntryContent::Item(ItemContent::Subagent { .. }) => counts.subagents += 1,
             EntryContent::ContextCompacted(_)
             | EntryContent::ContextWindowChanged { .. }
+            | EntryContent::ControlAction(_)
             | EntryContent::Steer { .. }
             | EntryContent::Item(ItemContent::UserMessage { .. })
             | EntryContent::Item(ItemContent::AssistantMessage { .. })
@@ -1386,6 +1391,11 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         }
         EntryContent::ContextCompacted(_) => {}
         EntryContent::ContextWindowChanged { window } => window.hash(hash),
+        EntryContent::ControlAction(action) => {
+            action.actor_thread_id.hash(hash);
+            action.action.hash(hash);
+            action.detail.hash(hash);
+        }
         EntryContent::Item(ItemContent::ImageRead { path, .. }) => path.hash(hash),
         EntryContent::Item(ItemContent::WebSearch { query }) => {
             "web_search".len().hash(hash);

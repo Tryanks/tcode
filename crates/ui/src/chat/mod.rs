@@ -1473,6 +1473,14 @@ impl ChatView {
                         &entry.id, window, cx,
                     ));
                 }
+                Segment::ControlAction(entry) => {
+                    let EntryContent::ControlAction(action) = &entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::control_action_divider(
+                        &entry.id, action, cx,
+                    ));
+                }
                 Segment::ActivityRun(activities) => {
                     column = column.child(self.compose_work_log(
                         (index, &row.part, turn, cwd, activities, row.live_activity),

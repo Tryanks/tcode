@@ -641,6 +641,20 @@ impl ComputerUseTools {
     }
 }
 
+/// Every tool's name and the description its model reads.
+pub fn tool_descriptions() -> Vec<(String, String)> {
+    ComputerUseTools::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| {
+            (
+                tool.name.to_string(),
+                tool.description.as_deref().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
 /// The server's `instructions`, which the client reads at initialization.
 pub const INSTRUCTIONS: &str = "Use find_roots → observe_ui, query the immutable cached state with \
                  search_ui/expand_ui/inspect_ui, then use act_ui/wait_for and observe again. \

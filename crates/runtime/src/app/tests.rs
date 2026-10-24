@@ -1833,10 +1833,7 @@ fn installed_acp_duplicates_of_native_providers_only_serve_their_existing_sessio
             &existing,
             &state.settings,
             LaunchEnv::default(),
-            None,
-            None,
-            None,
-            None,
+            McpServers::default(),
         );
         assert_eq!(opts.acp.map(|agent| agent.id).as_deref(), Some("cursor"));
     });
@@ -3067,7 +3064,7 @@ fn provider_binary_home_and_launch_arguments_follow_the_selected_profile() {
             .clone(),
     };
     let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
-    let opts = session_options(&meta, &settings, launch_env, None, None, None, None);
+    let opts = session_options(&meta, &settings, launch_env, McpServers::default());
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/claude")));
     assert_eq!(opts.extra_args, vec!["--chrome", "--verbose"]);
     assert_eq!(
@@ -3087,7 +3084,7 @@ fn provider_binary_home_and_launch_arguments_follow_the_selected_profile() {
         home: settings.provider(ProviderKind::Codex).home_path.clone(),
     };
     let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-    let opts = session_options(&meta, &settings, launch_env, None, None, None, None);
+    let opts = session_options(&meta, &settings, launch_env, McpServers::default());
     assert_eq!(opts.binary_path, Some(PathBuf::from("/custom/codex")));
     assert!(opts.extra_args.is_empty());
     assert_eq!(
@@ -3101,10 +3098,7 @@ fn provider_binary_home_and_launch_arguments_follow_the_selected_profile() {
         &meta,
         &settings,
         LaunchEnv::default(),
-        None,
-        None,
-        None,
-        None,
+        McpServers::default(),
     );
     assert_eq!(opts.extra_args, vec!["--verbose"]);
 
@@ -3116,10 +3110,7 @@ fn provider_binary_home_and_launch_arguments_follow_the_selected_profile() {
         &meta,
         &settings,
         LaunchEnv::default(),
-        None,
-        None,
-        None,
-        None,
+        McpServers::default(),
     );
     assert_eq!(opts.extra_args, vec!["--verbose", "--approve"]);
 }
@@ -3259,7 +3250,7 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
             .iter()
             .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://api.kimi.com/coding/")
     );
-    let opts = session_options(&meta, &state.settings, launch_env, None, None, None, None);
+    let opts = session_options(&meta, &state.settings, launch_env, McpServers::default());
     assert_eq!(opts.binary_path, Some(PathBuf::from("/opt/kimi/claude")));
 }
 
@@ -3274,6 +3265,7 @@ fn session_launch_scopes_mcp_registrations() {
     let orchestrate = registration(agent::McpRegistration::SERVER_NAME_ORCHESTRATE, 8);
     let report = registration("child-report", 9);
     let computer = registration(agent::McpRegistration::SERVER_NAME_COMPUTER_USE, 10);
+    let control = registration(agent::McpRegistration::SERVER_NAME_CONTROL, 11);
     for (provider, preview_supported, computer_supported) in [
         (ProviderKind::ClaudeCode, true, true),
         (ProviderKind::Codex, true, false),
@@ -3295,10 +3287,13 @@ fn session_launch_scopes_mcp_registrations() {
                 &meta,
                 &settings,
                 LaunchEnv::default(),
-                Some(preview.clone()),
-                Some(orchestrate.clone()),
-                Some(report.clone()),
-                Some(computer.clone()),
+                McpServers {
+                    preview: Some(preview.clone()),
+                    orchestrate: Some(orchestrate.clone()),
+                    orchestrate_report: Some(report.clone()),
+                    computer_use: Some(computer.clone()),
+                    control: Some(control.clone()),
+                },
             );
             let mut expected = Vec::new();
             for (enabled, reg) in [
@@ -3306,6 +3301,7 @@ fn session_launch_scopes_mcp_registrations() {
                 (lead, &orchestrate),
                 (child, &report),
                 (computer_enabled && computer_supported, &computer),
+                (preview_supported, &control),
             ] {
                 if enabled {
                     expected.push((&reg.name, &reg.url, &reg.bearer_token));

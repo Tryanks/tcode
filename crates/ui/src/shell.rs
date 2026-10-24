@@ -6724,7 +6724,8 @@ mod tests {
             native_rewind_prefill_available: false,
             model_pending_restart: false,
             options_pending_restart: false,
-            pull_request_tools: None,
+            injected_tools: None,
+            control: None,
         }
     }
 

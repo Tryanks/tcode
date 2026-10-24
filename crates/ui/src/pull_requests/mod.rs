@@ -1316,7 +1316,7 @@ impl PullRequestsPanel {
     /// What the host injects into this thread's provider for pull requests, before any call.
     fn agent_tools(
         &self,
-        tools: &tcode_protocol::InjectedPullRequestTools,
+        tools: &tcode_protocol::InjectedTools,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.agent_tools_open;
@@ -1445,7 +1445,7 @@ impl Render for PullRequestsPanel {
             });
         let agent_tools = store
             .session_status()
-            .and_then(|status| status.pull_request_tools.clone());
+            .and_then(|status| status.injected_tools.clone());
         let compact = self.window_state.read(cx).compact;
         // Level two: the pull request the thread opened, in the wide layout's tab.
         if !compact

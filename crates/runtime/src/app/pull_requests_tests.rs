@@ -1060,7 +1060,7 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
             state
                 .session_status_snapshot("thread")
                 .unwrap()
-                .pull_request_tools
+                .injected_tools
                 .unwrap()
         })
     };
@@ -1086,7 +1086,7 @@ fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
         .unwrap();
     cx.run_until(|state| {
         let tools = state.session_status_snapshot("thread").unwrap();
-        !tools.pull_request_tools.unwrap().attached
+        !tools.injected_tools.unwrap().attached
     });
     let tools = disclosed(&state);
     assert!(tools.instructions.is_empty());
@@ -1112,10 +1112,7 @@ fn the_agent_tools_are_disclosed_before_the_first_turn() {
                 .residents
                 .live
                 .insert(id.clone(), ActiveSession::new(meta, false, Vec::new()));
-            state
-                .session_status_snapshot(&id)
-                .unwrap()
-                .pull_request_tools
+            state.session_status_snapshot(&id).unwrap().injected_tools
         }))
         .unwrap();
         assert_eq!(
@@ -1150,7 +1147,7 @@ fn a_threads_tools_keep_the_hosts_they_were_registered_with() {
         state
             .session_status_snapshot(id)
             .unwrap()
-            .pull_request_tools
+            .injected_tools
             .unwrap()
             .tools
             .into_iter()

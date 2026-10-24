@@ -40,6 +40,14 @@ pub(super) struct McpWiring {
     pub(super) computer_use_url: Option<String>,
     pub(super) computer_use_tokens: Option<computer_use_mcp::TokenRegistry>,
     pub(super) computer_use_registrations: HashMap<String, agent::McpRegistration>,
+    pub(super) control_url: Option<String>,
+    pub(super) control_tokens: Option<control_mcp::TokenRegistry>,
+    pub(super) control_registrations: HashMap<String, agent::McpRegistration>,
+    pub(super) control_requests: Option<smol::channel::Receiver<control_mcp::BrokerRequest>>,
+    /// Each registered thread's effective grant, read by the control server when a
+    /// connection opens to list the tools that grant allows.
+    pub(super) control_grants:
+        Arc<std::sync::Mutex<HashMap<String, tcode_core::control::ControlGrant>>>,
 }
 
 impl AppState {
@@ -134,6 +142,110 @@ impl AppState {
     ) {
         self.mcp.computer_use_url = Some(url);
         self.mcp.computer_use_tokens = Some(tokens);
+    }
+
+    /// Every MCP tool offered to this thread's provider, and every text Tcode gives its model
+    /// outside the conversation, as delivered; `None` for a provider that takes no MCP server.
+    pub(super) fn injected_tools(
+        &self,
+        session: &ActiveSession,
+    ) -> Option<tcode_protocol::InjectedTools> {
+        use tcode_protocol::{InjectedChannel, InjectedInstructions};
+        let meta = &session.meta;
+        let provider = meta.provider;
+        if !provider.caps().mcp_servers {
+            return None;
+        }
+        let pull_requests = self.pull_request_tools_offered(provider);
+        let preview = self.mcp.preview_url.is_some();
+        let orchestrate = meta.orchestrate_enabled && self.mcp.orchestrate_url.is_some();
+        let report = meta.parent_session_id.is_some() && self.mcp.orchestrate_child_url.is_some();
+        let computer_use =
+            computer_use_attaches(provider, &self.settings) && self.mcp.computer_use_url.is_some();
+        let control = self.control_offered(meta);
+        if !(pull_requests || preview || orchestrate || report || computer_use || control) {
+            return None;
+        }
+        let id = meta.id.as_str();
+        let attached = session.mcp_servers_attached;
+        let mut instructions = Vec::new();
+        let channel = provider.caps().instruction_channel;
+        if pull_requests && attached && channel != agent::InstructionChannel::None {
+            instructions.push(InjectedInstructions {
+                channel: InjectedChannel::Linking(channel),
+                text: self.pull_request_instructions(id),
+            });
+        }
+        if provider == ProviderKind::Codex {
+            instructions.push(InjectedInstructions {
+                channel: InjectedChannel::DeveloperInstructions,
+                text: agent::codex::PREVIEW_BROWSER_INSTRUCTIONS.to_owned(),
+            });
+        }
+        let servers = [
+            (
+                agent::McpRegistration::SERVER_NAME_PULL_REQUESTS,
+                pull_request_mcp::INSTRUCTIONS,
+                self.mcp.pull_request_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_PREVIEW,
+                preview_mcp::INSTRUCTIONS,
+                self.mcp.preview_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_ORCHESTRATE,
+                orchestrate_mcp::INSTRUCTIONS,
+                self.mcp.orchestrate_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT,
+                orchestrate_mcp::REPORT_INSTRUCTIONS,
+                self.mcp.orchestrate_child_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
+                computer_use_mcp::tools::INSTRUCTIONS,
+                self.mcp.computer_use_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_CONTROL,
+                control_mcp::INSTRUCTIONS,
+                self.mcp.control_registrations.contains_key(id),
+            ),
+        ];
+        instructions.extend(
+            servers
+                .into_iter()
+                .filter(|(_, _, registered)| attached && *registered)
+                .map(|(name, text, _)| InjectedInstructions {
+                    channel: InjectedChannel::McpServer(name.to_owned()),
+                    text: text.to_owned(),
+                }),
+        );
+        let mut tools = Vec::new();
+        if pull_requests {
+            tools.extend(pull_request_mcp::tool_descriptions(
+                &self.pull_request_tool_hosts(id),
+            ));
+        }
+        if preview {
+            tools.extend(preview_mcp::tool_descriptions());
+        }
+        if orchestrate {
+            tools.extend(orchestrate_mcp::tool_descriptions());
+        }
+        if computer_use {
+            tools.extend(computer_use_mcp::tools::tool_descriptions());
+        }
+        if control {
+            tools.extend(control_mcp::tool_descriptions(&self.caller_grant(meta).0));
+        }
+        Some(tcode_protocol::InjectedTools {
+            tools,
+            attached,
+            instructions,
+        })
     }
 
     pub(super) fn computer_use_registration_for(

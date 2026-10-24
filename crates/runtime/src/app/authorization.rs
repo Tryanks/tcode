@@ -264,6 +264,14 @@ impl AppState {
                 | Command::UnarchiveSession { session_id }
                 | Command::SettleChildren { session_id }
                 | Command::SettleSession { session_id }
+                | Command::SetControlGrant { session_id, .. }
+                | Command::RespondControlGrant { session_id, .. }
+                | Command::AddThreadReference { session_id, .. }
+                | Command::RemoveThreadReference { session_id, .. }
+                | Command::SetFollowUp { session_id, .. }
+                | Command::SetParked { session_id, .. }
+                | Command::DismissSettleSuggestion { session_id }
+                | Command::RevokeSelfSettle { session_id }
                 | Command::CancelAgent { session_id }
                 | Command::UnsettleSession { session_id }
                 | Command::SetAutoSettle { session_id, .. }
@@ -370,6 +378,8 @@ impl AppState {
                 }
                 Query::Hosting { .. }
                 | Query::ComputerUsePermissions
+                | Query::ControlActivity { .. }
+                | Query::ReviewRecords { .. }
                 | Query::ScanExternalHistory => Err(refusal("query")),
             },
         }
