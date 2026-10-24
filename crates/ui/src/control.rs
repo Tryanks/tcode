@@ -159,7 +159,13 @@ pub(crate) fn grant_editor(
     cx: &App,
 ) -> gpui::Div {
     let id: SharedString = id.into();
-    let caption = |text: String| div().pt_1().text_caption(cx).child(text);
+    let caption = |text: String| {
+        div()
+            .pt_1()
+            .pl(gpui::px(crate::material::CARD_INSET))
+            .text_caption(cx)
+            .child(text)
+    };
     let selected_projects = match &grant.scope {
         ControlScope::Projects(ids) => ids.clone(),
         _ => Vec::new(),
