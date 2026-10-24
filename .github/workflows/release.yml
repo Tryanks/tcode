@@ -53,11 +53,6 @@ jobs:
             target: aarch64-apple-darwin
             platform: macos
             arch: arm64
-          - label: macOS x64
-            os: macos-26
-            target: x86_64-apple-darwin
-            platform: macos
-            arch: x64
           - label: Windows x64
             os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -151,7 +146,7 @@ jobs:
             <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>CFBundleVersion</key><string>${VERSION}</string>
             <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
-            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>LSMinimumSystemVersion</key><string>27.0</string>
             <key>NSHighResolutionCapable</key><true/>
             <key>NSMicrophoneUsageDescription</key><string>Tcode uses the microphone for voice input in the message composer.</string>
             <key>NSSpeechRecognitionUsageDescription</key><string>Tcode transcribes your speech on-device to type messages by voice.</string>
@@ -289,7 +284,7 @@ jobs:
           @"
           Tcode $env:VERSION
 
-          Microsoft Edge WebView2 Runtime is required (included with Windows 11).
+          Requires Windows 11 or later.
           "@ | Set-Content "$stage\README.txt"
           Compress-Archive -Path "$stage\*" -DestinationPath "dist\tcode-$env:VERSION-windows-${{ matrix.arch }}.zip"
           Remove-Item -Recurse -Force $stage
@@ -347,18 +342,17 @@ jobs:
           cat > "$notes_file" <<'NOTES'
           ## Platform notes
 
-          - **macOS 12+**: release builds are Developer ID signed and notarized when the maintainer has configured signing credentials. If you downloaded an unsigned build, clear Gatekeeper quarantine after moving the app to Applications with:
+          - **macOS 27+** (Apple silicon): release builds are Developer ID signed and notarized when the maintainer has configured signing credentials. If you downloaded an unsigned build, clear Gatekeeper quarantine after moving the app to Applications with:
 
             `xattr -dr com.apple.quarantine /Applications/Tcode.app`
 
-          - **Windows**: Microsoft Edge WebView2 Runtime is required. It is included with Windows 11.
+          - **Windows 11+**: the embedded preview uses the WebView2 runtime that ships with Windows.
           - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
           - **Android**: the arm64 APK is signed with the project's release key and installs over previous releases signed with it. A build signed with a different key (a local build, or a release from before the key existed) must be uninstalled first.
-          - **iOS**: not published yet.
+          - **iOS 27+**: not published yet.
 
-          Packages are uploaded as soon as each platform build completes. macOS artifacts are
-          architecture-specific. Windows MSI/NSIS and Linux AppImage packages are not currently
-          produced. `SHA256SUMS.txt` is added after every platform package has finished.
+          Packages are uploaded as soon as each platform build completes. Windows MSI/NSIS and
+          Linux AppImage packages are not currently produced. `SHA256SUMS.txt` is added after every platform package has finished.
           NOTES
 
           release_args=(
@@ -462,11 +456,6 @@ jobs:
             target: aarch64-apple-darwin
             platform: macos
             arch: arm64
-          - label: macOS x64
-            os: macos-26
-            target: x86_64-apple-darwin
-            platform: macos
-            arch: x64
           - label: Windows x64
             os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -572,11 +561,6 @@ jobs:
             target: aarch64-apple-darwin
             platform: macos
             arch: arm64
-          - label: macOS x64
-            os: macos-26
-            target: x86_64-apple-darwin
-            platform: macos
-            arch: x64
           - label: Windows x64
             os: windows-2022
             target: x86_64-pc-windows-msvc

@@ -131,7 +131,7 @@ has the detection and sandbox details.
 Platform prerequisites:
 
 - **macOS** — Xcode command-line tools.
-- **Windows** — MSVC toolchain; the WebView2 runtime for the preview browser.
+- **Windows** — MSVC toolchain.
 - **Linux** — a Vulkan driver plus the usual GPUI build deps (`libxkbcommon-dev`,
   `libwayland-dev`, `libxcb*`, `libssl-dev`, `libasound2-dev`, `libfontconfig-dev`).
   The embedded preview browser is compiled out on Linux.

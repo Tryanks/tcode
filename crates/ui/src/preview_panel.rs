@@ -129,9 +129,9 @@ fn preview_key_for_session(
     }
 }
 
-/// What an automation tool answers when the platform webview cannot be created
-/// (Windows without the WebView2 runtime): say so plainly, with the underlying
-/// error, rather than leaving the agent to guess why nothing happened.
+/// What an automation tool answers when the platform webview cannot be created:
+/// say so plainly, with the underlying error, rather than leaving the agent to
+/// guess why nothing happened.
 #[cfg(all(
     feature = "native-preview",
     any(target_os = "macos", target_os = "windows", target_os = "android")
