@@ -159,8 +159,11 @@ and blocking work goes through `Host::unblock`. A new approved site carries an
 `allow(clippy::disallowed_methods)` with its reason.
 
 CI also runs `cargo machete` to catch unused dependencies, and checks iOS, Android
-and Web with `RUSTFLAGS='-D warnings'`. Use the commands and tool version in
-[the workflow](.github/workflows/ci.yml) to reproduce those checks. Fix warnings
+and Web with `RUSTFLAGS='-D warnings'`. On Linux it also builds the browser
+bundle, runs Clippy on `tcode-headless --features web` (the container image's
+binary) and checks the container scripts and Compose files. Use the commands and
+tool version in [the workflow](.github/workflows/ci.yml) to reproduce those
+checks. Fix warnings
 at their source; a platform-specific lint exception needs a concrete reason at
 the declaration. For a dependency imported under a different crate name, use
 Cargo's `package` alias or machete's `renamed` metadata so unused imports remain

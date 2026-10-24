@@ -80,6 +80,47 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The container image runs tcode-headless with the browser bundle built
+      # in. Release publishing builds both with fat LTO and smoke-tests the
+      # images; here the bundle only has to build and the binary pass Clippy.
+      - name: Read the locked wasm-bindgen version
+        id: wasm-bindgen
+        if: runner.os == 'Linux'
+        run: echo "version=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;q;}' Cargo.lock)" >> "$GITHUB_OUTPUT"
+
+      - name: Install wasm-bindgen
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
+
+      - name: Build the browser bundle
+        if: runner.os == 'Linux'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: 'off'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '256'
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: '0'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          crates/web/build.sh
+
+      - name: Run Clippy on the container's headless host
+        if: runner.os == 'Linux'
+        run: cargo clippy -p tcode-headless --features web --all-targets --locked -- -D warnings
+
+      - uses: actions/setup-node@v7
+        if: runner.os == 'Linux'
+        with:
+          node-version: '24'
+
+      - name: Check the container scripts and Compose files
+        if: runner.os == 'Linux'
+        run: |
+          shellcheck crates/headless/container/*.sh
+          for script in crates/headless/container/*.mjs; do node --check "$script"; done
+          TCODE_PASSWORD=ci docker compose config --quiet
+          docker compose -f crates/traverse-server/docker-compose.yml config --quiet
+
   linux-tests:
     name: Linux x64 / tests
     runs-on: ubuntu-24.04

@@ -277,6 +277,9 @@ Actions to create and approve pull requests**; it dispatches CI on its branch
 itself, because pull requests opened with `GITHUB_TOKEN` start no
 `pull_request` runs.
 
-Release publishing runs the [smoke check](../crates/headless/container/smoke.mjs)
-on native amd64 and arm64 runners against images built from the release
-binaries before pushing either architecture.
+CI builds the browser bundle on every push, runs Clippy on the
+`tcode-headless --features web` binary the image runs, and checks the container
+scripts and Compose files. Release publishing runs the
+[smoke check](../crates/headless/container/smoke.mjs) on native amd64 and arm64
+runners against images built from the release binaries before pushing either
+architecture.
