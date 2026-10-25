@@ -45,7 +45,7 @@ pub(super) struct ThreadDrag {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DragAction {
+pub(super) enum DragAction {
     Pin,
     Unpin,
     Settle,
@@ -53,7 +53,7 @@ enum DragAction {
 }
 
 impl DragAction {
-    fn icon(self) -> IconName {
+    pub(super) fn icon(self) -> IconName {
         match self {
             Self::Pin => IconName::Pin,
             Self::Unpin => IconName::PinOff,
@@ -62,7 +62,7 @@ impl DragAction {
         }
     }
 
-    fn label(self) -> Cow<'static, str> {
+    pub(super) fn label(self) -> Cow<'static, str> {
         match self {
             Self::Pin => crate::tr!("sidebar.pin"),
             Self::Unpin => crate::tr!("sidebar.unpin"),

@@ -42,6 +42,7 @@ use crate::window_drag_area;
 use crate::window_state::{Destination, Route, WindowState};
 
 mod arrange;
+mod swipe;
 use arrange::{DraggedThread, DropZone, ThreadDrag};
 
 /// The provider mark behind a thread row: its provider's glyph at this alpha,
@@ -518,6 +519,7 @@ pub struct SessionsSidebar {
     /// A thread pinned from its menu: Pinned leads the list, above where the
     /// user was looking, so the list scrolls to the row once it shows there.
     reveal_pinned: Option<String>,
+    row_swipe: Option<swipe::RowSwipe>,
     drag: Option<ThreadDrag>,
     /// The project the Arrange threads page shows; `None` is every project.
     arrange_scope: Option<String>,
@@ -774,6 +776,7 @@ impl SessionsSidebar {
             settled_limits: HashMap::new(),
             lifecycle_undo: None,
             reveal_pinned: None,
+            row_swipe: None,
             drag: None,
             arrange_scope: None,
             arrange_settled_expanded: false,
@@ -1128,6 +1131,11 @@ impl SessionsSidebar {
                         if pinning {
                             this.reveal_pinned = None;
                         }
+                        // A swiped row waiting on this command closes again.
+                        if let Some(swipe) = &mut this.row_swipe {
+                            swipe.refused();
+                        }
+                        cx.notify();
                         let message = if settling && error.code == "thread_busy" {
                             crate::tr!("sidebar.settle_refused").into_owned()
                         } else {
@@ -3555,6 +3563,7 @@ impl SessionsSidebar {
     fn render_compact_row(
         &mut self,
         row: &CompactListRow,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         match row {
@@ -3571,13 +3580,16 @@ impl SessionsSidebar {
             CompactListRow::Project(row) => {
                 self.render_compact_group_header(row, cx).into_any_element()
             }
-            CompactListRow::Thread(row) => v_flex()
-                .w_full()
-                .child(self.render_compact_thread(row, cx))
-                .when(row.separator, |list| {
-                    list.child(crate::material::row_hairline(px(COMPACT_PAGE_INSET), cx))
-                })
-                .into_any_element(),
+            CompactListRow::Thread(row) => {
+                let content = v_flex()
+                    .w_full()
+                    .child(self.render_compact_thread(row, cx))
+                    .when(row.separator, |list| {
+                        list.child(crate::material::row_hairline(px(COMPACT_PAGE_INSET), cx))
+                    })
+                    .into_any_element();
+                self.swipeable_row(row, content, window, cx)
+            }
             CompactListRow::BottomInset => div().h(cx.theme().tokens.spacing.xl).into_any_element(),
         }
     }
@@ -3642,7 +3654,11 @@ impl SessionsSidebar {
                                     while first > 0 && remaining > px(0.) {
                                         first -= 1;
                                         remaining -= this
-                                            .render_compact_row(&reveal_model.rows[first], cx)
+                                            .render_compact_row(
+                                                &reveal_model.rows[first],
+                                                window,
+                                                cx,
+                                            )
                                             .layout_as_root(
                                                 gpui::size(
                                                     gpui::AvailableSpace::Definite(
@@ -3672,8 +3688,8 @@ impl SessionsSidebar {
                     &self.compact_list_state,
                     list(
                         self.compact_list_state.clone(),
-                        cx.processor(move |this, index: usize, _, cx| {
-                            this.render_compact_row(&model.rows[index], cx)
+                        cx.processor(move |this, index: usize, window, cx| {
+                            this.render_compact_row(&model.rows[index], window, cx)
                         }),
                     )
                     .size_full(),
@@ -5153,6 +5169,111 @@ mod tests {
         );
         assert!(!selected_surface(cx, a));
         assert!(selected_surface(cx, b), "selected surface follows B");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn compact_row_swiped_left_settles_and_the_next_tap_still_opens(cx: &mut TestAppContext) {
+        use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase};
+        cx.update(crate::theme::init);
+        let root = crate::store::tests::scratch_root("row-swipe");
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let project = Project::from_root(root.clone());
+        let sessions: Vec<_> = (0..3)
+            .map(|index| {
+                let mut meta = session(&format!("swipe-{index}"), None);
+                meta.project_id = Some(project.id.clone());
+                meta.updated_at = 1000 - index;
+                meta.created_at = meta.updated_at;
+                meta
+            })
+            .collect();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = vec![project];
+            state.sessions = sessions.into();
+        }))
+        .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        let navigation = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SessionsSidebar::new(store.clone(), navigation.clone(), cx));
+            gpui_base::Root::new(view, window, cx)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        draw(cx);
+        let send = |cx: &mut VisualTestContext, id, phase, position| {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::Touch(TouchEvent {
+                        id: TouchId(id),
+                        phase,
+                        position,
+                        predicted_position: None,
+                        force: None,
+                    }),
+                    cx,
+                );
+            })
+        };
+
+        let row = cx.debug_bounds("compact-row-swipe-0").unwrap();
+        send(cx, 1, TouchPhase::Started, row.center());
+        for step in 1..=6 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            send(
+                cx,
+                1,
+                TouchPhase::Moved,
+                row.center() - gpui::point(px(40. * step as f32), px(0.)),
+            );
+            draw(cx);
+        }
+        send(
+            cx,
+            1,
+            TouchPhase::Ended,
+            row.center() - gpui::point(px(240.), px(0.)),
+        );
+        driver.wait_until(cx, &store, "the swiped thread settles", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .thread_meta("swipe-0")
+                    .is_some_and(|meta| meta.is_settled())
+            })
+        });
+        draw(cx);
+
+        // The last row, clear of the undo notice the settle raised.
+        let next = cx.debug_bounds("compact-row-swipe-2").unwrap();
+        send(cx, 2, TouchPhase::Started, next.center());
+        send(cx, 2, TouchPhase::Ended, next.center());
+        draw(cx);
+        assert_eq!(
+            store
+                .read_with(cx, |store, _| store.active_session_id())
+                .as_deref(),
+            Some("swipe-2"),
+            "the released swipe's fling does not swallow the next tap"
+        );
+        driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 

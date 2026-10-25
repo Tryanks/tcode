@@ -2425,26 +2425,7 @@ impl AppShell {
                                     let origin = swipe.origin;
                                     shell.move_edge_back(event.touch_phase, window, cx);
                                     if event.touch_phase == TouchPhase::Ended {
-                                        // GPUI flings every released pan, this one too, and
-                                        // spends the next touch, a tap included, on catching
-                                        // that invisible fling. A touch that starts and
-                                        // cancels at once catches it instead.
-                                        window.defer(cx, move |window, cx| {
-                                            for phase in
-                                                [TouchPhase::Started, TouchPhase::Cancelled]
-                                            {
-                                                window.dispatch_event(
-                                                    gpui::PlatformInput::Touch(gpui::TouchEvent {
-                                                        id: gpui::TouchId(u64::MAX),
-                                                        phase,
-                                                        position: origin,
-                                                        predicted_position: None,
-                                                        force: None,
-                                                    }),
-                                                    cx,
-                                                );
-                                            }
-                                        });
+                                        crate::edge_back::catch_fling(origin, window, cx);
                                     }
                                 }
                             });
