@@ -6594,7 +6594,8 @@ mod tests {
 
     /// Wide, the pairing page is pushed over Machines, and its header's Back
     /// returns to Machines rather than leaving the Hosts route; Machines, a
-    /// root the sidebar switches to, has no Back.
+    /// root the sidebar switches to, has no Back. What was pasted there, and
+    /// the error it drew, stay behind on the page that was left.
     #[gpui::test]
     fn the_wide_pair_page_goes_back_to_machines(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -6607,8 +6608,17 @@ mod tests {
             cx.debug_bounds("hosts-back").is_none(),
             "Machines is a root"
         );
-        state.update(cx, |state, cx| state.go(Destination::Pair, cx));
+        let paste = cx
+            .debug_bounds("hosts-pair")
+            .expect("Machines offers pasting an invitation");
+        cx.simulate_click(paste.center(), gpui::Modifiers::default());
         draw(cx);
+        cx.simulate_input("not an invitation");
+        draw(cx);
+        assert!(
+            cx.debug_bounds("hosts-pair-error").is_some(),
+            "the paste page flags what is not an invitation"
+        );
         let back = cx
             .debug_bounds("hosts-back")
             .expect("the pairing page offers Back");
@@ -6619,6 +6629,10 @@ mod tests {
             Destination::Hosts
         );
         assert!(cx.debug_bounds("hosts-route").is_some());
+        assert!(
+            cx.debug_bounds("hosts-pair-error").is_none(),
+            "the error does not follow the user back to Machines"
+        );
     }
 
     /// A store selection can come from the sidebar or palette. In wide layout

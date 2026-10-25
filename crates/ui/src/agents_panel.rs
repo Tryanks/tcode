@@ -594,15 +594,12 @@ impl AgentsPanel {
             Some(AgentExecution::Working) => {
                 Spinner::new().color(cx.theme().primary).into_any_element()
             }
-            // A status dot, drawn smaller than a glyph; no icon or token has it.
-            execution => div()
-                .flex_none()
-                .size(px(8.))
-                .rounded_full()
-                .bg(execution.map_or(cx.theme().muted_foreground, |execution| {
+            execution => crate::material::status_dot(
+                execution.map_or(cx.theme().muted_foreground, |execution| {
                     execution_color(execution, cx)
-                }))
-                .into_any_element(),
+                }),
+            )
+            .into_any_element(),
         }
     }
 

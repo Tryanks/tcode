@@ -20,6 +20,7 @@ use super::hosting::{
 };
 use crate::icon::{Icon, IconName};
 use crate::material::{group_caption, grouped};
+use crate::overlay::{Notification, OverlayExt as _};
 use crate::settings_rows::{FIELD_WIDTH, ToggleRow, footnote};
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
@@ -187,7 +188,10 @@ impl TraversePanel {
         let name = controller.local_settings().remote_host_name.clone();
         match self.typed(cx) {
             Some(traverse) if traverse != controller.local_settings().traverse => {
-                apply_hosting_settings(traverse, name, window, cx);
+                // The hosting switch that shows a failure is on another page.
+                if let Err(error) = apply_hosting_settings(traverse, name, cx) {
+                    window.push_notification(Notification::error(error), cx);
+                }
             }
             _ => {}
         }

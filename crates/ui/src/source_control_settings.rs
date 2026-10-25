@@ -90,16 +90,6 @@ fn listed(settings: &SourceControlSettings) -> Vec<(String, HostKind)> {
     listed
 }
 
-/// A link off Tcode to a page the host names.
-fn external_link(id: String, label: SharedString, url: String) -> Button {
-    Button::new(SharedString::from(id))
-        .ghost()
-        .xsmall()
-        .icon(crate::icon::IconName::ExternalLink)
-        .label(label)
-        .on_click(move |_, _, cx| cx.open_url(&url))
-}
-
 fn source_slot(source: &CredentialSource) -> String {
     match source {
         CredentialSource::Saved
@@ -540,7 +530,7 @@ impl SourceControlPanel {
                 .text_secondary(compact, cx)
                 .children(scopes)
                 .when_some(token_url, |help, url| {
-                    help.child(external_link(
+                    help.child(crate::settings_rows::external_link(
                         format!("source-control-token-link-{host}"),
                         crate::tr!("source_control.create_token")
                             .into_owned()
@@ -664,7 +654,7 @@ impl SourceControlPanel {
             .text_secondary(compact, cx)
             .child(div().w_full().child(description.into_owned()))
             .when_some(link, |description, url| {
-                description.child(external_link(
+                description.child(crate::settings_rows::external_link(
                     format!("source-control-method-link-{host}"),
                     link_label.into_owned().into(),
                     url,

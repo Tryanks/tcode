@@ -1331,9 +1331,12 @@ toast:
 remote:
   failed: "Could not update remote access: %{error}"
   hosting_off: "This machine is not hosting. Turn it on in Remote first."
+  learn_more: "Learn more"
   host:
     section: "THIS MACHINE"
     title: "Let other devices connect to this machine"
+    start_failed: "Could not start: %{reason}"
+    port_in_use: "the port is already in use by another Tcode"
   pairing:
     title: "Accept new devices"
   host_name:
@@ -1341,7 +1344,7 @@ remote:
     description: "Shown to other devices."
   traverse:
     section: "TRAVERSE"
-    description: "Relay and lookup services that let devices reach this machine off its network. With all of them off, devices reach it on the LAN or at an address entered on the device."
+    description: "Relays and lookups that let devices reach this machine from other networks."
     official: "Official Traverse"
     custom: "Self-hosted Traverse"
     url_description: "The base URL your instance serves its manifest from."
@@ -1382,6 +1385,8 @@ remote:
     section: "CONNECTED DEVICES"
     empty: "No devices have connected yet."
     revoke: "Remove"
+    revoke_title: "Remove «%{name}»?"
+    revoke_description: "The device is disconnected and can come back only by pairing again."
     revoke_failed: "Could not remove the device; it is still paired: %{error}"
   path:
     lan: "LAN"
@@ -1410,6 +1415,8 @@ hosts:
   empty: "No machines added yet."
   disconnect: "Disconnect"
   forget: "Remove"
+  forget_title: "Remove «%{name}»?"
+  forget_description: "This device forgets the machine; connecting again needs a new invitation."
   actions: "Actions for %{name}"
   pair_again: "Pair again"
   in_group: "In a machine group"
@@ -1419,7 +1426,7 @@ hosts:
     needs_migration: "Its data has to be upgraded first. Quit Tcode and open it again."
     retry: "Retry"
   invite:
-    description: "Scan this QR code in Tcode on another device, or paste the invitation link there. Pairing connects at once."
+    description: "Scan this code in Tcode on another device, or paste the link there, to pair and connect."
     disabled: "Remote access is off."
     pairing_off: "This machine is not accepting new devices."
     open_settings: "Remote settings"
@@ -1427,21 +1434,21 @@ hosts:
     title: "ADD A MACHINE"
     page_title: "Add a machine"
     action: "Connect"
-    description: "Paste the invitation link the machine shows on its Machines page. Pairing connects at once."
+    description: "Paste the invitation a machine shows on its Machines page or in Settings → Remote."
     invitation: "Invitation link"
     invitation_placeholder: "tcode://pair?…"
     scan: "Scan a QR code"
     paste: "Paste an invitation link"
     bad_invite: "That is not a Tcode invitation link."
     connecting: "Connecting to the machine…"
-    rejected: "The machine rejected this invitation. Check that Accept new devices is on and use a new invitation."
-    unconfirmed: "The pairing result could not be confirmed. Create a new invitation on the machine and try again."
-    disabled: "This machine is not accepting new device pairings. Turn on Accept new devices there and try again."
+    rejected: "The machine rejected this invitation; create a new one there and paste it here."
+    unconfirmed: "The pairing could not be confirmed; try again with a new invitation."
+    disabled: "This machine is not accepting new devices; turn on Accept new devices there."
     address: "Machine's IP address"
-    address_description: "Nothing found the machine on this network. Type the IP address it shows (Addresses: in tcode-headless output, or its network settings) and connect again with the same invitation."
+    address_description: "Nothing found the machine on this network; enter the IP address from its network settings."
     address_placeholder: "192.168.1.20"
     bad_address: "Enter an IPv4 or IPv6 address, without a port."
-    address_unreachable: "Could not reach the machine at %{address}. Check the address, and that the machine's UDP port accepts connections on this network."
+    address_unreachable: "Nothing answered at %{address}; check it and that the machine's UDP port is open on this network."
     retry: "Try again"
     failed: "Could not add the machine: %{reason}"
 
@@ -1505,7 +1512,7 @@ project_icon:
 
 spaces:
   section: "SHARED SPACES"
-  intro: "A space gives collaborators a reusable link to the projects you choose. They see only those projects and their threads."
+  intro: "A space shares only the projects you choose, through one reusable link."
   new: "New space"
   not_hosting: "This machine is not hosting."
   detached: "The machine is no longer attached."
@@ -1518,8 +1525,8 @@ spaces:
   rename_action: "Save"
   delete: "Delete space"
   delete_title: "Delete «%{name}»?"
-  delete_description: "Its members lose access and are unpaired from this machine. The projects and their threads stay."
-  delete_description_empty: "The link stops working. The projects and their threads stay."
+  delete_description: "Its members are unpaired from this machine; the projects and their threads stay."
+  delete_description_empty: "The link stops working; the projects and their threads stay."
   delete_action: "Delete"
   summary:
     project_one: "1 project"
@@ -1537,7 +1544,7 @@ spaces:
     disclosure: "Members run commands with this machine's agents and permissions."
     action: "Create"
   link:
-    description: "Scan this QR code in Tcode on another device, or send the link. Whoever joins sees only «%{name}»."
+    description: "Scan or send this link; whoever joins sees only «%{name}»."
     copy: "Copy link"
     copied: "Space link copied"
     regenerate: "Regenerate link"
@@ -1558,7 +1565,7 @@ spaces:
     empty: "No one has joined yet."
     move: "Move to…"
     remove: "Remove"
-    remove_title: "Remove %{name} from «%{space}»?"
+    remove_title: "Remove «%{name}» from «%{space}»?"
     remove_description: "The device is disconnected and unpaired from this machine."
     regenerate: "Also regenerate the link"
   share:
@@ -1569,7 +1576,7 @@ spaces:
     separator: ", "
   shared:
     title: "«%{name}» is ready"
-    description: "Send this link to collaborators. They will see «%{project}» and its threads, and work with this machine's agents."
+    description: "Send this link to collaborators; they will see «%{project}» and its threads."
   machines:
     section: "SHARED SPACES"
     show_qr: "Show QR"
@@ -1578,14 +1585,14 @@ spaces:
 
 group:
   section: "MACHINE GROUP"
-  intro: "A group links this machine with your other machines. A device paired with any machine in the group can open every machine in it, and the group carries on when any one machine leaves."
-  risk: "Every machine in the group can let devices into all the others. Join only machines you trust; a group is off until you create or join one."
+  intro: "A group links your machines, so a device paired with one can open all of them."
+  risk: "Every machine in a group can admit devices to the others, so group only machines you trust."
   failed: "Could not update the group: %{error}"
   leave: "Leave group"
   leave_title: "Leave «%{name}»?"
-  leave_description: "The other machines stop admitting devices through this one. Devices paired here stay paired with this machine."
-  detail_note: "To add a device or another machine, use this machine's invitation: every machine in the group admits a device that pairs with it, and removing a device on any machine removes it from all of them."
-  invitation_note: "This machine is in «%{name}»: a device that pairs with this invitation can open every machine in the group, and another machine can join the group with it."
+  leave_description: "The other machines stop admitting devices through this one; devices paired here stay paired with it."
+  detail_note: "Pair a device or another machine with this machine's invitation to bring it into the group."
+  invitation_note: "A device or machine that pairs with this invitation joins «%{name}»."
   summary:
     machine_one: "1 machine"
     machines: "%{count} machines"
@@ -1597,7 +1604,7 @@ group:
   join:
     action: "Join group"
     title: "Join a machine group"
-    description: "Paste the invitation of a machine in the group, from its Machines page or Settings → Remote. Like a device pairing, it works once and for five minutes."
+    description: "Paste the invitation of a machine in the group, from its Machines page or Settings → Remote."
     placeholder: "tcode://pair?…"
     address: "Machine's IP address (optional)"
     address_placeholder: "Only when nothing finds the machine, e.g. 192.168.1.20"
@@ -1611,15 +1618,15 @@ group:
     section: "MACHINES"
     this: "This machine"
     remove: "Remove"
-    remove_title: "Remove %{name} from the group?"
-    remove_description: "The other machines stop syncing with it and stop admitting the devices it brings from now on. Devices it already brought keep their access."
+    remove_title: "Remove «%{name}» from the group?"
+    remove_description: "The other machines stop syncing with it; devices it already brought keep their access."
   declined:
     section: "WAITING FOR THIS MACHINE"
     description: "Other machines admitted these devices while this machine was not accepting new devices."
     admit: "Admit"
   remove_device:
-    title: "Remove %{name} from the group?"
-    description: "The device is disconnected and unpaired from every machine in «%{group}», not only this one. It can come back only by pairing again."
+    title: "Remove «%{name}» from every machine?"
+    description: "It is disconnected from every machine in «%{group}» and can come back only by pairing again."
     action: "Remove everywhere"
 
 member:
