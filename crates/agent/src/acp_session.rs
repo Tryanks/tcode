@@ -42,7 +42,7 @@ use crate::{
 /// Option-descriptor ids. The composer renders an ACP agent's own
 /// modes/models/config options through the existing traits picker, so each one
 /// needs a stable id that routes back to the right ACP method.
-pub(crate) const MODE_OPTION_ID: &str = "acp:mode";
+pub(crate) use crate::ACP_MODE_OPTION_ID as MODE_OPTION_ID;
 const MODEL_OPTION_ID: &str = "acp:model";
 /// A thought-level option takes the id every native provider gives its
 /// reasoning effort, so it is presented, inherited and set like theirs.
