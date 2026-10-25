@@ -177,10 +177,9 @@ impl Composer {
             SpeechEvent::Started => {
                 // A cancelled session can have a Started event already queued.
                 if self.voice.state.read(cx).status().is_active() {
-                    let (anchor, expected) = self.input.update(cx, |input, cx| {
-                        input.focus(window, cx);
-                        (input.cursor(), input.value().to_string())
-                    });
+                    self.focus(window, cx);
+                    let input = self.input.read(cx);
+                    let (anchor, expected) = (input.cursor(), input.value().to_string());
                     self.voice.insertion = Some(Insertion {
                         anchor,
                         last_len: 0,
@@ -450,6 +449,29 @@ mod tests {
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             ""
         );
+
+        cx.update(|window, cx| {
+            crate::window_seam::override_mobile_for_test(cx, true);
+            window.blur(cx);
+        });
+        composer.update_in(cx, |composer, _, cx| {
+            composer
+                .voice
+                .state
+                .update(cx, |state, cx| state.toggle(cx));
+        });
+        let touch = sink.borrow().clone().unwrap();
+        touch
+            .try_send(PlatformEvent::Hypothesis("no keyboard".into()))
+            .unwrap();
+        cx.run_until_parked();
+        composer.update_in(cx, |composer, window, cx| {
+            assert!(
+                !composer.input.read(cx).focus_handle(cx).is_focused(window),
+                "dictation on a touch layout must not raise the software keyboard"
+            );
+            assert_eq!(composer.draft(cx), "no keyboard");
+        });
         driver.shutdown(cx, &store, &host);
     }
 }
