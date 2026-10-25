@@ -15,6 +15,7 @@ members = [
     "crates/preview-mcp",
     "crates/pull-request-mcp",
     "crates/orchestrate-mcp",
+    "crates/control-mcp",
     "crates/computer-use-mcp",
     "crates/ui",
     "crates/app",

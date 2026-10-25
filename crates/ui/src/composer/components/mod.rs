@@ -1,6 +1,7 @@
 mod approval;
 mod checkout;
 mod context_window;
+mod control;
 mod fallback;
 mod goal_strip;
 pub(super) mod images;

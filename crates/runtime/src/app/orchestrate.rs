@@ -42,6 +42,16 @@ pub(super) struct McpWiring {
     pub(super) computer_use_url: Option<String>,
     pub(super) computer_use_tokens: Option<computer_use_mcp::TokenRegistry>,
     pub(super) computer_use_registrations: HashMap<String, agent::McpRegistration>,
+    pub(super) control_url: Option<String>,
+    pub(super) control_tokens: Option<control_mcp::TokenRegistry>,
+    pub(super) control_registrations: HashMap<String, agent::McpRegistration>,
+    pub(super) control_requests: Option<smol::channel::Receiver<control_mcp::BrokerRequest>>,
+    /// Each registered thread's effective grant, read by the control server when a
+    /// connection opens to list the tools that grant allows.
+    pub(super) control_grants:
+        Arc<std::sync::Mutex<HashMap<String, tcode_core::control::ControlGrant>>>,
+    /// The control server's record of the tools each thread's connection received.
+    pub(super) control_source: Option<control_mcp::GrantSource>,
 }
 
 impl AppState {
@@ -136,6 +146,136 @@ impl AppState {
     ) {
         self.mcp.computer_use_url = Some(url);
         self.mcp.computer_use_tokens = Some(tokens);
+    }
+
+    /// Every MCP tool offered to this thread's provider, and every text Tcode gives its model
+    /// outside the conversation, as delivered; `None` for a provider that takes no MCP server.
+    pub(super) fn injected_tools(
+        &self,
+        session: &ActiveSession,
+    ) -> Option<tcode_protocol::InjectedTools> {
+        use tcode_protocol::{InjectedChannel, InjectedInstructions};
+        let meta = &session.meta;
+        let provider = meta.provider;
+        if !provider.caps().mcp_servers {
+            return None;
+        }
+        let pull_requests = self.pull_request_tools_offered(provider);
+        let preview = self.mcp.preview_url.is_some();
+        let orchestrate = meta.orchestrate_enabled && self.mcp.orchestrate_url.is_some();
+        let report = meta.parent_session_id.is_some() && self.mcp.orchestrate_child_url.is_some();
+        let computer_use =
+            computer_use_attaches(provider, &self.settings) && self.mcp.computer_use_url.is_some();
+        let control = self.control_offered(meta);
+        if !(pull_requests || preview || orchestrate || report || computer_use || control) {
+            return None;
+        }
+        let id = meta.id.as_str();
+        let attached = session.mcp_servers_attached;
+        let mut instructions = Vec::new();
+        let channel = provider.caps().instruction_channel;
+        if pull_requests && attached && channel != agent::InstructionChannel::None {
+            instructions.push(InjectedInstructions {
+                channel: InjectedChannel::Linking(channel),
+                text: self.pull_request_instructions(id),
+            });
+        }
+        if provider == ProviderKind::Codex {
+            instructions.push(InjectedInstructions {
+                channel: InjectedChannel::DeveloperInstructions,
+                text: agent::codex::PREVIEW_BROWSER_INSTRUCTIONS.to_owned(),
+            });
+        }
+        let servers = [
+            (
+                agent::McpRegistration::SERVER_NAME_PULL_REQUESTS,
+                pull_request_mcp::INSTRUCTIONS,
+                self.mcp.pull_request_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_PREVIEW,
+                preview_mcp::INSTRUCTIONS,
+                self.mcp.preview_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_ORCHESTRATE,
+                orchestrate_mcp::INSTRUCTIONS,
+                self.mcp.orchestrate_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT,
+                orchestrate_mcp::REPORT_INSTRUCTIONS,
+                self.mcp.orchestrate_child_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
+                computer_use_mcp::tools::INSTRUCTIONS,
+                self.mcp.computer_use_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_CONTROL,
+                control_mcp::INSTRUCTIONS,
+                self.mcp.control_registrations.contains_key(id),
+            ),
+        ];
+        instructions.extend(
+            servers
+                .into_iter()
+                .filter(|(_, _, registered)| attached && *registered)
+                .map(|(name, text, _)| InjectedInstructions {
+                    channel: InjectedChannel::McpServer(name.to_owned()),
+                    text: text.to_owned(),
+                }),
+        );
+        let mut tools = Vec::new();
+        let mut servers = Vec::new();
+        let mut offer = |name: &str, listed: Vec<(String, String)>| {
+            servers.push(tcode_protocol::InjectedServer {
+                name: name.to_owned(),
+                tools: listed.len(),
+            });
+            tools.extend(listed);
+        };
+        if pull_requests {
+            offer(
+                agent::McpRegistration::SERVER_NAME_PULL_REQUESTS,
+                pull_request_mcp::tool_descriptions(&self.pull_request_tool_hosts(id)),
+            );
+        }
+        if preview {
+            offer(
+                agent::McpRegistration::SERVER_NAME_PREVIEW,
+                preview_mcp::tool_descriptions(),
+            );
+        }
+        if orchestrate {
+            offer(
+                agent::McpRegistration::SERVER_NAME_ORCHESTRATE,
+                orchestrate_mcp::tool_descriptions(),
+            );
+        }
+        if computer_use {
+            offer(
+                agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
+                computer_use_mcp::tools::tool_descriptions(),
+            );
+        }
+        if control {
+            offer(
+                agent::McpRegistration::SERVER_NAME_CONTROL,
+                self.mcp
+                    .control_source
+                    .as_ref()
+                    .and_then(|source| source.offered(id))
+                    .unwrap_or_else(|| control_mcp::tool_descriptions(&self.caller_grant(meta).0)),
+            );
+        }
+        Some(tcode_protocol::InjectedTools {
+            tools,
+            servers,
+            attached,
+            instructions,
+        })
     }
 
     pub(super) fn computer_use_registration_for(
@@ -411,6 +551,18 @@ impl AppState {
         };
         let mut meta = meta;
         meta.expectation = Some(ChildExpectation::opened(now_secs()));
+        Ok(self.install_background_thread(meta, brief, Vec::new(), cx))
+    }
+
+    /// Persist a new thread and start it in the background on `first_message`, written by an
+    /// agent. Nobody's selection or draft is touched.
+    pub(super) fn install_background_thread(
+        &mut self,
+        meta: SessionMeta,
+        first_message: String,
+        attachments: Vec<Attachment>,
+        cx: &mut HostCx,
+    ) -> String {
         self.thread_activity
             .insert(meta.id.clone(), Default::default());
         self.enqueue_store_write(
@@ -424,7 +576,7 @@ impl AppState {
         self.discover_pull_requests_for(&meta.id, false, cx);
         let id = meta.id.clone();
         let provider_commands = self.cached_provider_commands_for(&meta);
-        let mut child = Self::build_draft_session(
+        let mut session = Self::build_draft_session(
             meta.project_id.clone().unwrap_or_default(),
             meta.cwd.clone(),
             meta.provider,
@@ -432,14 +584,14 @@ impl AppState {
             None,
             provider_commands,
         );
-        child.meta = meta;
-        child.draft = false;
-        child.push_queued(brief, Vec::new());
-        child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
-        self.residents.parked.insert(id.clone(), child);
+        session.meta = meta;
+        session.draft = false;
+        session.push_queued(first_message, attachments);
+        session.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
+        self.residents.parked.insert(id.clone(), session);
         self.reactivate_session(&id, cx);
         self.ensure_session_started(&id, cx);
-        Ok(id)
+        id
     }
 
     /// Switch a child's fast mode and persist it. Fast mode is a launch-time
@@ -1786,6 +1938,19 @@ pub(super) fn resolve_orchestrate_collaboration(
     )
 }
 
+/// A native provider as a model names it: `claude`, `codex`, `opencode`, …
+pub(super) fn native_provider_named(name: &str) -> Option<ProviderKind> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude_code" | "claude-code" => Some(ProviderKind::ClaudeCode),
+        "codex" => Some(ProviderKind::Codex),
+        "pi" => Some(ProviderKind::Pi),
+        "opencode" | "open_code" | "open-code" => Some(ProviderKind::OpenCode),
+        "cursor" => Some(ProviderKind::Cursor),
+        "grok" => Some(ProviderKind::Grok),
+        _ => None,
+    }
+}
+
 fn resolve_orchestrate_profiles(
     profiles: &[OrchestrateChildModel],
     provider: &str,
@@ -1795,20 +1960,15 @@ fn resolve_orchestrate_profiles(
     catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
     collaboration: bool,
 ) -> Result<ResolvedDispatch, String> {
-    let provider = match provider.trim().to_ascii_lowercase().as_str() {
-        "claude" | "claude_code" | "claude-code" => ProviderKind::ClaudeCode,
-        "codex" => ProviderKind::Codex,
-        "pi" => ProviderKind::Pi,
-        "opencode" | "open_code" | "open-code" => ProviderKind::OpenCode,
-        "cursor" => ProviderKind::Cursor,
-        "grok" => ProviderKind::Grok,
-        "acp" => {
+    let provider = match native_provider_named(provider) {
+        Some(provider) => provider,
+        None if provider.trim().eq_ignore_ascii_case("acp") => {
             return Err(
                 "ACP child dispatch is not available yet; configure a native-provider child model"
                     .into(),
             );
         }
-        other => return Err(format!("unknown provider: {other}")),
+        None => return Err(format!("unknown provider: {}", provider.trim())),
     };
     let requested_model = model.map(str::trim).filter(|model| !model.is_empty());
     let requested_effort = effort.map(str::trim).filter(|effort| !effort.is_empty());

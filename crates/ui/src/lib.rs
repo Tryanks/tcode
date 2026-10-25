@@ -11,6 +11,7 @@ mod commit_dialog;
 mod composer;
 mod composer_trigger;
 mod context_meter;
+mod control;
 mod conversation_ui;
 pub(crate) mod diff;
 mod edge_back;

@@ -25,6 +25,7 @@ pub mod session_search;
 pub mod settings;
 pub mod shell_env;
 pub mod store;
+pub mod thread_index;
 pub mod user_files;
 pub mod version_check;
 pub mod workspace;

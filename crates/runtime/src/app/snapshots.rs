@@ -1184,7 +1184,8 @@ impl AppState {
             native_rewind_prefill_available: false,
             model_pending_restart: session.model_changed_while_live(),
             options_pending_restart: session.options_changed_while_live(),
-            pull_request_tools: self.injected_pull_request_tools(session),
+            injected_tools: self.injected_tools(session),
+            control: self.control_status(meta),
         })
     }
 

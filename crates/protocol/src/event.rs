@@ -526,21 +526,58 @@ pub struct SessionStatus {
     pub native_rewind_prefill_available: bool,
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
-    /// The pull request tools offered to this thread's provider, with every text Tcode gives
-    /// its model outside the conversation.
+    /// The MCP tools offered to this thread's provider, with every text Tcode gives its
+    /// model outside the conversation; absent when the provider takes no MCP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_request_tools: Option<InjectedPullRequestTools>,
+    pub injected_tools: Option<InjectedTools>,
+    /// The thread's `tcode_control` grant and what rests on it; absent when the provider
+    /// takes no MCP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<ControlStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InjectedPullRequestTools {
-    /// Each tool's name and the description the model reads.
+pub struct ControlStatus {
+    pub grant: tcode_core::control::ControlGrant,
+    pub source: tcode_core::control::ControlGrantSource,
+    pub pending_requests: Vec<tcode_core::control::ControlGrantRequest>,
+    pub references: Vec<ThreadReferenceStatus>,
+    pub self_settle: Option<tcode_core::control::SelfSettleGrant>,
+    /// Whether the thread's provider is given the `tcode_control` server when it starts.
+    pub tools_offered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadReferenceStatus {
+    pub thread_id: String,
+    pub title: String,
+    /// The referenced thread no longer exists on the host.
+    pub deleted: bool,
+    pub by: tcode_core::control::ReferenceOrigin,
+    pub boundary_notice: bool,
+}
+
+pub use tcode_core::control::ControlActivityEntry;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectedTools {
+    /// Each tool's name and the description the model reads, across every server offered.
     pub tools: Vec<(String, String)>,
+    /// Which server offers them: `tools` holds each server's tools together, in this order.
+    #[serde(default)]
+    pub servers: Vec<InjectedServer>,
     /// False once the provider took none of Tcode's MCP servers: its model has neither these
     /// tools nor the linking instructions.
     pub attached: bool,
     /// Verbatim, as delivered.
     pub instructions: Vec<InjectedInstructions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectedServer {
+    pub name: String,
+    /// How many consecutive entries of `InjectedTools::tools` are this server's.
+    pub tools: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -847,6 +884,19 @@ pub enum RuntimeNotice {
         reason: MergeWorktreeFailure,
         detail: Option<String>,
     },
+    /// A thread's model recorded a conversation review.
+    ReviewRecorded {
+        items: usize,
+        coverage: String,
+    },
+    /// A thread's model referenced a thread in another project or of another provider, so
+    /// that thread's content may now reach this thread's model vendor; the user is told once.
+    ReferenceBoundaryCrossed {
+        thread: String,
+        thread_title: String,
+        referenced: String,
+        title: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -858,13 +908,16 @@ pub enum NoticeSeverity {
 impl RuntimeNotice {
     pub fn severity(&self) -> NoticeSeverity {
         match self {
-            Self::ProviderMessage(_) | Self::WorktreeMergeFailed { .. } => NoticeSeverity::Warning,
+            Self::ProviderMessage(_)
+            | Self::WorktreeMergeFailed { .. }
+            | Self::ReferenceBoundaryCrossed { .. } => NoticeSeverity::Warning,
             Self::TcodeUpdateAvailable { .. }
             | Self::NativeRewindCompleted { .. }
             | Self::SwitchedBranch { .. }
             | Self::WorktreeSeeded { .. }
             | Self::WorktreeMergedFastForward
-            | Self::WorktreeMergedCommit => NoticeSeverity::Success,
+            | Self::WorktreeMergedCommit
+            | Self::ReviewRecorded { .. } => NoticeSeverity::Success,
         }
     }
 }

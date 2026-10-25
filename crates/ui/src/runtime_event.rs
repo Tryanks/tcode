@@ -153,6 +153,20 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeNotice::WorktreeMergedCommit => {
                     crate::tr!("notice.worktree_merged_commit").into_owned()
                 }
+                RuntimeNotice::ReviewRecorded { items, coverage } => {
+                    crate::tr!("notice.review_recorded", items = items, coverage = coverage)
+                        .into_owned()
+                }
+                RuntimeNotice::ReferenceBoundaryCrossed {
+                    thread_title,
+                    title,
+                    ..
+                } => crate::tr!(
+                    "notice.reference_boundary_crossed",
+                    thread = thread_title,
+                    title = title
+                )
+                .into_owned(),
                 RuntimeNotice::WorktreeMergeFailed { reason, detail } => match reason {
                     MergeWorktreeFailure::Missing => {
                         crate::tr!("notice.worktree_merge_missing").into_owned()

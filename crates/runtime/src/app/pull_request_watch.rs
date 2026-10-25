@@ -1,5 +1,6 @@
 use super::active_session::QueuedMessageKind;
 use super::*;
+use tcode_core::control::WatchEvent;
 use tcode_core::pull_request::{self, PullRequestKey, PullRequestSource, PullRequestState};
 use tcode_core::pull_request_watch::{
     self as watch, PendingWake, PullRequestRemark, PullRequestWatch, PullRequestWatchRead,
@@ -694,6 +695,7 @@ impl AppState {
         };
         self.save_pull_request_meta(meta, cx);
         if let Some((pending, notice)) = delivered {
+            self.fire_control_watches(thread, WatchEvent::PrChanged, cx);
             self.deliver_pull_request_wake(thread, key, &pending, cx);
             emit_runtime(
                 cx,

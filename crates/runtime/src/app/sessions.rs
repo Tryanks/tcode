@@ -1,5 +1,21 @@
 use super::*;
+use tcode_core::control::WatchEvent;
 use tcode_core::thread_sort::ThreadSection;
+
+/// What a settle did, or would do, beyond marking the thread settled. Unsettle restores none
+/// of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SettleEffects {
+    pub provider_detached: bool,
+    pub pull_request_watches_ended: usize,
+    /// Agent and server messages dropped from the queue; human ones stay.
+    pub queued_dropped: usize,
+    /// Open terminals inspected; the ones at an idle shell are closed.
+    pub terminals_checked: usize,
+    pub unpinned: bool,
+    /// Pending non-blocking input answered with empty answers.
+    pub input_answered: bool,
+}
 
 /// Sessions viewed by clients and sessions retained for in-flight work or re-adoption.
 #[derive(Default)]
@@ -118,18 +134,7 @@ impl AppState {
             .unwrap_or_default();
         let text = append_terminal_contexts_to_prompt(&text, terminal_contexts);
         let text = append_review_comments_to_prompt(&text, self.review_comments(target_id));
-        let attachments = attachment_paths
-            .into_iter()
-            .filter_map(|path| {
-                let bytes = fs::read(&path).ok()?;
-                Some(Attachment {
-                    media_type: mime_from_path(&path),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                    source_path: Some(path.to_string_lossy().into_owned()),
-                })
-            })
-            .collect();
-        (text, attachments)
+        (text, read_attachments(attachment_paths))
     }
 
     pub(super) fn clear_consumed_draft_context(&mut self, target_id: &str, cx: &mut HostCx) {
@@ -824,12 +829,18 @@ impl AppState {
 
     /// Merge a clean dedicated-worktree branch into its clean original checkout
     /// without blocking the host owner thread.
-    pub fn merge_worktree(&mut self, session_id: &str, cx: &mut HostCx) {
+    /// The returned channel carries the notice the clients are shown.
+    pub fn merge_worktree(
+        &mut self,
+        session_id: &str,
+        cx: &mut HostCx,
+    ) -> smol::channel::Receiver<RuntimeNotice> {
+        let (done, outcome) = smol::channel::bounded(1);
         let Some(meta) = self.find_meta(session_id) else {
-            return;
+            return outcome;
         };
         let Some(worktree) = meta.worktree else {
-            return;
+            return outcome;
         };
         let destination = worktree.root_project_path;
         let worktree_path = meta.cwd;
@@ -867,9 +878,11 @@ impl AppState {
                         RuntimeNotice::WorktreeMergeFailed { reason, detail }
                     }
                 };
-                emit_runtime(cx, RuntimeEvent::Notice(notice));
+                emit_runtime(cx, RuntimeEvent::Notice(notice.clone()));
+                let _ = done.try_send(notice);
             });
         });
+        outcome
     }
 
     /// Toggle a project's collapsed state (persisted in settings).
@@ -932,7 +945,8 @@ impl AppState {
         let settlement_changed = self.settings.auto_settle_after_days
             != settings.auto_settle_after_days
             || self.settings.auto_settle_on_merge != settings.auto_settle_on_merge
-            || self.settings.project_settlement_overrides != settings.project_settlement_overrides;
+            || self.settings.project_settlement_overrides != settings.project_settlement_overrides
+            || self.settings.settlement_automation != settings.settlement_automation;
         self.enqueue_settings(&settings, cx);
         if ProviderKind::NATIVE
             .iter()
@@ -954,7 +968,11 @@ impl AppState {
             self.providers.invalidate_profile_reads(&id);
         }
         let hosts_changed = self.settings.source_control.hosts != settings.source_control.hosts;
+        let control_changed = self.settings.control != settings.control;
         self.settings = settings;
+        if control_changed {
+            self.refresh_control_grants();
+        }
         self.forge
             .configure(self.settings.source_control.hosts.clone());
         if hosts_changed {
@@ -1040,18 +1058,59 @@ impl AppState {
         })
     }
 
-    pub fn settle_session(&mut self, id: &str, cx: &mut HostCx) {
-        if !self.settle_thread_busy(id) {
-            self.settle_session_at(id, now_secs(), cx);
+    pub fn settle_session(&mut self, id: &str, cx: &mut HostCx) -> Option<SettleEffects> {
+        if self.settle_thread_busy(id) {
+            return None;
+        }
+        self.settle_session_at(id, now_secs(), cx)
+    }
+
+    /// What settling the thread now would do beyond marking it settled.
+    pub(super) fn settle_effects(&self, id: &str) -> SettleEffects {
+        let meta = self.find_meta(id);
+        let resident = self.resident(id);
+        SettleEffects {
+            provider_detached: resident
+                .is_some_and(|session| !matches!(session.runtime, Runtime::Idle)),
+            pull_request_watches_ended: meta.as_ref().map_or(0, |meta| {
+                meta.pull_requests
+                    .iter()
+                    .filter(|link| link.watch.is_some())
+                    .count()
+            }),
+            queued_dropped: resident.map_or(0, |session| {
+                session
+                    .queue
+                    .iter()
+                    .filter(|message| message.origin != MessageOrigin::Human)
+                    .count()
+            }),
+            terminals_checked: resident
+                .map(|session| &session.terminal_workspace)
+                .or_else(|| {
+                    self.terminal_workspaces
+                        .get(&ConversationDestination::Thread(id.to_owned()))
+                })
+                .map_or(0, |workspace| workspace.terminals.len()),
+            unpinned: meta.as_ref().is_some_and(|meta| meta.pinned_at.is_some()),
+            input_answered: resident
+                .and_then(|session| session.timeline.pending_user_input.as_ref())
+                .is_some_and(|input| !input.delivery.is_blocking()),
         }
     }
 
     /// Settle this thread only: detach its provider, cancel its automatic
     /// queue and close its idle terminals. Children are separate threads.
-    pub(super) fn settle_session_at(&mut self, id: &str, timestamp: u64, cx: &mut HostCx) {
-        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
-            return;
-        };
+    pub(super) fn settle_session_at(
+        &mut self,
+        id: &str,
+        timestamp: u64,
+        cx: &mut HostCx,
+    ) -> Option<SettleEffects> {
+        let mut meta = self
+            .find_meta(id)
+            .filter(|meta| meta.archived_at.is_none())?;
+        let effects = self.settle_effects(id);
         if !meta.is_settled() {
             meta.settled_at = Some(timestamp);
         }
@@ -1086,6 +1145,8 @@ impl AppState {
         self.persist_meta(&meta, cx);
         self.reschedule_scheduled_wake(cx);
         self.close_settled_idle_terminals(id, cx);
+        self.fire_control_watches(id, WatchEvent::Settled, cx);
+        Some(effects)
     }
 
     pub fn unsettle_session(&mut self, id: &str, cx: &mut HostCx) {
@@ -1188,16 +1249,23 @@ impl AppState {
 
     /// A message accepted for this thread: reopen it and make any completion
     /// already on its way from it stale. Its queued work blocks settlement
-    /// until the provider records it.
+    /// until the provider records it. The user speaking withdraws a self-settle
+    /// grant: the thread may only settle itself again if asked anew.
     pub(super) fn reactivate_session(&mut self, id: &str, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
             return;
         };
-        if meta.settled_override.is_none()
+        let withdraws_self_settle = meta.self_settle.is_some()
+            && cx.origin.unwrap_or(MessageOrigin::Human) == MessageOrigin::Human;
+        if !withdraws_self_settle
+            && meta.settled_override.is_none()
             && meta.settled_at.is_none()
             && meta.cancelled_at.is_none()
         {
             return;
+        }
+        if withdraws_self_settle {
+            meta.self_settle = None;
         }
         if meta.is_settled() {
             meta.unsettled_at = Some(now_secs());
@@ -1286,6 +1354,7 @@ impl AppState {
             self.revoke_preview_registration(id);
             self.revoke_pull_request_registration(id);
             self.revoke_orchestrate_child_registration(id);
+            self.revoke_control_registration(id);
         }
         for id in &ids {
             self.close_orchestrator_children(id, cx);
@@ -1351,17 +1420,7 @@ impl AppState {
         let source = resident
             .map(|session| &session.meta)
             .or_else(|| self.sessions.iter().find(|meta| meta.id == id))?;
-        let error = match Self::session_fork_availability(source, resident) {
-            ForkAvailability::Unsupported => {
-                Some("This provider does not support conversation forks.")
-            }
-            ForkAvailability::Empty => Some("This conversation is empty and cannot be forked."),
-            ForkAvailability::Running => {
-                Some("Wait for the running turn to finish before forking this conversation.")
-            }
-            ForkAvailability::Available => None,
-        };
-        if let Some(error) = error {
+        if let Some(error) = fork_refusal(Self::session_fork_availability(source, resident)) {
             self.report_error(RuntimeError::External(error.into()), cx);
             return None;
         }
@@ -1374,6 +1433,8 @@ impl AppState {
         fork.acp_agent_id = source.acp_agent_id.clone();
         fork.profile_id = source.profile_id.clone();
         fork.resume_cursor = source.resume_cursor.clone();
+        // The fork carries the source's context, so it may read what the source could.
+        fork.references = source.references.clone();
         fork.pending_fork = true;
         // `worktree` deliberately stays absent: it is an ownership/cleanup
         // marker. The cwd may be shared, but the fork must not own the source's
@@ -2202,5 +2263,32 @@ fn project_directory_error(error: std::io::Error) -> ProtocolError {
         }
         .into(),
         message: error.to_string(),
+    }
+}
+
+/// Images at `paths` as message attachments; an unreadable path is left out.
+pub(super) fn read_attachments(paths: Vec<PathBuf>) -> Vec<Attachment> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let bytes = fs::read(&path).ok()?;
+            Some(Attachment {
+                media_type: mime_from_path(&path),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                source_path: Some(path.to_string_lossy().into_owned()),
+            })
+        })
+        .collect()
+}
+
+/// Why a thread cannot be forked right now, if it cannot.
+pub(super) fn fork_refusal(availability: ForkAvailability) -> Option<&'static str> {
+    match availability {
+        ForkAvailability::Unsupported => Some("This provider does not support conversation forks."),
+        ForkAvailability::Empty => Some("This conversation is empty and cannot be forked."),
+        ForkAvailability::Running => {
+            Some("Wait for the running turn to finish before forking this conversation.")
+        }
+        ForkAvailability::Available => None,
     }
 }

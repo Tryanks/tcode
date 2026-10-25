@@ -121,6 +121,7 @@ impl AppState {
         } else {
             None
         };
+        let control_registration = self.control_registration_for(&meta);
         let provider_launcher = self.provider_launcher.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
@@ -141,10 +142,13 @@ impl AppState {
                     &meta,
                     &settings,
                     launch_env,
-                    preview_registration,
-                    orchestrate_registration,
-                    orchestrate_report_registration,
-                    computer_use_registration,
+                    McpServers {
+                        preview: preview_registration,
+                        orchestrate: orchestrate_registration,
+                        orchestrate_report: orchestrate_report_registration,
+                        computer_use: computer_use_registration,
+                        control: control_registration,
+                    },
                 );
                 opts.mcp_servers.extend(pull_request_registration);
                 opts.instructions = instructions;
@@ -656,10 +660,12 @@ impl AppState {
             self.revoke_preview_registration(&child_id);
             self.revoke_pull_request_registration(&child_id);
             self.revoke_orchestrate_child_registration(&child_id);
+            self.revoke_control_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
         self.revoke_pull_request_registration(parent_id);
         self.revoke_computer_use_registration(parent_id);
+        self.revoke_control_registration(parent_id);
         if let Some(registration) = self.mcp.orchestrate_registrations.remove(parent_id)
             && let Some(tokens) = &self.mcp.orchestrate_tokens
         {

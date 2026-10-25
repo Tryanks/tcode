@@ -43,6 +43,8 @@ pub(super) enum StoreWrite {
     InvalidateCommands(CommandsCacheKey),
     WriteTerminalUi(Vec<u8>),
     WriteSettings(Vec<u8>),
+    WriteReviewRecords(Vec<tcode_core::control::ReviewRecord>),
+    WriteControlActivity(Vec<tcode_core::control::ControlActivityEntry>),
     SetProfileSecret {
         profile_id: String,
         key: String,
@@ -179,6 +181,8 @@ impl StoreWrite {
             | StoreWrite::InvalidateCommands(_)
             | StoreWrite::WriteTerminalUi(_)
             | StoreWrite::WriteSettings(_)
+            | StoreWrite::WriteReviewRecords(_)
+            | StoreWrite::WriteControlActivity(_)
             | StoreWrite::ClearProfileSecrets(_) => {
                 (|error| RuntimeError::PersistSettings { error }, None)
             }
@@ -363,6 +367,16 @@ impl StoreWriter {
                     .err()
                     .map(settings_failure)
             }
+            StoreWrite::WriteReviewRecords(records) => self
+                .settings_store
+                .save_review_records(&records)
+                .err()
+                .map(settings_failure),
+            StoreWrite::WriteControlActivity(entries) => self
+                .settings_store
+                .save_control_activity(&entries)
+                .err()
+                .map(settings_failure),
             StoreWrite::SetProfileSecret {
                 profile_id,
                 key,

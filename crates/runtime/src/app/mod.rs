@@ -246,6 +246,7 @@ mod approvals;
 mod authorization;
 mod command_output;
 mod command_validation;
+mod control;
 mod diff_pass;
 mod events;
 mod git;
@@ -284,8 +285,8 @@ use active_session::{
 use orchestrate::McpWiring;
 pub use providers::ProviderCatalog;
 use providers::{
-    computer_use_attaches, effort_selection, normalized_selections, provider_secret_names,
-    session_options,
+    McpServers, computer_use_attaches, effort_selection, normalized_selections,
+    provider_secret_names, session_options,
 };
 pub use revisioned::Revisioned;
 pub use session_index::SessionIndex;
@@ -426,6 +427,7 @@ pub struct AppState {
     /// Native plugin catalogs by profile id, listed on demand.
     plugin_catalogs: HashMap<String, plugins::PluginCatalog>,
     mcp: McpWiring,
+    control: control::ControlState,
     callback_approval_requests: HashSet<(String, String)>,
     callback_user_input_requests: HashSet<(String, String)>,
     /// Live provider approvals for every resident session. This is the sole
@@ -502,6 +504,8 @@ impl AppState {
         }
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
+        let review_records = settings_store.load_review_records();
+        let control_activity = settings_store.load_control_activity();
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
         forge.configure(settings.source_control.hosts.clone());
         let releases = Arc::new(ReleaseFeed::new(tcode_services::github::GitHubApi::host(
@@ -622,6 +626,7 @@ impl AppState {
             acp_installing: std::collections::HashSet::new(),
             plugin_catalogs: HashMap::new(),
             mcp: McpWiring::default(),
+            control: control::ControlState::new(review_records, control_activity),
             callback_approval_requests: HashSet::new(),
             callback_user_input_requests: HashSet::new(),
             approvals: Default::default(),

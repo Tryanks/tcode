@@ -75,7 +75,9 @@ impl Composer {
                     .as_ref()
                     .map(|(_, e)| e.as_slice())
                     .unwrap_or(&[]);
-                let rows = filter_entries(entries, &trigger.query, FILE_MENU_ROW_CAP)
+                let threads = self.thread_rows(&trigger.query, cx);
+                let file_group = (!threads.is_empty()).then_some("composer.group_files");
+                let files = filter_entries(entries, &trigger.query, FILE_MENU_ROW_CAP)
                     .into_iter()
                     .map(|e| MenuRow {
                         primary: e.basename.clone(),
@@ -86,9 +88,9 @@ impl Composer {
                             MenuIcon::File
                         },
                         accept: MenuAccept::InsertPath(e.rel_path.clone()),
-                        group: None,
-                    })
-                    .collect();
+                        group: file_group,
+                    });
+                let rows = threads.into_iter().chain(files).collect();
                 let loading = self.workspace_loading && self.workspace.is_none();
                 (rows, crate::tr!("composer.no_files").into_owned(), loading)
             }
@@ -202,6 +204,51 @@ impl Composer {
         }
     }
 
+    /// Sidebar threads whose title matches an `@` query, for the "Threads"
+    /// group: offered once the query names something, to threads whose
+    /// provider takes `tcode_control`.
+    fn thread_rows(&self, query: &str, cx: &App) -> Vec<MenuRow> {
+        let store = self.workspace_store.read(cx);
+        let Some(status) = store.session_status().filter(|status| !status.draft) else {
+            return Vec::new();
+        };
+        let (Some(control), Some(session_id)) = (&status.control, store.active_session_id()) else {
+            return Vec::new();
+        };
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<_> = store
+            .flat_sessions()
+            .into_iter()
+            .filter(|meta| meta.id != session_id)
+            .filter(|meta| {
+                !control
+                    .references
+                    .iter()
+                    .any(|reference| reference.thread_id == meta.id)
+            })
+            .filter_map(|meta| Some((fuzzy_score(query, &meta.title)?, meta)))
+            .collect();
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        scored
+            .into_iter()
+            .take(THREAD_MENU_ROW_CAP)
+            .map(|(_, meta)| MenuRow {
+                secondary: meta
+                    .project_id
+                    .as_deref()
+                    .and_then(|id| store.project(id))
+                    .map(|project| project.name.clone())
+                    .unwrap_or_else(|| crate::tr!("control.reference.secondary").into_owned()),
+                primary: meta.title,
+                icon: MenuIcon::Thread,
+                accept: MenuAccept::ReferenceThread(meta.id),
+                group: Some("control.reference.group"),
+            })
+            .collect()
+    }
+
     /// Replace the active trigger's text range in the input with `replacement`.
     pub(in super::super) fn replace_trigger(
         &mut self,
@@ -234,6 +281,10 @@ impl Composer {
             MenuAccept::InsertPath(path) => {
                 let link = format!("{} ", serialize_composer_file_link(path));
                 self.replace_trigger(&link, window, cx);
+            }
+            MenuAccept::ReferenceThread(id) => {
+                self.replace_trigger("", window, cx);
+                self.reference_thread(id.clone(), window, cx);
             }
             MenuAccept::InsertSkill(name) => self.replace_trigger(&format!("${name} "), window, cx),
             MenuAccept::InsertCommand(name) => {
@@ -364,6 +415,7 @@ fn render_menu_row(
         MenuIcon::Folder => Icon::empty().path("icons/folder-closed.svg"),
         MenuIcon::Command => Icon::empty().path("icons/box.svg"),
         MenuIcon::Skill => Icon::empty().path("icons/ruler.svg"),
+        MenuIcon::Thread => Icon::new(IconName::MessageSquare),
     };
     let accessible_label = crate::tr!(
         "composer.trigger_option",

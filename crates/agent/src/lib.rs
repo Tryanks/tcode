@@ -877,6 +877,7 @@ impl McpRegistration {
     pub const SERVER_NAME_ORCHESTRATE_REPORT: &'static str = "tcode_report";
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
     pub const SERVER_NAME_PULL_REQUESTS: &'static str = "tcode_pull_requests";
+    pub const SERVER_NAME_CONTROL: &'static str = "tcode_control";
 
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token
@@ -1131,6 +1132,21 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
         recommended: Some(recommended.into()),
         permissive: Some(permissive.into()),
     })
+}
+
+/// The ACP session option that carries the agent's mode, which ACP agents use for their
+/// approval modes.
+pub const ACP_MODE_OPTION_ID: &str = "acp:mode";
+
+/// Whether option `id` of `provider` decides what runs without the user's approval: the
+/// provider's permission control, or an ACP session mode, which ACP agents use for their
+/// approval modes alongside anything else.
+pub fn option_governs_approvals(provider: ProviderKind, id: &str) -> bool {
+    id == ACP_MODE_OPTION_ID
+        || permission_control(provider).is_some_and(|descriptor| match descriptor {
+            OptionDescriptor::Select { id: own, .. }
+            | OptionDescriptor::Boolean { id: own, .. } => own == id,
+        })
 }
 
 pub fn permission_notice(provider: ProviderKind) -> Option<&'static str> {
@@ -1928,6 +1944,9 @@ pub enum AgentEvent {
     ContextWindowChanged {
         window: u64,
     },
+    /// Another thread's model acted on this thread through `tcode_control`. This is
+    /// never emitted by an adapter; the runtime records it in the target thread.
+    ControlAction(ControlAction),
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
     /// Claude `TodoWrite`). Replaces the current turn's plan wholesale.
     PlanUpdated {
@@ -2358,6 +2377,18 @@ pub enum ContextFreshness {
     LastKnown,
     Compacting,
     AwaitingObservation,
+}
+
+/// One `tcode_control` write, as the target thread records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlAction {
+    pub actor_thread_id: String,
+    pub actor_title: String,
+    /// A semantic key from `tcode_core::control::action`, which clients put in words.
+    pub action: String,
+    /// Data only (a title, an id, a name, a count, someone's own words), never a sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

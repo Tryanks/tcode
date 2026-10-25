@@ -17,7 +17,6 @@ use gpui::{
 };
 
 use super::{
-    link_target::LinkTarget,
     nodes::LinkMark,
     state::{MarkdownState, PendingContextTarget, PendingLinkMenu},
 };
@@ -431,10 +430,7 @@ impl Element for Inline {
                 }
                 if let Some(link) = Self::link_for_position(&layout, &links, event.position) {
                     crate::widgets::stop_click_propagation(window, cx);
-                    match view.read(cx).resolve_link(&link.url) {
-                        LinkTarget::Web(url) => cx.open_url(&url),
-                        LinkTarget::Local(path) => cx.open_with_system(&path),
-                    }
+                    view.read(cx).resolve_link(&link.url).open(window, cx);
                 }
             }
         });

@@ -221,6 +221,9 @@ pub struct WorkspaceStore {
     active_destination: Option<ConversationDestination>,
     /// One-shot turn navigation requested by a cross-session content search.
     pending_chat_turn: Option<(String, usize)>,
+    /// A thread and the event position an anchor link named, until the
+    /// thread's held history covers it.
+    pending_chat_anchor: Option<(String, u64)>,
     native_rewind_prefills: HashMap<String, String>,
     /// Text a pull request action put into a thread's composer for the user to edit and send.
     composer_appends: HashMap<String, String>,
@@ -417,6 +420,7 @@ impl WorkspaceStore {
             git_status_replica: GitStatusStatus::default(),
             active_destination: None,
             pending_chat_turn: None,
+            pending_chat_anchor: None,
             native_rewind_prefills: HashMap::new(),
             composer_appends: HashMap::new(),
             fallback_blocks: HashMap::new(),
@@ -3278,6 +3282,25 @@ impl WorkspaceStore {
         )
     }
 
+    /// The latest `tcode_control` writes across every thread, newest first.
+    pub fn control_activity(
+        &self,
+        limit: u32,
+        cx: &mut App,
+    ) -> Task<Result<Vec<tcode_protocol::ControlActivityEntry>, String>> {
+        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+            return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
+        }
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::ControlActivity { limit }).await {
+                Ok(QueryResponse::ControlActivity(entries)) => Ok(entries),
+                Ok(_) => Err("unexpected control activity response".into()),
+                Err(error) => Err(error.message),
+            },
+        )
+    }
+
     pub fn read_file_preview(&self, path: PathBuf, cx: &mut App) -> Task<std::io::Result<Vec<u8>>> {
         let host = self.host.clone();
         cx.spawn(
@@ -3353,13 +3376,37 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn pending_chat_turn(&self, session_id: &str) -> Option<usize> {
-        self.pending_chat_turn
+        if let Some(turn) = self
+            .pending_chat_turn
             .as_ref()
             .filter(|(id, _)| id == session_id)
             .and_then(|(_, turn)| turn.checked_sub(self.session_turn_offset))
+        {
+            return Some(turn);
+        }
+        let (_, position) = self
+            .pending_chat_anchor
+            .as_ref()
+            .filter(|(id, _)| id == session_id)?;
+        let held = self.threads.get(session_id)?.history.as_ref()?;
+        let index = usize::try_from(position.checked_sub(held.from)?).ok()?;
+        let records = held.records.get(..=index)?;
+        Some(
+            Timeline::fold_stored(records.iter())
+                .turns
+                .len()
+                .saturating_sub(1),
+        )
     }
 
     pub(crate) fn take_pending_chat_turn(&mut self, session_id: &str, turn: usize) {
+        if self
+            .pending_chat_anchor
+            .as_ref()
+            .is_some_and(|(id, _)| id == session_id)
+        {
+            self.pending_chat_anchor = None;
+        }
         if self.pending_chat_turn.as_ref()
             == Some(&(session_id.to_string(), turn + self.session_turn_offset))
         {

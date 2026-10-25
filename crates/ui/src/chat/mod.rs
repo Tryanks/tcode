@@ -1471,6 +1471,14 @@ impl ChatView {
                         &entry.id, window, cx,
                     ));
                 }
+                Segment::ControlAction(entry) => {
+                    let EntryContent::ControlAction(action) = &entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::control_action_divider(
+                        &entry.id, action, cx,
+                    ));
+                }
                 Segment::ActivityRun(activities) => {
                     column = column.child(self.compose_work_log(
                         (index, &row.part, turn, cwd, activities, row.live_activity),
@@ -1989,7 +1997,9 @@ impl ChatView {
                         column.child(self.compose_callback_row(turn, key(), label, callback, cx));
                 }
             }
-            HostNotice::PullRequest { .. } | HostNotice::ReportReminder => {
+            HostNotice::PullRequest { .. }
+            | HostNotice::ReportReminder
+            | HostNotice::Control(_) => {
                 column = column.child(self.compose_disclosure(
                     turn,
                     key(),
@@ -2604,6 +2614,15 @@ impl ChatView {
         }
     }
 
+    fn on_show_agent_tools(
+        &mut self,
+        _: &crate::pull_requests::ShowAgentTools,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::pull_requests::open_agent_sees(self.workspace_store.clone(), window, cx);
+    }
+
     /// The header, laid out for the width it is given in this frame: whether
     /// its split buttons are labelled depends on that width.
     fn render_header(
@@ -2744,6 +2763,11 @@ impl ChatView {
         let preview_showing = right_panel_open && right_tab == RightTab::Preview;
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
+        let agent_tools = self
+            .workspace_store
+            .read(cx)
+            .session_status()
+            .is_some_and(|status| status.injected_tools.is_some());
         let title_menu = {
             let title = title.clone();
             let cwd = cwd.clone();
@@ -2754,10 +2778,18 @@ impl ChatView {
                         Box::new(crate::widgets::menu::CopyText(title)),
                     )
                 });
-                let menu = menu.separator().menu(
-                    crate::tr!("pull_requests.link_menu").into_owned(),
-                    Box::new(crate::pull_requests::OpenLinkDialog),
-                );
+                let menu = menu
+                    .separator()
+                    .menu(
+                        crate::tr!("pull_requests.link_menu").into_owned(),
+                        Box::new(crate::pull_requests::OpenLinkDialog),
+                    )
+                    .when(agent_tools, |menu| {
+                        menu.menu(
+                            crate::tr!("pull_requests.agent_sees").into_owned(),
+                            Box::new(crate::pull_requests::ShowAgentTools),
+                        )
+                    });
                 match &cwd {
                     Some(cwd) => menu.separator().path_items(&cwd.to_string_lossy(), None),
                     None => menu,
@@ -3596,11 +3628,17 @@ impl Render for ChatView {
         self.composer
             .update(cx, |composer, cx| composer.set_compact(compact, cx));
         // The phone reads on T1 paper; the desktop keeps the glass canvas.
-        let root = v_flex().size_full().min_w_0().bg(if compact {
-            crate::material::content_surface(cx)
-        } else {
-            crate::material::canvas(cx)
-        });
+        // The header's title menu dispatches these, and the header is a sibling of `main`.
+        let root = v_flex()
+            .size_full()
+            .min_w_0()
+            .bg(if compact {
+                crate::material::content_surface(cx)
+            } else {
+                crate::material::canvas(cx)
+            })
+            .on_action(cx.listener(Self::on_link_dialog))
+            .on_action(cx.listener(Self::on_show_agent_tools));
 
         if self.workspace_store.read(cx).chat_loading() {
             return root.child(
@@ -3912,7 +3950,6 @@ impl Render for ChatView {
             .size_full()
             .min_h_0()
             .on_action(cx.listener(Self::on_link_url))
-            .on_action(cx.listener(Self::on_link_dialog))
             .on_action(cx.listener(Self::on_rewind_turn))
             .on_action(cx.listener(Self::on_open_file_diff))
             .child(
