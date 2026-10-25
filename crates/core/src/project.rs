@@ -191,8 +191,7 @@ pub struct SessionMeta {
     /// `cancel`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expectation: Option<ChildExpectation>,
-    /// This thread's own `tcode_control` grant, set from its control chip or an approved
-    /// request; absent means its project's or the default applies.
+    /// This thread's own `tcode_control` grant, set by an approved request; absent means its project's or the default applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_grant: Option<crate::control::ControlGrant>,
     /// Grants the model asked for that the user has not answered.

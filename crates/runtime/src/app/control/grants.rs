@@ -117,7 +117,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Set or clear the thread's own grant from its control chip.
+    /// Set or clear the thread's own grant.
     pub fn set_control_grant(
         &mut self,
         session_id: &str,

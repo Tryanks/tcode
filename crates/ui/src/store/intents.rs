@@ -363,9 +363,12 @@ impl WorkspaceStore {
     pub fn set_settlement_automation(&mut self, value: SettlementAutomation) {
         self.patch_settings(SettingsPatch::SettlementAutomation(value));
     }
-    /// The thread's own grant; `None` returns it to its project's or the default.
-    pub fn set_control_grant(&mut self, session_id: String, grant: Option<ControlGrant>) {
-        self.dispatch(Command::SetControlGrant { session_id, grant });
+    /// Drops the thread's own grant, returning it to its project's or the default.
+    pub fn clear_control_grant(&mut self, session_id: String) {
+        self.dispatch(Command::SetControlGrant {
+            session_id,
+            grant: None,
+        });
     }
     pub fn respond_control_grant(&mut self, session_id: String, request_id: String, approve: bool) {
         self.dispatch(Command::RespondControlGrant {

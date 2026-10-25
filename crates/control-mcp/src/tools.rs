@@ -190,7 +190,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Arrange for this thread, and only this thread, to settle itself: at the end of your current turn, or when a named pull request merges or closes. Requires the user's consent, quoted verbatim in consent_quote from a message the user sent in this thread (case and spacing aside); a quote the user never said here is refused. The user can revoke it from the thread's control chip, and any new message from the user withdraws it. Settle stops the provider, ends the thread's pull request watches, drops its non-human queued messages, closes its idle terminals, unpins it, and answers pending non-blocking input with empty answers. Never fires mid-turn."
+        description = "Arrange for this thread, and only this thread, to settle itself: at the end of your current turn, or when a named pull request merges or closes. Requires the user's consent, quoted verbatim in consent_quote from a message the user sent in this thread (case and spacing aside); a quote the user never said here is refused. The user can revoke it from the thread's title menu, and any new message from the user withdraws it. Settle stops the provider, ends the thread's pull request watches, drops its non-human queued messages, closes its idle terminals, unpins it, and answers pending non-blocking input with empty answers. Never fires mid-turn."
     )]
     async fn settle_self(&self, Parameters(p): Parameters<SettleSelfParams>) -> CallToolResult {
         self.run(ControlOp::SettleSelf(p)).await
