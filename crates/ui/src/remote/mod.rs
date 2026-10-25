@@ -27,12 +27,12 @@ use tcode_client::host::ClientHost;
 use tcode_client::pairing::PairedHost;
 
 use crate::icon::{Icon, IconName};
-// Machines are a navigable content list, so their rows, captions and hairlines
-// are the shared plain-list vocabulary — the same the thread list uses.
-use crate::material::{COMPACT_PAGE_INSET, list_caption, list_row, plain_list, section_gap};
+use crate::material::{
+    CARD_INSET, COMPACT_PAGE_INSET, group_row, group_row_stacked, panel_row, section_gap,
+};
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::pairing::PairForm;
-use crate::settings_rows::CONTENT_MAX_WIDTH;
+use crate::settings_rows::{CONTENT_MAX_WIDTH, settings_group};
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -129,6 +129,20 @@ impl ClientAttachment {
     }
 }
 
+/// The name of the machine this process hosts, where it hosts one.
+pub(crate) fn local_machine_name(cx: &App) -> Option<String> {
+    #[cfg(feature = "remote-hosting")]
+    {
+        cx.try_global::<RemoteController>()
+            .map(RemoteController::machine_name)
+    }
+    #[cfg(not(feature = "remote-hosting"))]
+    {
+        let _ = cx;
+        None
+    }
+}
+
 /// Open a *client-local* path in the user's editor through whatever integration
 /// this client was given. `None` when it has none.
 pub(crate) fn open_in_editor(path: &std::path::Path, cx: &App) -> Option<Result<(), String>> {
@@ -160,6 +174,18 @@ fn report<T: 'static>(
 }
 
 type Row = gpui::Stateful<gpui::Div>;
+
+/// A [`panel_row`] inside one of the page's groups. Compact, a panel row is a
+/// page-inset list row; inside a group it takes the group's inset, so its text
+/// lines up with the caption and the group's other rows.
+fn group_entry(
+    id: impl Into<gpui::ElementId>,
+    label: SharedString,
+    compact: bool,
+    cx: &App,
+) -> Row {
+    panel_row(id, label, compact, cx).px(px(CARD_INSET))
+}
 
 pub struct RemotePanel {
     /// The window's current attachment, when it has one. Hosts is also the
@@ -391,16 +417,17 @@ impl RemotePanel {
     /// on it is not a connection, so the row carries a check, not a dot. A
     /// host that did not start says why, and offers starting it again or
     /// quitting.
-    fn local_row(&self, cx: &mut Context<Self>) -> Option<Row> {
+    fn local_row(&self, compact: bool, cx: &mut Context<Self>) -> Option<Row> {
         cx.try_global::<ClientAttachment>()
             .is_some_and(ClientAttachment::can_attach_local)
             .then(|| {
                 let current = self.attached_locally(cx);
                 let failure = self.local_failure.clone();
                 let failed = failure.is_some();
-                list_row(
+                group_entry(
                     "hosts-local",
                     crate::tr!("hosts.this_computer").into_owned().into(),
+                    compact,
                     cx,
                 )
                 .child(
@@ -417,7 +444,7 @@ impl RemotePanel {
                             column.child(
                                 div()
                                     .debug_selector(|| "hosts-local-failure".into())
-                                    .text_secondary(true, cx)
+                                    .text_secondary(compact, cx)
                                     .text_color(cx.theme().danger_foreground)
                                     .child(
                                         crate::tr!("hosts.local.unavailable", reason = reason)
@@ -463,7 +490,13 @@ impl RemotePanel {
     }
 
     /// Saved machines offer pairing again when authorization is rejected.
-    fn host_row(&self, host: &PairedHost, current: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn host_row(
+        &self,
+        host: &PairedHost,
+        current: bool,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let reason = if current {
             self.store
                 .as_ref()
@@ -479,9 +512,10 @@ impl RemotePanel {
             && !self.fixed_machine;
         let name = SharedString::from(host.name.clone());
         let connect_host = host.clone();
-        let row = list_row(
+        let row = group_entry(
             SharedString::from(format!("host-{}", host.host_id)),
             name.clone(),
+            compact,
             cx,
         )
         .debug_selector(|| format!("host-{}", host.host_id))
@@ -497,7 +531,7 @@ impl RemotePanel {
                         .child(crate::widgets::fade_text(name.clone())),
                 )
                 .when_some(host.space_name.as_deref(), |column, space| {
-                    column.child(div().text_secondary(true, cx).overflow_hidden().child(
+                    column.child(div().text_secondary(compact, cx).overflow_hidden().child(
                         crate::widgets::fade_text(
                             crate::tr!("member.space", space = space).into_owned(),
                         ),
@@ -508,7 +542,7 @@ impl RemotePanel {
                     |column| {
                         column.child(
                             div()
-                                .text_secondary(true, cx)
+                                .text_secondary(compact, cx)
                                 .overflow_hidden()
                                 .child(crate::widgets::fade_text(crate::tr!("hosts.in_group"))),
                         )
@@ -517,7 +551,7 @@ impl RemotePanel {
                 .when_some(reason, |column, reason| {
                     column.child(
                         div()
-                            .text_secondary(true, cx)
+                            .text_secondary(compact, cx)
                             .text_color(cx.theme().danger_foreground)
                             .child(failure_description(&reason)),
                     )
@@ -584,63 +618,63 @@ impl RemotePanel {
             .into_any_element()
     }
 
-    /// The whole Hosts surface: this machine and the invitation it offers
-    /// other devices, the saved machines and, where the client can pair, the
-    /// ways to add another.
+    /// The whole Hosts surface, one captioned group each: this machine and
+    /// the invitation it offers other devices, its shared spaces, the saved
+    /// machines and, where the client can pair, the ways to add another.
     pub(crate) fn render_hosts(
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
         let hosts = self
             .client(cx)
             .map(|client| client.load_hosts())
             .unwrap_or_default();
         let current_id = self.attached_host_id(cx);
-        let spacing = &cx.theme().tokens.spacing;
-        let mut column = v_flex()
-            .w_full()
-            .gap(section_gap(cx))
-            .pt(spacing.sm)
-            .pb(spacing.xl);
-        if let Some(local) = self.local_row(cx) {
-            column = column.child(plain_list(vec![local.into_any_element()], cx));
+        let mut column = v_flex().gap(section_gap(cx));
+
+        let mut this_machine: Vec<AnyElement> = Vec::new();
+        if let Some(local) = self.local_row(compact, cx) {
+            this_machine.push(local.into_any_element());
         }
         // Only a host running in this process can offer an invitation.
         #[cfg(feature = "remote-hosting")]
         if cx.has_global::<RemoteController>() {
-            column = column.child(self.invitation_section(cx));
+            this_machine.push(self.invitation_row(compact, cx));
         }
-        if hosts.is_empty() {
-            column = column.child(
-                div()
-                    .w_full()
-                    .px(px(COMPACT_PAGE_INSET))
-                    .text_secondary(true, cx)
-                    .child(crate::tr!("hosts.empty")),
-            );
+        if !this_machine.is_empty() {
+            column = column.child(settings_group(
+                crate::tr!("hosts.this_machine_section"),
+                this_machine,
+                cx,
+            ));
+        }
+        #[cfg(feature = "remote-hosting")]
+        if cx.has_global::<RemoteController>() {
+            column = column.children(self.space_links(compact, cx));
+        }
+
+        let saved = if hosts.is_empty() {
+            vec![
+                crate::material::empty_row(crate::tr!("hosts.empty"), cx)
+                    .text_secondary(compact, cx)
+                    .into_any_element(),
+            ]
         } else {
-            let rows = hosts
+            hosts
                 .iter()
                 .map(|host| {
                     let current = current_id.as_deref() == Some(host.host_id.as_str());
-                    self.host_row(host, current, cx)
+                    self.host_row(host, current, compact, cx)
                 })
-                .collect();
-            column = column.child(
-                v_flex()
-                    .child(list_caption(
-                        crate::tr!("hosts.saved").into_owned().into(),
-                        true,
-                        cx,
-                    ))
-                    .child(plain_list(rows, cx)),
-            );
-        }
+                .collect()
+        };
+        column = column.child(settings_group(crate::tr!("hosts.saved"), saved, cx));
         if !self.fixed_machine {
-            column = column.child(self.add_machine(cx));
+            column = column.child(self.add_machine(compact, cx));
         }
-        self.page(column.into_any_element(), &self.hosts_scroll, cx)
+        self.page(column, &self.hosts_scroll, cx)
     }
 
     /// What this machine offers other devices: the live invitation while
@@ -648,15 +682,14 @@ impl RemotePanel {
     /// turns it on. Hosting itself — the endpoint, its name, Traverse — is
     /// configured in Settings → Remote; this is where the connection is made.
     #[cfg(feature = "remote-hosting")]
-    fn invitation_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn invitation_row(&mut self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         use hosting::{InvitationOffer, RemoteController};
-        let compact = self.window_state.read(cx).compact;
         let offer = cx
             .try_global::<RemoteController>()
             .map(RemoteController::invitation_offer)
             .unwrap_or(InvitationOffer::NotHosting);
         self.sync_invitation_ticker(matches!(offer, InvitationOffer::Live { .. }), cx);
-        let body = match offer {
+        match offer {
             InvitationOffer::Live {
                 invitation,
                 remaining,
@@ -665,58 +698,42 @@ impl RemotePanel {
                     .and_then(|spaces| spaces.read(cx).group().map(|group| group.name.clone()));
                 hosting::invitation_card(&invitation, remaining, group, compact, cx)
             }
-            InvitationOffer::Expired => hosting::expired_invitation_row(cx),
+            InvitationOffer::Expired => hosting::expired_invitation_row(compact, cx),
             InvitationOffer::NotHosting | InvitationOffer::PairingOff => {
                 let note = if offer == InvitationOffer::PairingOff {
                     crate::tr!("hosts.invite.pairing_off")
                 } else {
                     crate::tr!("hosts.invite.disabled")
                 };
-                let title: SharedString =
-                    crate::tr!("hosts.invite.open_settings").into_owned().into();
-                v_flex()
-                    .w_full()
-                    .child(
-                        div()
-                            .w_full()
-                            .px(px(COMPACT_PAGE_INSET))
-                            .pb(cx.theme().tokens.spacing.xs)
-                            .text_secondary(true, cx)
-                            .child(note),
-                    )
-                    .child(plain_list(
-                        vec![
-                            list_row("hosts-remote-settings", title.clone(), cx)
-                                .debug_selector(|| "hosts-remote-settings".into())
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_body(true, cx)
-                                        .overflow_hidden()
-                                        .child(crate::widgets::fade_text(title)),
-                                )
-                                .child(
-                                    Icon::new(IconName::ChevronRight)
-                                        .flex_none()
-                                        .text_color(cx.theme().muted_foreground),
-                                )
-                                .on_click(cx.listener(|panel, _, _, cx| {
-                                    panel.window_state.update(cx, |state, cx| {
-                                        state.pending_settings_section = Some("remote".into());
-                                        state.open_settings(cx);
-                                    });
-                                }))
-                                .into_any_element(),
-                        ],
-                        cx,
+                crate::settings_rows::row_frame(compact, cx)
+                    .child(crate::settings_rows::row_labels(
+                        note, None, None, compact, cx,
                     ))
+                    .child(
+                        Button::new("hosts-remote-settings")
+                            .debug_selector(|| "hosts-remote-settings".into())
+                            .ghost()
+                            .outline()
+                            .compact()
+                            .label(crate::tr!("hosts.invite.open_settings"))
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.window_state.update(cx, |state, cx| {
+                                    state.pending_settings_section = Some("remote".into());
+                                    state.open_settings(cx);
+                                });
+                            })),
+                    )
                     .into_any_element()
             }
-        };
+        }
+    }
+
+    /// This machine's shared spaces, each with its link and QR on demand.
+    #[cfg(feature = "remote-hosting")]
+    fn space_links(&mut self, compact: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let spaces = spaces::local(cx);
         self.spaces_observer.watch(spaces.as_ref(), cx);
-        let space_links = spaces.and_then(|spaces| {
+        spaces.and_then(|spaces| {
             spaces::machine_links(
                 &spaces,
                 self.space_qr.as_deref(),
@@ -727,22 +744,7 @@ impl RemotePanel {
                 compact,
                 cx,
             )
-        });
-        v_flex()
-            .w_full()
-            .child(
-                v_flex()
-                    .w_full()
-                    .debug_selector(|| "hosts-invitation".into())
-                    .child(list_caption(
-                        crate::tr!("hosts.invite.section").into_owned().into(),
-                        true,
-                        cx,
-                    ))
-                    .child(body),
-            )
-            .children(space_links)
-            .into_any_element()
+        })
     }
 
     /// Run the one-second repaint exactly while an invitation counts down.
@@ -773,15 +775,15 @@ impl RemotePanel {
     /// field. A first pairing is always by invitation, never by finding a
     /// machine on the network. The attempt in flight and its failure are
     /// shown here, under the rows that started them.
-    fn add_machine(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn add_machine(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
         let entry = |id: &'static str, title: SharedString, cx: &mut Context<Self>| {
-            list_row(id, title.clone(), cx)
+            group_entry(id, title.clone(), compact, cx)
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_body(true, cx)
+                        .text_body(compact, cx)
                         .overflow_hidden()
                         .child(crate::widgets::fade_text(title)),
                 )
@@ -812,32 +814,29 @@ impl RemotePanel {
             .on_click(cx.listener(|panel, _, window, cx| panel.open_pair(window, cx)))
             .into_any_element(),
         );
-        v_flex()
-            .w_full()
+        rows.extend(
+            self.attempt_status(compact, cx)
+                .map(|status| group_row(cx).child(status).into_any_element()),
+        );
+        rows.extend(
+            self.address_prompt(true, compact, cx)
+                .map(|prompt| group_row(cx).child(prompt).into_any_element()),
+        );
+        settings_group(crate::tr!("hosts.pair.title"), rows, cx)
             .debug_selector(|| "hosts-add-machine".into())
-            .child(list_caption(
-                crate::tr!("hosts.pair.title").into_owned().into(),
-                true,
-                cx,
-            ))
-            .child(plain_list(rows, cx))
-            .children(self.attempt_status(cx))
-            .children(self.address_prompt(true, cx))
             .into_any_element()
     }
 
     /// The pairing attempt in flight, or the failure of the last one; one
     /// line at both the Hosts page and the paste page.
-    fn attempt_status(&self, cx: &App) -> Option<AnyElement> {
+    fn attempt_status(&self, compact: bool, cx: &App) -> Option<AnyElement> {
         if self.form.busy {
             return Some(
                 h_flex()
                     .w_full()
-                    .px(px(COMPACT_PAGE_INSET))
-                    .py(cx.theme().tokens.spacing.sm)
                     .gap_2()
                     .items_center()
-                    .text_secondary(true, cx)
+                    .text_secondary(compact, cx)
                     .debug_selector(|| "hosts-pairing".into())
                     .child(crate::widgets::spinner::Spinner::new())
                     .child(div().min_w_0().child(crate::tr!("hosts.pair.connecting")))
@@ -852,9 +851,7 @@ impl RemotePanel {
         Some(
             div()
                 .w_full()
-                .px(px(COMPACT_PAGE_INSET))
-                .py(cx.theme().tokens.spacing.sm)
-                .text_secondary(true, cx)
+                .text_secondary(compact, cx)
                 .min_w_0()
                 .text_color(cx.theme().danger_foreground)
                 .debug_selector(|| "hosts-pair-error".into())
@@ -865,8 +862,13 @@ impl RemotePanel {
 
     /// The machine's IP address, asked for once an attempt found no path to
     /// it; the prompt stands in for that failure. `retry` adds the button
-    /// that sends it, where no Connect button is pinned to the page.
-    fn address_prompt(&self, retry: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// that sends it, where no Connect button is beside the field.
+    fn address_prompt(
+        &self,
+        retry: bool,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.form.needs_address(cx) {
             return None;
         }
@@ -880,17 +882,16 @@ impl RemotePanel {
         Some(
             v_flex()
                 .w_full()
-                .px(px(COMPACT_PAGE_INSET))
                 .gap_1p5()
                 .debug_selector(|| "hosts-pair-address".into())
                 .child(
                     div()
-                        .text_caption(cx)
+                        .text_body(compact, cx)
                         .child(crate::tr!("hosts.pair.address")),
                 )
                 .child(
                     div()
-                        .text_secondary(true, cx)
+                        .text_secondary(compact, cx)
                         .min_w_0()
                         .child(crate::tr!("hosts.pair.address_description")),
                 )
@@ -900,7 +901,7 @@ impl RemotePanel {
                 )
                 .children(error.map(|error| {
                     div()
-                        .text_secondary(true, cx)
+                        .text_secondary(compact, cx)
                         .min_w_0()
                         .text_color(cx.theme().danger_foreground)
                         .debug_selector(|| "hosts-pair-address-error".into())
@@ -910,7 +911,7 @@ impl RemotePanel {
                     column.child(
                         Button::new("hosts-pair-retry")
                             .primary()
-                            .w_full()
+                            .when(compact, |button| button.w_full())
                             .loading(busy)
                             .disabled(busy || invalid)
                             .label(crate::tr!("hosts.pair.retry"))
@@ -921,25 +922,67 @@ impl RemotePanel {
         )
     }
 
-    /// The paste page: the field above, the attempt's state under it, and a
-    /// Connect button pinned to the foot of the page for a retry — above the
-    /// software keyboard, which the window seam already accounts for. A link
-    /// that parses is submitted as it lands; the button is never the only way.
+    /// The paste page. A link that parses is submitted as it lands; Connect
+    /// is never the only way, only the retry. Wide, the form is one card with
+    /// Connect beside its field. Compact, Connect is pinned to the foot of
+    /// the page, above the software keyboard, which the window seam already
+    /// accounts for.
     pub(crate) fn render_pair(
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
         let busy = self.form.busy;
         let ready = !busy && self.form.request(cx).is_some() && self.form.typed_address(cx).is_ok();
         let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
+        let action = Button::new("hosts-pair-submit")
+            .primary()
+            .loading(busy)
+            .disabled(!ready)
+            .label(crate::tr!("hosts.pair.action"))
+            .on_click(cx.listener(|panel, _, window, cx| panel.submit(window, cx)));
+        let scan = scannable.then(|| {
+            Button::new("hosts-scan")
+                .ghost()
+                .outline()
+                .disabled(busy)
+                .label(crate::tr!("hosts.pair.scan"))
+                .on_click(cx.listener(|panel, _, _, cx| panel.scan(cx)))
+        });
+        let field = Input::new(&self.form.invitation)
+            .placeholder(crate::tr!("hosts.pair.invitation_placeholder"));
+        if !compact {
+            let form = group_row_stacked(cx)
+                .child(crate::settings_rows::row_labels(
+                    crate::tr!("hosts.pair.invitation"),
+                    Some(crate::tr!("hosts.pair.description").into_owned().into()),
+                    None,
+                    false,
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap(cx.theme().tokens.spacing.sm)
+                        .items_center()
+                        .child(div().flex_1().min_w_0().child(field))
+                        .children(scan)
+                        .child(action),
+                )
+                .children(self.attempt_status(false, cx))
+                .children(self.address_prompt(false, false, cx));
+            let page = v_flex().child(
+                crate::material::group(cx)
+                    .debug_selector(|| "hosts-pair-form".into())
+                    .child(form),
+            );
+            return self.page(page, &self.pair_scroll, cx);
+        }
         let body = v_flex()
-            .w_full()
-            .py(cx.theme().tokens.spacing.lg)
             .gap(section_gap(cx))
             .child(
                 div()
-                    .px(px(COMPACT_PAGE_INSET))
                     .text_secondary(true, cx)
                     .min_w_0()
                     .child(crate::tr!("hosts.pair.description")),
@@ -947,46 +990,23 @@ impl RemotePanel {
             .child(
                 v_flex()
                     .w_full()
-                    .px(px(COMPACT_PAGE_INSET))
                     .gap_1p5()
                     .child(
                         div()
                             .text_caption(cx)
                             .child(crate::tr!("hosts.pair.invitation")),
                     )
-                    .child(
-                        Input::new(&self.form.invitation)
-                            .placeholder(crate::tr!("hosts.pair.invitation_placeholder")),
-                    ),
+                    .child(field),
             )
-            .children(self.attempt_status(cx))
-            .children(self.address_prompt(false, cx))
-            .when(scannable, |column| {
-                column.child(
-                    div().px(px(COMPACT_PAGE_INSET)).child(
-                        Button::new("hosts-scan")
-                            .ghost()
-                            .outline()
-                            .w_full()
-                            .disabled(busy)
-                            .label(crate::tr!("hosts.pair.scan"))
-                            .on_click(cx.listener(|panel, _, _, cx| panel.scan(cx))),
-                    ),
-                )
-            });
-        let action = Button::new("hosts-pair-submit")
-            .primary()
-            .w_full()
-            .loading(busy)
-            .disabled(!ready)
-            .label(crate::tr!("hosts.pair.action"))
-            .on_click(cx.listener(|panel, _, window, cx| panel.submit(window, cx)));
-        self.page_with_footer(body.into_any_element(), action.into_any_element(), cx)
+            .children(self.attempt_status(true, cx))
+            .children(self.address_prompt(false, true, cx))
+            .children(scan.map(|scan| scan.w_full()));
+        self.page_with_footer(body, action.w_full().into_any_element(), cx)
     }
 
-    /// The scrolling page body, centered in the wide content column and
-    /// full-bleed in compact.
-    fn page(&self, body: AnyElement, scroll: &ScrollHandle, cx: &mut Context<Self>) -> AnyElement {
+    /// The scrolling page body: the settings content column, so the page's
+    /// groups line up with Settings' at every width.
+    fn page(&self, body: gpui::Div, scroll: &ScrollHandle, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
         crate::scroll::page_viewport(
             "hosts-scroll-bounce",
@@ -1001,21 +1021,14 @@ impl RemotePanel {
                 .track_scroll(scroll)
                 .on_action(cx.listener(Self::on_disconnect))
                 .on_action(cx.listener(Self::on_forget))
-                .child(
-                    h_flex().w_full().justify_center().child(
-                        div()
-                            .w_full()
-                            .when(!compact, |column| column.max_w(px(CONTENT_MAX_WIDTH)))
-                            .child(body),
-                    ),
-                ),
+                .child(crate::settings_rows::content_column(body, compact, cx)),
         )
         .into_any_element()
     }
 
     fn page_with_footer(
         &self,
-        body: AnyElement,
+        body: gpui::Div,
         action: AnyElement,
         cx: &mut Context<Self>,
     ) -> AnyElement {

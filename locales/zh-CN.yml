@@ -1394,6 +1394,7 @@ remote:
 hosts:
   title: "主机"
   this_computer: "本机"
+  this_machine_section: "本机"
   saved: "已添加的主机"
   empty: "尚未添加任何主机。"
   disconnect: "断开"
@@ -1407,13 +1408,13 @@ hosts:
     needs_migration: "需要先升级本机数据。请退出 Tcode 后重新打开。"
     retry: "重试"
   invite:
-    section: "让其他设备连接本机"
     description: "在另一台设备的 Tcode 中扫描此二维码，或粘贴邀请链接，即可配对并连接。"
     disabled: "远程连接未开启。"
     pairing_off: "本机已关闭新设备配对。"
     open_settings: "远程连接设置"
   pair:
     title: "添加主机"
+    page_title: "添加主机"
     action: "连接"
     description: "粘贴主机在“主机”页面显示的邀请链接。配对完成后会立即连接。"
     invitation: "邀请链接"

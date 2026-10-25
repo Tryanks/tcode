@@ -248,6 +248,19 @@ impl WindowState {
         cx.notify();
     }
 
+    /// Leave the pairing page for the Machines page it was opened over. Wide,
+    /// [`Self::back`] leaves the whole Hosts route, Pair included.
+    pub fn close_pair(&mut self, cx: &mut Context<Self>) {
+        if self.destination() != Destination::Pair {
+            return;
+        }
+        self.history.pop();
+        if self.destination() != Destination::Hosts {
+            self.history.push(Destination::Hosts);
+        }
+        cx.notify();
+    }
+
     /// Pop one step. `false` only where there is nothing left to pop — in
     /// compact that is the root, where the platform closes the app; in wide it
     /// is the workspace, which is not a page you can leave.

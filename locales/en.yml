@@ -1401,6 +1401,7 @@ remote:
 hosts:
   title: "Machines"
   this_computer: "This machine"
+  this_machine_section: "THIS MACHINE"
   saved: "YOUR MACHINES"
   empty: "No machines added yet."
   disconnect: "Disconnect"
@@ -1414,13 +1415,13 @@ hosts:
     needs_migration: "Its data has to be upgraded first. Quit Tcode and open it again."
     retry: "Retry"
   invite:
-    section: "LET OTHER DEVICES CONNECT"
     description: "Scan this QR code in Tcode on another device, or paste the invitation link there. Pairing connects at once."
     disabled: "Remote access is off."
     pairing_off: "This machine is not accepting new devices."
     open_settings: "Remote settings"
   pair:
     title: "ADD A MACHINE"
+    page_title: "Add a machine"
     action: "Connect"
     description: "Paste the invitation link the machine shows on its Machines page. Pairing connects at once."
     invitation: "Invitation link"

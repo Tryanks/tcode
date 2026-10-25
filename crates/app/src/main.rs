@@ -362,11 +362,8 @@ impl LocalKernel {
             local_settings.clone(),
         ));
         if local_settings.remote_hosting_enabled {
-            let name = local_settings
-                .remote_host_name
-                .clone()
-                .unwrap_or_else(machine_name);
             cx.update_global::<RemoteController, _>(|controller, _| {
+                let name = controller.machine_name();
                 if let Err(error) = controller.start_hosting(&local_settings.traverse, name) {
                     log::error!("remote hosting could not start: {error}");
                 }
