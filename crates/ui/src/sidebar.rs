@@ -1772,39 +1772,37 @@ impl SessionsSidebar {
     }
 
     /// The machine this window is on, as the control that leads to Machines:
-    /// a bordered control at the top of the wide sidebar, so it never reads
-    /// as a caption. Compact has none; Machines is the root its Back returns
-    /// to.
+    /// a bordered two-line entry at the top of the wide sidebar, so it reads
+    /// as a device to pick and never as a caption. Compact has none; Machines
+    /// is the root its Back returns to.
     fn render_machine_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.window_state.read(cx).route() == Route::Hosts;
         let store = self.store.read(cx);
         let connection_state = store.connection_state();
         let dot = cx.theme().connection_color(&connection_state);
-        // A remote link has a machine to name and a state to report on
-        // hover; this machine is named after itself.
-        let remote = store.remote_host_name().map(|_| {
-            (
-                SharedString::from(store.machine_label()),
-                SharedString::from(crate::remote::connection_label(&connection_state)),
-            )
-        });
-        let (title, detail): (SharedString, Option<SharedString>) = match &remote {
-            Some((host, _)) => (host.clone(), None),
-            None => {
-                #[cfg(feature = "remote-hosting")]
-                let name = Some(crate::remote::machine_name())
-                    .filter(|name| !name.trim().is_empty())
-                    .map(SharedString::from);
-                #[cfg(not(feature = "remote-hosting"))]
-                let name = None;
-                (crate::tr!("hosts.this_computer").into_owned().into(), name)
-            }
+        let this_machine: SharedString = crate::tr!("hosts.this_computer").into_owned().into();
+        // A remote machine is named with the state of the link to it; this
+        // machine with its own name over "This machine".
+        let (name, detail): (SharedString, Option<SharedString>) = match store.remote_host_name() {
+            Some(_) => (
+                store.machine_label().into(),
+                Some(crate::remote::connection_label(&connection_state).into()),
+            ),
+            None => match crate::remote::local_machine_name(cx) {
+                Some(name) => (name.into(), Some(this_machine)),
+                None => (this_machine, None),
+            },
         };
+        let tooltip = store
+            .remote_host_name()
+            .is_some()
+            .then(|| (name.clone(), detail.clone().unwrap_or_default()));
         let control = Button::new("sidebar-hosts")
             .ghost()
             .outline()
             .selected(active)
             .w_full()
+            .with_size(px(crate::material::selectable_row_two_line_height(false)))
             .aria_label(crate::tr!("hosts.title"))
             .debug_selector(|| "sidebar-feature-hosts".into())
             .on_click(cx.listener(|this, _, _, cx| {
@@ -1817,21 +1815,23 @@ impl SessionsSidebar {
                     .min_w_0()
                     .gap(cx.theme().tokens.spacing.sm)
                     .items_center()
-                    .text_body(false, cx)
                     .child(crate::material::status_dot(dot))
                     .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(crate::widgets::fade_text(title)),
-                    )
-                    .child(
-                        div()
+                        v_flex()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .text_secondary(false, cx)
-                            .children(detail.map(crate::widgets::fade_text)),
+                            .child(
+                                div()
+                                    .text_body(false, cx)
+                                    .overflow_hidden()
+                                    .child(crate::widgets::fade_text(name)),
+                            )
+                            .children(detail.map(|detail| {
+                                div()
+                                    .text_secondary(false, cx)
+                                    .overflow_hidden()
+                                    .child(crate::widgets::fade_text(detail))
+                            })),
                     )
                     .child(
                         Icon::new(IconName::ChevronRight)
@@ -1841,7 +1841,7 @@ impl SessionsSidebar {
             );
         // The control truncates a long machine or space name; the tooltip
         // carries it whole, above the link's state.
-        let control = match remote {
+        let control = match tooltip {
             Some((host, connection)) => {
                 gpui::StatefulInteractiveElement::tooltip(control, move |window, cx| {
                     let (host, connection) = (host.clone(), connection.clone());

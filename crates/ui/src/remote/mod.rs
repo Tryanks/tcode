@@ -129,6 +129,20 @@ impl ClientAttachment {
     }
 }
 
+/// The name of the machine this process hosts, where it hosts one.
+pub(crate) fn local_machine_name(cx: &App) -> Option<String> {
+    #[cfg(feature = "remote-hosting")]
+    {
+        cx.try_global::<RemoteController>()
+            .map(RemoteController::machine_name)
+    }
+    #[cfg(not(feature = "remote-hosting"))]
+    {
+        let _ = cx;
+        None
+    }
+}
+
 /// Open a *client-local* path in the user's editor through whatever integration
 /// this client was given. `None` when it has none.
 pub(crate) fn open_in_editor(path: &std::path::Path, cx: &App) -> Option<Result<(), String>> {

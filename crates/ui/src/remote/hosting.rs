@@ -74,6 +74,16 @@ impl RemoteController {
         &self.local_settings
     }
 
+    /// The name this machine goes by: the one set in Settings → Remote, else
+    /// the device's own.
+    pub fn machine_name(&self) -> String {
+        self.local_settings
+            .remote_host_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(machine_name)
+    }
+
     pub fn save_hosting_settings(
         &mut self,
         enabled: bool,

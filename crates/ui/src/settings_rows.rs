@@ -44,6 +44,18 @@ pub fn content_column(column: gpui::Div, compact: bool, cx: &App) -> gpui::Div {
         .child(column.w(px(CONTENT_MAX_WIDTH)).max_w_full())
 }
 
+/// The top strip of a page whose body is a [`content_column`]: the body's
+/// inset, so its [`content_header_column`] stays over the content at every
+/// width.
+pub fn content_header(strip: gpui_base::Toolbar, cx: &App) -> gpui_base::Toolbar {
+    strip.px(cx.theme().tokens.spacing.xl).justify_center()
+}
+
+/// The column inside a [`content_header`], as wide as the content below it.
+pub fn content_header_column() -> gpui::Div {
+    h_flex().w(px(CONTENT_MAX_WIDTH)).max_w_full()
+}
+
 /// A captioned group of settings rows: the unit every settings page is
 /// composed of.
 pub fn settings_group(

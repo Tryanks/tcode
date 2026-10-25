@@ -1594,16 +1594,15 @@ fn nav_bar(
     // own controls out of the content and stays draggable by its top strip.
     let traffic_lights = window_caption::traffic_light_inset(window);
     let hosts_caption = window_caption::compact_hosts_caption();
-    // The 44pt controls keep their glyphs clear of the edge inside their own hit
-    // box, so the strip takes the dense inset, not the page inset.
-    let spacing = &cx.theme().tokens.spacing;
-    let (column_gap, control_gap) = (spacing.md, spacing.xs);
+    let (dense, tight) = (cx.theme().tokens.spacing.sm, cx.theme().tokens.spacing.xs);
+    // The sides carry the strip's insets themselves, so their floor is
+    // measured from the window's edge (or the platform's controls). The 44pt
+    // controls keep their glyphs clear of the edge inside their own hit box,
+    // so the inset is the dense one, not the page inset.
     let strip = crate::material::bar("compact-nav", crate::material::Bar::Strip, false, cx)
-        .gap(column_gap)
-        .when(traffic_lights > Pixels::ZERO, |strip| {
-            strip.pl(traffic_lights)
-        })
-        .when(hosts_caption, |strip| strip.pr_0());
+        .px_0()
+        .gap(Pixels::ZERO)
+        .pl(traffic_lights);
     v_flex()
         .flex_none()
         .w_full()
@@ -1621,6 +1620,8 @@ fn nav_bar(
                         .min_w(px(NAV_CONTROL_WIDTH))
                         .h_full()
                         .items_center()
+                        .when(traffic_lights == Pixels::ZERO, |side| side.pl(dense))
+                        .pr(tight)
                         .children(back)
                         .child(window_caption::drag_region(div().flex_1().h_full())),
                 )
@@ -1647,7 +1648,8 @@ fn nav_bar(
                         .h_full()
                         .items_center()
                         .justify_end()
-                        .gap(control_gap)
+                        .gap(tight)
+                        .when(!hosts_caption, |side| side.pr(dense))
                         .child(window_caption::drag_region(div().flex_1().h_full()))
                         .children(actions)
                         .children(
@@ -2649,28 +2651,40 @@ impl AppShell {
             false,
             RightTab::Diff,
         );
-        let title: SharedString = if self.destination(cx) == Destination::Pair {
+        let pairing = self.destination(cx) == Destination::Pair;
+        let title: SharedString = if pairing {
             crate::tr!("hosts.pair.page_title").into_owned().into()
         } else {
             crate::tr!("hosts.title").into_owned().into()
         };
+        // Machines is a root the sidebar switches to; Pair is pushed over it,
+        // so only Pair has somewhere to go back to.
+        let back = pairing.then(|| {
+            back_button("hosts-back", Destination::Hosts.back_label())
+                .debug_selector(|| "hosts-back".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.window_state
+                        .update(cx, |state, cx| state.close_pair(cx));
+                }))
+        });
         window_drag_area(
             "hosts-header-drag",
-            crate::material::bar("hosts-header", crate::material::Bar::Strip, false, cx)
-                // The body's inset, so the title stays over the content column at every width.
-                .px(cx.theme().tokens.spacing.xl)
-                .justify_center()
-                .when(hosts_caption, |strip| strip.relative()),
+            crate::settings_rows::content_header(
+                crate::material::bar("hosts-header", crate::material::Bar::Strip, false, cx),
+                cx,
+            )
+            .when(hosts_caption, |strip| strip.relative()),
             window,
             cx,
         )
         .child(
-            h_flex()
-                .w(px(crate::settings_rows::CONTENT_MAX_WIDTH))
-                .max_w_full()
+            crate::settings_rows::content_header_column()
+                .items_center()
+                .gap(cx.theme().tokens.spacing.xs)
                 .when(hosts_caption, |column| {
                     column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
                 })
+                .children(back)
                 .child(window_caption::drag_region(crate::material::bar_title(
                     title, cx,
                 ))),
@@ -6576,6 +6590,35 @@ mod tests {
                 "settings returns to the page it was opened from"
             );
         });
+    }
+
+    /// Wide, the pairing page is pushed over Machines, and its header's Back
+    /// returns to Machines rather than leaving the Hosts route; Machines, a
+    /// root the sidebar switches to, has no Back.
+    #[gpui::test]
+    fn the_wide_pair_page_goes_back_to_machines(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        draw(cx);
+        assert!(
+            cx.debug_bounds("hosts-back").is_none(),
+            "Machines is a root"
+        );
+        state.update(cx, |state, cx| state.go(Destination::Pair, cx));
+        draw(cx);
+        let back = cx
+            .debug_bounds("hosts-back")
+            .expect("the pairing page offers Back");
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.destination(cx)),
+            Destination::Hosts
+        );
+        assert!(cx.debug_bounds("hosts-route").is_some());
     }
 
     /// A store selection can come from the sidebar or palette. In wide layout

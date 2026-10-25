@@ -36,7 +36,7 @@ use crate::window_state::WindowState;
 use tcode_core::project::SessionMeta;
 use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
 
-use crate::settings_rows::{CONTENT_MAX_WIDTH, FIELD_WIDTH, SelectRowOption, ToggleRow};
+use crate::settings_rows::{FIELD_WIDTH, SelectRowOption, ToggleRow};
 
 const NAV_WIDTH: f32 = 255.;
 /// Archived rows rendered per page. Each row carries two buttons with click
@@ -901,14 +901,7 @@ impl SettingsPage {
                 let name = if store.is_remote() {
                     store.remote_host_name().map(str::to_owned)
                 } else {
-                    #[cfg(feature = "remote-hosting")]
-                    {
-                        Some(crate::remote::machine_name())
-                    }
-                    #[cfg(not(feature = "remote-hosting"))]
-                    {
-                        None
-                    }
+                    crate::remote::local_machine_name(cx)
                 }
                 .filter(|name| !name.trim().is_empty());
                 // A member manages none of the machine's settings; what this
@@ -1167,18 +1160,16 @@ impl SettingsPage {
         // Align the header title and actions with the centered content column.
         window_drag_area(
             "settings-header-drag",
-            crate::material::bar("settings-header", crate::material::Bar::Strip, false, cx)
-                // The body's inset, so the title stays over the content column at every width.
-                .px(cx.theme().tokens.spacing.xl)
-                .justify_center()
-                .when(hosts_caption, |strip| strip.relative()),
+            crate::settings_rows::content_header(
+                crate::material::bar("settings-header", crate::material::Bar::Strip, false, cx),
+                cx,
+            )
+            .when(hosts_caption, |strip| strip.relative()),
             window,
             cx,
         )
         .child(
-            gpui_base::h_flex()
-                .w(px(CONTENT_MAX_WIDTH))
-                .max_w_full()
+            crate::settings_rows::content_header_column()
                 .when(hosts_caption, |column| {
                     column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
                 })
