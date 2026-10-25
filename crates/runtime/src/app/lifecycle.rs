@@ -386,14 +386,6 @@ impl AppState {
         if parent_changed {
             self.thread_activity.remove(&meta.id);
         }
-        let discover = self
-            .sessions
-            .iter()
-            .find(|old| old.id == meta.id)
-            .is_none_or(|old| {
-                (old.archived_at.is_some() && meta.archived_at.is_none())
-                    || (old.is_settled() && !meta.is_settled())
-            });
         self.advance_decision_revision(&meta.id);
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
@@ -403,9 +395,6 @@ impl AppState {
             cx,
         );
         self.upsert_session_in_memory(meta.clone());
-        if discover {
-            self.discover_pull_requests_for(&meta.id, true, cx);
-        }
         let id = meta.id.clone();
         let former_parent =
             old_parent.filter(|parent| Some(parent) != meta.parent_session_id.as_ref());

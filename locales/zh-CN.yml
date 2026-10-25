@@ -1722,7 +1722,6 @@ pull_requests:
   source_stack: "在堆叠中发现"
   source_dismissed: "已移除"
   source_not_linked: "在堆叠中，未关联"
-  source_branch: "在此对话的分支上，未关联"
   number_tooltip: "%{source} · %{ago}"
   waiting_for_host: "等待主机状态"
   conflict: "与 %{base} 存在冲突"

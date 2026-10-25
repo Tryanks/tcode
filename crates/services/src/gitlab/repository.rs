@@ -2,7 +2,6 @@
 //! project's full path below it, subgroups included.
 
 use crate::forge::Repository;
-use std::path::Path;
 use tcode_core::pull_request::{HostKind, PullRequestKey, dns_name, host_name};
 
 fn component(value: &str) -> bool {
@@ -142,16 +141,6 @@ pub(super) fn resolve(
     checkout: &crate::forge::Checkout<'_>,
 ) -> Option<Repository> {
     crate::forge::checkout::resolve(checkout, |url| remote(known, url))
-}
-
-/// The checked-out branch and the project and branch a merge request from it names as its
-/// source.
-pub(super) fn branch(
-    known: &[String],
-    root: &crate::forge::Checkout<'_>,
-    cwd: &Path,
-) -> Option<crate::forge::checkout::Branch> {
-    crate::forge::checkout::branch(root, cwd, |url| remote(known, url))
 }
 
 #[cfg(test)]
