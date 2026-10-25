@@ -716,6 +716,7 @@ impl PiActor {
         self.events
             .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
                 id: id.to_owned(),
+                parent_item_id: None,
                 turn_id: self.mapper.current_turn.clone(),
                 kind: if payload.is_null() {
                     ApprovalKind::ToolUse {

@@ -772,6 +772,13 @@ impl AppState {
         event: AgentEvent,
         cx: &mut HostCx,
     ) {
+        if let Some(session) = self.resident_mut(session_id)
+            && matches!(session.runtime, Runtime::Idle)
+        {
+            let (commands, receiver) = smol::channel::unbounded();
+            smol::spawn(async move { while receiver.recv().await.is_ok() {} }).detach();
+            session.runtime = Runtime::Live(commands);
+        }
         self.on_event(session_id, event, cx);
     }
 

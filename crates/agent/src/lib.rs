@@ -2289,6 +2289,10 @@ pub fn file_changes_from_unified_diff(diff: &str) -> Result<Vec<FileChange>, Str
 pub struct ApprovalRequest {
     pub id: String,
     pub turn_id: Option<String>,
+    /// Spawn item of the subagent that asked. A background subagent outlives
+    /// the turn that spawned it, so its request stays open past that turn's end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_item_id: Option<String>,
     pub kind: ApprovalKind,
     /// The provider's native choices for this request, in provider order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

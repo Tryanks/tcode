@@ -4164,6 +4164,7 @@ fn child_native_approval_callback_and_approve_tool_preserve_options_and_scope() 
                 ]
             };
             state.on_event("child", AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                parent_item_id: None,
                 id: request_id.clone(), turn_id: None,
                 kind: agent::ApprovalKind::ToolUse { name: "mcp__tcode_report__report_result".into(), input: serde_json::json!({}), detail: "Native MCP consent".into() },
                 options: options.clone(),
@@ -4215,6 +4216,7 @@ fn child_native_approval_callback_and_approve_tool_preserve_options_and_scope() 
         ] {
             let request_id = format!("automatic-{n}");
             state.on_event("child", AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                parent_item_id: None,
                 id: request_id.clone(), turn_id: None,
                 kind: agent::ApprovalKind::ExecCommand { command: "cargo check".into(), cwd: None, reason: None },
                 options: kinds.into_iter().enumerate().map(|(i, kind)| agent::ApprovalOption { id: format!("native-{i}"), label: "Native choice".into(), kind }).collect(),
@@ -9116,7 +9118,7 @@ fn interrupt_reports_stopping_until_the_turn_completes() {
 }
 
 #[test]
-fn status_carries_the_running_turn_and_its_question_only_while_in_flight() {
+fn status_carries_the_running_turn_while_in_flight_and_open_requests_while_live() {
     let store = TestStore::new("status-running-turn");
     let mut state = AppState::new((*store).clone()).unwrap();
     let context = TestAppContext::default();
@@ -9168,12 +9170,81 @@ fn status_carries_the_running_turn_and_its_question_only_while_in_flight() {
         Some("ask".into())
     );
 
-    // Shut down without a closing record: the timeline still holds both.
+    // A background subagent keeps running, and asking, after the turn that
+    // spawned it ends; the turn's own requests end with it.
+    let approval = |id: &str, parent_item_id: Option<&str>| agent::ApprovalRequest {
+        id: id.into(),
+        turn_id: None,
+        parent_item_id: parent_item_id.map(Into::into),
+        kind: agent::ApprovalKind::ExecCommand {
+            command: "cp a b".into(),
+            cwd: None,
+            reason: None,
+        },
+        options: Vec::new(),
+    };
+    for request in [
+        approval("own", None),
+        approval("subagent-during-turn", Some("toolu_agent")),
+    ] {
+        state.on_event(&id, AgentEvent::ApprovalRequested(request), &mut cx);
+    }
+    state.on_event(
+        &id,
+        AgentEvent::TurnCompleted {
+            turn_id: "turn-2".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        },
+        &mut cx,
+    );
+    state.on_event(
+        &id,
+        AgentEvent::ApprovalRequested(approval("subagent-between-turns", Some("toolu_agent"))),
+        &mut cx,
+    );
+    let pending = |state: &AppState| {
+        state
+            .session_status_snapshot(&id)
+            .unwrap()
+            .pending_approvals
+            .into_iter()
+            .map(|request| request.id)
+            .collect::<Vec<_>>()
+    };
+    let status = state.session_status_snapshot(&id).unwrap();
+    assert_eq!(status.running_turn, None);
+    assert_eq!(status.pending_user_input, None);
+    assert_eq!(
+        pending(&state),
+        ["subagent-during-turn", "subagent-between-turns"]
+    );
+    assert!(status.activity.waiting_for_approval);
+
+    // Shut down without a closing record: the timeline still holds the turn
+    // and its question.
+    state.on_event(
+        &id,
+        AgentEvent::TurnStarted {
+            turn_id: "turn-3".into(),
+        },
+        &mut cx,
+    );
+    state.on_event(
+        &id,
+        AgentEvent::UserInputRequested {
+            request_id: "ask-again".into(),
+            questions: Vec::new(),
+            delivery: agent::UserInputDelivery::Blocking,
+        },
+        &mut cx,
+    );
     state.resident_mut(&id).unwrap().shutdown_to_idle();
     assert!(state.resident(&id).unwrap().timeline.turn_running);
     let status = state.session_status_snapshot(&id).unwrap();
     assert_eq!(status.running_turn, None);
     assert_eq!(status.pending_user_input, None);
+    assert!(status.pending_approvals.is_empty());
 }
 
 /// Times the initial snapshot plus the pages a client fetches while scrolling
@@ -11266,6 +11337,7 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
         (
             AgentEvent::ApprovalRequested(agent::ApprovalRequest {
                 id: "approval".into(),
+                parent_item_id: None,
                 turn_id: None,
                 kind: agent::ApprovalKind::ToolUse {
                     name: "shell".into(),

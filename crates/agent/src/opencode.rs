@@ -750,6 +750,7 @@ impl OpenCodeMapper {
             "permission.asked" | "permission.updated" | "permission.v2.asked" => {
                 if let Some(request) = map_permission(properties) {
                     let request = ApprovalRequest {
+                        parent_item_id: None,
                         turn_id: self.active_turn.clone(),
                         ..request
                     };
@@ -1097,6 +1098,7 @@ fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
     };
     Some(ApprovalRequest {
         id,
+        parent_item_id: None,
         turn_id: None,
         kind,
         options: vec![

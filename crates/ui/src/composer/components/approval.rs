@@ -297,6 +297,7 @@ mod tests {
                 },
                 agent::AgentEvent::ApprovalRequested(ApprovalRequest {
                     id: "patch".into(),
+                    parent_item_id: None,
                     turn_id: None,
                     kind: ApprovalKind::FileChange {
                         changes,

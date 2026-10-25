@@ -940,8 +940,10 @@ impl Timeline {
                 if usage.is_some() {
                     self.usage = usage;
                 }
-                // A finished turn can no longer be waiting on approvals or input.
-                self.pending_approvals.clear();
+                // A finished turn can no longer be waiting on approvals or input;
+                // a background subagent it spawned still can.
+                self.pending_approvals
+                    .retain(|request| request.parent_item_id.is_some());
                 self.pending_user_input = None;
             }
             AgentEvent::ItemStarted(item) => {
@@ -2364,6 +2366,7 @@ mod tests {
             None,
             &AgentEvent::ApprovalRequested(ApprovalRequest {
                 id: "41".into(),
+                parent_item_id: None,
                 turn_id: Some("turn-1".into()),
                 kind: ApprovalKind::FileChange {
                     changes: changes.clone(),
@@ -2672,6 +2675,7 @@ mod tests {
             None,
             &AgentEvent::ApprovalRequested(ApprovalRequest {
                 id: "req".into(),
+                parent_item_id: None,
                 turn_id: None,
                 kind: ApprovalKind::ExecCommand {
                     command: "rm -rf /".into(),
