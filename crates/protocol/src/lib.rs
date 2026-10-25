@@ -228,7 +228,9 @@ pub use wire::{
 // command, and Interrupt no longer pauses a thread's watches between turns.
 //
 // Unreleased: SessionMeta drops branch_pull_request; a thread shows only the
-// pull requests linked to it.
+// pull requests linked to it. ApprovalRequest carries parent_item_id, the
+// subagent that asked, and SessionStatus carries pending approvals and input
+// while the provider is live, not only during a turn.
 pub const PROTOCOL_VERSION: u32 = 20;
 
 #[cfg(test)]

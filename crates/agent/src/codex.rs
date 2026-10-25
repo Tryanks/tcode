@@ -1661,6 +1661,7 @@ impl Actor {
         self.events
             .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
                 id: request_id,
+                parent_item_id: None,
                 turn_id: params
                     .get("turnId")
                     .and_then(Value::as_str)
@@ -2069,6 +2070,7 @@ impl Actor {
         self.events
             .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
                 id: key,
+                parent_item_id: None,
                 turn_id,
                 kind,
                 options,
@@ -2149,6 +2151,7 @@ impl Actor {
             self.events
                 .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
                     id: request_id,
+                    parent_item_id: None,
                     turn_id: params
                         .get("turnId")
                         .and_then(Value::as_str)
