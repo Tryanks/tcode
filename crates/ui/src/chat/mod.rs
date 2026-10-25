@@ -65,6 +65,8 @@ pub(crate) struct RewindTurn {
     pub(crate) mode: RewindMode,
 }
 
+gpui::actions!(tcode_chat, [OpenMoveThreadDialog]);
+
 /// A changed-file chip's context-menu "View diff".
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_chat, no_json)]
@@ -1416,6 +1418,7 @@ impl ChatView {
                         from_provider,
                         to_provider,
                         prompt,
+                        moved_from,
                         ..
                     } = &entry.content
                     else {
@@ -1425,6 +1428,7 @@ impl ChatView {
                         &entry.id,
                         *from_provider,
                         *to_provider,
+                        moved_from.as_deref(),
                         cx,
                     ));
                     if let Some(prompt) = prompt {
@@ -2614,6 +2618,17 @@ impl ChatView {
         }
     }
 
+    fn on_move_thread_dialog(
+        &mut self,
+        _: &OpenMoveThreadDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.workspace_store.read(cx).active_session_id() {
+            crate::move_thread_dialog::open(self.workspace_store.clone(), id, window, cx);
+        }
+    }
+
     fn on_show_agent_tools(
         &mut self,
         _: &crate::pull_requests::ShowAgentTools,
@@ -2768,6 +2783,14 @@ impl ChatView {
             .read(cx)
             .session_status()
             .is_some_and(|status| status.injected_tools.is_some());
+        let movable = !is_draft && {
+            let store = self.workspace_store.read(cx);
+            let active = store.active_session_id();
+            store
+                .sidebar_sessions()
+                .iter()
+                .any(|meta| Some(&meta.id) == active.as_ref() && meta.worktree.is_none())
+        };
         let title_menu = {
             let title = title.clone();
             let cwd = cwd.clone();
@@ -2784,6 +2807,12 @@ impl ChatView {
                         crate::tr!("pull_requests.link_menu").into_owned(),
                         Box::new(crate::pull_requests::OpenLinkDialog),
                     )
+                    .when(movable, |menu| {
+                        menu.menu(
+                            crate::tr!("sidebar.ctx_move_thread").into_owned(),
+                            Box::new(OpenMoveThreadDialog),
+                        )
+                    })
                     .when(agent_tools, |menu| {
                         menu.menu(
                             crate::tr!("pull_requests.agent_sees").into_owned(),
@@ -3638,6 +3667,7 @@ impl Render for ChatView {
                 crate::material::canvas(cx)
             })
             .on_action(cx.listener(Self::on_link_dialog))
+            .on_action(cx.listener(Self::on_move_thread_dialog))
             .on_action(cx.listener(Self::on_show_agent_tools));
 
         if self.workspace_store.read(cx).chat_loading() {

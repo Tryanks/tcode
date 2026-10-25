@@ -7,6 +7,7 @@ chat:
   discard_delivery: "丢弃"
   history_record_too_large: 一条历史记录超过了 8 MiB 的响应大小限制。
   relayed: "已从 %{from} 接力至 %{to}"
+  moved: "已从 %{from} 移入此目录，%{to} 以新会话继续"
   relay_handoff: "发送给 %{to} 的接力内容"
   model_changed: "模型已切换：%{from} → %{to}"
   model_changed_to: "模型已切换至 %{to}"
@@ -270,6 +271,12 @@ sidebar:
   ctx_regenerating_title: "正在重新生成…"
   ctx_fork: "分叉对话"
   ctx_merge_worktree: "合并回主检出目录"
+  ctx_move_thread: "移动到项目…"
+  move_thread_title: "移动到项目"
+  move_thread_confirm: "提供商会话将在新项目的目录中重新启动，并接收到目前为止的对话接力内容。此对话的记录保持不变。"
+  move_thread_action: "移动"
+  move_thread_empty: "没有可移入的其他项目，请先添加项目。"
+  move_thread_failed: "无法移动此对话：%{reason}"
   fork_title_suffix: "（分叉）"
   fork_unsupported: "此提供商不支持分叉对话。"
   fork_empty: "此对话为空，无法分叉。"
@@ -2481,6 +2488,7 @@ control:
     git_publish_branch: "发布分支"
     git_initialize: "初始化 git"
     create_project: "创建项目"
+    move: "移动到其他项目"
     reference: "引用对话"
   settings:
     enabled: "允许智能体操作 Tcode"

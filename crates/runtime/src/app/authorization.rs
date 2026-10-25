@@ -294,6 +294,18 @@ impl AppState {
                 | Command::MarkSessionUnread { session_id }
                 | Command::WriteRelaunchMarker { session_id, .. } => session(session_id),
                 Command::ForkThread { id } => session(id),
+                // A space may move its threads only between its own projects.
+                Command::MoveSession {
+                    session_id,
+                    project_id,
+                    ..
+                } => {
+                    session(session_id)?;
+                    project_ids
+                        .contains(project_id)
+                        .then_some(())
+                        .ok_or_else(|| refusal("project"))
+                }
                 // A reference lets the thread's model read the referenced thread, so a space
                 // may only point at threads it can read itself.
                 Command::AddThreadReference {
