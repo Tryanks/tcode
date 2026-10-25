@@ -1,8 +1,8 @@
 use super::*;
 use crate::app::orchestrate::PullRequestRegistration;
 use tcode_core::pull_request::{
-    self, BranchPullRequest, PullRequestKey, PullRequestSnapshot, PullRequestSource,
-    PullRequestStackState, PullRequestState, PullRequestSyncError,
+    self, PullRequestKey, PullRequestSnapshot, PullRequestSource, PullRequestStackState,
+    PullRequestState, PullRequestSyncError,
 };
 use tcode_protocol::{
     CommandResponse, ProtocolError, PullRequestAction, PullRequestActionResult, PullRequestRead,
@@ -18,15 +18,6 @@ pub(super) struct PullRequestRuntime {
     paused: HashMap<(Option<String>, String), SystemTime>,
     syncing: bool,
     sync_scheduled: bool,
-    discovering: bool,
-    /// Threads triggered during a discovery pass, each with the refresh its triggers asked for.
-    discover_again: HashMap<String, bool>,
-    /// The checkout and project root of every discovery read in flight; each
-    /// runs git in both.
-    discovery_reads: Vec<(PathBuf, PathBuf)>,
-    /// Project roots being moved, each with the move's wait for the discovery
-    /// reads in it to end while any is in flight.
-    moving_roots: Vec<(PathBuf, Option<smol::channel::Sender<()>>)>,
     merge_commands: HashSet<String>,
     pub(super) workers: Vec<HostTask<()>>,
     /// Stacks with a write submitted and not yet answered.
@@ -45,69 +36,12 @@ impl PullRequestRuntime {
             paused: HashMap::new(),
             syncing: false,
             sync_scheduled: false,
-            discovering: false,
-            discover_again: HashMap::new(),
-            discovery_reads: Vec::new(),
-            moving_roots: Vec::new(),
             merge_commands: HashSet::new(),
             workers: Vec::new(),
             stack_writes: HashSet::new(),
             submissions: 0,
         }
     }
-
-    /// Keep discovery out of `root` until [`Self::end_root_move`]. Windows
-    /// refuses to rename a directory that is a process's current directory,
-    /// so the move waits until the receiver closes: when no discovery read
-    /// in flight runs git in `root`.
-    pub(super) fn begin_root_move(&mut self, root: PathBuf) -> smol::channel::Receiver<()> {
-        let (waiting, reads_ended) = smol::channel::bounded(1);
-        let waiting = reading_in(&self.discovery_reads, &root).then_some(waiting);
-        self.moving_roots.push((root, waiting));
-        reads_ended
-    }
-
-    pub(super) fn end_root_move(&mut self, root: &Path) {
-        if let Some(index) = self
-            .moving_roots
-            .iter()
-            .position(|(moving, _)| moving == root)
-        {
-            self.moving_roots.remove(index);
-        }
-    }
-
-    /// Admit a discovery read unless it would run git in a moving root.
-    fn begin_discovery_read(&mut self, cwd: &Path, root: &Path) -> bool {
-        let moving = self
-            .moving_roots
-            .iter()
-            .any(|(moving, _)| cwd.starts_with(moving) || root.starts_with(moving));
-        if !moving {
-            self.discovery_reads.push((cwd.to_owned(), root.to_owned()));
-        }
-        !moving
-    }
-
-    fn end_discovery_read(&mut self, cwd: &Path, root: &Path) {
-        if let Some(index) = self
-            .discovery_reads
-            .iter()
-            .position(|read| read.0 == cwd && read.1 == root)
-        {
-            self.discovery_reads.remove(index);
-        }
-        for (moving, waiting) in &mut self.moving_roots {
-            if !reading_in(&self.discovery_reads, moving) {
-                *waiting = None;
-            }
-        }
-    }
-}
-fn reading_in(reads: &[(PathBuf, PathBuf)], dir: &Path) -> bool {
-    reads
-        .iter()
-        .any(|(cwd, root)| cwd.starts_with(dir) || root.starts_with(dir))
 }
 struct SyncGroup {
     key: PullRequestKey,
@@ -424,13 +358,7 @@ impl AppState {
         key: &PullRequestKey,
     ) -> Result<(), ProtocolError> {
         self.find_meta(session_id)
-            .filter(|meta| {
-                pull_request::shown(
-                    &meta.pull_requests,
-                    meta.branch_pull_request.as_deref(),
-                    key,
-                )
-            })
+            .filter(|meta| pull_request::shown(&meta.pull_requests, key))
             .map(|_| ())
             .ok_or_else(|| ProtocolError {
                 code: "pull_request_not_linked".into(),
@@ -879,9 +807,6 @@ impl AppState {
             resident.pull_requests.clone_from(&meta.pull_requests);
             resident.pull_request_watches_paused = meta.pull_request_watches_paused;
             resident
-                .branch_pull_request
-                .clone_from(&meta.branch_pull_request);
-            resident
                 .pull_request_reviews
                 .clone_from(&meta.pull_request_reviews);
             resident
@@ -917,47 +842,6 @@ impl AppState {
             self.request_pull_request_sync(key, cx);
         }
         Ok(())
-    }
-    /// What discovery found on the thread's checkout branch, `None` when it has no pull
-    /// request: shown, read and settled on, never linked.
-    fn apply_branch_pull_request(
-        &mut self,
-        id: &str,
-        found: Option<(PullRequestKey, String)>,
-        cx: &mut HostCx,
-    ) {
-        let Some(mut meta) = self.find_meta(id) else {
-            return;
-        };
-        if meta.native_subagent.is_some() {
-            return;
-        }
-        let previous = meta.branch_pull_request.as_deref();
-        let branch = match found {
-            Some((key, _)) if previous.is_some_and(|branch| branch.key == key) => return,
-            Some((key, url)) => Some(Box::new(BranchPullRequest {
-                key,
-                url,
-                snapshot: None,
-            })),
-            None if previous.is_none() => return,
-            // A thread in the project root keeps the pull request it ended once the checkout
-            // leaves its branch, so the merge or close still settles it.
-            None if meta.worktree.is_none()
-                && previous
-                    .and_then(|branch| branch.snapshot.as_ref())
-                    .is_some_and(|snapshot| snapshot.state != PullRequestState::Open) =>
-            {
-                return;
-            }
-            None => None,
-        };
-        let read = branch.as_ref().map(|branch| branch.key.clone());
-        meta.branch_pull_request = branch;
-        self.save_pull_request_meta(meta, cx);
-        if let Some(key) = read {
-            self.request_pull_request_sync(key, cx);
-        }
     }
     pub fn unlink_pull_request(&mut self, id: &str, key: &PullRequestKey, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id) else {
@@ -1008,26 +892,18 @@ impl AppState {
         self.stop_pull_request_watch_worker();
     }
     pub(crate) fn start_pull_request_workers(&mut self, cx: &mut HostCx) {
-        for discovery in [false, true] {
-            let host = cx.clone();
-            let task = cx.spawn_background(async move {
-                loop {
-                    let task = host
-                        .enqueue_and_wait(move |state, cx| {
-                            if discovery {
-                                state.discover_pull_requests(None, cx)
-                            } else {
-                                state.sweep_pull_requests(false, cx)
-                            }
-                        })
-                        .await;
-                    let Ok(task) = task else { break };
-                    task.await;
-                    smol::Timer::after(Duration::from_secs(60)).await;
-                }
-            });
-            self.pull_requests.workers.push(task);
-        }
+        let host = cx.clone();
+        let task = cx.spawn_background(async move {
+            loop {
+                let task = host
+                    .enqueue_and_wait(|state, cx| state.sweep_pull_requests(false, cx))
+                    .await;
+                let Ok(task) = task else { break };
+                task.await;
+                smol::Timer::after(Duration::from_secs(60)).await;
+            }
+        });
+        self.pull_requests.workers.push(task);
         self.resume_stack_operations(cx);
         self.start_pull_request_watch_worker(cx);
     }
@@ -1059,13 +935,7 @@ impl AppState {
                 .iter()
                 .filter(|link| link.visible())
                 .map(|link| (&link.key, &link.snapshot, link.stack.clone()));
-            // The branch's pull request is read for its own snapshot, never for a stack to link.
-            let branch = meta
-                .branch_pull_request
-                .iter()
-                .filter(|branch| !pull_request::shown(&meta.pull_requests, None, &branch.key))
-                .map(|branch| (&branch.key, &branch.snapshot, PullRequestStackState::None));
-            for (key, snapshot, stack) in links.chain(branch) {
+            for (key, snapshot, stack) in links {
                 let group = groups.entry(key.clone()).or_insert_with(|| SyncGroup {
                     key: key.clone(),
                     projects: Vec::new(),
@@ -1279,19 +1149,6 @@ impl AppState {
                 .iter()
                 .find(|link| link.key == key && link.visible())
             else {
-                if let Some(branch) = meta
-                    .branch_pull_request
-                    .as_mut()
-                    .filter(|branch| branch.key == key)
-                    && branch
-                        .snapshot
-                        .as_ref()
-                        .is_none_or(|s| !s.same_observation(&summary.snapshot))
-                {
-                    branch.snapshot = Some(summary.snapshot.clone());
-                    self.save_pull_request_meta(meta, cx);
-                    self.evaluate_thread_settlement(&id, cx);
-                }
                 continue;
             };
             let stack = stack.clone().unwrap_or_else(|| link.stack.clone());
@@ -1352,136 +1209,6 @@ impl AppState {
             self.evaluate_thread_settlement(&id, cx);
         }
     }
-    /// `None` sweeps every eligible thread without refresh; otherwise each listed thread
-    /// is discovered with the refresh its trigger asked for.
-    pub(super) fn discover_pull_requests(
-        &mut self,
-        threads: Option<HashMap<String, bool>>,
-        cx: &mut HostCx,
-    ) -> HostTask<()> {
-        if self.pull_requests.discovering {
-            for (thread, refresh) in threads.into_iter().flatten() {
-                *self.pull_requests.discover_again.entry(thread).or_default() |= refresh;
-            }
-            return cx.spawn_background(async {});
-        }
-        self.pull_requests.discovering = true;
-        let metas: Vec<_> = self
-            .sessions
-            .iter()
-            .filter_map(|meta| match &threads {
-                None => Some((meta, false)),
-                Some(threads) => threads.get(&meta.id).map(|refresh| (meta, *refresh)),
-            })
-            .filter_map(|(meta, refresh)| Some((self.find_meta(&meta.id)?, refresh)))
-            .filter(|(meta, _)| meta.archived_at.is_none() && !meta.is_settled())
-            .map(|(meta, refresh)| {
-                let root = self.pull_request_project_cwd(&meta);
-                (meta, root, refresh)
-            })
-            .collect();
-        let mut grouped = HashMap::<(PathBuf, PathBuf), (Vec<SessionMeta>, bool)>::new();
-        for (meta, root, refresh) in metas {
-            let cwd = if meta.worktree.is_some() {
-                meta.cwd.clone()
-            } else {
-                root.clone()
-            };
-            let group = grouped.entry((cwd, root)).or_default();
-            group.0.push(meta);
-            group.1 |= refresh;
-        }
-        let groups: Vec<_> = grouped.into_iter().collect();
-        let forge = self.pull_requests.forge.clone();
-        let host = cx.clone();
-        cx.spawn_background(async move {
-            for chunk in groups.chunks(32) {
-                let chunk = chunk.to_vec();
-                let admitted = host
-                    .enqueue_and_wait(move |state, _| {
-                        chunk
-                            .into_iter()
-                            .filter(|((cwd, root), _)| {
-                                state.pull_requests.begin_discovery_read(cwd, root)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await
-                    .unwrap_or_default();
-                let mut tasks = Vec::new();
-                for ((cwd, root), (metas, refresh)) in admitted {
-                    let (read_cwd, read_root) = (cwd.clone(), root.clone());
-                    let forge = forge.clone();
-                    tasks.push((
-                        metas,
-                        cwd,
-                        root,
-                        host.unblock(move || {
-                            forge.discover(&read_cwd, &Checkout::new(&read_root), refresh)
-                        }),
-                    ));
-                }
-                for (metas, cwd, root, task) in tasks {
-                    let result = task.await;
-                    let read_root = root.clone();
-                    host.enqueue(move |state, _| {
-                        state.pull_requests.end_discovery_read(&cwd, &read_root)
-                    });
-                    // A read that failed says nothing of the branch, so it changes nothing.
-                    let Ok(result) = result else {
-                        continue;
-                    };
-                    for meta in metas {
-                        let result = result.clone();
-                        let root = root.clone();
-                        let _ = host
-                            .enqueue_and_wait(move |state, cx| {
-                                let Some(current) = state.find_meta(&meta.id) else {
-                                    return;
-                                };
-                                if current.cwd != meta.cwd
-                                    || current.worktree != meta.worktree
-                                    || current.project_id != meta.project_id
-                                    || current.archived_at.is_some()
-                                    || current.is_settled()
-                                    || state.pull_request_project_cwd(&current) != root
-                                {
-                                    return;
-                                }
-                                if let Some(result) = &result
-                                    && state
-                                        .resident(&meta.id)
-                                        .and_then(|r| r.git_branch.as_ref())
-                                        .is_some_and(|branch| branch != &result.branch)
-                                {
-                                    return;
-                                }
-                                state.apply_branch_pull_request(
-                                    &meta.id,
-                                    result.map(|result| (result.key, result.url)),
-                                    cx,
-                                );
-                            })
-                            .await;
-                    }
-                }
-            }
-            let _ = host
-                .enqueue_and_wait(|state, cx| {
-                    state.pull_requests.discovering = false;
-                    state.refresh_host_credentials(cx);
-                    let pending = std::mem::take(&mut state.pull_requests.discover_again);
-                    if !pending.is_empty() {
-                        state.discover_pull_requests(Some(pending), cx).detach();
-                    }
-                })
-                .await;
-        })
-    }
-    pub(super) fn discover_pull_requests_for(&mut self, id: &str, refresh: bool, cx: &mut HostCx) {
-        self.discover_pull_requests(Some(HashMap::from([(id.to_owned(), refresh)])), cx)
-            .detach();
-    }
     pub(super) fn observe_pull_request_event(
         &mut self,
         id: &str,
@@ -1497,11 +1224,9 @@ impl AppState {
         if matches!(
             event,
             AgentEvent::TurnCompleted { .. } | AgentEvent::TurnCheckpoint { .. }
-        ) {
-            if self.pull_requests.merge_commands.remove(id) {
-                self.refresh_open_pull_requests(id, cx);
-            }
-            self.discover_pull_requests_for(id, true, cx);
+        ) && self.pull_requests.merge_commands.remove(id)
+        {
+            self.refresh_open_pull_requests(id, cx);
         }
     }
 }

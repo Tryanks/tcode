@@ -2,14 +2,14 @@ use super::{
     GitHubApi, GitHubError, RequestOptions, RestRequest,
     api::Authentication,
     graphql::{self, AliasItem, Variables},
-    repository::{BranchHead, Repository, pull_request_url},
+    repository::{Repository, pull_request_url},
 };
 use crate::forge::Summary;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     sync::{Arc, Condvar, Mutex, mpsc},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tcode_core::pull_request::{
     ChecksState, Mergeability, PullRequestAuthor, PullRequestKey, PullRequestSnapshot,
@@ -72,37 +72,15 @@ impl<K: Clone, V> Batcher<K, V> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct HeadRequest {
-    head: String,
-    owner: String,
-    open_only: bool,
-}
-#[derive(Debug, Clone)]
-pub struct HeadPullRequest {
-    pub key: PullRequestKey,
-    pub url: String,
-    pub state: PullRequestState,
-}
-struct CachedBranch {
-    result: Result<Option<HeadPullRequest>, GitHubError>,
-    until: Instant,
-    failures: u32,
-}
-
 pub struct PullRequests {
     api: Arc<GitHubApi>,
     summaries: Batcher<PullRequestKey, Summary>,
-    heads: Batcher<HeadRequest, Option<HeadPullRequest>>,
-    branches: Mutex<HashMap<BranchHead, CachedBranch>>,
 }
 impl PullRequests {
     pub fn new(api: Arc<GitHubApi>) -> Arc<Self> {
         Arc::new(Self {
             api,
             summaries: Batcher::default(),
-            heads: Batcher::default(),
-            branches: Mutex::new(HashMap::new()),
         })
     }
     pub fn summary(&self, key: &PullRequestKey) -> Result<Summary, GitHubError> {
@@ -243,157 +221,6 @@ impl PullRequests {
         decode_stack(stack, &repository)
             .map(PullRequestStackState::Native)
             .ok_or(GitHubError::InvalidResponse)
-    }
-    fn by_head(
-        &self,
-        repository: &Repository,
-        request: HeadRequest,
-    ) -> Result<Option<HeadPullRequest>, GitHubError> {
-        let credential = self.api.credentials().get(&repository.host)?;
-        let group = format!(
-            "{}\0{}\0{}\0{}",
-            repository.host, repository.owner, repository.name, credential.fingerprint
-        );
-        let options = RequestOptions {
-            authentication: Authentication::Pinned(credential),
-            operation: "PullRequestsByHead",
-            ..Default::default()
-        };
-        self.heads
-            .read(group, request, 25, Duration::from_millis(500), |requests| {
-                let result = self.read_heads(repository, requests, &options);
-                match result {
-                    Ok(rows) => rows.into_iter().map(Ok).collect(),
-                    Err(error) => requests.iter().map(|_| Err(error.clone())).collect(),
-                }
-            })
-    }
-    fn read_heads(
-        &self,
-        repository: &Repository,
-        requests: &[HeadRequest],
-        options: &RequestOptions,
-    ) -> Result<Vec<Option<HeadPullRequest>>, GitHubError> {
-        let mut declarations = vec!["$owner: String!".to_owned(), "$name: String!".to_owned()];
-        let mut variables = std::collections::BTreeMap::from([
-            ("owner".into(), json!(repository.owner)),
-            ("name".into(), json!(repository.name)),
-        ]);
-        let mut fields = Vec::new();
-        for (index, request) in requests.iter().enumerate() {
-            declarations.extend([
-                format!("$h{index}: String!"),
-                format!("$s{index}: [PullRequestState!]"),
-            ]);
-            variables.insert(format!("h{index}"), json!(request.head));
-            variables.insert(
-                format!("s{index}"),
-                if request.open_only {
-                    json!(["OPEN"])
-                } else {
-                    json!(["OPEN", "CLOSED", "MERGED"])
-                },
-            );
-            // GitHub cannot filter by head owner, so scan 100 same-named heads for the owner's.
-            fields.push(format!("h{index}: pullRequests(headRefName: $h{index}, states: $s{index}, first: 100, orderBy: {{ field: CREATED_AT, direction: DESC }}) {{ nodes {{ number title url baseRefName headRefName headRefOid state isDraft mergedAt closedAt updatedAt isCrossRepository headRepository {{ name nameWithOwner }} headRepositoryOwner {{ login }} }} }}"));
-        }
-        let document = graphql::Document {
-            query: format!(
-                "query PullRequestsByHead({}) {{ repository(owner: $owner, name: $name) {{ {} }} }}",
-                declarations.join(", "),
-                fields.join("\n")
-            ),
-            variables,
-        };
-        let response: Value = self
-            .api
-            .graphql(&repository.host, &document, options)?
-            .json()?;
-        let raw = response["data"]["repository"]
-            .as_object()
-            .ok_or(GitHubError::NotFound)?;
-        Ok(requests
-            .iter()
-            .enumerate()
-            .map(|(index, request)| {
-                raw.get(&format!("h{index}"))
-                    .and_then(|v| v["nodes"].as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter(|row| {
-                        row["headRepositoryOwner"]["login"]
-                            .as_str()
-                            .is_some_and(|login| request.owner.eq_ignore_ascii_case(login))
-                    })
-                    .find_map(|row| {
-                        let (key, url) = pull_request_url(row["url"].as_str()?)?;
-                        Some(HeadPullRequest {
-                            key,
-                            url,
-                            state: state(row)?,
-                        })
-                    })
-            })
-            .collect())
-    }
-    pub fn branch(
-        &self,
-        head: &BranchHead,
-        refresh: bool,
-    ) -> Result<Option<HeadPullRequest>, GitHubError> {
-        let failures = {
-            let mut cache = self.branches.lock().unwrap();
-            if let Some(cached) = cache.get(head)
-                && cached.until > Instant::now()
-                && (!refresh || cached.result.is_err())
-            {
-                return cached.result.clone();
-            }
-            if cache.len() >= 2048 {
-                cache.retain(|_, row| row.until > Instant::now());
-                if cache.len() >= 2048 {
-                    cache.clear();
-                }
-            }
-            cache.get(head).map_or(0, |cached| cached.failures)
-        };
-        let request = |open_only| HeadRequest {
-            head: head.head_branch.clone(),
-            owner: head.head_owner.clone(),
-            open_only,
-        };
-        let result = self
-            .by_head(&head.repository, request(true))
-            .and_then(|row| match row {
-                Some(row) => Ok(Some(row)),
-                None => self.by_head(&head.repository, request(false)).map(|row| {
-                    row.filter(|row| !head.default_branch || row.state == PullRequestState::Open)
-                }),
-            });
-        let failures = if result.is_err() {
-            failures.saturating_add(1)
-        } else {
-            0
-        };
-        let ttl = if result.is_err() {
-            (20u64.saturating_mul(2u64.saturating_pow(failures.saturating_sub(1)))).min(900)
-        } else if result.as_ref().is_ok_and(|row| {
-            row.as_ref()
-                .is_some_and(|row| row.state == PullRequestState::Open)
-        }) {
-            60
-        } else {
-            300
-        };
-        self.branches.lock().unwrap().insert(
-            head.clone(),
-            CachedBranch {
-                result: result.clone(),
-                failures,
-                until: Instant::now() + Duration::from_secs(ttl),
-            },
-        );
-        result
     }
 }
 

@@ -8,8 +8,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary,
-        Tails, ViewedMarks,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
+        ViewedMarks,
     },
     settings::SettingsStore,
 };
@@ -18,7 +18,6 @@ use reads::{MAX_PAGES, Mr, text};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
-    path::Path,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -49,8 +48,6 @@ const ANONYMOUS: &str = "anonymous";
 const DELETED: &str = "0000000000000000000000000000000000000000";
 
 type Slot = (Instant, PullRequestReadResponse);
-/// A branch's merge request by project and source, and when it was looked up.
-type Branches = HashMap<(String, String), (Instant, Option<Discovered>)>;
 
 pub struct GitLab {
     api: Arc<Api>,
@@ -58,7 +55,6 @@ pub struct GitLab {
     /// The servers known by settings, a glab login or the environment.
     known: RwLock<Vec<String>>,
     reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
-    branches: Mutex<Branches>,
 }
 
 impl GitLab {
@@ -72,7 +68,6 @@ impl GitLab {
             api: Api::new(store, environment),
             known: RwLock::default(),
             reads: Mutex::default(),
-            branches: Mutex::default(),
         })
     }
 
@@ -604,77 +599,6 @@ impl Forge for GitLab {
 
     fn url(&self, key: &PullRequestKey) -> Option<String> {
         Some(repository::url(key))
-    }
-
-    /// One page of the project's open merge requests from the branch: a source branch with
-    /// more than one page of them is not searched further.
-    fn discover(
-        &self,
-        cwd: &Path,
-        root: &crate::forge::Checkout<'_>,
-        refresh: bool,
-    ) -> Result<Option<Discovered>, ForgeError> {
-        let known = self.known();
-        let cwd = if cwd.exists() { cwd } else { root.cwd() };
-        let Some(target) = repository::resolve(&known, root) else {
-            return Ok(None);
-        };
-        let Some(branch) = repository::branch(&known, root, cwd) else {
-            return Ok(None);
-        };
-        let slot = (
-            format!("{}/{}", target.host, target.locator),
-            format!("{}:{}", branch.source.locator, branch.source_branch),
-        );
-        if !refresh
-            && let Some((at, found)) = self.branches.lock().unwrap().get(&slot)
-            && at.elapsed() < READ_TTL
-        {
-            return Ok(found.clone());
-        }
-        let probe = target.key(1);
-        let mr = self.mr(&probe);
-        let rows = mr.get(
-            mr.project_path(&format!(
-                "/merge_requests?state=opened&source_branch={}&per_page=20",
-                crate::github::pull_request_reads::percent_encode(&branch.source_branch)
-            )),
-            "MergeRequestsByBranch",
-        )?;
-        // A fork's merge request comes from another project, which only its id names here.
-        let source_id = if branch.source == target {
-            None
-        } else {
-            let fork = branch.source.key(1);
-            let fork = self.mr(&fork);
-            Some(
-                fork.get(fork.project_path(""), "SourceProject")?["id"]
-                    .as_u64()
-                    .ok_or_else(|| error(ForgeErrorKind::Uncertain, "GitLab project unreadable"))?,
-            )
-        };
-        let found = rows.as_array().into_iter().flatten().find_map(|row| {
-            let from = row["source_project_id"].as_u64();
-            let own = match source_id {
-                Some(id) => from == Some(id),
-                None => from.is_some() && from == row["target_project_id"].as_u64(),
-            };
-            (own && row["source_branch"].as_str() == Some(branch.source_branch.as_str())).then(
-                || {
-                    let key = target.key(row["iid"].as_u64()?);
-                    Some(Discovered {
-                        branch: branch.branch.clone(),
-                        url: repository::url(&key),
-                        key,
-                    })
-                },
-            )?
-        });
-        self.branches
-            .lock()
-            .unwrap()
-            .insert(slot, (Instant::now(), found.clone()));
-        Ok(found)
     }
 
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {

@@ -281,16 +281,6 @@ impl PullRequestView {
             .cloned()
     }
 
-    /// The open pull request when it is the thread's branch's, shown without a link.
-    fn branch(&self, cx: &App) -> Option<tcode_core::pull_request::BranchPullRequest> {
-        let (session, key) = self.current.as_ref()?;
-        self.store
-            .read(cx)
-            .branch_pull_request(session)
-            .filter(|branch| branch.key == *key)
-            .cloned()
-    }
-
     fn stack(&self, cx: &App) -> Option<tcode_core::pull_request::PullRequestStack> {
         let (session, key) = self.current.as_ref()?;
         tcode_core::pull_request::native_stack(self.store.read(cx).pull_requests(session), key)
@@ -335,7 +325,6 @@ impl PullRequestView {
                     .find(|layer| layer.number == key.number)
                     .map(|layer| layer.url.clone())
             })
-            .or_else(|| self.branch(cx).map(|branch| branch.url))
     }
 
     pub(super) fn tab(&self, cx: &App) -> Tab {
@@ -345,7 +334,6 @@ impl PullRequestView {
         let state = self
             .link(cx)
             .and_then(|link| link.snapshot)
-            .or_else(|| self.branch(cx).and_then(|branch| branch.snapshot))
             .map(|snapshot| snapshot.state);
         match state {
             Some(PullRequestState::Merged | PullRequestState::Closed) => Tab::Conversation,
@@ -820,16 +808,12 @@ impl PullRequestView {
             .as_ref()
             .and_then(|stack| stack.layers.iter().find(|layer| layer.number == key.number));
         let visible = link.as_ref().is_some_and(|link| link.visible());
-        let found = self.branch(cx).and_then(|branch| branch.snapshot);
         let snapshot = link
             .as_ref()
             .filter(|link| link.visible())
-            .and_then(|link| link.snapshot.clone())
-            .or_else(|| found.clone());
+            .and_then(|link| link.snapshot.clone());
         let badge = row_state(
-            link.as_ref()
-                .and_then(|link| link.snapshot.as_ref())
-                .or(found.as_ref()),
+            link.as_ref().and_then(|link| link.snapshot.as_ref()),
             layer.map(|layer| layer.state),
         );
         let (glyph, color, state_label) = appearance(badge, cx);
@@ -856,8 +840,7 @@ impl PullRequestView {
                     .tooltip({
                         let label = crate::tr!(
                             "pull_requests.number_tooltip",
-                            source =
-                                crate::tr!(source(link.as_ref(), layer.is_some())).into_owned(),
+                            source = crate::tr!(source(link.as_ref())).into_owned(),
                             ago = ago(link
                                 .as_ref()
                                 .and_then(|link| link.linked_at)
@@ -1841,7 +1824,7 @@ impl PullRequestView {
         let unlinked = self
             .link(cx)
             .is_some_and(|link| !link.visible() && link.source != PullRequestSource::Stack)
-            || (self.link(cx).is_none() && self.stack(cx).is_none() && self.branch(cx).is_none());
+            || (self.link(cx).is_none() && self.stack(cx).is_none());
         if unlinked
             && let Some((url, key)) = self
                 .url(cx)

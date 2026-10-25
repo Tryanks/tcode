@@ -1123,47 +1123,14 @@ fn linked_pr_summaries_coalesce_and_retry_only_missing_graphql_aliases() {
 }
 
 #[test]
-fn head_queries_filter_fork_owner_and_keep_branch_names_in_variables() {
-    use tcode_services::github::{
-        pull_requests::PullRequests,
-        repository::{BranchHead, Repository},
-    };
+fn stacks_are_unknown_off_github_com() {
+    use tcode_services::github::pull_requests::PullRequests;
     let store = Store::new();
     let fixture = Fixture::new();
     let service = PullRequests::new(GitHubApi::new(
         store.credentials(&[("GH_TOKEN", "fixture")]),
         fixture.builder(),
     ));
-    let repository = Repository {
-        host: "github.com".into(),
-        owner: "sample".into(),
-        name: "project".into(),
-    };
-    let head = "feat/quotes\"and-braces}";
-    let request = Arc::new(std::sync::Mutex::new(None));
-    let received = request.clone();
-    let _server=fixture.serve(move |exchange| {
-        let body:serde_json::Value=serde_json::from_slice(&exchange.body).unwrap();
-        let rows=[serde_json::json!({"number":4,"url":"https://github.com/sample/project/pull/4","state":"OPEN","headRepositoryOwner":{"login":"other"}}),serde_json::json!({"number":5,"url":"https://github.com/sample/project/pull/5","state":"OPEN","headRepositoryOwner":{"login":"fOrKoWnEr"}})];
-        *received.lock().unwrap()=Some(body);
-        exchange.reply(200,"",&serde_json::to_vec(&serde_json::json!({"data":{"repository":{"h0":{"nodes":rows}}}})).unwrap());
-    });
-    let found = service.branch(
-        &BranchHead {
-            cwd: std::path::PathBuf::new(),
-            branch: "local".into(),
-            repository,
-            head_owner: "ForkOwner".into(),
-            head_branch: head.into(),
-            local_identity: "fork".into(),
-            default_branch: false,
-        },
-        false,
-    );
-    assert_eq!(found.unwrap().map(|row| row.key.number), Some(5));
-    let body = request.lock().unwrap().take().unwrap();
-    assert_eq!(body["variables"]["h0"], head);
-    assert!(!body["query"].as_str().unwrap().contains(head));
     assert!(matches!(
         service
             .stack(&tcode_core::pull_request::PullRequestKey::new(
@@ -1177,7 +1144,7 @@ fn head_queries_filter_fork_owner_and_keep_branch_names_in_variables() {
 }
 
 #[test]
-fn real_git_fork_heads_follow_gh_default_without_mistaking_the_base_for_a_published_branch() {
+fn real_git_checkouts_resolve_the_gh_default_remote() {
     use tcode_services::github::repository;
     let store = Store::new();
     let cwd = store.root.join("checkout");
@@ -1195,16 +1162,6 @@ fn real_git_fork_heads_follow_gh_default_without_mistaking_the_base_for_a_publis
         );
     };
     git(&["init", "-b", "main"]);
-    git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.test",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "initial",
-    ]);
     git(&[
         "remote",
         "add",
@@ -1224,10 +1181,6 @@ fn real_git_fork_heads_follow_gh_default_without_mistaking_the_base_for_a_publis
         "https://gitlab.example.com/sample/project.git",
     ]);
     git(&["config", "remote.upstream.gh-resolved", "base"]);
-    git(&["update-ref", "refs/remotes/upstream/main", "HEAD"]);
-    git(&["switch", "-c", "topic"]);
-    git(&["config", "branch.topic.remote", "upstream"]);
-    git(&["config", "branch.topic.merge", "refs/heads/main"]);
     let subdirectory = cwd.join("nested");
     std::fs::create_dir(&subdirectory).unwrap();
     assert_eq!(
@@ -1245,20 +1198,4 @@ fn real_git_fork_heads_follow_gh_default_without_mistaking_the_base_for_a_publis
         "sample",
         "mixed hosts and SSH aliases reject the strict gh mark and use the host-ranked remote"
     );
-    assert!(
-        repository::branch_head(&subdirectory).is_none(),
-        "tracking the default branch is not evidence the feature was pushed"
-    );
-    git(&["update-ref", "refs/remotes/origin/topic", "HEAD"]);
-    let head = repository::branch_head(&subdirectory).unwrap();
-    assert_eq!(head.repository.owner, "sample");
-    assert_eq!(head.head_owner, "forkowner");
-    assert_eq!(head.head_branch, "topic");
-    git(&["branch", "-m", "renamed"]);
-    git(&["config", "branch.renamed.remote", "origin"]);
-    git(&["config", "branch.renamed.merge", "refs/heads/topic"]);
-    let renamed = repository::branch_head(&subdirectory).unwrap();
-    assert_eq!(renamed.branch, "renamed");
-    assert_eq!(renamed.head_branch, "topic");
-    assert_ne!(head.local_identity, renamed.local_identity);
 }

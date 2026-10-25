@@ -658,12 +658,6 @@ fn pull_request_state(meta: &SessionMeta, url: &str) -> Option<Option<PullReques
         .filter(|link| link.visible())
         .find(|link| same(&link.url))
         .map(|link| link.snapshot.as_ref().map(|snapshot| snapshot.state))
-        .or_else(|| {
-            meta.branch_pull_request
-                .as_ref()
-                .filter(|branch| same(&branch.url))
-                .map(|branch| branch.snapshot.as_ref().map(|snapshot| snapshot.state))
-        })
 }
 
 #[cfg(test)]

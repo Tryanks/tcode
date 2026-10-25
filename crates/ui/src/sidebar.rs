@@ -2845,7 +2845,6 @@ impl SessionsSidebar {
                     .then(|| {
                         crate::pull_requests::sidebar_badge(
                             &meta.pull_requests,
-                            meta.branch_pull_request.as_deref(),
                             &meta.id,
                             self.store.clone(),
                             cx,
@@ -3070,7 +3069,6 @@ impl SessionsSidebar {
                     .then(|| {
                         crate::pull_requests::sidebar_badge(
                             &meta.pull_requests,
-                            meta.branch_pull_request.as_deref(),
                             &meta.id,
                             self.store.clone(),
                             cx,
@@ -3872,12 +3870,7 @@ impl SessionsSidebar {
             cx,
         );
 
-        let label = crate::pull_requests::badge_label(
-            &meta.pull_requests,
-            meta.branch_pull_request.as_deref(),
-            cx,
-        )
-        .map_or_else(
+        let label = crate::pull_requests::badge_label(&meta.pull_requests, cx).map_or_else(
             || cached.label.to_string(),
             |badge| format!("{}, {badge}", cached.label),
         );
@@ -3991,12 +3984,7 @@ impl SessionsSidebar {
                                     .child(div().flex_none().child("·"))
                             })
                             .when_some(
-                                crate::pull_requests::badge(
-                                    &meta.pull_requests,
-                                    meta.branch_pull_request.as_deref(),
-                                    14.,
-                                    cx,
-                                ),
+                                crate::pull_requests::badge(&meta.pull_requests, 14., cx),
                                 |line, badge| line.child(badge).child("·"),
                             )
                             .child(div().flex_none().child(cached.relative_time.clone())),

@@ -95,8 +95,6 @@ pub struct SessionMeta {
     /// Interrupt pauses monitoring for the thread, including watches registered afterwards.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pull_request_watches_paused: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch_pull_request: Option<Box<crate::pull_request::BranchPullRequest>>,
     /// Reviews being written in this thread, one per pull request it shows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pull_request_reviews: Vec<crate::pull_request::PullRequestReviewDraft>,
@@ -362,7 +360,6 @@ impl SessionMeta {
             title: format!("New {} session", provider.display_name()),
             pull_requests: Vec::new(),
             pull_request_watches_paused: false,
-            branch_pull_request: None,
             pull_request_reviews: Vec::new(),
             pull_request_operations: Vec::new(),
             provider,
@@ -651,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn links_branch_discovery_stored_are_dropped_as_the_thread_is_read() {
+    fn what_branch_discovery_stored_is_dropped_as_the_thread_is_read() {
         let link = |number: u64, source: &str| {
             serde_json::json!({
                 "key": {"host": "github.com", "repository": "sample/project", "number": number},
@@ -671,7 +668,11 @@ mod tests {
                 {"key": {"host": "github.com", "repository": "sample/project", "number": 5},
                  "source": "dismissed"},
                 link(6, "opened")
-            ]
+            ],
+            "branch_pull_request": {
+                "key": {"host": "github.com", "repository": "sample/project", "number": 7},
+                "url": "https://github.com/sample/project/pull/7"
+            }
         });
         let meta: SessionMeta = serde_json::from_value(stored).unwrap();
         let kept: Vec<_> = meta
@@ -690,7 +691,6 @@ mod tests {
                 (6, Opened)
             ]
         );
-        assert_eq!(meta.branch_pull_request, None);
         let malformed = serde_json::json!({
             "id": "legacy", "title": "Legacy", "provider": "codex",
             "cwd": "/work", "created_at": 1, "updated_at": 2,

@@ -8,8 +8,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary,
-        Tails, ViewedMarks,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
+        ViewedMarks,
     },
     settings::SettingsStore,
 };
@@ -18,7 +18,6 @@ use reads::{MAX_PAGES, Pr, text};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
-    path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -40,9 +39,9 @@ use tcode_protocol::{
 };
 
 const READ_TTL: Duration = Duration::from_secs(60);
-/// How long a summary or a branch's pull request is kept while reading anonymously: Bitbucket
-/// allows 60 anonymous requests an hour, and a summary each minute (two requests) for one open
-/// pull request with a discovery each minute (one) spends them in twenty minutes.
+/// How long a summary is kept while reading anonymously: Bitbucket allows 60 anonymous
+/// requests an hour, and a summary each minute (two requests) for one open pull request spends
+/// them in thirty minutes.
 const ANONYMOUS_TTL: Duration = Duration::from_secs(600);
 /// Text at a commit never changes; the bound is only on how long it holds memory.
 const TEXT_TTL: Duration = Duration::from_secs(600);
@@ -50,8 +49,6 @@ const FILE_BYTES: usize = 1024 * 1024;
 const ANONYMOUS: &str = "anonymous";
 
 type Slot = (Instant, PullRequestReadResponse);
-/// A branch's pull request by repository and source, and when it was looked up.
-type Branches = HashMap<(String, String), (Instant, Option<Discovered>)>;
 /// Each pull request's whole diff, `None` past the read limit, by when and at which head it
 /// was read.
 type Diffs = HashMap<PullRequestKey, (Instant, String, Option<String>)>;
@@ -64,7 +61,6 @@ pub struct Bitbucket {
     reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
     /// The whole diff, which the files, viewed marks and anchoring reads all page from.
     diffs: Mutex<Diffs>,
-    branches: Mutex<Branches>,
     /// Each pull request's last summary, kept for [`Bitbucket::sync_ttl`].
     summaries: Mutex<HashMap<PullRequestKey, (Instant, Summary)>>,
 }
@@ -80,7 +76,6 @@ impl Bitbucket {
             api: Api::new(store, environment),
             reads: Mutex::default(),
             diffs: Mutex::default(),
-            branches: Mutex::default(),
             summaries: Mutex::default(),
         })
     }
@@ -602,7 +597,6 @@ impl Forge for Bitbucket {
     fn forget_credential(&self, _: &str) {
         self.api.forget();
         self.summaries.lock().unwrap().clear();
-        self.branches.lock().unwrap().clear();
     }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
@@ -619,73 +613,6 @@ impl Forge for Bitbucket {
 
     fn url(&self, key: &PullRequestKey) -> Option<String> {
         Some(repository::url(key))
-    }
-
-    /// One page of the repository's open pull requests from the branch: a source branch with
-    /// more than one page of them is not searched further.
-    fn discover(
-        &self,
-        cwd: &Path,
-        root: &crate::forge::Checkout<'_>,
-        refresh: bool,
-    ) -> Result<Option<Discovered>, ForgeError> {
-        let cwd = if cwd.exists() { cwd } else { root.cwd() };
-        let Some(target) = repository::resolve(root) else {
-            return Ok(None);
-        };
-        let Some(branch) = repository::branch(root, cwd) else {
-            return Ok(None);
-        };
-        let slot = (
-            target.locator.clone(),
-            format!("{}:{}", branch.source.locator, branch.source_branch),
-        );
-        if !refresh
-            && let Some((at, found)) = self.branches.lock().unwrap().get(&slot)
-            && at.elapsed() < self.sync_ttl()
-        {
-            return Ok(found.clone());
-        }
-        let quoted = branch
-            .source_branch
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let query = crate::github::pull_request_reads::percent_encode(&format!(
-            "source.branch.name=\"{quoted}\" AND state=\"OPEN\""
-        ));
-        let probe = target.key(1);
-        let rows = self
-            .pr(&probe)
-            .get(
-                self.pr(&probe).repository_path(&format!(
-                    "/pullrequests?q={query}&pagelen={PAGE_LIMIT}&fields=values.id,values.source.branch.name,values.source.repository.full_name"
-                )),
-                "PullRequestsByBranch",
-            )
-            ?;
-        let found = rows["values"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find_map(|row| {
-                let from = row["source"]["repository"]["full_name"].as_str()?;
-                (from.eq_ignore_ascii_case(&branch.source.locator)
-                    && row["source"]["branch"]["name"].as_str()
-                        == Some(branch.source_branch.as_str()))
-                .then(|| {
-                    let key = target.key(row["id"].as_u64()?);
-                    Some(Discovered {
-                        branch: branch.branch.clone(),
-                        url: repository::url(&key),
-                        key,
-                    })
-                })?
-            });
-        self.branches
-            .lock()
-            .unwrap()
-            .insert(slot, (Instant::now(), found.clone()));
-        Ok(found)
     }
 
     /// The pull request and its head's build statuses.

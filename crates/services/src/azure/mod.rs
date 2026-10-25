@@ -10,8 +10,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary,
-        Tails, ViewedMarks,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
+        ViewedMarks,
     },
     settings::SettingsStore,
 };
@@ -21,7 +21,6 @@ use reads::{Iteration, Pr, text};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
-    path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -59,8 +58,6 @@ const CONCURRENCY: usize = 6;
 const DELETED: &str = "0000000000000000000000000000000000000000";
 
 type Slot = (Instant, PullRequestReadResponse);
-/// A branch's pull request by repository and source, and when it was looked up.
-type Branches = HashMap<(String, String), (Instant, Option<Discovered>)>;
 /// An iteration's changed files, and whether the list is whole, by pull request and iteration.
 type Changes = HashMap<(PullRequestKey, u64), (Instant, Arc<(Vec<Change>, bool)>)>;
 
@@ -71,7 +68,6 @@ pub struct Azure {
     /// An iteration's changes never change; the files, viewed marks and anchoring reads page
     /// through them.
     changes: Mutex<Changes>,
-    branches: Mutex<Branches>,
 }
 
 /// Files of the latest push, the push's id, and Azure's change entries of those files, which a
@@ -102,7 +98,6 @@ impl Azure {
             api: Api::new(store, environment),
             reads: Mutex::default(),
             changes: Mutex::default(),
-            branches: Mutex::default(),
         })
     }
 
@@ -746,7 +741,6 @@ impl Forge for Azure {
 
     fn forget_credential(&self, host: &str) {
         self.api.forget(host);
-        self.branches.lock().unwrap().clear();
     }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
@@ -763,86 +757,6 @@ impl Forge for Azure {
 
     fn url(&self, key: &PullRequestKey) -> Option<String> {
         Some(repository::url(key))
-    }
-
-    /// The repository's active pull requests from the branch, one page of them; a fork's come
-    /// from the fork's repository.
-    fn discover(
-        &self,
-        cwd: &Path,
-        root: &crate::forge::Checkout<'_>,
-        refresh: bool,
-    ) -> Result<Option<Discovered>, ForgeError> {
-        let cwd = if cwd.exists() { cwd } else { root.cwd() };
-        let Some(target) = repository::resolve(root) else {
-            return Ok(None);
-        };
-        let Some(branch) = repository::branch(root, cwd) else {
-            return Ok(None);
-        };
-        let slot = (
-            format!("{}/{}", target.host, target.locator),
-            format!(
-                "{}/{}:{}",
-                branch.source.host, branch.source.locator, branch.source_branch
-            ),
-        );
-        if !refresh
-            && let Some((at, found)) = self.branches.lock().unwrap().get(&slot)
-            && at.elapsed() < READ_TTL
-        {
-            return Ok(found.clone());
-        }
-        let probe = target.key(1);
-        let pr = self.pr(&probe);
-        let rows = pr
-            .get(
-                pr.repository_path(&format!(
-                    "/pullrequests?searchCriteria.status=active&searchCriteria.sourceRefName={}&$top=20",
-                    crate::github::pull_request_reads::percent_encode(&format!(
-                        "refs/heads/{}",
-                        branch.source_branch
-                    ))
-                )),
-                "PullRequestsByBranch",
-            )
-            ?;
-        let from_fork = branch.source != target;
-        let found = rows["value"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find_map(|row| {
-                let fork = &row["forkSource"]["repository"];
-                let own = if from_fork {
-                    fork["name"]
-                        .as_str()
-                        .zip(fork["project"]["name"].as_str())
-                        .is_some_and(|(name, project)| {
-                            branch
-                                .source
-                                .locator
-                                .eq_ignore_ascii_case(&format!("{project}/{name}"))
-                        })
-                } else {
-                    fork.is_null()
-                };
-                (own && row["sourceRefName"].as_str()
-                    == Some(format!("refs/heads/{}", branch.source_branch).as_str()))
-                .then(|| {
-                    let key = target.key(row["pullRequestId"].as_u64()?);
-                    Some(Discovered {
-                        branch: branch.branch.clone(),
-                        url: repository::url(&key),
-                        key,
-                    })
-                })?
-            });
-        self.branches
-            .lock()
-            .unwrap()
-            .insert(slot, (Instant::now(), found.clone()));
-        Ok(found)
     }
 
     /// The pull request with its statuses and policy evaluations.

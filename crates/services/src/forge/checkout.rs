@@ -1,5 +1,5 @@
-//! A checkout's repository and branch on a host, from its git remotes, for hosts whose remote
-//! URLs each kind reads in its own way.
+//! A checkout's repository on a host, from its git remotes, for hosts whose remote URLs each
+//! kind reads in its own way.
 
 use super::Repository;
 use std::cell::OnceCell;
@@ -67,42 +67,4 @@ pub(crate) fn resolve(
         .find_map(|name| remotes.iter().find(|(remote, _)| remote == name))
         .or_else(|| remotes.first())
         .map(|(_, repository)| repository.clone())
-}
-
-/// The checked-out branch and where it is pushed: the repository and branch a pull request from
-/// it names as its source. A branch that tracks nothing has no pull request yet.
-pub(crate) struct Branch {
-    pub(crate) branch: String,
-    pub(crate) source: Repository,
-    pub(crate) source_branch: String,
-}
-
-/// The branch checked out at `cwd`; `root`'s remote listing serves when that is the root itself.
-pub(crate) fn branch(
-    root: &Checkout<'_>,
-    cwd: &Path,
-    remote: impl Fn(&str) -> Option<Repository>,
-) -> Option<Branch> {
-    let elsewhere;
-    let checkout = if cwd == root.cwd() {
-        root
-    } else {
-        elsewhere = Checkout::new(cwd);
-        &elsewhere
-    };
-    let branch = git(cwd, &["symbolic-ref", "--short", "HEAD"])?;
-    let pushed_to = git(cwd, &["config", &format!("branch.{branch}.remote")])?;
-    let merge = git(cwd, &["config", &format!("branch.{branch}.merge")])?;
-    let source = remotes(checkout, remote)
-        .into_iter()
-        .find(|(name, _)| *name == pushed_to)?
-        .1;
-    Some(Branch {
-        source,
-        source_branch: merge
-            .strip_prefix("refs/heads/")
-            .unwrap_or(&merge)
-            .to_owned(),
-        branch,
-    })
 }

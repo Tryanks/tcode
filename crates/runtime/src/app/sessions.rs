@@ -234,20 +234,10 @@ impl AppState {
         cx: &mut HostCx,
     ) -> HostTask<Result<(), ProtocolError>> {
         let outcome = self.prepare_project_root_change(project_id, &root, move_files, cx);
-        let discovery_left = match &outcome {
-            Ok((old_root, _)) if move_files => {
-                Some(self.pull_requests.begin_root_move(old_root.clone()))
-            }
-            _ => None,
-        };
         let host = cx.clone();
         let project_id = project_id.to_string();
         cx.spawn_background(async move {
             let (old_root, worktrees) = outcome?;
-            if let Some(discovery_left) = &discovery_left {
-                let _ = discovery_left.recv().await;
-            }
-            let moving = old_root.clone();
             let destination = root.clone();
             let changed = host
                 .unblock(move || {
@@ -268,9 +258,6 @@ impl AppState {
                     Ok(())
                 })
                 .await;
-            if discovery_left.is_some() {
-                host.enqueue(move |app, _| app.pull_requests.end_root_move(&moving));
-            }
             changed.map_err(project_root_error)?;
             host.enqueue_and_wait(move |app, cx| app.apply_project_root(&project_id, root, cx))
                 .await
@@ -589,7 +576,6 @@ impl AppState {
             self.refresh_session_git_branch(meta.id.clone(), meta.cwd.clone(), cx);
             self.refresh_git_status(session_id, cx);
         }
-        self.discover_pull_requests_for(session_id, false, cx);
         Ok(())
     }
 
@@ -2188,9 +2174,7 @@ impl AppState {
                 },
                 cx,
             );
-            let id = meta.id.clone();
             self.upsert_session_in_memory(meta);
-            self.discover_pull_requests_for(&id, false, cx);
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
