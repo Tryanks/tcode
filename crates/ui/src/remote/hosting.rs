@@ -27,7 +27,6 @@ use tcode_traverse::{DeviceInfo, HostConfig, HostMux, Invitation, TraverseHost};
 use super::access::AccessSection;
 use super::spaces::{SpacesObserver, this_machine};
 use crate::material::{group_row, group_row_stacked};
-use crate::overlay::{Notification, OverlayExt as _};
 use crate::settings_rows::{FIELD_WIDTH, ToggleRow, row_labels, settings_group};
 use crate::store::WorkspaceStore;
 use crate::widgets::input::{Input, InputEvent, InputState};
@@ -38,6 +37,9 @@ pub struct RemoteController {
     data_dir: PathBuf,
     local_settings_link: HostLink,
     local_settings: Settings,
+    /// Why the last start did not bind, until hosting starts or is turned
+    /// off; Settings → Remote shows it under the hosting switch.
+    start_failure: Option<String>,
 }
 
 impl Global for RemoteController {}
@@ -55,6 +57,7 @@ impl RemoteController {
             data_dir,
             local_settings_link,
             local_settings,
+            start_failure: None,
         }
     }
 
@@ -108,6 +111,7 @@ impl RemoteController {
     }
 
     /// Bind the endpoint, publish to `traverse` and mint a first invitation.
+    /// A failure is kept as [`Self::start_failure`] and returned, localized.
     pub fn start_hosting(
         &mut self,
         traverse: &TraverseSetting,
@@ -116,24 +120,43 @@ impl RemoteController {
         if self.host.is_some() {
             return Ok(());
         }
-        let host = TraverseHost::start(
-            self.mux.clone(),
-            HostConfig {
-                host_name,
-                data_dir: self.data_dir.clone(),
-                traverse: traverse_sources(traverse)?,
-                pairing_enabled: true,
-                // Fixed, so the invitation's port, firewall rules and LAN probes
-                // survive restarts.
-                bind_port: Some(tcode_traverse::lan::DEFAULT_PORT),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+        let started = traverse_sources(traverse).and_then(|traverse| {
+            TraverseHost::start(
+                self.mux.clone(),
+                HostConfig {
+                    host_name,
+                    data_dir: self.data_dir.clone(),
+                    traverse,
+                    pairing_enabled: true,
+                    // Fixed, so the invitation's port, firewall rules and LAN
+                    // probes survive restarts.
+                    bind_port: Some(tcode_traverse::lan::DEFAULT_PORT),
+                },
+            )
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AddrInUse => crate::tr!("remote.host.port_in_use").into_owned(),
+                _ => error.to_string(),
+            })
+        });
+        let host = match started {
+            Ok(host) => host,
+            Err(reason) => {
+                let failure = crate::tr!("remote.host.start_failed", reason = reason).into_owned();
+                self.start_failure = Some(failure.clone());
+                return Err(failure);
+            }
+        };
+        self.start_failure = None;
         if host.pairing_enabled() {
             host.new_invitation();
         }
         self.host = Some(host);
         Ok(())
+    }
+
+    /// Why hosting did not start the last time it was asked to.
+    pub fn start_failure(&self) -> Option<&str> {
+        self.start_failure.as_deref()
     }
 
     /// Adopt a host started elsewhere: tests bind a random port, since the
@@ -144,6 +167,7 @@ impl RemoteController {
     }
 
     pub fn stop_hosting(&mut self) {
+        self.start_failure = None;
         if let Some(host) = self.host.take() {
             host.shutdown();
         }
@@ -310,31 +334,24 @@ pub(super) fn field_labels(
 }
 
 /// Start or stop hosting with `traverse` and `name`, saving them once that
-/// worked; a failure is shown and nothing is saved.
+/// worked. A failure saves nothing; the hosting switch shows it, and the
+/// caller tells a user who is not looking at that switch.
 fn switch_hosting(
     enabled: bool,
     traverse: TraverseSetting,
     name: Option<String>,
-    window: &mut Window,
     cx: &mut App,
-) {
+) -> Result<(), String> {
     let host_name = name.clone().unwrap_or_else(machine_name);
-    let mut failure = None;
     cx.update_global::<RemoteController, _>(|controller, _| {
         if enabled {
-            if let Err(error) = controller.start_hosting(&traverse, host_name) {
-                failure = Some(error);
-            }
+            controller.start_hosting(&traverse, host_name)?;
         } else {
             controller.stop_hosting();
         }
-        if failure.is_none() {
-            controller.save_hosting_settings(enabled, traverse, name);
-        }
-    });
-    if let Some(error) = failure {
-        window.push_notification(Notification::error(error), cx);
-    }
+        controller.save_hosting_settings(enabled, traverse, name);
+        Ok(())
+    })
 }
 
 /// Save a new name or Traverse setting; while hosting, re-bind the endpoint
@@ -342,19 +359,19 @@ fn switch_hosting(
 pub(super) fn apply_hosting_settings(
     traverse: TraverseSetting,
     name: Option<String>,
-    window: &mut Window,
     cx: &mut App,
-) {
+) -> Result<(), String> {
     if cx
         .try_global::<RemoteController>()
         .is_some_and(RemoteController::is_hosting)
     {
-        switch_hosting(false, traverse.clone(), name.clone(), window, cx);
-        switch_hosting(true, traverse, name, window, cx);
+        switch_hosting(false, traverse.clone(), name.clone(), cx)?;
+        switch_hosting(true, traverse, name, cx)
     } else {
         cx.update_global::<RemoteController, _>(|controller, _| {
             controller.save_hosting_settings(false, traverse, name);
         });
+        Ok(())
     }
 }
 
@@ -395,8 +412,8 @@ impl HostingPanel {
         let subscription = cx.subscribe_in(
             &host_name_input,
             window,
-            |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::Blur | InputEvent::PressEnter { .. } => this.apply_name(window, cx),
+            |this, _, event: &InputEvent, _, cx| match event {
+                InputEvent::Blur | InputEvent::PressEnter { .. } => this.apply_name(cx),
                 InputEvent::Change | InputEvent::Focus => {}
             },
         );
@@ -414,7 +431,7 @@ impl HostingPanel {
         (!typed.is_empty()).then_some(typed)
     }
 
-    fn set_hosting(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_hosting(&mut self, enabled: bool, cx: &mut Context<Self>) {
         let Some(traverse) = cx
             .try_global::<RemoteController>()
             .map(|controller| controller.local_settings().traverse.clone())
@@ -422,11 +439,12 @@ impl HostingPanel {
             return;
         };
         let name = self.typed_name(cx);
-        switch_hosting(enabled, traverse, name, window, cx);
+        // A failure shows under the hosting switch, on this page.
+        let _ = switch_hosting(enabled, traverse, name, cx);
         cx.notify();
     }
 
-    fn apply_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_name(&mut self, cx: &mut Context<Self>) {
         let Some(controller) = cx.try_global::<RemoteController>() else {
             return;
         };
@@ -435,7 +453,8 @@ impl HostingPanel {
             return;
         }
         let traverse = controller.local_settings().traverse.clone();
-        apply_hosting_settings(traverse, name, window, cx);
+        // A failure shows under the hosting switch, on this page.
+        let _ = apply_hosting_settings(traverse, name, cx);
         cx.notify();
     }
 
@@ -452,9 +471,15 @@ impl HostingPanel {
     }
 
     fn render_machine(&mut self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
-        let (hosting, pairing) = cx
+        let (hosting, pairing, failure) = cx
             .try_global::<RemoteController>()
-            .map(|controller| (controller.is_hosting(), controller.pairing_enabled()))
+            .map(|controller| {
+                (
+                    controller.is_hosting(),
+                    controller.pairing_enabled(),
+                    controller.start_failure().map(SharedString::from),
+                )
+            })
             .unwrap_or_default();
         let mut rows = vec![
             ToggleRow::new(
@@ -462,10 +487,11 @@ impl HostingPanel {
                 crate::tr!("remote.host.title"),
                 hosting,
                 compact,
-                cx.listener(|this, checked: &bool, window, cx| {
-                    this.set_hosting(*checked, window, cx);
+                cx.listener(|this, checked: &bool, _, cx| {
+                    this.set_hosting(*checked, cx);
                 }),
             )
+            .error(failure)
             .into_any_element(),
         ];
         if hosting {
@@ -585,10 +611,10 @@ mod tests {
         assert!(cx.debug_bounds("remote-invitation").is_none());
 
         panel.update_in(cx, |panel, window, cx| {
-            panel
-                .host_name_input
-                .update(cx, |input, cx| input.set_value("Studio", window, cx));
-            panel.apply_name(window, cx);
+            panel.host_name_input.update(cx, |input, cx| {
+                input.set_value("Studio", window, cx);
+                cx.emit(InputEvent::Blur);
+            });
         });
         cx.read(|cx| {
             assert_eq!(

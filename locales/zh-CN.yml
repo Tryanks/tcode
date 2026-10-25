@@ -1328,6 +1328,8 @@ remote:
   host:
     section: "本机"
     title: "允许其他设备连接本机"
+    start_failed: "无法启动：%{reason}"
+    port_in_use: "端口已被另一个 Tcode 占用"
   pairing:
     title: "接受新设备配对"
   host_name:

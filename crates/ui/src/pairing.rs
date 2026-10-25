@@ -179,16 +179,29 @@ impl PairForm {
 
     /// Empty the fields for a fresh invitation.
     pub fn clear(&mut self, window: &mut Window, cx: &mut App) {
+        self.empty(window, cx);
+        self.invitation
+            .update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// The paste page was left. An attempt that has ended leaves nothing
+    /// behind, so its failure does not follow the user back to Machines; one
+    /// still in flight keeps running and reports there.
+    pub fn leave(&mut self, window: &mut Window, cx: &mut App) {
+        if !self.busy {
+            self.empty(window, cx);
+        }
+    }
+
+    fn empty(&mut self, window: &mut Window, cx: &mut App) {
         self.error = None;
         self.attempted = None;
         self.unreachable = None;
         self.address_error = None;
         self.address
             .update(cx, |state, cx| state.set_value("", window, cx));
-        self.invitation.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-            state.focus(window, cx);
-        });
+        self.invitation
+            .update(cx, |state, cx| state.set_value("", window, cx));
     }
 }
 

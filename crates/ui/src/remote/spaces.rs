@@ -717,19 +717,22 @@ pub(crate) fn open_create(
     window.open_dialog(cx, move |dialog, _, _| {
         let field = field.clone();
         submit_actions(
-            dialog.title(title.clone()).content(move |content, _, cx| {
-                content.child(
-                    v_flex()
-                        .gap_3()
-                        .debug_selector(|| "spaces-create".into())
-                        .child(Input::new(&field))
-                        .child(
-                            div()
-                                .text_secondary(false, cx)
-                                .child(crate::tr!("spaces.create.disclosure")),
-                        ),
-                )
-            }),
+            dialog
+                .title(title.clone())
+                .content(move |content, window, cx| {
+                    let compact = crate::window_seam::window_is_compact(window, cx);
+                    content.child(
+                        v_flex()
+                            .gap_3()
+                            .debug_selector(|| "spaces-create".into())
+                            .child(Input::new(&field))
+                            .child(
+                                div()
+                                    .text_secondary(compact, cx)
+                                    .child(crate::tr!("spaces.create.disclosure")),
+                            ),
+                    )
+                }),
             "spaces-create",
             crate::tr!("spaces.create.action").into_owned().into(),
             submit.clone(),
@@ -1612,14 +1615,15 @@ mod section {
                     )
                     .into_owned(),
                 )
-                .content(move |content, _, cx| {
+                .content(move |content, window, cx| {
+                    let compact = crate::window_seam::window_is_compact(window, cx);
                     content.child(
                         v_flex()
                             .gap_3()
                             .debug_selector(|| "spaces-remove-member".into())
                             .child(
                                 div()
-                                    .text_secondary(false, cx)
+                                    .text_secondary(compact, cx)
                                     .child(crate::tr!("spaces.members.remove_description")),
                             )
                             .child(

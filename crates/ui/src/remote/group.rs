@@ -351,11 +351,11 @@ fn brought(spaces: &Entity<Spaces>, cx: &App) -> Vec<String> {
 
 /// The warning every create and join carries: the devices this machine
 /// brings, which every member admits once confirmed.
-fn brought_warning(devices: &[String], cx: &App) -> AnyElement {
+fn brought_warning(devices: &[String], compact: bool, cx: &App) -> AnyElement {
     notice(cx.theme().warning, cx)
         .flex_col()
         .items_start()
-        .text_body(false, cx)
+        .text_body(compact, cx)
         .debug_selector(|| "group-brought".into())
         .child(
             div()
@@ -400,13 +400,14 @@ fn open_create(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
         submit_actions(
             dialog
                 .title(crate::tr!("group.create.title").into_owned())
-                .content(move |content, _, cx| {
+                .content(move |content, window, cx| {
+                    let compact = crate::window_seam::window_is_compact(window, cx);
                     content.child(
                         v_flex()
                             .gap_3()
                             .debug_selector(|| "group-create-dialog".into())
                             .child(Input::new(&field))
-                            .child(brought_warning(&brought, cx)),
+                            .child(brought_warning(&brought, compact, cx)),
                     )
                 }),
             "group-create",
@@ -478,14 +479,15 @@ fn open_join(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
         submit_actions(
             dialog
                 .title(crate::tr!("group.join.title").into_owned())
-                .content(move |content, _, cx| {
+                .content(move |content, window, cx| {
+                    let compact = crate::window_seam::window_is_compact(window, cx);
                     content.child(
                         v_flex()
                             .gap_3()
                             .debug_selector(|| "group-join-dialog".into())
                             .child(
                                 div()
-                                    .text_secondary(false, cx)
+                                    .text_secondary(compact, cx)
                                     .child(crate::tr!("group.join.description")),
                             )
                             .child(Input::new(&link_field))
@@ -495,7 +497,7 @@ fn open_join(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
                                     .child(crate::tr!("group.join.address")),
                             )
                             .child(Input::new(&address_field))
-                            .child(brought_warning(&brought, cx)),
+                            .child(brought_warning(&brought, compact, cx)),
                     )
                 }),
             "group-join",

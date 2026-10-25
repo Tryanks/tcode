@@ -1335,6 +1335,8 @@ remote:
   host:
     section: "THIS MACHINE"
     title: "Let other devices connect to this machine"
+    start_failed: "Could not start: %{reason}"
+    port_in_use: "the port is already in use by another Tcode"
   pairing:
     title: "Accept new devices"
   host_name:

@@ -165,6 +165,7 @@ pub struct ToggleRow {
     id: SharedString,
     title: SharedString,
     description: Option<SharedString>,
+    error: Option<SharedString>,
     checked: bool,
     compact: bool,
     disabled: bool,
@@ -186,6 +187,7 @@ impl ToggleRow {
             id: id.into(),
             title: title.into(),
             description: None,
+            error: None,
             checked,
             compact,
             disabled: false,
@@ -197,6 +199,12 @@ impl ToggleRow {
 
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Why the switch did not take, under the title in the danger colour.
+    pub fn error(mut self, error: Option<SharedString>) -> Self {
+        self.error = error;
         self
     }
 
@@ -224,6 +232,7 @@ impl RenderOnce for ToggleRow {
             id,
             title,
             description,
+            error,
             checked,
             compact,
             disabled,
@@ -284,6 +293,12 @@ impl RenderOnce for ToggleRow {
         })
         .child(
             row_labels(title, description, reset, compact, cx)
+                .children(error.map(|error| {
+                    div()
+                        .text_secondary(compact, cx)
+                        .text_color(cx.theme().danger_foreground)
+                        .child(error)
+                }))
                 // An accessory takes the room the labels leave.
                 .when(has_accessory, |labels| labels.flex_none()),
         )

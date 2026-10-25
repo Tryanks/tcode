@@ -4054,7 +4054,7 @@ fn compact_status_glyph(
     if state.show_unread {
         return slot
             .justify_center()
-            .child(div().size(px(8.)).rounded_full().bg(cx.theme().primary))
+            .child(crate::material::status_dot(cx.theme().primary))
             .into_any_element();
     }
     slot.justify_center()

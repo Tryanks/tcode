@@ -237,9 +237,9 @@ impl TraverseHost {
                 // where IPv6 is unavailable.
                 Err(error) if config.bind_port.is_some() => {
                     log::debug!("dual-stack bind failed, trying IPv4 only: {error}");
-                    build(false)?.bind().await.map_err(io::Error::other)?
+                    build(false)?.bind().await.map_err(bind_error)?
                 }
-                Err(error) => return Err(io::Error::other(error)),
+                Err(error) => return Err(bind_error(error)),
             };
             let status_changed = Arc::new(tokio::sync::Notify::new());
             let lookup_checks = Arc::new(live::LookupChecks::new(status_changed.clone()));
@@ -501,6 +501,18 @@ impl TraverseHost {
             let _ = router.shutdown().await;
         });
     }
+}
+
+/// The endpoint's bind failure, with the kind of the socket error under it,
+/// so a caller can tell a port another process holds from other failures.
+fn bind_error(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
+    let kind = std::iter::successors(
+        Some(&error as &(dyn std::error::Error + 'static)),
+        |error| error.source(),
+    )
+    .find_map(|error| error.downcast_ref::<io::Error>())
+    .map_or(io::ErrorKind::Other, io::Error::kind);
+    io::Error::new(kind, error)
 }
 
 /// The endpoint's UDP port: the IPv4 socket's, else the IPv6 one's. With
