@@ -433,6 +433,8 @@ pub mod action {
     /// Detail: the setting's key.
     pub const PATCH_SETTINGS: &str = "patch_settings";
     pub const START_THREAD: &str = "start_thread";
+    /// Detail: the target project's name and root.
+    pub const MOVE: &str = "move";
     pub const SEND_QUEUED: &str = "send_queued";
     pub const SEND_STEERED: &str = "send_steered";
     pub const SEND_SCHEDULED: &str = "send_scheduled";

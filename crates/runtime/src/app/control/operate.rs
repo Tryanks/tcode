@@ -2,12 +2,12 @@ use std::pin::Pin;
 
 use super::*;
 use crate::app::orchestrate::native_provider_named;
-use crate::app::sessions::{fork_refusal, read_attachments};
+use crate::app::sessions::{directory_within, fork_refusal, read_attachments};
 use control_mcp::{
     ActionResponse, BatchResponse, BatchResult, ControlThreadParams, ControlThreadResponse,
-    CreateProjectParams, CreateProjectResponse, GitOp, GitParams, Outcome, PullRequestOp,
-    PullRequestParams, RunChange, RunOp, RunResult, SendMessageParams, SendMode, StartThreadParams,
-    StartThreadResponse, Workspace,
+    CreateProjectParams, CreateProjectResponse, GitOp, GitParams, MoveThreadParams,
+    MoveThreadResponse, Outcome, PullRequestOp, PullRequestParams, RunChange, RunOp, RunResult,
+    SendMessageParams, SendMode, StartThreadParams, StartThreadResponse, Workspace,
 };
 use tcode_core::control::{ControlCategory, StartedBy, action};
 use tcode_core::pull_request::{PullRequestKey, PullRequestSource};
@@ -120,17 +120,14 @@ fn cwd_inside(root: &Path, cwd: &str) -> Result<PathBuf, String> {
         return Err(outside());
     }
     let joined = root.join(relative);
-    let (Ok(canonical), Ok(canonical_root)) = (fs::canonicalize(&joined), fs::canonicalize(root))
-    else {
-        return Err(format!(
+    match directory_within(root, &joined) {
+        None => Err(format!(
             "invalid cwd: {} is not a directory on this host",
             joined.display()
-        ));
-    };
-    if !canonical.starts_with(&canonical_root) {
-        return Err(outside());
+        )),
+        Some(false) => Err(outside()),
+        Some(true) => Ok(joined),
     }
-    Ok(joined)
 }
 
 impl AppState {
@@ -991,6 +988,72 @@ impl AppState {
             root: project.root.display().to_string(),
             created: !existed,
         })
+    }
+
+    /// Move a thread into a project the grant reaches; a thread may move itself, keeping the
+    /// turn that asked ([`AppState::move_session_by`]).
+    pub(super) fn op_move_thread(
+        &mut self,
+        caller: &Caller,
+        params: MoveThreadParams,
+        cx: &mut HostCx,
+    ) -> Result<serde_json::Value, String> {
+        let key = params
+            .request_id
+            .as_deref()
+            .map(|id| request_key(caller, "move_thread", id));
+        if let Some(answer) = key.as_deref().and_then(|key| self.answered(key)) {
+            return Ok(answer);
+        }
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.id == params.project_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown project: {}", params.project_id))?;
+        if !caller
+            .grant
+            .scope
+            .reaches(caller.project_id.as_deref(), Some(project.id.as_str()))
+        {
+            return Err(format!(
+                "refused: project {} is outside your grant's scope ({})",
+                project.id,
+                caller.grant.scope.describe()
+            ));
+        }
+        let cwd = params
+            .cwd
+            .map(|cwd| cwd_inside(&project.root, &cwd))
+            .transpose()?;
+        let before = self
+            .find_meta(&params.thread_id)
+            .map(|meta| (meta.project_id, meta.cwd));
+        let by_own_turn = params.thread_id == caller.thread_id;
+        self.move_session_by(&params.thread_id, &project.id, cwd, by_own_turn, cx)
+            .map_err(|error| format!("refused: {}", error.message))?;
+        let meta = self
+            .find_meta(&params.thread_id)
+            .ok_or("the thread disappeared")?;
+        if before != Some((meta.project_id.clone(), meta.cwd.clone())) {
+            self.audit(
+                caller,
+                &params.thread_id,
+                action::MOVE,
+                Some(format!("{} ({})", project.name, project.root.display())),
+                cx,
+            );
+        }
+        let answer = to_json(MoveThreadResponse {
+            thread_id: meta.id,
+            project_id: project.id,
+            project_name: project.name,
+            cwd: meta.cwd.display().to_string(),
+        })?;
+        if let Some(key) = key {
+            self.remember_answer(key, answer.clone());
+        }
+        Ok(answer)
     }
 }
 

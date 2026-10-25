@@ -91,10 +91,16 @@ impl AppState {
             .expect("provider start generation overflow");
         let generation = self.next_start_generation;
         let active = self.resident_mut(session_id).unwrap();
+        if active.meta.moved_from.is_some() {
+            // The native session belongs to the directory the thread left.
+            active.meta.resume_cursor = None;
+            active.meta.pending_fork = false;
+        }
         active.runtime = Runtime::Starting { generation };
         active.mcp_servers_attached = true;
         active.idle_since = None;
         active.live_model = active.meta.model.clone();
+        active.live_cwd = active.meta.cwd.clone();
         active.live_option_selections = active.meta.option_selections.clone();
         active.confirmed_option_selections.clear();
 

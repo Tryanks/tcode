@@ -239,6 +239,9 @@ struct ThreadMergeWorktree(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadMarkUnread(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadMoveToProject(String);
 
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
@@ -925,6 +928,15 @@ impl SessionsSidebar {
         self.store.update(cx, |store, cx| {
             store.fork_thread(id, cx);
         });
+    }
+
+    fn on_move_to_project(
+        &mut self,
+        action: &ThreadMoveToProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::move_thread_dialog::open(self.store.clone(), action.0.clone(), window, cx);
     }
 
     fn on_merge_worktree(
@@ -2640,6 +2652,12 @@ impl SessionsSidebar {
                     Box::new(ThreadMergeWorktree(id.clone())),
                 )
             })
+            .when(!is_worktree, |menu| {
+                menu.menu(
+                    crate::tr!("sidebar.ctx_move_thread").into_owned(),
+                    Box::new(ThreadMoveToProject(id.clone())),
+                )
+            })
             .menu(
                 crate::tr!("pull_requests.link_menu").into_owned(),
                 Box::new(ThreadLinkPullRequest(id.clone())),
@@ -3681,6 +3699,7 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_regenerate_title))
             .on_action(cx.listener(Self::on_fork))
             .on_action(cx.listener(Self::on_merge_worktree))
+            .on_action(cx.listener(Self::on_move_to_project))
             .on_action(cx.listener(Self::on_mark_unread))
             .on_action(cx.listener(Self::on_copy_path))
             .on_action(cx.listener(Self::on_copy_id))
@@ -4421,6 +4440,7 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_regenerate_title))
             .on_action(cx.listener(Self::on_fork))
             .on_action(cx.listener(Self::on_merge_worktree))
+            .on_action(cx.listener(Self::on_move_to_project))
             .on_action(cx.listener(Self::on_mark_unread))
             .on_action(cx.listener(Self::on_copy_path))
             .on_action(cx.listener(Self::on_copy_id))

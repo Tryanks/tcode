@@ -169,6 +169,7 @@ pub(crate) fn action_label(key: &str) -> String {
         action::GIT_PUBLISH_BRANCH => "control.action.git_publish_branch",
         action::GIT_INITIALIZE => "control.action.git_initialize",
         action::CREATE_PROJECT => "control.action.create_project",
+        action::MOVE => "control.action.move",
         action::REFERENCE => "control.action.reference",
         _ => return key.to_owned(),
     };

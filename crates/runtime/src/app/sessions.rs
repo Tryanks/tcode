@@ -462,6 +462,137 @@ impl AppState {
         Ok(())
     }
 
+    /// Move a thread into `project_id`, its conversation continuing in `cwd` (the project
+    /// root when absent). A provider's native session belongs to the directory it ran in —
+    /// Claude Code keeps its sessions per directory and cannot resume one from another — so
+    /// the move clears the resume cursor and the next turn starts a fresh provider session
+    /// there, handed the conversation so far by the relay owner
+    /// ([`Self::hand_off_moved_conversation`]). The Tcode transcript stays as it is.
+    pub fn move_session(
+        &mut self,
+        session_id: &str,
+        project_id: &str,
+        cwd: Option<PathBuf>,
+        cx: &mut HostCx,
+    ) -> Result<(), ProtocolError> {
+        self.move_session_by(session_id, project_id, cwd, false, cx)
+    }
+
+    /// [`Self::move_session`]; `by_own_turn` when the thread's own running turn asked for the
+    /// move, which keeps that turn: its provider leaves the old directory when it ends.
+    pub(super) fn move_session_by(
+        &mut self,
+        session_id: &str,
+        project_id: &str,
+        cwd: Option<PathBuf>,
+        by_own_turn: bool,
+        cx: &mut HostCx,
+    ) -> Result<(), ProtocolError> {
+        let error = |code: &str, message: String| ProtocolError {
+            code: code.into(),
+            message,
+        };
+        let resident_meta = self
+            .resident(session_id)
+            .map(|session| session.meta.clone());
+        let Some(mut meta) = resident_meta.or_else(|| self.find_meta(session_id)) else {
+            return Err(error(
+                "unknown_session",
+                "This thread is no longer available on the host.".into(),
+            ));
+        };
+        let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() else {
+            return Err(error(
+                "unknown_project",
+                "This project is no longer available.".into(),
+            ));
+        };
+        if meta.archived_at.is_some() {
+            return Err(error(
+                "archived_session",
+                "Unarchive this thread before moving it.".into(),
+            ));
+        }
+        if self
+            .resident(session_id)
+            .is_some_and(|session| session.draft)
+        {
+            return Err(error(
+                "draft_session",
+                "An unsent draft is not a thread yet; start it in the other project instead."
+                    .into(),
+            ));
+        }
+        if Self::conversation_read_only(&meta) {
+            return Err(error(
+                "read_only_session",
+                "A native subagent's mirror cannot be moved.".into(),
+            ));
+        }
+        if meta.worktree.is_some() {
+            return Err(error(
+                "worktree_session",
+                "This thread runs in its own worktree; move the worktree's branch instead.".into(),
+            ));
+        }
+        let cwd = match cwd {
+            None => project.root.clone(),
+            Some(cwd) if cwd.is_relative() => project.root.join(cwd),
+            Some(cwd) => cwd,
+        };
+        match directory_within(&project.root, &cwd) {
+            None => {
+                return Err(error(
+                    "invalid_cwd",
+                    format!("{} is not a directory on this host.", cwd.display()),
+                ));
+            }
+            Some(false) => {
+                return Err(error(
+                    "cwd_outside_project",
+                    format!(
+                        "{} is not inside {}.",
+                        cwd.display(),
+                        project.root.display()
+                    ),
+                ));
+            }
+            Some(true) => {}
+        }
+        if meta.project_id.as_deref() == Some(project_id) && meta.cwd == cwd {
+            return Ok(());
+        }
+        if !by_own_turn && self.settle_thread_busy(session_id) {
+            return Err(error(
+                "thread_busy",
+                "This thread is busy; wait for it to finish before moving it.".into(),
+            ));
+        }
+
+        let old_cwd = std::mem::replace(&mut meta.cwd, cwd);
+        meta.moved_from.get_or_insert(old_cwd);
+        meta.project_id = Some(project.id.clone());
+        meta.resume_cursor = None;
+        meta.pending_fork = false;
+        meta.updated_at = now_secs();
+        if !by_own_turn {
+            self.detach_provider_to_idle(session_id, cx);
+        }
+        if let Some(resident) = self.resident_mut(session_id) {
+            resident.meta = meta.clone();
+            resident.git_branch = None;
+            resident.branches.clear();
+        }
+        self.persist_meta(&meta, cx);
+        self.refresh_control_grants();
+        if self.resident(session_id).is_some() {
+            self.refresh_session_git_branch(meta.id.clone(), meta.cwd.clone(), cx);
+            self.refresh_git_status(session_id, cx);
+        }
+        self.discover_pull_requests_for(session_id, false, cx);
+        Ok(())
+    }
+
     pub fn create_new_project(
         &self,
         name: String,
@@ -2291,4 +2422,12 @@ pub(super) fn fork_refusal(availability: ForkAvailability) -> Option<&'static st
         }
         ForkAvailability::Available => None,
     }
+}
+
+/// Whether `dir` is a directory inside `root` on this host, links resolved; `None` when it
+/// is not a directory there.
+pub(super) fn directory_within(root: &Path, dir: &Path) -> Option<bool> {
+    let dir = fs::canonicalize(dir).ok().filter(|dir| dir.is_dir())?;
+    let root = fs::canonicalize(root).ok()?;
+    Some(dir.starts_with(root))
 }

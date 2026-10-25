@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::test_support::*;
 use crate::app::{ProviderLauncher, active_session::Runtime};
-use control_mcp::{ControlOp, ReferenceParams};
+use control_mcp::{ControlOp, MoveThreadParams, ReferenceParams};
 use tcode_core::control::{ControlScope, ControlTier, ReferenceOrigin};
 
 /// Providers that never come up, so what a call queued stays observable.
@@ -722,4 +722,105 @@ fn git_answers_with_the_outcome_and_refuses_unsafe_checkouts() {
             .trim(),
         "topic"
     );
+}
+
+/// A thread moves itself with `move_thread` only into a project its grant reaches. The move
+/// is audited in the thread with the project it went to, and the turn that asked keeps its
+/// provider until it ends, when the provider leaves the old directory.
+#[test]
+fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
+    let store = TestStore::new("tcode-control-move-thread");
+    let quick = store.root().join("quick");
+    let demo = store.root().join("demo");
+    std::fs::create_dir_all(&quick).unwrap();
+    std::fs::create_dir_all(&demo).unwrap();
+    let cx = &mut TestAppContext::default();
+    let state = host(&store, cx);
+    let (commands, _provider) = smol::channel::unbounded();
+    let demo_id = state.update(cx, |state, cx| {
+        let quick_id = state.create_project(quick.clone(), cx).unwrap();
+        let demo_id = state.create_project(demo.clone(), cx).unwrap();
+        let mut caller = thread("caller", &quick_id, ProviderKind::ClaudeCode);
+        caller.cwd = quick.clone();
+        let mut session = ActiveSession::new(caller, false, Vec::new());
+        session.runtime = Runtime::Live(commands);
+        session.turn_in_flight = true;
+        park(state, session);
+        demo_id
+    });
+    let move_self = || {
+        ControlOp::MoveThread(MoveThreadParams {
+            thread_id: "caller".into(),
+            project_id: demo_id.clone(),
+            cwd: None,
+            request_id: Some("move-1".into()),
+        })
+    };
+
+    state.update(cx, |state, cx| {
+        assert_eq!(
+            call(state, cx, "caller", move_self()),
+            Err(format!(
+                "refused: project {demo_id} is outside your grant's scope (project)"
+            ))
+        );
+        assert_eq!(
+            state.find_meta("caller").unwrap().cwd,
+            quick,
+            "a refused move changes nothing"
+        );
+        let mut caller = state.find_meta("caller").unwrap();
+        caller.control_grant = Some(ControlGrant {
+            scope: ControlScope::Host,
+            tiers: [ControlTier::Operate].into_iter().collect(),
+            ..ControlGrant::none()
+        });
+        state.store_meta(caller, cx);
+        let moved = call(state, cx, "caller", move_self()).unwrap();
+        assert_eq!(moved["project_id"], demo_id.as_str());
+        assert_eq!(moved["cwd"], demo.display().to_string());
+    });
+    cx.run_until_parked();
+    state.read(|state| {
+        let session = state.resident("caller").unwrap();
+        assert_eq!(session.meta.project_id.as_deref(), Some(demo_id.as_str()));
+        assert_eq!(session.meta.cwd, demo);
+        assert!(
+            matches!(session.runtime, Runtime::Live(_)),
+            "the turn that asked keeps its provider"
+        );
+        let audits: Vec<_> = session
+            .timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                EntryContent::ControlAction(action) => {
+                    Some((action.action.clone(), action.detail.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            audits,
+            [(
+                tcode_core::control::action::MOVE.to_owned(),
+                Some(format!("demo ({})", demo.display()))
+            )]
+        );
+    });
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "caller",
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+        assert!(matches!(
+            state.resident("caller").unwrap().runtime,
+            Runtime::Idle
+        ));
+    });
 }

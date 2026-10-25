@@ -466,6 +466,7 @@ impl AppState {
             ControlOp::PullRequest(p) => return self.op_pull_request(caller, p, cx),
             ControlOp::Git(p) => return self.op_git(caller, p, cx),
             ControlOp::CreateProject(p) => self.op_create_project(caller, p, cx),
+            ControlOp::MoveThread(p) => self.op_move_thread(caller, p, cx),
             ControlOp::NotifyWhen(p) => self.op_notify_when(caller, p, cx),
             ControlOp::CancelNotify(p) => self.op_cancel_notify(caller, p, cx),
             ControlOp::Reference(p) => self.op_reference(caller, p, cx),

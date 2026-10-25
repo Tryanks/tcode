@@ -1773,6 +1773,10 @@ pub enum AgentEvent {
         /// before it was kept carry `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// Set when the handoff follows the thread's move to another directory: the
+        /// directory the native session it replaces belonged to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        moved_from: Option<PathBuf>,
     },
     /// History-only: retained to decode stored plan decisions; never emitted.
     PlanResolved {

@@ -596,6 +596,22 @@ pub struct CreateProjectParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MoveThreadParams {
+    #[schemars(description = "The thread to move; your own thread id moves this thread.")]
+    pub thread_id: String,
+    #[schemars(description = "The project to move it into, from list_projects or create_project.")]
+    pub project_id: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Working directory relative to the project root, which it must stay inside; the root when absent."
+    )]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Idempotency key.")]
+    pub request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NotifyWhenParams {
     #[schemars(description = "The threads to watch.")]
     pub thread_ids: Vec<String>,
@@ -815,6 +831,14 @@ pub struct CreateProjectResponse {
     pub root: String,
     /// False when a project already covered the root.
     pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveThreadResponse {
+    pub thread_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
