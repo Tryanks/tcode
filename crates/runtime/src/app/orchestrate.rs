@@ -573,7 +573,6 @@ impl AppState {
             cx,
         );
         self.upsert_session_in_memory(meta.clone());
-        self.discover_pull_requests_for(&meta.id, false, cx);
         let id = meta.id.clone();
         let provider_commands = self.cached_provider_commands_for(&meta);
         let mut session = Self::build_draft_session(

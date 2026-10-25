@@ -2564,16 +2564,10 @@ impl ChatView {
     fn active_pull_requests(
         &self,
         cx: &App,
-    ) -> Option<(
-        Vec<tcode_core::pull_request::ThreadPullRequestLink>,
-        Option<tcode_core::pull_request::BranchPullRequest>,
-    )> {
+    ) -> Option<Vec<tcode_core::pull_request::ThreadPullRequestLink>> {
         let store = self.workspace_store.read(cx);
         let id = store.active_session_id()?;
-        Some((
-            store.pull_requests(&id).to_vec(),
-            store.branch_pull_request(&id).cloned(),
-        ))
+        Some(store.pull_requests(&id).to_vec())
     }
 
     /// The pull request page a phone pushes over the thread.
@@ -2584,9 +2578,9 @@ impl ChatView {
     /// The phone's entry to the linked pull requests: a chip in the row above the
     /// composer that opens them in a bottom sheet.
     fn render_pull_request_pill(&self, cx: &App) -> Option<AnyElement> {
-        let (links, branch) = self.active_pull_requests(cx)?;
-        let badge = crate::pull_requests::badge(&links, branch.as_ref(), 14., cx)?;
-        let label = crate::pull_requests::badge_label(&links, branch.as_ref(), cx)?;
+        let links = self.active_pull_requests(cx)?;
+        let badge = crate::pull_requests::badge(&links, 14., cx)?;
+        let label = crate::pull_requests::badge_label(&links, cx)?;
         let panel = self.pull_requests.clone();
         Some(
             crate::material::bar("phone-pr-row", crate::material::Bar::Toolbar, true, cx)
@@ -2866,10 +2860,10 @@ impl ChatView {
                             .context_menu(title_menu),
                     )
                     .when_some(
-                        self.active_pull_requests(cx).and_then(|(links, branch)| {
+                        self.active_pull_requests(cx).and_then(|links| {
                             Some((
-                                crate::pull_requests::badge(&links, branch.as_ref(), 14., cx)?,
-                                crate::pull_requests::badge_label(&links, branch.as_ref(), cx)?,
+                                crate::pull_requests::badge(&links, 14., cx)?,
+                                crate::pull_requests::badge_label(&links, cx)?,
                             ))
                         }),
                         |header, (badge, label)| {

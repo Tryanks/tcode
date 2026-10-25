@@ -1729,7 +1729,6 @@ pull_requests:
   source_stack: "Found in the stack"
   source_dismissed: "Dismissed"
   source_not_linked: "In the stack, not linked"
-  source_branch: "On this thread's branch, not linked"
   number_tooltip: "%{source} · %{ago}"
   waiting_for_host: "Waiting for host state"
   conflict: "Conflicts with %{base}"

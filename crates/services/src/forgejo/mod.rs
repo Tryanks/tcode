@@ -9,8 +9,8 @@ mod repository;
 
 use crate::{
     forge::{
-        Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary,
-        Tails, ViewedMarks,
+        Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
+        ViewedMarks,
     },
     settings::SettingsStore,
 };
@@ -19,7 +19,6 @@ use reads::{MAX_PAGES, Pull, text};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
-    path::Path,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -50,8 +49,6 @@ const REACTION_READS: usize = 100;
 const ANONYMOUS: &str = "anonymous";
 
 type Slot = (Instant, PullRequestReadResponse);
-/// A branch's pull request by repository and `owner:branch`, and when it was looked up.
-type Branches = HashMap<(String, String), (Instant, Option<Discovered>)>;
 
 pub struct Forgejo {
     api: Arc<Api>,
@@ -59,7 +56,6 @@ pub struct Forgejo {
     /// The servers known by settings, a CLI login or the environment, with their kind.
     known: RwLock<BTreeMap<String, HostKind>>,
     reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
-    branches: Mutex<Branches>,
 }
 
 impl Forgejo {
@@ -73,7 +69,6 @@ impl Forgejo {
             api: Api::new(store, environment),
             known: RwLock::default(),
             reads: Mutex::default(),
-            branches: Mutex::default(),
         })
     }
 
@@ -785,59 +780,6 @@ impl Forge for Forgejo {
 
     fn url(&self, key: &PullRequestKey) -> Option<String> {
         Some(repository::url(key))
-    }
-
-    /// One page of the repository's open pull requests, newest activity first: a branch whose
-    /// pull request is older than fifty others is not found, rather than every page read.
-    fn discover(
-        &self,
-        cwd: &Path,
-        root: &crate::forge::Checkout<'_>,
-        refresh: bool,
-    ) -> Result<Option<Discovered>, ForgeError> {
-        let known = self.known();
-        let cwd = if cwd.exists() { cwd } else { root.cwd() };
-        let Some(repository) = repository::resolve(&known, root) else {
-            return Ok(None);
-        };
-        let Some(branch) = repository::branch(&known, root, cwd) else {
-            return Ok(None);
-        };
-        let slot = (
-            format!("{}/{}", repository.host, repository.locator),
-            format!("{}:{}", branch.head_owner, branch.head_branch),
-        );
-        if !refresh
-            && let Some((at, found)) = self.branches.lock().unwrap().get(&slot)
-            && at.elapsed() < READ_TTL
-        {
-            return Ok(found.clone());
-        }
-        let probe = repository.key(1);
-        let pull = self.pull(&probe);
-        let rows = pull.get(
-            "pulls?state=open&sort=recentupdate&limit=50",
-            "PullRequestsByHead",
-        )?;
-        let found = rows.as_array().into_iter().flatten().find_map(|row| {
-            let head = &row["head"];
-            let owner = head["repo"]["owner"]["login"].as_str()?;
-            (head["ref"].as_str() == Some(branch.head_branch.as_str())
-                && owner.eq_ignore_ascii_case(&branch.head_owner))
-            .then(|| {
-                let key = repository.key(row["number"].as_u64()?);
-                Some(Discovered {
-                    branch: branch.branch.clone(),
-                    url: repository::url(&key),
-                    key,
-                })
-            })?
-        });
-        self.branches
-            .lock()
-            .unwrap()
-            .insert(slot, (Instant::now(), found.clone()));
-        Ok(found)
     }
 
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {

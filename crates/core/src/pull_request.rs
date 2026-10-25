@@ -571,7 +571,8 @@ pub enum PullRequestState {
 pub enum PullRequestSource {
     Manual,
     /// Opened by an action in this thread. Links stored as `created` came from branch
-    /// discovery, which no longer links; [`drop_discovered_links`] drops them as they are read.
+    /// discovery, which Tcode no longer has; [`drop_discovered_links`] drops them as they are
+    /// read.
     Opened,
     Agent,
     Stack,
@@ -735,45 +736,22 @@ pub(crate) fn drop_discovered_links<'de, D: serde::Deserializer<'de>>(
         .collect())
 }
 
-/// The pull request discovery found for the thread's checkout branch. It is shown only while
-/// the thread has no visible link, is never one, and holds the thread out of no settlement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BranchPullRequest {
-    pub key: PullRequestKey,
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<PullRequestSnapshot>,
-}
-
-/// The branch's pull request, which the thread shows only while it has no visible link.
-pub fn branch_fallback<'a>(
-    links: &[ThreadPullRequestLink],
-    branch: Option<&'a BranchPullRequest>,
-) -> Option<&'a BranchPullRequest> {
-    branch.filter(|_| !links.iter().any(ThreadPullRequestLink::visible))
-}
-
 impl ThreadPullRequestLink {
     pub fn visible(&self) -> bool {
         self.source != PullRequestSource::Dismissed
     }
 }
 
-/// Whether the thread shows the pull request: a visible link, a layer of the native stack
-/// a visible link carries, or its branch's pull request while it has no visible link.
-pub fn shown(
-    links: &[ThreadPullRequestLink],
-    branch: Option<&BranchPullRequest>,
-    key: &PullRequestKey,
-) -> bool {
-    branch_fallback(links, branch).is_some_and(|branch| branch.key == *key)
-        || links.iter().filter(|link| link.visible()).any(|link| {
-            link.key == *key
-                || matches!(&link.stack, PullRequestStackState::Native(stack)
-                if link.key.host == key.host
-                    && link.key.repository == key.repository
-                    && stack.layers.iter().any(|layer| layer.number == key.number))
-        })
+/// Whether the thread shows the pull request: a visible link, or a layer of the native stack
+/// a visible link carries.
+pub fn shown(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> bool {
+    links.iter().filter(|link| link.visible()).any(|link| {
+        link.key == *key
+            || matches!(&link.stack, PullRequestStackState::Native(stack)
+            if link.key.host == key.host
+                && link.key.repository == key.repository
+                && stack.layers.iter().any(|layer| layer.number == key.number))
+    })
 }
 
 /// GitHub's merge methods, in the order its merge button lists them.
@@ -1226,18 +1204,10 @@ impl PullRequestBadgeState {
     }
 }
 
-pub fn badge(
-    links: &[ThreadPullRequestLink],
-    branch: Option<&BranchPullRequest>,
-) -> Option<(PullRequestBadgeState, usize, bool)> {
+pub fn badge(links: &[ThreadPullRequestLink]) -> Option<(PullRequestBadgeState, usize, bool)> {
     let visible: Vec<_> = links.iter().filter(|link| link.visible()).collect();
     if visible.is_empty() {
-        let branch = branch?;
-        return Some((
-            PullRequestBadgeState::of(branch.snapshot.as_ref()),
-            1,
-            false,
-        ));
+        return None;
     }
     let open: Vec<_> = visible
         .iter()
@@ -1989,7 +1959,7 @@ mod tests {
             ),
         ];
         for (links, expected) in cases {
-            assert_eq!(badge(&links, None), expected);
+            assert_eq!(badge(&links), expected);
         }
         let mut links = vec![
             link(1, Some(State::Open), false),
@@ -1998,7 +1968,7 @@ mod tests {
         ];
         links[1].snapshot.as_mut().unwrap().base_branch = "layer-1".into();
         links[2].snapshot.as_mut().unwrap().base_branch = "layer-2".into();
-        assert_eq!(badge(&links, None), Some((Badge::Open, 3, true)));
+        assert_eq!(badge(&links), Some((Badge::Open, 3, true)));
         assert_eq!(
             groups(&links)[0]
                 .links
@@ -2008,25 +1978,7 @@ mod tests {
             vec![1, 2, 3]
         );
         links[1].source = PullRequestSource::Dismissed;
-        assert_eq!(badge(&links, None), Some((Badge::Open, 2, false)));
-        let found = link(9, Some(State::Open), true);
-        let branch = BranchPullRequest {
-            key: found.key.clone(),
-            url: found.url.clone(),
-            snapshot: found.snapshot.clone(),
-        };
-        assert_eq!(badge(&[], Some(&branch)), Some((Badge::Draft, 1, false)));
-        let mut dismissed = link(1, Some(State::Merged), false);
-        dismissed.source = PullRequestSource::Dismissed;
-        assert_eq!(
-            badge(&[dismissed], Some(&branch)),
-            Some((Badge::Draft, 1, false))
-        );
-        assert_eq!(
-            badge(&[link(1, Some(State::Merged), false)], Some(&branch)),
-            Some((Badge::Merged, 1, false)),
-            "a link hides the branch's pull request"
-        );
+        assert_eq!(badge(&links), Some((Badge::Open, 2, false)));
         assert!(is_pull_request_url(
             "https://github.com/sample/project/pull/123/files"
         ));

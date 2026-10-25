@@ -17,7 +17,6 @@ pub(crate) use http::{Step, answered, in_order, media, run_cli, same_origin};
 pub(crate) use rate_limit::RateLimits;
 use std::{
     collections::{BTreeMap, HashMap},
-    path::Path,
     sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -80,16 +79,6 @@ pub trait Forge: Send + Sync {
     fn repository(&self, name: &str, host: &str) -> Option<Repository>;
     /// The web URL of a pull request.
     fn url(&self, key: &PullRequestKey) -> Option<String>;
-    /// The pull request of the branch checked out at `cwd`, when `root`'s repository has one:
-    /// read again with `refresh`, otherwise possibly from what was read recently. `Ok(None)`
-    /// is an answer that there is none; an error is no answer.
-    fn discover(
-        &self,
-        cwd: &Path,
-        root: &Checkout<'_>,
-        refresh: bool,
-    ) -> Result<Option<Discovered>, ForgeError>;
-
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError>;
     fn stack(&self, key: &PullRequestKey) -> Result<PullRequestStackState, ForgeError>;
 
@@ -275,15 +264,6 @@ impl Repository {
     pub fn key(&self, number: u64) -> PullRequestKey {
         PullRequestKey::new(&self.host, &self.locator, number)
     }
-}
-
-/// A pull request found for a checkout's branch.
-#[derive(Debug, Clone)]
-pub struct Discovered {
-    /// The local branch it was found for.
-    pub branch: String,
-    pub key: PullRequestKey,
-    pub url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -526,18 +506,6 @@ impl Forge for Hosts {
 
     fn url(&self, key: &PullRequestKey) -> Option<String> {
         self.host(&key.host).url(key)
-    }
-
-    fn discover(
-        &self,
-        cwd: &Path,
-        root: &Checkout<'_>,
-        refresh: bool,
-    ) -> Result<Option<Discovered>, ForgeError> {
-        let Some(repository) = self.checkout_repository(root) else {
-            return Ok(None);
-        };
-        self.host(&repository.host).discover(cwd, root, refresh)
     }
 
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {

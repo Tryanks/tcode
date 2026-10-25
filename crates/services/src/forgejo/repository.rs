@@ -2,7 +2,6 @@
 //! a mount path, and `owner/name` below it.
 
 use crate::forge::Repository;
-use std::path::Path;
 use tcode_core::pull_request::{HostKind, PullRequestKey};
 
 fn component(value: &str) -> bool {
@@ -157,27 +156,6 @@ pub(super) fn resolve(
     checkout: &crate::forge::Checkout<'_>,
 ) -> Option<Repository> {
     crate::forge::checkout::resolve(checkout, |url| remote(known, url))
-}
-
-/// The checked-out branch and where it is pushed: the head owner and branch a pull request
-/// from it names. A branch that tracks nothing has no pull request yet.
-pub(super) struct Branch {
-    pub(super) branch: String,
-    pub(super) head_owner: String,
-    pub(super) head_branch: String,
-}
-
-pub(super) fn branch(
-    known: &[String],
-    root: &crate::forge::Checkout<'_>,
-    cwd: &Path,
-) -> Option<Branch> {
-    let found = crate::forge::checkout::branch(root, cwd, |url| remote(known, url))?;
-    Some(Branch {
-        head_owner: found.source.locator.split('/').next()?.to_owned(),
-        head_branch: found.source_branch,
-        branch: found.branch,
-    })
 }
 
 #[cfg(test)]
