@@ -200,26 +200,27 @@ pub use wire::{
 // and image previews keep the source's shape instead of being cropped to the
 // tile.
 //
-// Unreleased: an original's metadata, the OriginalReady reply and the browser
-// /original response (X-Image-Dimensions) carry the image's displayed size;
-// the provider_relay event and timeline entry carry `prompt`, the handoff as
-// sent to the new provider; the agent event stream gains goal_updated,
-// SessionStatus carries the harness's standing goal, and the protocol adds the
-// SetGoal and ClearGoal commands. tcode_control (#929): SessionMeta carries
-// control_grant, control_grant_requests, references, follow_up, parked_at,
-// settle_suggestion_dismissed_at, self_settle, started_by and control_watches;
-// Settings carries control and settlement_automation with the ControlEnabled,
-// ControlDefaultGrant, ControlProjectGrant and SettlementAutomation patches;
-// the agent event stream gains control_action; the protocol adds the
-// SetControlGrant, RespondControlGrant, AddThreadReference,
-// RemoveThreadReference, SetFollowUp, SetParked, DismissSettleSuggestion and
-// RevokeSelfSettle commands and the ControlActivity and ReviewRecords queries;
-// SessionStatus.pull_request_tools (InjectedPullRequestTools) becomes
-// injected_tools (InjectedTools), listing every offered server's tools with
-// the servers that offer them (InjectedServer), and
-// SessionStatus gains control; RuntimeNotice gains review_recorded and
-// reference_boundary_crossed; AddThreadReference answers ThreadReferenceAdded.
-pub const PROTOCOL_VERSION: u32 = 18;
+// Version 19 (v0.3.0): an original's metadata, the OriginalReady reply and
+// the browser /original response (X-Image-Dimensions) carry the image's
+// displayed size; the provider_relay event and timeline entry carry `prompt`,
+// the handoff as sent to the new provider; the agent event stream gains
+// goal_updated, SessionStatus carries the harness's standing goal, and the
+// protocol adds the SetGoal and ClearGoal commands. tcode_control (#929):
+// SessionMeta carries control_grant, control_grant_requests, references,
+// follow_up, parked_at, settle_suggestion_dismissed_at, self_settle,
+// started_by and control_watches; Settings carries control and
+// settlement_automation with the ControlEnabled, ControlDefaultGrant,
+// ControlProjectGrant and SettlementAutomation patches; the agent event stream
+// gains control_action; the protocol adds the SetControlGrant,
+// RespondControlGrant, AddThreadReference, RemoveThreadReference, SetFollowUp,
+// SetParked, DismissSettleSuggestion and RevokeSelfSettle commands and the
+// ControlActivity and ReviewRecords queries; SessionStatus.pull_request_tools
+// (InjectedPullRequestTools) becomes injected_tools (InjectedTools), listing
+// every offered server's tools with the servers that offer them
+// (InjectedServer), and SessionStatus gains control; RuntimeNotice gains
+// review_recorded and reference_boundary_crossed; AddThreadReference answers
+// ThreadReferenceAdded.
+pub const PROTOCOL_VERSION: u32 = 19;
 
 #[cfg(test)]
 mod tests;
