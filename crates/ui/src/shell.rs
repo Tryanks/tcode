@@ -6681,6 +6681,31 @@ mod tests {
         draw(cx);
         assert_eq!(state.read_with(cx, |state, _| state.route()), Route::Chat);
         assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+
+        // The control toggles: on Machines, or on Pair over it, a click returns
+        // to the thread the window was showing.
+        let click_control = |cx: &mut VisualTestContext| {
+            let control = cx
+                .debug_bounds("sidebar-feature-hosts")
+                .expect("the Machines control is visible");
+            cx.simulate_click(control.center(), gpui::Modifiers::default());
+            draw(cx);
+        };
+        for pairing in [false, true] {
+            click_control(cx);
+            assert_eq!(state.read_with(cx, |state, _| state.route()), Route::Hosts);
+            if pairing {
+                state.update(cx, |state, cx| state.go(Destination::Pair, cx));
+                draw(cx);
+            }
+            click_control(cx);
+            assert_eq!(
+                state.read_with(cx, |state, _| state.history().to_vec()),
+                vec![Destination::Hosts, Destination::Thread],
+                "pairing: {pairing}"
+            );
+            assert!(cx.debug_bounds("hosts-route").is_none());
+        }
     }
 
     /// Settings replaces the whole window, unlike the Hosts route: the left
