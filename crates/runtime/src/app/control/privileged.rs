@@ -6,21 +6,62 @@ use control_mcp::{
 use tcode_core::settings::SettingsPatch;
 use tcode_protocol::{Command, Principal};
 
-/// Settings no grant lets an agent change: credentials and hosting, and everything that
-/// changes authority (grants, the control configuration, the settlement automation tier).
+/// The settings an agent may change, as display preferences only. Everything else touches
+/// authority (approvals, computer use, browser evaluation, plugins, child approval, grants,
+/// hosting, credentials), automation (settlement rules and tiers, resuming, fallbacks, title
+/// and review models) or UI state (sidebar, last project), and stays the user's. The match is
+/// exhaustive so a new setting is decided here, not allowed by default.
 pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
-    matches!(
-        patch,
+    match patch {
+        SettingsPatch::Language(_)
+        | SettingsPatch::ThemeMode(_)
+        | SettingsPatch::WordWrapDiffs(_)
+        | SettingsPatch::AutoOpenTaskPanel(_)
+        | SettingsPatch::LiveCommandPanelDisabled(_)
+        | SettingsPatch::SidebarProviderMarks(_)
+        | SettingsPatch::InactiveFrameThrottleDisabled(_)
+        | SettingsPatch::FallbackReviewAdvisor(_) => false,
         SettingsPatch::SourceControlHost { .. }
-            | SettingsPatch::RemoveSourceControlHost { .. }
-            | SettingsPatch::RemoteHostingEnabled(_)
-            | SettingsPatch::Traverse(_)
-            | SettingsPatch::RemoteHostName(_)
-            | SettingsPatch::ControlEnabled(_)
-            | SettingsPatch::ControlDefaultGrant(_)
-            | SettingsPatch::ControlProjectGrant { .. }
-            | SettingsPatch::SettlementAutomation(_)
-    )
+        | SettingsPatch::RemoveSourceControlHost { .. }
+        | SettingsPatch::SkipDeleteConfirmation(_)
+        | SettingsPatch::ProviderUpdateChecksDisabled(_)
+        | SettingsPatch::AbortOnModelFallback(_)
+        | SettingsPatch::ResumeOnLimitReset(_)
+        | SettingsPatch::AutoSettleAfterDays(_)
+        | SettingsPatch::AutoSettleOnMerge(_)
+        | SettingsPatch::ProjectSettlement { .. }
+        | SettingsPatch::ProjectMergeMethod { .. }
+        | SettingsPatch::RemoveAgentCreditsOnMerge(_)
+        | SettingsPatch::OrchestrateDecisionModels(_)
+        | SettingsPatch::OrchestrateChildModels(_)
+        | SettingsPatch::OrchestrateChildApproval(_)
+        | SettingsPatch::OrchestrateChildWorktrees(_)
+        | SettingsPatch::ComputerUseEnabled(_)
+        | SettingsPatch::ComputerUseImageMode(_)
+        | SettingsPatch::ComputerUseAllowInput(_)
+        | SettingsPatch::ComputerUseAllowForegroundFallback(_)
+        | SettingsPatch::ComputerUseShowAgentCursor(_)
+        | SettingsPatch::BrowserEnabled(_)
+        | SettingsPatch::BrowserHomeUrl(_)
+        | SettingsPatch::BrowserAllowEvaluate(_)
+        | SettingsPatch::PluginManagementEnabled(_)
+        | SettingsPatch::PluginManagementProvider { .. }
+        | SettingsPatch::ControlEnabled(_)
+        | SettingsPatch::ControlDefaultGrant(_)
+        | SettingsPatch::ControlProjectGrant { .. }
+        | SettingsPatch::SettlementAutomation(_)
+        | SettingsPatch::TitleGenerationProvider(_)
+        | SettingsPatch::TitleGenerationModel(_)
+        | SettingsPatch::TitleGenerationProfileId(_)
+        | SettingsPatch::FallbackReviewProvider(_)
+        | SettingsPatch::FallbackReviewModel(_)
+        | SettingsPatch::FallbackReviewProfileId(_)
+        | SettingsPatch::SidebarLayout(_)
+        | SettingsPatch::RemoteHostingEnabled(_)
+        | SettingsPatch::Traverse(_)
+        | SettingsPatch::RemoteHostName(_)
+        | SettingsPatch::LastProject(_) => true,
+    }
 }
 
 /// The context every privileged write runs in: the host's full authority, authored by the
@@ -82,17 +123,11 @@ impl AppState {
         self.validate_command_target(&command).map_err(refusal)?;
         self.respond_user_input(&target, request_id.clone(), params.answers.clone(), &mut cx)
             .map_err(refusal)?;
-        let keys = params
-            .answers
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
         self.audit(
             caller,
             &target,
-            "respond_input",
-            Some(format!("answered {request_id} ({keys})")),
+            action::RESPOND_INPUT,
+            Some(request_id.clone()),
             &mut cx,
         );
         Ok(serde_json::json!({ "thread_id": target, "request_id": request_id, "answered": true }))
@@ -120,7 +155,7 @@ impl AppState {
                 })
                 .map_err(refusal)?;
                 self.new_terminal(&target, &mut cx);
-                self.audit(caller, &target, "terminal", Some("open".into()), &mut cx);
+                self.audit(caller, &target, action::TERMINAL_OPEN, None, &mut cx);
                 TerminalAnswer {
                     thread_id: target,
                     terminal_id: None,
@@ -137,13 +172,12 @@ impl AppState {
                     bytes: text.clone().into_bytes(),
                 })
                 .map_err(refusal)?;
-                let bytes = text.len();
                 self.write_terminal_input(terminal_id, text.into_bytes(), &mut cx);
                 self.audit(
                     caller,
                     &target,
-                    "terminal",
-                    Some(format!("input to terminal {terminal_id} ({bytes} bytes)")),
+                    action::TERMINAL_INPUT,
+                    Some(terminal_id.to_string()),
                     &mut cx,
                 );
                 TerminalAnswer {
@@ -164,8 +198,8 @@ impl AppState {
                 self.audit(
                     caller,
                     &target,
-                    "terminal",
-                    Some(format!("closed terminal {terminal_id}")),
+                    action::TERMINAL_CLOSE,
+                    Some(terminal_id.to_string()),
                     &mut cx,
                 );
                 TerminalAnswer {
@@ -255,11 +289,8 @@ impl AppState {
             self.audit(
                 caller,
                 &caller.thread_id,
-                "delete_threads",
-                Some(format!(
-                    "deleted \"{}\" ({target}) and {descendants} thread(s) under it",
-                    meta.title
-                )),
+                action::DELETE_THREADS,
+                Some(meta.title.clone()),
                 &mut cx,
             );
             results.push(BatchResult {
@@ -308,12 +339,8 @@ impl AppState {
         self.audit(
             caller,
             &target,
-            "rewind",
-            Some(format!(
-                "to turn {} ({})",
-                params.turn,
-                wire_mode(params.mode)
-            )),
+            action::REWIND,
+            Some(params.turn.to_string()),
             &mut cx,
         );
         Ok(serde_json::json!({
@@ -338,12 +365,6 @@ impl AppState {
             .to_owned();
         let patch: SettingsPatch = serde_json::from_value(params.patch)
             .map_err(|error| format!("invalid settings patch: {error}"))?;
-        if settings_patch_never_exposed(&patch) {
-            return Err(format!(
-                "refused: `patch_settings` never changes {name}: credentials, hosting, \
-                 tcode_control grants and the settlement automation tier stay the user's"
-            ));
-        }
         self.validate_command_target(&Command::PatchSettings {
             patch: patch.clone(),
         })
@@ -353,17 +374,10 @@ impl AppState {
         self.audit(
             caller,
             &caller.thread_id,
-            "patch_settings",
+            action::PATCH_SETTINGS,
             Some(name.clone()),
             &mut cx,
         );
         Ok(serde_json::json!({ "applied": name }))
     }
-}
-
-fn wire_mode(mode: RewindScope) -> String {
-    serde_json::to_value(mode)
-        .ok()
-        .and_then(|mode| mode.as_str().map(str::to_owned))
-        .unwrap_or_default()
 }

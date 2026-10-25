@@ -48,11 +48,17 @@ impl AppState {
             requested_at: now_secs(),
         };
         let response = pending(&request);
-        let detail = format!("{} — {}", request.grant.describe(), request.reason);
+        let detail = request.reason.clone();
         meta.control_grant_requests.push(request);
         meta.updated_at = now_secs();
         self.store_meta(meta, cx);
-        self.audit(caller, &caller.thread_id, "request_grant", Some(detail), cx);
+        self.audit(
+            caller,
+            &caller.thread_id,
+            action::REQUEST_GRANT,
+            Some(detail),
+            cx,
+        );
         Ok(response)
     }
 
@@ -88,10 +94,12 @@ impl AppState {
                 .control_grant
                 .clone()
                 .unwrap_or_else(|| self.caller_grant(&meta).0);
-            grant.merge(&request.grant);
+            grant.merge(&request.grant, meta.project_id.as_deref());
             meta.control_grant = Some(grant);
             format!(
-                "[control] grant approved: {}. Your grant is now {}.",
+                "[control] grant approved: {}. Your grant is now {}. It applies at once to the \
+                 tools you already have; tools it adds appear when your provider next starts a \
+                 session.",
                 request.grant.describe(),
                 meta.control_grant.as_ref().expect("set above").describe()
             )

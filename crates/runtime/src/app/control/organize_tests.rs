@@ -428,7 +428,7 @@ fn a_thread_settles_itself_only_after_its_turn_and_only_with_standing_consent() 
         11,
         Command::SendTurn {
             session_id: "self".into(),
-            text: "wait, one more thing".into(),
+            text: "wait, one more thing. After that you can  SETTLE now".into(),
             attachment_paths: Vec::new(),
         },
     );
@@ -451,7 +451,18 @@ fn a_thread_settles_itself_only_after_its_turn_and_only_with_standing_consent() 
         )
     });
     cx.run_until_parked();
-    call(&state, cx, "self", settle_self("ok, now you can settle")).unwrap();
+    assert_eq!(
+        call(
+            &state,
+            cx,
+            "self",
+            settle_self("ok, I'm done, settle yourself")
+        )
+        .unwrap_err(),
+        "consent_required: the quote is not something the user said here",
+        "a quote the user never said is no consent"
+    );
+    call(&state, cx, "self", settle_self("you can settle\nnow")).unwrap();
     end_turn(&state, cx);
     state.read(|state| {
         let meta = state.find_meta("self").unwrap();
@@ -465,7 +476,16 @@ fn a_thread_settles_itself_only_after_its_turn_and_only_with_standing_consent() 
                 _ => None,
             })
             .collect();
-        assert_eq!(actions, ["settle_self", "settle_self", "settle"]);
+        use tcode_core::control::action;
+        assert_eq!(
+            actions,
+            [
+                action::SETTLE_SELF,
+                action::SETTLE_SELF,
+                action::SETTLED_ITSELF
+            ],
+            "the self-settle is recorded apart from a settle another thread asked for"
+        );
     });
 }
 

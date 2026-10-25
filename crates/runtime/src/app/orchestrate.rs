@@ -50,6 +50,8 @@ pub(super) struct McpWiring {
     /// connection opens to list the tools that grant allows.
     pub(super) control_grants:
         Arc<std::sync::Mutex<HashMap<String, tcode_core::control::ControlGrant>>>,
+    /// The control server's record of the tools each thread's connection received.
+    pub(super) control_source: Option<control_mcp::GrantSource>,
 }
 
 impl AppState {
@@ -261,7 +263,11 @@ impl AppState {
         if control {
             offer(
                 agent::McpRegistration::SERVER_NAME_CONTROL,
-                control_mcp::tool_descriptions(&self.caller_grant(meta).0),
+                self.mcp
+                    .control_source
+                    .as_ref()
+                    .and_then(|source| source.offered(id))
+                    .unwrap_or_else(|| control_mcp::tool_descriptions(&self.caller_grant(meta).0)),
             );
         }
         Some(tcode_protocol::InjectedTools {

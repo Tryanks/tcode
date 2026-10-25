@@ -225,7 +225,7 @@ impl AppState {
             return None;
         }
         let activity = self.thread_activity.get(&meta.id)?;
-        let blockers = self.settlement_holds(meta, projection).blockers();
+        let blockers = self.settlement_blockers(meta, projection);
         let rule = self.settlement_rule(meta);
         automatic_settlement_due(
             meta,
@@ -238,13 +238,13 @@ impl AppState {
     }
 
     /// The host facts that hold a thread out of automatic settlement, one by one.
-    pub(super) fn settlement_holds(
+    pub(super) fn settlement_blockers(
         &self,
         meta: &SessionMeta,
         projection: &super::snapshots::ActivityProjection<'_>,
-    ) -> SettlementHolds {
+    ) -> SettlementBlockers {
         let resident = self.resident(&meta.id);
-        SettlementHolds {
+        SettlementBlockers {
             pending_approval: resident
                 .is_some_and(|session| !session.timeline.pending_approvals.is_empty()),
             pending_input: resident
@@ -297,34 +297,6 @@ impl AppState {
             after_days_from_project: days.is_some(),
             on_merge: on_merge.unwrap_or(self.settings.auto_settle_on_merge),
             on_merge_from_project: on_merge.is_some(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(super) struct SettlementHolds {
-    pub(super) pending_approval: bool,
-    pub(super) pending_input: bool,
-    pub(super) live_run: bool,
-    pub(super) background_work: bool,
-    pub(super) unsettled_children: bool,
-    pub(super) pull_request_watches: bool,
-    pub(super) pending_human_message: bool,
-    pub(super) scheduled_wake: bool,
-    pub(super) pending_agent_message: bool,
-}
-
-impl SettlementHolds {
-    fn blockers(self) -> SettlementBlockers {
-        SettlementBlockers {
-            pending_input: self.pending_approval || self.pending_input,
-            live_run: self.live_run,
-            completion_holding_work: self.background_work
-                || self.unsettled_children
-                || self.pull_request_watches,
-            pending_human_message: self.pending_human_message,
-            scheduled_wake: self.scheduled_wake,
-            pending_agent_message: self.pending_agent_message,
         }
     }
 }

@@ -87,9 +87,78 @@ fn start_thread_makes_one_ordinary_thread_across_retries_and_restarts() {
     });
     let draft = state.read(|state| state.active_session_id().unwrap().to_owned());
 
+    // The model may not choose the permission mode, leave the project or attach a file the
+    // user did not attach; nothing is made.
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("notes.txt"), b"notes").unwrap();
+    let shot = state.read(|state| state.attachments_dir_for("caller").join("shot.png"));
+    std::fs::create_dir_all(shot.parent().unwrap()).unwrap();
+    std::fs::write(&shot, b"png").unwrap();
+    let with = |edit: &dyn Fn(&mut StartThreadParams)| {
+        let ControlOp::StartThread(mut params) = start(&project_id) else {
+            unreachable!()
+        };
+        edit(&mut params);
+        ControlOp::StartThread(params)
+    };
+    let outside = std::env::temp_dir().display().to_string();
+    let notes = root.join("notes.txt").display().to_string();
+    for (op, refusal) in [
+        (
+            with(&|p| {
+                p.options = Some(
+                    [("permissions".to_owned(), serde_json::json!("full_access"))]
+                        .into_iter()
+                        .collect(),
+                )
+            }),
+            "refused: option permissions sets the permission mode, which only the user changes",
+        ),
+        (
+            with(&|p| p.cwd = Some("../".into())),
+            "refused: cwd must be inside the project",
+        ),
+        (
+            with(&|p| p.cwd = Some(outside.clone())),
+            "refused: cwd must be inside the project",
+        ),
+        (with(&|p| p.attachments = Some(vec![notes.clone()])), ""),
+    ] {
+        let error = state
+            .update(cx, |state, cx| call(state, cx, "caller", op))
+            .unwrap_err();
+        if refusal.is_empty() {
+            assert!(
+                error.starts_with("refused: attachment ") && error.ends_with("in your scope"),
+                "{error}"
+            );
+        } else {
+            assert_eq!(error, refusal);
+        }
+    }
+    state.read(|state| assert!(started(state).is_empty()));
+    state.update(cx, |state, _| {
+        let project = state
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+            .unwrap();
+        project
+            .permission_defaults
+            .insert("codex".into(), "read_only".into());
+    });
+
     let first = state
         .update(cx, |state, cx| {
-            call(state, cx, "caller", start(&project_id))
+            call(
+                state,
+                cx,
+                "caller",
+                with(&|p| {
+                    p.cwd = Some("sub".into());
+                    p.attachments = Some(vec![shot.display().to_string()]);
+                }),
+            )
         })
         .unwrap();
     assert_eq!(first["created"], true);
@@ -104,9 +173,19 @@ fn start_thread_makes_one_ordinary_thread_across_retries_and_restarts() {
             "an ordinary thread, not a child"
         );
         assert_eq!(meta.title, "Investigate the flaky test");
+        assert_eq!(meta.cwd, root.join("sub"));
+        assert!(
+            meta.option_selections
+                .iter()
+                .any(|selection| selection.id == "permissions"
+                    && selection.value == serde_json::json!("read_only")),
+            "the project's default permission: {:?}",
+            meta.option_selections
+        );
         let session = state.resident(&id).unwrap();
         assert!(!session.draft);
         assert_eq!(session.queue[0].text, "Find out why the sync test flakes");
+        assert_eq!(session.queue[0].attachments.len(), 1);
         assert_eq!(session.queue[0].origin, MessageOrigin::Agent);
 
         assert_eq!(state.active_session_id(), Some(draft.as_str()));
@@ -229,6 +308,17 @@ fn send_message_queues_steers_and_schedules_as_the_agent() {
         })
     };
     let at = now_secs() + 3600;
+    let hosts = ControlOp::SendMessage(SendMessageParams {
+        attachments: Some(vec![std::env::temp_dir().display().to_string()]),
+        ..match send(&["later"], SendMode::Queue) {
+            ControlOp::SendMessage(params) => params,
+            _ => unreachable!(),
+        }
+    });
+    let refused = state
+        .update(cx, |state, cx| call(state, cx, "caller", hosts))
+        .unwrap_err();
+    assert!(refused.starts_with("refused: attachment "), "{refused}");
     let (queued, steer, scheduled) = state.update(cx, |state, cx| {
         (
             call(state, cx, "caller", send(&["settled"], SendMode::Queue)).unwrap(),
@@ -325,6 +415,12 @@ fn control_thread_guards_human_queued_messages_and_forks() {
         park(state, queued);
         let mut source = thread("source", "p", ProviderKind::Codex);
         source.resume_cursor = Some(agent::ResumeCursor(serde_json::json!({"thread_id": "t"})));
+        source.references = vec![tcode_core::control::ThreadReference {
+            thread_id: "queued".into(),
+            by: ReferenceOrigin::User,
+            created_at: 1,
+            boundary_notice: false,
+        }];
         state.sessions.push(source);
         (human, agent)
     });
@@ -361,6 +457,38 @@ fn control_thread_guards_human_queued_messages_and_forks() {
         "refused: dropping a queued human message needs history_edit"
     );
     assert_eq!(dropped["results"][0]["outcome"], "applied");
+    let permission = state
+        .update(cx, |state, cx| {
+            call(
+                state,
+                cx,
+                "caller",
+                change(
+                    "queued",
+                    RunOp::SetOption {
+                        id: "permissions".into(),
+                        value: serde_json::json!("full_access"),
+                    },
+                ),
+            )
+        })
+        .unwrap();
+    assert_eq!(permission["results"][0]["outcome"], "failed");
+    assert_eq!(
+        permission["results"][0]["reason"],
+        "refused: option permissions sets the permission mode, which only the user changes"
+    );
+    state.read(|state| {
+        assert!(
+            state
+                .find_meta("queued")
+                .unwrap()
+                .option_selections
+                .iter()
+                .all(|selection| selection.id != "permissions"),
+            "the permission mode stays the user's"
+        );
+    });
     state.read(|state| {
         let queue = &state.resident("queued").unwrap().queue;
         assert_eq!(queue.len(), 1);
@@ -393,7 +521,13 @@ fn control_thread_guards_human_queued_messages_and_forks() {
     let fork = forked["results"][0]["new_thread_id"].as_str().unwrap();
     assert_ne!(fork, "source");
     state.read(|state| {
-        assert_eq!(state.find_meta(fork).unwrap().title, "Thread source (fork)");
+        let fork = state.find_meta(fork).unwrap();
+        assert_eq!(fork.title, "Thread source (fork)");
+        assert_eq!(
+            fork.references,
+            state.find_meta("source").unwrap().references,
+            "a fork inherits the threads its source may read"
+        );
     });
 }
 
@@ -421,6 +555,20 @@ fn reference_stays_within_the_grant_scope_and_marks_boundaries() {
             reason: None,
         })
     };
+    let notices = |cx: &mut TestAppContext| -> Vec<RuntimeNotice> {
+        cx.drain_outgoing()
+            .into_iter()
+            .filter_map(|message| match message {
+                tcode_protocol::HostMessage::Event(envelope) => match envelope.event {
+                    ServerEvent::Runtime(RuntimeEvent::Notice(
+                        notice @ RuntimeNotice::ReferenceBoundaryCrossed { .. },
+                    )) => Some(notice),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    };
     state.update(cx, |state, cx| {
         assert_eq!(
             call(state, cx, "caller", reference("far")),
@@ -428,21 +576,46 @@ fn reference_stays_within_the_grant_scope_and_marks_boundaries() {
         );
         let near = call(state, cx, "caller", reference("near")).unwrap();
         assert_eq!(near["boundary_notice"], false);
+    });
+    cx.run_until_parked();
+    assert!(notices(cx).is_empty(), "no boundary, no notice");
 
+    let far_before = state.update(cx, |state, cx| {
+        // Observe alone is enough: a reference only makes a thread in scope readable.
         let mut caller = state.find_meta("caller").unwrap();
         caller.control_grant = Some(ControlGrant {
             scope: ControlScope::Host,
-            tiers: [ControlTier::Observe, ControlTier::Operate]
-                .into_iter()
-                .collect(),
+            tiers: [ControlTier::Observe].into_iter().collect(),
             ..ControlGrant::none()
         });
         state.store_meta(caller, cx);
         let far_before = state.find_meta("far").unwrap();
         let far = call(state, cx, "caller", reference("far")).unwrap();
         assert_eq!(far["boundary_notice"], true);
-        assert_eq!(state.find_meta("far").unwrap(), far_before);
+        far_before
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        notices(cx),
+        [RuntimeNotice::ReferenceBoundaryCrossed {
+            thread: "caller".into(),
+            thread_title: "Thread caller".into(),
+            referenced: "far".into(),
+            title: "Thread far".into(),
+        }],
+        "the user hears of the crossing once, when the model makes it"
+    );
+    state.update(cx, |state, cx| {
+        call(state, cx, "caller", reference("far")).unwrap();
+    });
+    cx.run_until_parked();
+    assert!(
+        notices(cx).is_empty(),
+        "an existing reference is not announced again"
+    );
 
+    state.read(|state| {
+        assert_eq!(state.find_meta("far").unwrap(), far_before);
         let references = state.find_meta("caller").unwrap().references;
         assert_eq!(
             references

@@ -108,42 +108,69 @@ pub(crate) fn source_label(source: ControlGrantSource) -> String {
 }
 
 /// A `ControlAction`'s operation in words; an operation this client does not
-/// know keeps the name the host recorded.
-pub(crate) fn action_label(action: &str) -> String {
-    let key = match action {
-        "settle" => "control.action.settle",
-        "unsettle" => "control.action.unsettle",
-        "archive" => "control.action.archive",
-        "unarchive" => "control.action.unarchive",
-        "pin" => "control.action.pin",
-        "unpin" => "control.action.unpin",
-        "rename" => "control.action.rename",
-        "mark_read" => "control.action.mark_read",
-        "mark_unread" => "control.action.mark_unread",
-        "follow_up" => "control.action.follow_up",
-        "follow_up off" => "control.action.follow_up_off",
-        "park" => "control.action.park",
-        "park off" => "control.action.park_off",
-        "keep" => "control.action.keep",
-        "keep off" => "control.action.keep_off",
-        "settle_self" => "control.action.settle_self",
-        "record_review" => "control.action.record_review",
-        "request_grant" => "control.action.request_grant",
-        "notify_when" => "control.action.notify_when",
-        "cancel_notify" => "control.action.cancel_notify",
-        "respond_input" => "control.action.respond_input",
-        "terminal" => "control.action.terminal",
-        "delete_threads" => "control.action.delete_threads",
-        "rewind" => "control.action.rewind",
-        "patch_settings" => "control.action.patch_settings",
-        "start_thread" => "control.action.start_thread",
-        "send_message" => "control.action.send_message",
-        "control_thread" => "control.action.control_thread",
-        "pull_request" => "control.action.pull_request",
-        "git" => "control.action.git",
-        "create_project" => "control.action.create_project",
-        "reference" => "control.action.reference",
-        _ => return action.to_owned(),
+/// know keeps the key the host recorded.
+pub(crate) fn action_label(key: &str) -> String {
+    use tcode_core::control::action;
+    let key = match key {
+        action::SETTLE => "control.action.settle",
+        action::SETTLED_ITSELF => "control.action.settled_itself",
+        action::UNSETTLE => "control.action.unsettle",
+        action::ARCHIVE => "control.action.archive",
+        action::UNARCHIVE => "control.action.unarchive",
+        action::PIN => "control.action.pin",
+        action::UNPIN => "control.action.unpin",
+        action::RENAME => "control.action.rename",
+        action::MARK_READ => "control.action.mark_read",
+        action::MARK_UNREAD => "control.action.mark_unread",
+        action::FOLLOW_UP => "control.action.follow_up",
+        action::FOLLOW_UP_OFF => "control.action.follow_up_off",
+        action::PARK => "control.action.park",
+        action::PARK_OFF => "control.action.park_off",
+        action::KEEP => "control.action.keep",
+        action::KEEP_OFF => "control.action.keep_off",
+        action::SETTLE_SELF => "control.action.settle_self",
+        action::RECORD_REVIEW => "control.action.record_review",
+        action::REQUEST_GRANT => "control.action.request_grant",
+        action::NOTIFY_WHEN => "control.action.notify_when",
+        action::CANCEL_NOTIFY => "control.action.cancel_notify",
+        action::RESPOND_INPUT => "control.action.respond_input",
+        action::TERMINAL_OPEN => "control.action.terminal_open",
+        action::TERMINAL_INPUT => "control.action.terminal_input",
+        action::TERMINAL_CLOSE => "control.action.terminal_close",
+        action::DELETE_THREADS => "control.action.delete_threads",
+        action::REWIND => "control.action.rewind",
+        action::PATCH_SETTINGS => "control.action.patch_settings",
+        action::START_THREAD => "control.action.start_thread",
+        action::SEND_QUEUED => "control.action.send_queued",
+        action::SEND_STEERED => "control.action.send_steered",
+        action::SEND_SCHEDULED => "control.action.send_scheduled",
+        action::INTERRUPT => "control.action.interrupt",
+        action::RETRY => "control.action.retry",
+        action::COMPACT => "control.action.compact",
+        action::SET_MODEL => "control.action.set_model",
+        action::SET_OPTION => "control.action.set_option",
+        action::FORK => "control.action.fork",
+        action::STEER_QUEUED => "control.action.steer_queued",
+        action::DROP_QUEUED => "control.action.drop_queued",
+        action::PR_LINK => "control.action.pr_link",
+        action::PR_UNLINK => "control.action.pr_unlink",
+        action::PR_WATCH => "control.action.pr_watch",
+        action::PR_UNWATCH => "control.action.pr_unwatch",
+        action::PR_REFRESH => "control.action.pr_refresh",
+        action::PR_COMMENT => "control.action.pr_comment",
+        action::PR_REPLY => "control.action.pr_reply",
+        action::PR_RESOLVE => "control.action.pr_resolve",
+        action::GIT_CHECKOUT => "control.action.git_checkout",
+        action::GIT_MERGE_WORKTREE => "control.action.git_merge_worktree",
+        action::GIT_COMMIT => "control.action.git_commit",
+        action::GIT_COMMIT_PUSH => "control.action.git_commit_push",
+        action::GIT_PUSH => "control.action.git_push",
+        action::GIT_PULL => "control.action.git_pull",
+        action::GIT_PUBLISH_BRANCH => "control.action.git_publish_branch",
+        action::GIT_INITIALIZE => "control.action.git_initialize",
+        action::CREATE_PROJECT => "control.action.create_project",
+        action::REFERENCE => "control.action.reference",
+        _ => return key.to_owned(),
     };
     crate::tr!(key).into_owned()
 }
@@ -346,13 +373,4 @@ pub(crate) fn when_label(when: &tcode_core::control::SelfSettleWhen) -> String {
             crate::tr!("control.self_settle.pr_closed", url = url.as_str()).into_owned()
         }
     }
-}
-
-/// Whether a reference from `from` to `to` sends `to`'s content to a different
-/// project's or provider's model vendor, which the user is told once.
-pub(crate) fn crosses_boundary(
-    from: &tcode_core::project::SessionMeta,
-    to: &tcode_core::project::SessionMeta,
-) -> bool {
-    from.project_id != to.project_id || from.provider != to.provider
 }

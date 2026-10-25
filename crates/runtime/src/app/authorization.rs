@@ -239,9 +239,9 @@ impl AppState {
                     ..
                 } => {
                     session(session_id)?;
-                    attachment_paths.iter().try_for_each(|path| {
-                        self.authorize_path(path, project_ids, PathAccess::AttachmentDescendant, cx)
-                    })
+                    attachment_paths
+                        .iter()
+                        .try_for_each(|path| self.authorize_attachment(path, project_ids, cx))
                 }
                 Command::LinkPullRequest { session_id, .. }
                 | Command::UnlinkPullRequest { session_id, .. }
@@ -264,9 +264,6 @@ impl AppState {
                 | Command::UnarchiveSession { session_id }
                 | Command::SettleChildren { session_id }
                 | Command::SettleSession { session_id }
-                | Command::SetControlGrant { session_id, .. }
-                | Command::RespondControlGrant { session_id, .. }
-                | Command::AddThreadReference { session_id, .. }
                 | Command::RemoveThreadReference { session_id, .. }
                 | Command::SetFollowUp { session_id, .. }
                 | Command::SetParked { session_id, .. }
@@ -297,6 +294,15 @@ impl AppState {
                 | Command::MarkSessionUnread { session_id }
                 | Command::WriteRelaunchMarker { session_id, .. } => session(session_id),
                 Command::ForkThread { id } => session(id),
+                // A reference lets the thread's model read the referenced thread, so a space
+                // may only point at threads it can read itself.
+                Command::AddThreadReference {
+                    session_id,
+                    thread_id,
+                } => {
+                    session(session_id)?;
+                    session(thread_id)
+                }
                 Command::DeleteSession { .. }
                 | Command::DeleteProject { .. }
                 | Command::CreateProject { .. }
@@ -309,6 +315,8 @@ impl AppState {
                 | Command::ShutdownAllAndFlush
                 | Command::ApplyPendingRelaunch
                 | Command::PatchSettings { .. }
+                | Command::SetControlGrant { .. }
+                | Command::RespondControlGrant { .. }
                 | Command::ResetSettings
                 | Command::SetSidebarCollapsed { .. }
                 | Command::CycleProjectSort
@@ -383,6 +391,17 @@ impl AppState {
                 | Query::ScanExternalHistory => Err(refusal("query")),
             },
         }
+    }
+
+    /// Whether `path` may be sent as an attachment by someone confined to `projects`: a file
+    /// inside the attachments folder of one of their threads, never an arbitrary file.
+    pub(super) fn authorize_attachment(
+        &self,
+        path: &Path,
+        projects: &[String],
+        cx: &HostCx,
+    ) -> Result<(), ProtocolError> {
+        self.authorize_path(path, projects, PathAccess::AttachmentDescendant, cx)
     }
 
     fn authorize_path(

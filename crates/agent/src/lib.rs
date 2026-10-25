@@ -1134,6 +1134,17 @@ pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
     })
 }
 
+/// Whether option `id` of `provider` decides what runs without the user's approval: the
+/// provider's permission control, or an ACP session mode, which ACP agents use for their
+/// approval modes alongside anything else.
+pub fn option_governs_approvals(provider: ProviderKind, id: &str) -> bool {
+    id == acp_session::MODE_OPTION_ID
+        || permission_control(provider).is_some_and(|descriptor| match descriptor {
+            OptionDescriptor::Select { id: own, .. }
+            | OptionDescriptor::Boolean { id: own, .. } => own == id,
+        })
+}
+
 pub fn permission_notice(provider: ProviderKind) -> Option<&'static str> {
     match provider {
         ProviderKind::Pi => Some("No permission control"),
@@ -2369,8 +2380,9 @@ pub enum ContextFreshness {
 pub struct ControlAction {
     pub actor_thread_id: String,
     pub actor_title: String,
-    /// The tool or operation name, for example `settle`.
+    /// A semantic key from `tcode_core::control::action`, which clients put in words.
     pub action: String,
+    /// Data only (a title, an id, a name, a count, someone's own words), never a sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }

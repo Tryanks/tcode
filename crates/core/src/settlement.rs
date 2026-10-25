@@ -203,9 +203,14 @@ impl AgentDelivery {
 /// Host facts that keep a thread out of automatic settlement.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SettlementBlockers {
+    pub pending_approval: bool,
     pub pending_input: bool,
     pub live_run: bool,
-    pub completion_holding_work: bool,
+    /// Background tasks the provider still runs.
+    pub background_work: bool,
+    /// Orchestrate children not yet settled.
+    pub unsettled_children: bool,
+    pub pull_request_watches: bool,
     pub pending_human_message: bool,
     pub scheduled_wake: bool,
     /// An agent or server message waits in the queue; settling would drop it.
@@ -214,9 +219,12 @@ pub struct SettlementBlockers {
 
 impl SettlementBlockers {
     fn any(self) -> bool {
-        self.pending_input
+        self.pending_approval
+            || self.pending_input
             || self.live_run
-            || self.completion_holding_work
+            || self.background_work
+            || self.unsettled_children
+            || self.pull_request_watches
             || self.pending_human_message
             || self.scheduled_wake
             || self.pending_agent_message
@@ -417,9 +425,12 @@ mod tests {
             "disabled",
             "pinned",
             "child",
+            "approval",
             "input",
             "run",
             "background",
+            "children",
+            "watches",
             "human",
             "wake",
             "agent message",
@@ -446,9 +457,12 @@ mod tests {
                 _ => {}
             }
             let blockers = SettlementBlockers {
+                pending_approval: blocker == "approval",
                 pending_input: blocker == "input",
                 live_run: blocker == "run",
-                completion_holding_work: blocker == "background",
+                background_work: blocker == "background",
+                unsettled_children: blocker == "children",
+                pull_request_watches: blocker == "watches",
                 pending_human_message: blocker == "human",
                 scheduled_wake: blocker == "wake",
                 pending_agent_message: blocker == "agent message",

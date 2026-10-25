@@ -380,7 +380,9 @@ pub struct StartThreadParams {
     #[schemars(description = "The project the thread belongs to.")]
     pub project_id: String,
     #[serde(default)]
-    #[schemars(description = "Working directory; default the project root.")]
+    #[schemars(
+        description = "Working directory relative to the project root, inside it; default the project root."
+    )]
     pub cwd: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -400,7 +402,9 @@ pub struct StartThreadParams {
     )]
     pub profile: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Provider option id → value, as list_providers describes them.")]
+    #[schemars(
+        description = "Provider option id → value, as list_providers describes them. The permission mode is not settable: the project's default applies."
+    )]
     pub options: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     #[schemars(description = "Thread title; omit to let Tcode title it.")]
@@ -410,7 +414,9 @@ pub struct StartThreadParams {
     )]
     pub message: String,
     #[serde(default)]
-    #[schemars(description = "Image paths on the host to attach to the message.")]
+    #[schemars(
+        description = "Image paths already in the attachments folder of a thread in your scope."
+    )]
     pub attachments: Option<Vec<String>>,
     #[schemars(
         description = "Idempotency key, stored on the thread: a retry after a failure or restart returns the same thread."
@@ -437,7 +443,9 @@ pub struct SendMessageParams {
     )]
     pub mode: SendMode,
     #[serde(default)]
-    #[schemars(description = "Image paths on the host to attach.")]
+    #[schemars(
+        description = "Image paths already in the attachments folder of a thread in your scope."
+    )]
     pub attachments: Option<Vec<String>>,
     #[serde(default)]
     #[schemars(description = "Idempotency key: a retry with the same key does not send twice.")]

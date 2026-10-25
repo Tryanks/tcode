@@ -9,7 +9,7 @@ use control_mcp::{
     PullRequestParams, RunChange, RunOp, RunResult, SendMessageParams, SendMode, StartThreadParams,
     StartThreadResponse, Workspace,
 };
-use tcode_core::control::{ControlCategory, StartedBy};
+use tcode_core::control::{ControlCategory, StartedBy, action};
 use tcode_core::pull_request::{PullRequestKey, PullRequestSource};
 use tcode_protocol::{Command, CommandResponse, PullRequestAction, PullRequestActionResult};
 
@@ -96,7 +96,81 @@ fn linked_key(meta: &SessionMeta, name: &str) -> Option<PullRequestKey> {
         .map(|link| link.key.clone())
 }
 
+/// The refusal for an option that decides what runs without the user's approval, which only
+/// the user changes.
+fn approval_option_refusal(provider: ProviderKind, id: &str) -> Option<String> {
+    agent::option_governs_approvals(provider, id).then(|| {
+        format!("refused: option {id} sets the permission mode, which only the user changes")
+    })
+}
+
+/// `cwd`, relative to `root`, as a directory inside it; absolute paths, `..` and links that
+/// lead out are refused.
+fn cwd_inside(root: &Path, cwd: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(cwd);
+    let outside = || "refused: cwd must be inside the project".to_string();
+    if relative.is_absolute()
+        || relative.components().any(|part| {
+            !matches!(
+                part,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(outside());
+    }
+    let joined = root.join(relative);
+    let (Ok(canonical), Ok(canonical_root)) = (fs::canonicalize(&joined), fs::canonicalize(root))
+    else {
+        return Err(format!(
+            "invalid cwd: {} is not a directory on this host",
+            joined.display()
+        ));
+    };
+    if !canonical.starts_with(&canonical_root) {
+        return Err(outside());
+    }
+    Ok(joined)
+}
+
 impl AppState {
+    /// `paths` as attachments the caller may send: the same rule a space client's attachment
+    /// passes, over the projects the caller's grant reaches.
+    fn agent_attachments(
+        &self,
+        caller: &Caller,
+        paths: Option<Vec<String>>,
+        cx: &HostCx,
+    ) -> Result<Vec<PathBuf>, String> {
+        let projects: Vec<String> = self
+            .projects
+            .iter()
+            .filter(|project| {
+                caller
+                    .grant
+                    .scope
+                    .reaches(caller.project_id.as_deref(), Some(&project.id))
+            })
+            .map(|project| project.id.clone())
+            .collect();
+        paths
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from)
+            .map(|path| {
+                self.authorize_attachment(&path, &projects, cx)
+                    .map(|()| path.clone())
+                    .map_err(|_| {
+                        format!(
+                            "refused: attachment {} is not in the attachments folder of a \
+                             thread in your scope",
+                            path.display()
+                        )
+                    })
+            })
+            .collect()
+    }
+
     /// Why an agent may not write to `target`, if it may not: archived threads, read-only
     /// subagent mirrors and unsent drafts, which belong to their composer.
     fn agent_write_refusal(&self, target: &str) -> Option<String> {
@@ -146,12 +220,7 @@ impl AppState {
                 cwd: meta.cwd.display().to_string(),
             });
         }
-        let attachment_paths: Vec<PathBuf> = params
-            .attachments
-            .unwrap_or_default()
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+        let attachment_paths = self.agent_attachments(caller, params.attachments, cx)?;
         if params.message.trim().is_empty() && attachment_paths.is_empty() {
             return Err("message is empty".into());
         }
@@ -200,13 +269,20 @@ impl AppState {
         }
         let cwd = match params.cwd {
             None => project.root.clone(),
-            Some(cwd) => project.root.join(cwd),
+            Some(cwd) => cwd_inside(&project.root, &cwd)?,
         };
         if !cwd.is_dir() {
             return Err(format!(
                 "invalid cwd: {} is not a directory on this host",
                 cwd.display()
             ));
+        }
+        let options = params.options.unwrap_or_default();
+        if let Some(refusal) = options
+            .keys()
+            .find_map(|id| approval_option_refusal(provider, id))
+        {
+            return Err(refusal);
         }
         let model = params
             .model
@@ -222,20 +298,12 @@ impl AppState {
         {
             meta.title = title;
         }
-        meta.option_selections = params
-            .options
-            .unwrap_or_default()
+        meta.option_selections = options
             .into_iter()
             .map(|(id, value)| OptionSelection { id, value })
             .collect();
-        if let Some(permission) = self.initial_permission_selection(Some(&project.id), provider)
-            && !meta
-                .option_selections
-                .iter()
-                .any(|selection| selection.id == permission.id)
-        {
-            meta.option_selections.push(permission);
-        }
+        meta.option_selections
+            .extend(self.initial_permission_selection(Some(&project.id), provider));
         meta.started_by = Some(StartedBy {
             thread_id: caller.thread_id.clone(),
             request_id: params.request_id,
@@ -252,7 +320,7 @@ impl AppState {
             read_attachments(attachment_paths),
             cx,
         );
-        self.audit(caller, &id, "start_thread", None, cx);
+        self.audit(caller, &id, action::START_THREAD, None, cx);
         to_json(response)
     }
 
@@ -269,12 +337,7 @@ impl AppState {
         if let Some(answer) = key.as_deref().and_then(|key| self.answered(key)) {
             return Ok(answer);
         }
-        let attachment_paths: Vec<PathBuf> = params
-            .attachments
-            .unwrap_or_default()
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+        let attachment_paths = self.agent_attachments(caller, params.attachments, cx)?;
         if params.text.trim().is_empty() && attachment_paths.is_empty() {
             return Err("text is empty".into());
         }
@@ -351,13 +414,12 @@ impl AppState {
             }
             SendMode::Queue => "queued",
         };
-        self.audit(
-            caller,
-            target,
-            "send_message",
-            Some(delivery.to_owned()),
-            cx,
-        );
+        let key = match delivery {
+            "steered" => action::SEND_STEERED,
+            "scheduled" => action::SEND_SCHEDULED,
+            _ => action::SEND_QUEUED,
+        };
+        self.audit(caller, target, key, None, cx);
         match (mode, delivery) {
             (_, "steered") => self.steer_assembled(target, text, attachments, cx),
             (SendMode::Schedule { at }, _) => {
@@ -475,14 +537,15 @@ impl AppState {
             .find_meta(target)
             .ok_or_else(|| skipped("unknown thread".into()))?;
         let session_id = target.to_owned();
-        let (command, label) = match &op {
-            RunOp::Interrupt => (Command::Interrupt { session_id }, "interrupt".to_owned()),
+        let (command, key, detail) = match &op {
+            RunOp::Interrupt => (Command::Interrupt { session_id }, action::INTERRUPT, None),
             RunOp::Retry { turn } => (
                 Command::RetryTurn {
                     session_id,
                     turn_id: turn.clone(),
                 },
-                format!("retry turn {turn}"),
+                action::RETRY,
+                Some(turn.clone()),
             ),
             RunOp::Compact => {
                 if !meta.provider.caps().manual_compaction {
@@ -491,7 +554,11 @@ impl AppState {
                         meta.provider.display_name()
                     )));
                 }
-                (Command::CompactContext { session_id }, "compact".to_owned())
+                (
+                    Command::CompactContext { session_id },
+                    action::COMPACT,
+                    None,
+                )
             }
             RunOp::SetModel { model } => (
                 Command::SetActiveModel {
@@ -500,16 +567,23 @@ impl AppState {
                     model: Some(model.clone()),
                     profile_id: meta.profile_id.clone(),
                 },
-                format!("set model {model}"),
+                action::SET_MODEL,
+                Some(model.clone()),
             ),
-            RunOp::SetOption { id, value } => (
-                Command::SetActiveOption {
-                    session_id,
-                    id: id.clone(),
-                    value: Some(value.clone()),
-                },
-                format!("set option {id}"),
-            ),
+            RunOp::SetOption { id, value } => {
+                if let Some(refusal) = approval_option_refusal(meta.provider, id) {
+                    return Err(failed(refusal));
+                }
+                (
+                    Command::SetActiveOption {
+                        session_id,
+                        id: id.clone(),
+                        value: Some(value.clone()),
+                    },
+                    action::SET_OPTION,
+                    Some(id.clone()),
+                )
+            }
             RunOp::Fork => {
                 if let Some(refusal) = fork_refusal(Self::session_fork_availability(
                     &meta,
@@ -517,7 +591,7 @@ impl AppState {
                 )) {
                     return Err(failed(refusal.into()));
                 }
-                (Command::ForkThread { id: session_id }, "fork".to_owned())
+                (Command::ForkThread { id: session_id }, action::FORK, None)
             }
             RunOp::SteerQueued { id } | RunOp::DropQueued { id } => {
                 let id = *id;
@@ -543,12 +617,14 @@ impl AppState {
                     }
                     (
                         Command::DropQueued { session_id, id },
-                        format!("drop queued message {id}"),
+                        action::DROP_QUEUED,
+                        Some(id.to_string()),
                     )
                 } else {
                     (
                         Command::SteerQueued { session_id, id },
-                        format!("steer queued message {id}"),
+                        action::STEER_QUEUED,
+                        Some(id.to_string()),
                     )
                 }
             }
@@ -609,7 +685,7 @@ impl AppState {
             }
             _ => unreachable!("every run op maps to one of these commands"),
         };
-        self.audit(caller, target, "control_thread", Some(label), cx);
+        self.audit(caller, target, key, detail, cx);
         Ok((done, new_thread_id))
     }
 
@@ -643,8 +719,8 @@ impl AppState {
             self.audit(
                 caller,
                 &thread,
-                "pull_request",
-                Some(format!("link {reference}")),
+                action::PR_LINK,
+                Some(reference.clone()),
                 cx,
             );
             let linking = self.link_pull_request(&thread, reference, PullRequestSource::Agent, cx);
@@ -664,7 +740,17 @@ impl AppState {
                 name.as_deref().unwrap_or("nothing")
             )));
         };
-        let label = format!("{:?} {}#{}", params.op, key.repository, key.number).to_lowercase();
+        let label = Some(format!("{}#{}", key.repository, key.number));
+        let audit_key = match &params.op {
+            PullRequestOp::Link => action::PR_LINK,
+            PullRequestOp::Unlink => action::PR_UNLINK,
+            PullRequestOp::Watch => action::PR_WATCH,
+            PullRequestOp::Unwatch => action::PR_UNWATCH,
+            PullRequestOp::Refresh => action::PR_REFRESH,
+            PullRequestOp::Comment { .. } => action::PR_COMMENT,
+            PullRequestOp::Reply { .. } => action::PR_REPLY,
+            PullRequestOp::Resolve { .. } => action::PR_RESOLVE,
+        };
         let action = match params.op {
             PullRequestOp::Link => unreachable!("linking is answered above"),
             op @ (PullRequestOp::Unlink | PullRequestOp::Watch | PullRequestOp::Unwatch) => {
@@ -693,7 +779,7 @@ impl AppState {
                 };
                 return match result {
                     Ok(()) => {
-                        self.audit(caller, &thread, "pull_request", Some(label), cx);
+                        self.audit(caller, &thread, audit_key, label, cx);
                         Answer::Now(to_json(ActionResponse {
                             thread_id: thread,
                             outcome: Outcome::Applied,
@@ -738,7 +824,7 @@ impl AppState {
         if let Err(error) = self.validate_command_target(&command) {
             return action_now(&thread, Outcome::Skipped, error.message);
         }
-        self.audit(caller, &thread, "pull_request", Some(label), cx);
+        self.audit(caller, &thread, audit_key, label, cx);
         let writing = self.run_pull_request_action(&thread, key, action, cx);
         action_later(
             thread,
@@ -778,8 +864,8 @@ impl AppState {
                 self.audit(
                     caller,
                     &thread,
-                    "git",
-                    Some(format!("checkout {branch}")),
+                    action::GIT_CHECKOUT,
+                    Some(branch.clone()),
                     cx,
                 );
                 let checkout = self.checkout_branch(&thread, branch, cx);
@@ -802,7 +888,7 @@ impl AppState {
                 if let Err(error) = self.validate_command_target(&command) {
                     return action_now(&thread, Outcome::Skipped, error.message);
                 }
-                self.audit(caller, &thread, "git", Some("merge worktree".into()), cx);
+                self.audit(caller, &thread, action::GIT_MERGE_WORKTREE, None, cx);
                 let merge = self.merge_worktree(&thread, cx);
                 return action_later(
                     thread,
@@ -847,13 +933,15 @@ impl AppState {
         if let Err(error) = self.validate_command_target(&command) {
             return action_now(&thread, Outcome::Skipped, error.message);
         }
-        self.audit(
-            caller,
-            &thread,
-            "git",
-            Some(format!("{action:?}").to_lowercase()),
-            cx,
-        );
+        let key = match action {
+            GitAction::Commit => action::GIT_COMMIT,
+            GitAction::CommitPush => action::GIT_COMMIT_PUSH,
+            GitAction::Push => action::GIT_PUSH,
+            GitAction::Pull => action::GIT_PULL,
+            GitAction::PublishBranch => action::GIT_PUBLISH_BRANCH,
+            GitAction::InitializeGit => action::GIT_INITIALIZE,
+        };
+        self.audit(caller, &thread, key, None, cx);
         let running = self.run_git_action(&thread, action, message, included, None, cx);
         action_later(
             thread,
@@ -892,7 +980,7 @@ impl AppState {
             self.audit(
                 caller,
                 &caller.thread_id,
-                "create_project",
+                action::CREATE_PROJECT,
                 Some(project.root.display().to_string()),
                 cx,
             );

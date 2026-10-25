@@ -393,3 +393,83 @@ fn review_candidates_changes_no_state_and_reports_coverage() {
     assert_eq!(review["coverage"]["threads"], 5);
     assert_eq!(review["coverage"]["without_enough_data"], 1);
 }
+
+/// `get_settings` shows the settings without environment values, keys this build does not
+/// know, or token-shaped strings, and says how many it redacted.
+#[test]
+fn get_settings_leaves_out_env_values_unknown_keys_and_tokens() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-control-get-settings");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        add(state, thread("caller", "p"), None);
+        state.settings.profiles.insert(
+            "team".into(),
+            tcode_core::settings::ProviderProfile {
+                kind: ProviderKind::Codex,
+                settings: tcode_core::settings::ProviderSettings {
+                    env: vec![tcode_core::settings::EnvVar {
+                        name: "BASE_URL".into(),
+                        value: "https://private-endpoint.invalid".into(),
+                        sensitive: false,
+                    }],
+                    ..tcode_core::settings::ProviderSettings::default()
+                },
+            },
+        );
+        state.settings.browser.home_url =
+            Some("https://example.invalid/?t=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij".into());
+        state.settings.unknown.insert(
+            "future_secret".into(),
+            serde_json::json!("from a newer build"),
+        );
+    });
+    let answer = call(
+        &state,
+        cx,
+        ControlOp::GetSettings(control_mcp::GetSettingsParams::default()),
+    )
+    .unwrap();
+    let text = answer.to_string();
+    assert!(!text.contains("private-endpoint"), "{text}");
+    assert!(!text.contains("future_secret"), "{text}");
+    assert!(!text.contains("ghp_ABCDEF"), "{text}");
+    assert_eq!(
+        answer["settings"]["profiles"]["team"]["env"][0]["name"],
+        "BASE_URL"
+    );
+    assert_eq!(answer["redacted"], 1);
+}
+
+/// However many threads a review collapses, it names a bounded number and says how many
+/// more there are.
+#[test]
+fn review_candidates_bounds_the_collapsed_list() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-control-review-cap");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        add(state, thread("caller", "p"), None);
+        for index in 0..150 {
+            let mut child = thread(&format!("child-{index}"), "p");
+            child.parent_session_id = Some("caller".into());
+            add(state, child, None);
+        }
+    });
+    let review = call(
+        &state,
+        cx,
+        ControlOp::ReviewCandidates(control_mcp::ReviewCandidatesParams::default()),
+    )
+    .unwrap();
+    assert_eq!(review["collapsed"].as_array().unwrap().len(), 100);
+    // The 150 children and the caller itself, which was just active.
+    assert!(
+        review["omitted"].as_array().unwrap().iter().any(|note| note
+            .as_str()
+            .unwrap()
+            .starts_with("51 more collapsed threads")),
+        "{}",
+        review["omitted"]
+    );
+}

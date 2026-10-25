@@ -3,7 +3,7 @@
 
 use super::*;
 use control_mcp::{ControlOp, ToolRequirement};
-use tcode_core::control::{ControlAction, ControlGrant, ControlGrantSource, ControlScope};
+use tcode_core::control::{ControlAction, ControlGrant, ControlGrantSource, ControlScope, action};
 use tcode_core::settings::SettingsPatch;
 use tcode_protocol::{ControlActivityEntry, ControlStatus, ThreadReferenceStatus};
 
@@ -32,9 +32,13 @@ pub(super) struct ControlState {
 }
 
 impl ControlState {
-    pub(super) fn new(review_records: Vec<tcode_core::control::ReviewRecord>) -> Self {
+    pub(super) fn new(
+        review_records: Vec<tcode_core::control::ReviewRecord>,
+        mut activity: Vec<ControlActivityEntry>,
+    ) -> Self {
+        activity.truncate(CONTROL_ACTIVITY_LIMIT);
         Self {
-            activity: VecDeque::new(),
+            activity: activity.into(),
             review_records,
             answered: VecDeque::new(),
             content_read: HashMap::new(),
@@ -74,6 +78,9 @@ pub(super) struct Caller {
     pub(super) thread_id: String,
     pub(super) project_id: Option<String>,
     pub(super) grant: ControlGrant,
+    /// Its Orchestrate parent and that thread's ancestors, which it may neither read nor
+    /// act on.
+    pub(super) ancestors: Vec<String>,
 }
 
 impl AppState {
@@ -82,6 +89,7 @@ impl AppState {
         self.mcp.control_tokens = Some(server.tokens);
         self.mcp.control_requests = Some(server.requests);
         let grants = self.mcp.control_grants.clone();
+        self.mcp.control_source = Some(server.grants.clone());
         server.grants.set(Arc::new(move |thread_id| {
             grants.lock().unwrap().get(thread_id).cloned()
         }));
@@ -111,12 +119,12 @@ impl AppState {
             .resolve(meta.control_grant.as_ref(), meta.project_id.as_deref())
     }
 
-    /// Whether the thread's provider is given the `tcode_control` server when it starts.
+    /// Whether the thread's provider is given the `tcode_control` server when it starts;
+    /// with an empty grant it lists `request_grant` alone, so the model can still ask.
     pub(super) fn control_offered(&self, meta: &SessionMeta) -> bool {
         self.settings.control.enabled
             && self.mcp.control_url.is_some()
             && meta.provider.caps().mcp_servers
-            && !self.caller_grant(meta).0.is_empty()
     }
 
     pub(super) fn control_registration_for(
@@ -153,6 +161,9 @@ impl AppState {
             tokens.revoke(&registration.bearer_token);
         }
         self.mcp.control_grants.lock().unwrap().remove(session_id);
+        if let Some(source) = &self.mcp.control_source {
+            source.forget(session_id);
+        }
     }
 
     /// Re-read every registered thread's effective grant after a grant or setting changed, so
@@ -209,16 +220,26 @@ impl AppState {
 
     /// `meta`'s thread as a `tcode_control` caller, with the grant in force now.
     pub(super) fn caller_of(&self, meta: &SessionMeta) -> Caller {
+        let mut ancestors: Vec<String> = Vec::new();
+        let mut next = meta.parent_session_id.clone();
+        while let Some(id) = next.filter(|id| !ancestors.contains(id)) {
+            next = self
+                .find_meta(&id)
+                .and_then(|parent| parent.parent_session_id);
+            ancestors.push(id);
+        }
         Caller {
             thread_id: meta.id.clone(),
             project_id: meta.project_id.clone(),
             grant: self.caller_grant(meta).0,
+            ancestors,
         }
     }
 
     /// Whether a call may reach `target`: inside `scope` (the grant's, or the narrower one the
     /// call asked for), or, for a read of its content, the caller itself, one of its
-    /// Orchestrate children or a thread it references.
+    /// Orchestrate children or a thread it references; never the caller's own Orchestrate
+    /// parent or its ancestors.
     pub(super) fn target_reachable(
         &self,
         caller: &Caller,
@@ -226,6 +247,9 @@ impl AppState {
         target: &SessionMeta,
         reads_content: bool,
     ) -> bool {
+        if caller.ancestors.contains(&target.id) {
+            return false;
+        }
         if scope.reaches(caller.project_id.as_deref(), target.project_id.as_deref()) {
             return true;
         }
@@ -316,9 +340,7 @@ impl AppState {
 
     /// The grant check every call passes host-side, however the connection listed its tools:
     /// tier or category, the call's own categories, the scope it asks for, the targets it
-    /// names, and the operations no grant exposes (approvals, credentials and hosting, anything
-    /// that changes authority: grants, the control configuration, the settlement automation
-    /// tier). Dropping a queued human message needs `history_edit` and is judged where the
+    /// names, and the settings no grant lets an agent change. Dropping a queued human message needs `history_edit` and is judged where the
     /// queue is read. The refusal names the reason and the grant.
     pub(super) fn authorize_control(&self, caller: &Caller, op: &ControlOp) -> Result<(), String> {
         let name = op.tool_name();
@@ -344,7 +366,7 @@ impl AppState {
             }
         }
         if let Some(scope) = op.requested_scope()
-            && !scope_within(scope, &grant.scope, caller.project_id.as_deref())
+            && !scope.within(&grant.scope, caller.project_id.as_deref())
         {
             return Err(format!(
                 "refused: scope {} is wider than your grant's {}",
@@ -356,28 +378,55 @@ impl AppState {
             let patch: SettingsPatch = serde_json::from_value(params.patch.clone())
                 .map_err(|error| format!("invalid settings patch: {error}"))?;
             if privileged::settings_patch_never_exposed(&patch) {
-                return Err(
-                    "refused: `patch_settings` never changes credentials, hosting, \
-                            tcode_control grants or the settlement automation tier"
-                        .into(),
-                );
+                let key = params
+                    .patch
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                return Err(format!(
+                    "refused: `patch_settings` never changes {key}: an agent may change only \
+                     display preferences (language, theme, diff word wrap, panels, sidebar \
+                     provider marks, frame throttling, the fallback review advisor)"
+                ));
             }
         }
         if op.answers_per_target() {
             return Ok(());
         }
         for target in op.target_thread_ids() {
-            let Some(meta) = self.find_meta(target) else {
-                return Err(format!("unknown thread: {target}"));
-            };
-            if !self.target_reachable(caller, &grant.scope, &meta, op.reads_content()) {
-                return Err(format!(
-                    "refused: thread {target} is outside your grant's scope ({})",
-                    grant.scope.describe()
-                ));
-            }
+            self.check_target(caller, &grant.scope, target, op.reads_content())
+                .map_err(|refusal| refusal.whole_call(target, &grant.scope))?;
         }
         Ok(())
+    }
+
+    /// Why `target` is closed to `caller`, or its meta when it is open.
+    fn check_target(
+        &self,
+        caller: &Caller,
+        scope: &ControlScope,
+        target: &str,
+        reads_content: bool,
+    ) -> Result<SessionMeta, TargetRefusal> {
+        let Some(meta) = self.find_meta(target) else {
+            let referenced = self.find_meta(&caller.thread_id).is_some_and(|meta| {
+                meta.references
+                    .iter()
+                    .any(|reference| reference.thread_id == target)
+            });
+            return Err(if referenced {
+                TargetRefusal::DeletedReference
+            } else {
+                TargetRefusal::Unknown
+            });
+        };
+        if caller.ancestors.iter().any(|ancestor| ancestor == target) {
+            return Err(TargetRefusal::Ancestor);
+        }
+        if !self.target_reachable(caller, scope, &meta, reads_content) {
+            return Err(TargetRefusal::OutsideScope);
+        }
+        Ok(meta)
     }
 
     /// One target of a per-item batch ([`ControlOp::answers_per_target`]): its meta, or the
@@ -388,16 +437,8 @@ impl AppState {
         target: &str,
         reads_content: bool,
     ) -> Result<SessionMeta, String> {
-        let meta = self
-            .find_meta(target)
-            .ok_or_else(|| "unknown_thread".to_owned())?;
-        if !self.target_reachable(caller, &caller.grant.scope, &meta, reads_content) {
-            return Err(format!(
-                "outside_scope: your grant's scope is {}",
-                caller.grant.scope.describe()
-            ));
-        }
-        Ok(meta)
+        self.check_target(caller, &caller.grant.scope, target, reads_content)
+            .map_err(|refusal| refusal.per_item(target, &caller.grant.scope))
     }
 
     fn dispatch_control_op(&mut self, caller: &Caller, op: ControlOp, cx: &mut HostCx) -> Answer {
@@ -480,6 +521,8 @@ impl AppState {
             action,
         });
         self.control.activity.truncate(CONTROL_ACTIVITY_LIMIT);
+        let entries = self.control.activity.iter().cloned().collect();
+        self.enqueue_store_write(StoreWrite::WriteControlActivity(entries), cx);
     }
 
     pub(crate) fn control_activity(&self, limit: usize) -> Vec<ControlActivityEntry> {
@@ -505,20 +548,40 @@ impl AppState {
     }
 }
 
-/// Whether a call may ask for `requested` under `granted`, from a caller in `caller_project`.
-fn scope_within(
-    requested: &ControlScope,
-    granted: &ControlScope,
-    caller_project: Option<&str>,
-) -> bool {
-    match (requested, granted) {
-        (_, ControlScope::Host) | (ControlScope::Project, _) => true,
-        (ControlScope::Projects(ids), ControlScope::Projects(allowed)) => {
-            ids.iter().all(|id| allowed.contains(id))
+/// A target closed to the caller; worded for a whole-call refusal or a per-item skip.
+enum TargetRefusal {
+    Unknown,
+    DeletedReference,
+    Ancestor,
+    OutsideScope,
+}
+
+impl TargetRefusal {
+    fn whole_call(&self, target: &str, scope: &ControlScope) -> String {
+        match self {
+            Self::Unknown => format!("unknown thread: {target}"),
+            Self::DeletedReference => format!(
+                "referenced thread {target} was deleted; what you already read cannot be recalled"
+            ),
+            Self::Ancestor => format!(
+                "refused: thread {target} orchestrates this thread; a child may not read or act \
+                 on its parent"
+            ),
+            Self::OutsideScope => format!(
+                "refused: thread {target} is outside your grant's scope ({})",
+                scope.describe()
+            ),
         }
-        (ControlScope::Projects(ids), ControlScope::Project) => ids
-            .iter()
-            .all(|id| caller_project.is_some_and(|project| project == id)),
-        (ControlScope::Host, _) => false,
+    }
+
+    fn per_item(&self, target: &str, scope: &ControlScope) -> String {
+        match self {
+            Self::Unknown => "unknown_thread".to_owned(),
+            Self::DeletedReference => format!("deleted: referenced thread {target} was deleted"),
+            Self::Ancestor => "ancestor: a child may not read or act on its parent".to_owned(),
+            Self::OutsideScope => {
+                format!("outside_scope: your grant's scope is {}", scope.describe())
+            }
+        }
     }
 }

@@ -819,35 +819,6 @@ fn discovery_shows_the_branch_pull_request_without_linking_it_and_its_merge_sett
     assert_eq!(merged.settled_at, Some(worked_at / 1000));
 }
 
-fn rpc(url: &str, token: &str, session: Option<&str>, body: Value) -> (Value, Option<String>) {
-    let mut request = ureq::post(url)
-        .set("Authorization", &format!("Bearer {token}"))
-        .set("Accept", "application/json, text/event-stream")
-        .set("Content-Type", "application/json");
-    if let Some(session) = session {
-        request = request
-            .set("Mcp-Session-Id", session)
-            .set("MCP-Protocol-Version", "2025-11-25");
-    }
-    let response = request
-        .send_bytes(&serde_json::to_vec(&body).unwrap())
-        .unwrap();
-    let session = response.header("Mcp-Session-Id").map(str::to_owned);
-    let text = response.into_string().unwrap();
-    let json = text
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .find(|data| !data.trim().is_empty())
-        .unwrap_or(&text);
-    (
-        if json.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_str(json).unwrap()
-        },
-        session,
-    )
-}
 #[test]
 fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
     let store = TestStore::new("tcode-pr-mcp");

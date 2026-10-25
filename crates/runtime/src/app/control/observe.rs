@@ -1,5 +1,4 @@
 use super::*;
-use crate::app::settlement::SettlementHolds;
 use crate::app::snapshots::ActivityProjection;
 use control_mcp::{
     GetGitParams, GetPullRequestParams, GetSettingsParams, GetThreadParams, GitWhat, ItemKind,
@@ -17,6 +16,8 @@ const PAGE_CAP: u32 = 100;
 const SEARCH_LIMIT: u32 = 20;
 const SEARCH_CAP: u32 = 50;
 const PER_TURN_CAP: usize = 200;
+/// How many collapsed threads, and how many left-out thread ids, a review lists by name.
+const REVIEW_LIST_CAP: usize = 100;
 /// What one response may carry, about the size of one large file.
 const RESPONSE_BUDGET: usize = 60 * 1024;
 const TERMINAL_TAIL_BYTES: usize = 32 * 1024;
@@ -155,7 +156,7 @@ struct SearchHitRow {
     thread_id: String,
     title: String,
     turn: usize,
-    kind: &'static str,
+    kind: SearchKind,
     snippet: String,
 }
 
@@ -614,7 +615,7 @@ impl AppState {
         let activity = self.thread_activity.get(&meta.id);
         let last_activity = activity.and_then(|activity| activity.last_activity_at());
         let automation = self.settings.settlement_automation;
-        let SettlementHolds {
+        let tcode_core::settlement::SettlementBlockers {
             pending_approval,
             pending_input,
             live_run,
@@ -624,7 +625,7 @@ impl AppState {
             pending_human_message,
             scheduled_wake,
             pending_agent_message,
-        } = self.settlement_holds(meta, projection);
+        } = self.settlement_blockers(meta, projection);
         let mut reasons: Vec<&'static str> = [
             (meta.archived_at.is_some(), reason::ARCHIVED),
             (
@@ -720,7 +721,7 @@ impl AppState {
             .sessions
             .iter()
             .filter(|meta| {
-                scope.reaches(caller.project_id.as_deref(), meta.project_id.as_deref())
+                self.target_reachable(caller, &scope, meta, false)
                     && states.contains(&thread_state(meta))
                     && (include_children || meta.parent_session_id.is_none())
                     && params
@@ -914,7 +915,6 @@ impl AppState {
             None => 0,
         };
         let filter = SearchFilter {
-            thread_ids: None,
             kinds,
             limit: params.limit.unwrap_or(SEARCH_LIMIT).clamp(1, SEARCH_CAP) as usize,
             offset,
@@ -949,7 +949,7 @@ impl AppState {
                         thread_id: hit.hit.session_id,
                         title: hit.hit.session_title,
                         turn: hit.hit.turn,
-                        kind: hit.kind.as_str(),
+                        kind: hit.kind,
                     }
                 })
                 .collect();
@@ -1209,7 +1209,11 @@ impl AppState {
         params: GetSettingsParams,
         _cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
-        let mut settings = serde_json::to_value(&self.settings).map_err(|e| e.to_string())?;
+        let mut settings = self.settings.clone();
+        // Keys this build does not know are not described anywhere and may hold anything.
+        settings.unknown.clear();
+        let mut settings = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
+        strip_env_values(&mut settings);
         if let Some(keys) = params.keys
             && let serde_json::Value::Object(fields) = &mut settings
         {
@@ -1223,7 +1227,12 @@ impl AppState {
                 return Err(format!("unknown settings keys: {}", missing.join(", ")));
             }
         }
-        Ok(serde_json::json!({ "settings": settings }))
+        let redacted = redact_strings(&mut settings);
+        Ok(serde_json::json!({
+            "settings": settings,
+            "redacted": redacted,
+            "omitted": ["environment variable values", "settings keys this build does not know"],
+        }))
     }
 
     pub(super) fn op_read_terminal(
@@ -1290,8 +1299,7 @@ impl AppState {
             .sessions
             .iter()
             .filter(|meta| {
-                meta.archived_at.is_none()
-                    && scope.reaches(caller.project_id.as_deref(), meta.project_id.as_deref())
+                meta.archived_at.is_none() && self.target_reachable(caller, &scope, meta, false)
             })
             .map(|meta| (self.activity_at(meta), meta))
             .collect();
@@ -1327,7 +1335,7 @@ impl AppState {
             if meta.is_settled() && at < since {
                 continue;
             }
-            let holds = self.settlement_holds(meta, &projection);
+            let holds = self.settlement_blockers(meta, &projection);
             if holds.live_run {
                 collapsed.push(collapse("running"));
                 continue;
@@ -1364,9 +1372,17 @@ impl AppState {
                     .then(|| now.saturating_sub(at) / DAY_MS),
             });
         }
+        let mut omitted = Vec::new();
+        if collapsed.len() > REVIEW_LIST_CAP {
+            omitted.push(format!(
+                "{} more collapsed threads (running, just active or orchestrated children) are \
+                 not listed; list_threads finds them",
+                collapsed.len() - REVIEW_LIST_CAP
+            ));
+            collapsed.truncate(REVIEW_LIST_CAP);
+        }
         let store = self.store.clone();
         Answer::Later(cx.unblock(move || {
-            let mut omitted = Vec::new();
             for candidate in &mut candidates {
                 if !cold.contains(&candidate.thread.id) {
                     continue;
@@ -1419,10 +1435,17 @@ impl AppState {
                 true
             });
             if !left_out.is_empty() {
+                let named = left_out.len().min(REVIEW_LIST_CAP);
+                let unnamed = left_out.len() - named;
                 omitted.push(format!(
-                    "{} candidates did not fit the response budget; get_thread each of: {}",
+                    "{} candidates did not fit the response budget; get_thread each of: {}{}",
                     left_out.len(),
-                    left_out.join(", ")
+                    left_out[..named].join(", "),
+                    if unnamed > 0 {
+                        format!(" and {unnamed} more, narrowed by scope or since")
+                    } else {
+                        String::new()
+                    }
                 ));
             }
             to_value(&ReviewAnswer {
@@ -1439,6 +1462,50 @@ impl AppState {
                 omitted,
             })
         }))
+    }
+}
+
+/// Blank every environment variable's value under an `env` key, whatever shape the list
+/// has (`{name, value}` entries or `[name, value]` pairs); the names stay.
+fn strip_env_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, field) in fields.iter_mut() {
+                if key == "env"
+                    && let serde_json::Value::Array(vars) = field
+                {
+                    for var in vars {
+                        match var {
+                            serde_json::Value::Object(var) => {
+                                var.remove("value");
+                            }
+                            serde_json::Value::Array(pair) if pair.len() == 2 => {
+                                pair[1] = serde_json::Value::String(String::new());
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    strip_env_values(field);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_env_values),
+        _ => {}
+    }
+}
+
+/// Redact every string in `value` in place; how many secrets were replaced.
+fn redact_strings(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(text) => {
+            let (clean, count) = redact(text);
+            *text = clean;
+            count
+        }
+        serde_json::Value::Array(items) => items.iter_mut().map(redact_strings).sum(),
+        serde_json::Value::Object(fields) => fields.values_mut().map(redact_strings).sum(),
+        _ => 0,
     }
 }
 

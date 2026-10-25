@@ -7,11 +7,17 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 use agent::ProviderKind;
+use serde::{Serialize, de::DeserializeOwned};
 #[cfg(test)]
 use tcode_core::settings::{EnvVar, ThemeMode};
-use tcode_core::{control::ReviewRecord, pull_request::HostKind, settings::Settings};
+use tcode_core::{
+    control::{ControlActivityEntry, ReviewRecord},
+    pull_request::HostKind,
+    settings::Settings,
+};
 
 const REVIEWS_FILE: &str = "reviews.json";
+const CONTROL_ACTIVITY_FILE: &str = "control_activity.json";
 
 type Secrets = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -353,19 +359,36 @@ impl SettingsStore {
 
     /// The recorded conversation reviews, oldest first; unreadable records read as none.
     pub fn load_review_records(&self) -> Vec<ReviewRecord> {
-        let Ok(bytes) = fs::read(self.data_file(REVIEWS_FILE)) else {
+        self.load_list(REVIEWS_FILE)
+    }
+
+    pub fn save_review_records(&self, records: &[ReviewRecord]) -> std::io::Result<()> {
+        self.save_list(REVIEWS_FILE, records)
+    }
+
+    /// The recent `tcode_control` writes, newest first; an unreadable file reads as none.
+    pub fn load_control_activity(&self) -> Vec<ControlActivityEntry> {
+        self.load_list(CONTROL_ACTIVITY_FILE)
+    }
+
+    pub fn save_control_activity(&self, entries: &[ControlActivityEntry]) -> std::io::Result<()> {
+        self.save_list(CONTROL_ACTIVITY_FILE, entries)
+    }
+
+    fn load_list<T: DeserializeOwned>(&self, name: &str) -> Vec<T> {
+        let Ok(bytes) = fs::read(self.data_file(name)) else {
             return Vec::new();
         };
         serde_json::from_slice(&bytes).unwrap_or_else(|err| {
-            log::warn!("failed to parse {REVIEWS_FILE}: {err}");
+            log::warn!("failed to parse {name}: {err}");
             Vec::new()
         })
     }
 
-    pub fn save_review_records(&self, records: &[ReviewRecord]) -> std::io::Result<()> {
-        let path = self.data_file(REVIEWS_FILE);
+    fn save_list<T: Serialize>(&self, name: &str, items: &[T]) -> std::io::Result<()> {
+        let path = self.data_file(name);
         let tmp = path.with_extension("json.tmp");
-        let data = serde_json::to_vec_pretty(records)
+        let data = serde_json::to_vec_pretty(items)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(&tmp, data)?;
         fs::rename(tmp, path)

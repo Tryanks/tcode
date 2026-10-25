@@ -35,28 +35,20 @@ pub enum SearchKind {
 }
 
 impl SearchKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::UserMessage => "user_message",
-            Self::AssistantMessage => "assistant_message",
-            Self::ToolCall => "tool_call",
-            Self::CommandExecution => "command_execution",
-            Self::FileChange => "file_change",
-            Self::Steer => "steer",
-            Self::Other => "other",
-        }
+    /// The kind's stored and wire name, as serde writes it.
+    fn name(self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|name| name.as_str().map(str::to_owned))
+            .unwrap_or_default()
     }
 
-    fn parse(text: &str) -> Self {
-        match text {
-            "user_message" => Self::UserMessage,
-            "assistant_message" => Self::AssistantMessage,
-            "tool_call" => Self::ToolCall,
-            "command_execution" => Self::CommandExecution,
-            "file_change" => Self::FileChange,
-            "steer" => Self::Steer,
-            _ => Self::Other,
-        }
+    /// A stored name; one this build does not know reads as `Other`.
+    fn parse(name: &str) -> Self {
+        use serde::de::IntoDeserializer;
+        let name: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+            name.into_deserializer();
+        Self::deserialize(name).unwrap_or(Self::Other)
     }
 }
 
@@ -73,8 +65,6 @@ pub struct SearchableEntry {
 /// What a scoped search is narrowed to and which page of it is wanted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchFilter {
-    /// Only these threads, visited in the order the sessions are supplied.
-    pub thread_ids: Option<Vec<String>>,
     pub kinds: Option<Vec<SearchKind>>,
     pub limit: usize,
     pub offset: usize,
@@ -170,18 +160,13 @@ impl SessionSearch {
         }
         let folded = query.to_lowercase();
         for meta in sessions {
-            if filter
-                .thread_ids
-                .as_ref()
-                .is_some_and(|ids| !ids.contains(&meta.id))
-            {
-                continue;
-            }
             if let Err(error) = self.refresh(&meta.id) {
                 log::warn!("cannot search session {}: {error}", meta.id);
                 continue;
             }
             let mut in_thread = 0;
+            // Where each of this thread's turns sits in `per_turn`.
+            let mut turn_rows: HashMap<usize, usize> = HashMap::new();
             let visited = self
                 .store
                 .visit_search_matches(&meta.id, &folded, |matched| {
@@ -197,13 +182,12 @@ impl SessionSearch {
                         return true;
                     };
                     in_thread += 1;
-                    match results
-                        .per_turn
-                        .iter_mut()
-                        .find(|(id, turn, _)| *id == meta.id && *turn == matched.turn)
-                    {
-                        Some((_, _, count)) => *count += 1,
-                        None => results.per_turn.push((meta.id.clone(), matched.turn, 1)),
+                    match turn_rows.get(&matched.turn) {
+                        Some(&row) => results.per_turn[row].2 += 1,
+                        None => {
+                            turn_rows.insert(matched.turn, results.per_turn.len());
+                            results.per_turn.push((meta.id.clone(), matched.turn, 1));
+                        }
                     }
                     let index = results.total;
                     results.total += 1;
@@ -278,6 +262,7 @@ impl SessionSearch {
         let log = self.store.read_log_until(id, source.end)?;
         let entries = extract_searchable_entries(&log);
         let folded: Vec<String> = entries.iter().map(|entry| fold(&entry.text)).collect();
+        let kinds: Vec<String> = entries.iter().map(|entry| entry.kind.name()).collect();
         self.store.replace_search_entries(
             id,
             EXTRACTION_VERSION,
@@ -285,11 +270,12 @@ impl SessionSearch {
             entries
                 .iter()
                 .zip(&folded)
-                .map(|(entry, folded)| IndexedEntry {
+                .zip(&kinds)
+                .map(|((entry, folded), kind)| IndexedEntry {
                     entry_id: &entry.entry_id,
                     position: entry.position,
                     turn: entry.turn,
-                    kind: entry.kind.as_str(),
+                    kind,
                     text: &entry.text,
                     folded,
                 }),
@@ -779,7 +765,6 @@ mod tests {
         let search = SessionSearch::new(store.clone());
         let sessions = [a.clone(), b.clone()];
         let all = |limit: usize, offset: usize| SearchFilter {
-            thread_ids: None,
             kinds: None,
             limit,
             offset,
@@ -816,18 +801,6 @@ mod tests {
             ]
         );
         assert_eq!(results.hits[1].hit.snippet, "rg auth.rs");
-
-        let scoped = search.search_filtered(
-            &sessions,
-            "auth.rs",
-            &SearchFilter {
-                thread_ids: Some(vec![b.id.clone()]),
-                ..all(10, 0)
-            },
-        );
-        assert_eq!(scoped.total, 1);
-        assert_eq!(scoped.hits[0].hit.session_id, b.id);
-        assert_eq!(scoped.per_thread, vec![(b.id.clone(), 1)]);
 
         let kinds = search.search_filtered(
             &sessions,

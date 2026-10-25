@@ -4,7 +4,9 @@ use control_mcp::{
     BatchResult, Expect, Outcome, RecordReviewParams, SettleSelfParams, ThreadChange, ThreadOp,
     UpdateThreadsParams,
 };
-use tcode_core::control::{FollowUp, ReviewItem, ReviewRecord, SelfSettleGrant, SelfSettleWhen};
+use tcode_core::control::{
+    FollowUp, ReviewItem, ReviewRecord, SelfSettleGrant, SelfSettleWhen, action,
+};
 use tcode_core::project::SettledOverride;
 use tcode_core::pull_request::PullRequestState;
 use tcode_protocol::{Command, Principal};
@@ -140,16 +142,11 @@ impl AppState {
         } else {
             let side_effects = self.apply_thread_op(&meta, &change.op, cx);
             let detail = match &change.op {
-                ThreadOp::Rename { title } => format!("to \u{201c}{}\u{201d}", title.trim()),
-                _ => side_effects.join("; "),
+                ThreadOp::Rename { title } => Some(title.trim().to_owned()),
+                ThreadOp::FollowUp { on: true, note } => note.clone(),
+                _ => None,
             };
-            self.audit(
-                caller,
-                &target,
-                thread_op_name(&change.op),
-                (!detail.is_empty()).then_some(detail),
-                cx,
-            );
+            self.audit(caller, &target, thread_op_name(&change.op), detail, cx);
             side_effects
         };
         BatchResult {
@@ -365,11 +362,11 @@ impl AppState {
             }),
         );
         let mut cx = agent_cx(cx);
-        let detail = format!("{} items; {}", record.items.len(), record.coverage);
+        let detail = record.items.len().to_string();
         self.audit(
             caller,
             &caller.thread_id,
-            "record_review",
+            action::RECORD_REVIEW,
             Some(detail),
             &mut cx,
         );
@@ -391,6 +388,9 @@ impl AppState {
             );
         }
         let meta = self.find_meta(&caller.thread_id).ok_or("unknown thread")?;
+        if !self.user_said(&meta, consent_quote) {
+            return Err("consent_required: the quote is not something the user said here".into());
+        }
         if let SelfSettleWhen::PrMerged { url } | SelfSettleWhen::PrClosed { url } = &params.when
             && pull_request_state(&meta, url).is_none()
         {
@@ -404,7 +404,7 @@ impl AppState {
             granted_at: now_secs(),
         };
         let when = describe_when(&grant.when);
-        let detail = format!("{when}: \u{201c}{}\u{201d}", grant.consent_quote);
+        let detail = grant.consent_quote.clone();
         let mut cx = agent_cx(cx);
         self.change_meta(&caller.thread_id, &mut cx, |meta| {
             meta.self_settle = Some(grant)
@@ -412,7 +412,7 @@ impl AppState {
         self.audit(
             caller,
             &caller.thread_id,
-            "settle_self",
+            action::SETTLE_SELF,
             Some(detail),
             &mut cx,
         );
@@ -422,6 +422,33 @@ impl AppState {
             "note": "The host settles this thread only after its current turn has ended. A new \
                      message from the user withdraws the grant, and the user can revoke it.",
         }))
+    }
+
+    /// Whether `quote` appears, ignoring case and runs of whitespace, in a message the user
+    /// sent in `meta`'s own thread; agent and host messages do not count.
+    fn user_said(&self, meta: &SessionMeta, quote: &str) -> bool {
+        let collapse = |text: &str| {
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
+        let quote = collapse(quote);
+        let unmarked = MessageOrigin::legacy(meta.parent_session_id.is_some());
+        self.event_records.get(&meta.id).is_some_and(|log| {
+            log.records().iter().any(|record| {
+                let text = match &record.event {
+                    AgentEvent::ItemCompleted(agent::ThreadItem {
+                        content: agent::ItemContent::UserMessage { text, .. },
+                        ..
+                    })
+                    | AgentEvent::SteerRequested { text, .. } => text,
+                    _ => return false,
+                };
+                record.origin.unwrap_or(unmarked) == MessageOrigin::Human
+                    && collapse(text).contains(&quote)
+            })
+        })
     }
 
     /// Settle a thread whose self-settle grant is met: `end_of_turn` once `turn_ended`, a pull
@@ -464,21 +491,18 @@ impl AppState {
         if !due || self.settle_thread_busy(id) {
             return;
         }
-        let Some(effects) = self.settle_session(id, &mut cx) else {
+        if self.settle_session(id, &mut cx).is_none() {
             return;
-        };
+        }
         self.change_meta(id, &mut cx, |meta| meta.self_settle = None);
         let caller = self.caller_of(&meta);
-        let mut detail = format!(
-            "settled itself ({}; \u{201c}{}\u{201d})",
-            describe_when(&grant.when),
-            grant.consent_quote
+        self.audit(
+            &caller,
+            id,
+            action::SETTLED_ITSELF,
+            Some(grant.consent_quote),
+            &mut cx,
         );
-        for effect in describe_settle(effects) {
-            detail.push_str("; ");
-            detail.push_str(&effect);
-        }
-        self.audit(&caller, id, "settle", Some(detail), &mut cx);
     }
 
     pub fn set_follow_up(
@@ -561,21 +585,21 @@ fn thread_state(meta: &SessionMeta) -> &'static str {
 
 fn thread_op_name(op: &ThreadOp) -> &'static str {
     match op {
-        ThreadOp::Settle => "settle",
-        ThreadOp::Unsettle => "unsettle",
-        ThreadOp::Archive => "archive",
-        ThreadOp::Unarchive => "unarchive",
-        ThreadOp::Pin => "pin",
-        ThreadOp::Unpin => "unpin",
-        ThreadOp::Rename { .. } => "rename",
-        ThreadOp::MarkRead => "mark_read",
-        ThreadOp::MarkUnread => "mark_unread",
-        ThreadOp::FollowUp { on: true, .. } => "follow_up",
-        ThreadOp::FollowUp { on: false, .. } => "follow_up off",
-        ThreadOp::Park { on: true } => "park",
-        ThreadOp::Park { on: false } => "park off",
-        ThreadOp::Keep { on: true } => "keep",
-        ThreadOp::Keep { on: false } => "keep off",
+        ThreadOp::Settle => action::SETTLE,
+        ThreadOp::Unsettle => action::UNSETTLE,
+        ThreadOp::Archive => action::ARCHIVE,
+        ThreadOp::Unarchive => action::UNARCHIVE,
+        ThreadOp::Pin => action::PIN,
+        ThreadOp::Unpin => action::UNPIN,
+        ThreadOp::Rename { .. } => action::RENAME,
+        ThreadOp::MarkRead => action::MARK_READ,
+        ThreadOp::MarkUnread => action::MARK_UNREAD,
+        ThreadOp::FollowUp { on: true, .. } => action::FOLLOW_UP,
+        ThreadOp::FollowUp { on: false, .. } => action::FOLLOW_UP_OFF,
+        ThreadOp::Park { on: true } => action::PARK,
+        ThreadOp::Park { on: false } => action::PARK_OFF,
+        ThreadOp::Keep { on: true } => action::KEEP,
+        ThreadOp::Keep { on: false } => action::KEEP_OFF,
     }
 }
 

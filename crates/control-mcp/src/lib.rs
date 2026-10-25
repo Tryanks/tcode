@@ -1,6 +1,7 @@
 //! In-process MCP server through which a thread's model observes and operates Tcode,
 //! within the grant the user gave that thread.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -68,7 +69,7 @@ impl ToolRequirement {
     }
 }
 
-/// Tool name → requirement, in the order the issue lists them (A4).
+/// Tool name → requirement.
 pub const TOOLS: [(&str, ToolRequirement); 32] = [
     ("list_projects", ToolRequirement::Tier(ControlTier::Observe)),
     ("list_threads", ToolRequirement::Tier(ControlTier::Observe)),
@@ -96,6 +97,8 @@ pub const TOOLS: [(&str, ToolRequirement); 32] = [
         "review_candidates",
         ToolRequirement::Tier(ControlTier::Observe),
     ),
+    // Referencing only makes a thread in the observe scope readable later; it writes nothing.
+    ("reference", ToolRequirement::Tier(ControlTier::Observe)),
     (
         "update_threads",
         ToolRequirement::Tier(ControlTier::Organize),
@@ -119,7 +122,6 @@ pub const TOOLS: [(&str, ToolRequirement); 32] = [
     ),
     ("notify_when", ToolRequirement::Tier(ControlTier::Operate)),
     ("cancel_notify", ToolRequirement::Tier(ControlTier::Operate)),
-    ("reference", ToolRequirement::Tier(ControlTier::Operate)),
     (
         "respond_input",
         ToolRequirement::Category(ControlCategory::AnswerInput),
@@ -309,21 +311,46 @@ pub type TokenRegistry = mcp_host::TokenRegistry<tools::Service>;
 /// does not know, which gets `request_grant` alone.
 pub type GrantResolver = Arc<dyn Fn(&str) -> Option<ControlGrant> + Send + Sync>;
 
-/// The resolver the runtime installs when it attaches the server. Until then, and for a
-/// thread it does not know, every connection sees the empty grant.
+/// Tool names with the descriptions a connection listed them with.
+pub type ListedTools = Vec<(String, String)>;
+
+/// The resolver the runtime installs when it attaches the server, and the tools each
+/// thread's latest connection was actually given. Until a resolver is set, and for a thread
+/// it does not know, every connection sees the empty grant.
 #[derive(Clone, Default)]
-pub struct GrantSource(Arc<Mutex<Option<GrantResolver>>>);
+pub struct GrantSource {
+    resolver: Arc<Mutex<Option<GrantResolver>>>,
+    offered: Arc<Mutex<HashMap<String, ListedTools>>>,
+}
 
 impl GrantSource {
     pub fn set(&self, resolver: GrantResolver) {
-        *self.0.lock().unwrap() = Some(resolver);
+        *self.resolver.lock().unwrap() = Some(resolver);
     }
 
     pub fn resolve(&self, thread_id: &str) -> ControlGrant {
-        let resolver = self.0.lock().unwrap().clone();
+        let resolver = self.resolver.lock().unwrap().clone();
         resolver
             .and_then(|resolve| resolve(thread_id))
             .unwrap_or_else(ControlGrant::none)
+    }
+
+    /// The tools, with descriptions, the thread's latest connection listed; `None` before
+    /// its provider first connected. A grant changed since then shows here only once the
+    /// provider connects again.
+    pub fn offered(&self, thread_id: &str) -> Option<ListedTools> {
+        self.offered.lock().unwrap().get(thread_id).cloned()
+    }
+
+    pub fn forget(&self, thread_id: &str) {
+        self.offered.lock().unwrap().remove(thread_id);
+    }
+
+    fn record_offered(&self, thread_id: &str, tools: ListedTools) {
+        self.offered
+            .lock()
+            .unwrap()
+            .insert(thread_id.to_owned(), tools);
     }
 }
 

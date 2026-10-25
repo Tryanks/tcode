@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::orchestrate::approval_request_summary;
 use control_mcp::{BatchResult, CancelNotifyParams, NotifyWhenParams, Outcome};
-use tcode_core::control::{ControlWatch, WatchEvent};
+use tcode_core::control::{ControlWatch, WatchEvent, action};
 use tcode_core::notice::CONTROL_CALLBACK_PREFIX;
 
 /// How much of a question or opening message a callback quotes; the rest is one
@@ -72,8 +72,8 @@ fn last_turn_detail(timeline: &Timeline, event: WatchEvent) -> Option<String> {
                 let own = context_len.and_then(|len| text.get(len..)).unwrap_or(text);
                 let (own, _) = tcode_services::thread_index::redact(own);
                 Some(format!(
-                    " from \"{}\"",
-                    one_line_head(&own, QUOTE_HEAD_CHARS)
+                    " from {}",
+                    quoted(&one_line_head(&own, QUOTE_HEAD_CHARS))
                 ))
             }
             _ => None,
@@ -83,6 +83,12 @@ fn last_turn_detail(timeline: &Timeline, event: WatchEvent) -> Option<String> {
         status.unwrap_or_default(),
         opening.unwrap_or_default()
     ))
+}
+
+/// `text` as one quoted string literal, so another thread's title or question cannot end
+/// the quote and read as part of the callback.
+fn quoted(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_default()
 }
 
 impl AppState {
@@ -138,20 +144,16 @@ impl AppState {
             skipped,
             ..WatchAnswer::from(&watch)
         });
-        let detail = format!(
-            "watch {} on {}: {}",
-            watch.id,
-            watch.thread_ids.join(", "),
-            watch
-                .events
-                .iter()
-                .map(wire_name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let detail = watch.id.clone();
         meta.control_watches.push(watch);
         self.store_meta(meta, cx);
-        self.audit(caller, &caller.thread_id, "notify_when", Some(detail), cx);
+        self.audit(
+            caller,
+            &caller.thread_id,
+            action::NOTIFY_WHEN,
+            Some(detail),
+            cx,
+        );
         Ok(answer)
     }
 
@@ -170,8 +172,14 @@ impl AppState {
             meta.control_watches
                 .retain(|watch| !removed.contains(&watch.id));
             self.store_meta(meta, cx);
-            let detail = format!("removed {}", removed.join(", "));
-            self.audit(caller, &caller.thread_id, "cancel_notify", Some(detail), cx);
+            let detail = removed.join(", ");
+            self.audit(
+                caller,
+                &caller.thread_id,
+                action::CANCEL_NOTIFY,
+                Some(detail),
+                cx,
+            );
         }
         Ok(serde_json::json!(CancelNotifyAnswer { removed, unknown }))
     }
@@ -185,7 +193,9 @@ impl AppState {
         event: WatchEvent,
         cx: &mut HostCx,
     ) {
-        if event == WatchEvent::Idle && self.turn_running_for(target_id) {
+        if !self.settings.control.enabled
+            || (event == WatchEvent::Idle && self.turn_running_for(target_id))
+        {
             return;
         }
         let fires = |watch: &ControlWatch| {
@@ -204,8 +214,8 @@ impl AppState {
             return;
         };
         let text = format!(
-            "{CONTROL_CALLBACK_PREFIX}thread {target_id} (\"{}\") {}{}",
-            target.title,
+            "{CONTROL_CALLBACK_PREFIX}thread {target_id} ({}) {}{}",
+            quoted(&target.title),
             wire_name(event),
             self.watch_event_detail(&target, event)
         );
@@ -213,6 +223,11 @@ impl AppState {
             let Some(mut meta) = self.find_meta(&watcher) else {
                 continue;
             };
+            // The watcher's grant may have narrowed since it asked.
+            let caller = self.caller_of(&meta);
+            if !self.target_reachable(&caller, &caller.grant.scope, &target, true) {
+                continue;
+            }
             let before = meta.control_watches.len();
             meta.control_watches
                 .retain(|watch| !(watch.once && fires(watch)));
@@ -238,7 +253,7 @@ impl AppState {
                         .first()
                         .map(|question| one_line_head(&question.question, QUOTE_HEAD_CHARS))
                         .unwrap_or_default();
-                    format!("\"{question}\" (request_id: {})", pending.request_id)
+                    format!("{} (request_id: {})", quoted(&question), pending.request_id)
                 }),
             WatchEvent::NeedsApproval => self
                 .approval_requests(&target.id)

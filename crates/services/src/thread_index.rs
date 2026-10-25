@@ -1569,12 +1569,12 @@ pub fn fence(label: &str, body: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use agent::{AgentEvent, FileChange, ProviderKind, RewindMode, ThreadItem};
+    use agent::{AgentEvent, FileChange, ProviderKind, ThreadItem};
     use serde_json::json;
     use tcode_core::project::SessionMeta;
 
     use super::*;
-    use crate::store::{Mutation, SessionStore};
+    use crate::store::SessionStore;
 
     /// One thread written through the store the way the host writes it, with
     /// the position each recorded event got.
@@ -1696,19 +1696,16 @@ mod tests {
             .collect()
     }
 
-    /// An anchor names the row that first recorded an entry: a tool call
-    /// keeps it when its output lands, a fork copies it, and a rewind leaves
-    /// the entries it kept where they were while new work gets new rows.
+    /// An anchor names the row that first recorded an entry: a tool call keeps it when its
+    /// output lands later, and the outline places the tool and its file in that turn. Reads
+    /// by anchor across compaction, rewind, retry and fork are proven through the host
+    /// (`original_entries_are_read_by_anchor_after_compaction_rewind_retry_and_fork`).
     #[test]
-    fn anchors_survive_output_updates_forks_and_rewinds() {
+    fn an_entry_keeps_the_position_that_first_recorded_it() {
         let mut thread = Thread::new();
         let u1 = thread.record(user("u1", "Find the bug"));
         thread.record(AgentEvent::TurnStarted {
             turn_id: "turn-1".into(),
-        });
-        thread.record(AgentEvent::TurnCheckpoint {
-            turn_id: "turn-1".into(),
-            checkpoint_id: "cp-1".into(),
         });
         let t1 = thread.record(AgentEvent::ItemStarted(item("t1", tool(None))));
         thread.record(AgentEvent::ItemCompleted(item(
@@ -1721,37 +1718,7 @@ mod tests {
             status: TurnStatus::Completed,
             usage: None,
         });
-        let (u2, a2) = thread.turn(2, "Fix it", "Fixed");
 
-        let log = thread.index();
-        let expected = vec![
-            (u1, "u1".to_owned()),
-            (t1, "t1".to_owned()),
-            (a1, "a1".to_owned()),
-            (u2, "u2".to_owned()),
-            (a2, "a2".to_owned()),
-        ];
-        assert_eq!(ids(&log), expected);
-        assert_eq!(log.as_of_position(), a2 + 1);
-        let read_tool = read(&log, ReadSelection::Anchors(vec![t1]), 4096);
-        assert_eq!(read_tool.entries.len(), 1);
-        assert_eq!(read_tool.entries[0].kind, "tool_call");
-        assert!(read_tool.entries[0].text.ends_with("fn main() {}"));
-        assert_eq!(read_tool.entries[0].truncated, None);
-
-        thread
-            .store
-            .apply(&[Mutation::clone_events(&thread.id, "fork")])
-            .unwrap();
-        let fork = IndexedLog::build(&thread.store.read_log("fork").unwrap());
-        assert_eq!(ids(&fork), expected);
-
-        thread.record(AgentEvent::RewindCompleted {
-            checkpoint_id: "cp-2".into(),
-            mode: RewindMode::Conversation,
-            prefill: None,
-        });
-        let u3 = thread.record(user("u3", "Try another fix"));
         let log = thread.index();
         assert_eq!(
             ids(&log),
@@ -1759,30 +1726,16 @@ mod tests {
                 (u1, "u1".to_owned()),
                 (t1, "t1".to_owned()),
                 (a1, "a1".to_owned()),
-                (u3, "u3".to_owned()),
             ]
         );
-        assert!(u3 > a2, "a rewind appends; positions are never reused");
-        let older = read(&log, ReadSelection::Anchors(vec![a1, a2]), 4096);
-        assert_eq!(older.entries.len(), 1);
-        assert_eq!(older.entries[0].text, "Found it in src/lib.rs");
-        assert_eq!(
-            older.omitted.as_deref(),
-            Some(format!("no entry at position {a2}").as_str())
-        );
+        let read_tool = read(&log, ReadSelection::Anchors(vec![t1]), 4096);
+        assert_eq!(read_tool.entries.len(), 1);
+        assert_eq!(read_tool.entries[0].kind, "tool_call");
+        assert!(read_tool.entries[0].text.ends_with("fn main() {}"));
+        assert_eq!(read_tool.entries[0].truncated, None);
         let outline = outline(&log, OutlineLevel::Turns, None, 64 * 1024);
-        assert_eq!(outline.turns.len(), 2);
-        assert_eq!(outline.turns[0].markers, vec![Marker::Rewind]);
         assert_eq!(outline.turns[0].tools, vec!["read_file"]);
         assert_eq!(outline.turns[0].files, vec!["src/lib.rs"]);
-        assert_eq!(
-            outline.turns[1].user_message_head.as_deref(),
-            Some("Try another fix")
-        );
-        assert_eq!(
-            (outline.turns[1].start_anchor, outline.turns[1].end_anchor),
-            (u3, u3)
-        );
 
         let anchor: Anchor = format!("{}#{t1}", thread.id).parse().unwrap();
         assert_eq!(
@@ -1793,11 +1746,13 @@ mod tests {
         assert!("no-position".parse::<Anchor>().is_err());
     }
 
-    /// A discussion thread's outline carries each reply's opening lines and
-    /// Markdown headings, the references it names and the identifiers worth
-    /// searching for; over budget it keeps the newest turns and says so.
+    /// Headings come from Markdown outside code fences, and commits, pull request numbers
+    /// and frequent identifiers are picked out as hints. Each turn's question and conclusion,
+    /// the budget's newest-first cut and ranges are proven through the host
+    /// (`a_discussion_outline_shows_each_turns_conclusion`,
+    /// `reading_a_very_long_thread_stays_within_budget_and_says_what_it_left_out`).
     #[test]
-    fn discussion_outline_shows_each_turns_assistant_head_and_headings() {
+    fn an_outline_picks_headings_outside_fences_commits_and_identifier_hints() {
         let mut thread = Thread::new();
         thread.turn(
             1,
@@ -1816,53 +1771,16 @@ mod tests {
         );
         let log = thread.index();
         let coarse = outline(&log, OutlineLevel::Coarse, None, 64 * 1024);
-        assert_eq!(coarse.turns.len(), 3);
-        let first = &coarse.turns[0];
-        assert_eq!(
-            first.user_message_head.as_deref(),
-            Some("Which transport should IrohEndpoint use?")
+        assert_eq!(coarse.turns[0].headings, vec!["Decision", "Why"]);
+        assert!(
+            coarse.turns[1].headings.is_empty(),
+            "fenced text is not a heading"
         );
-        assert_eq!(
-            first.assistant_head.as_deref(),
-            Some("Use iroh for transport.\nIrohEndpoint lives in src/transport.rs.")
-        );
-        assert_eq!(first.headings, vec!["Decision", "Why"]);
-        assert!(first.started_at.is_some() && first.ended_at.is_some());
-        let second = &coarse.turns[1];
-        assert_eq!(
-            second.assistant_head.as_deref(),
-            Some("Short answer first line.\nSecond line about IrohEndpoint in src/transport.rs.")
-        );
-        assert!(second.headings.is_empty(), "fenced text is not a heading");
-        let third = &coarse.turns[2];
-        assert_eq!(third.headings, vec!["Summary"]);
-        assert_eq!(third.commits_and_prs, vec!["#929", "abc1234def"]);
+        assert_eq!(coarse.turns[2].commits_and_prs, vec!["#929", "abc1234def"]);
         assert_eq!(
             coarse.hints,
             vec!["IrohEndpoint", "src/transport.rs", "#929"]
         );
-        assert_eq!(coarse.omitted, None);
-
-        let budget = serde_json::to_vec(&coarse).unwrap().len() - 1;
-        let trimmed = outline(&log, OutlineLevel::Coarse, None, budget);
-        assert!(trimmed.turns.len() < 3 && !trimmed.turns.is_empty());
-        assert_eq!(
-            trimmed.turns.last().unwrap().turn,
-            2,
-            "the newest turn is kept"
-        );
-        assert!(serde_json::to_vec(&trimmed).unwrap().len() <= budget);
-        let omitted = trimmed.omitted.unwrap();
-        assert!(omitted.contains("older turns omitted"), "{omitted}");
-
-        let ranged = outline(
-            &log,
-            OutlineLevel::Turns,
-            Some(coarse.turns[1].start_anchor..=coarse.turns[1].end_anchor),
-            64 * 1024,
-        );
-        assert_eq!(ranged.turns.len(), 1);
-        assert_eq!(ranged.turns[0].turn, 1);
     }
 
     /// A long output is shown head and tail within the budget; following the
@@ -1938,25 +1856,19 @@ mod tests {
         assert!(fenced.ends_with("\nbody\n---- end quoted data: thread#1 ----"));
     }
 
+    /// Matching ignores case and stops at the limit; a blank query matches nothing. Finding
+    /// an error with its context in a large output is proven through the host
+    /// (`search_in_item_finds_an_error_inside_a_large_output`).
     #[test]
-    fn search_in_item_finds_an_error_line_inside_a_mebibyte_of_output() {
-        let mut lines: Vec<String> = (0..16_384)
-            .map(|line| format!("{line:06} ok {}", "-".repeat(56)))
-            .collect();
-        lines[9_000] = "error[E0425]: cannot find value `foo`".into();
-        lines[12_000] = "ERROR: timeout after 30s".into();
-        let output = lines.join("\n");
-        assert!(output.len() >= 1 << 20);
-
-        let hits = search_in_item(&output, "error", 1, 10);
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].line_no, 9_001);
-        assert_eq!(hits[0].line, lines[9_000]);
-        assert_eq!(hits[0].before, vec![lines[8_999].clone()]);
-        assert_eq!(hits[0].after, vec![lines[9_001].clone()]);
-        assert_eq!(hits[1].line_no, 12_001);
-        assert_eq!(search_in_item(&output, "E0425", 0, 1).len(), 1);
-        assert!(search_in_item(&output, "   ", 1, 10).is_empty());
+    fn search_in_item_ignores_case_and_stops_at_the_limit() {
+        let output = "ok\nerror[E0425]: cannot find value `foo`\nok\nERROR: timeout after 30s\nok";
+        let hits = search_in_item(output, "error", 0, 10);
+        assert_eq!(
+            hits.iter().map(|hit| hit.line_no).collect::<Vec<_>>(),
+            [2, 4]
+        );
+        assert_eq!(search_in_item(output, "error", 0, 1).len(), 1);
+        assert!(search_in_item(output, "   ", 1, 10).is_empty());
     }
 
     #[test]
