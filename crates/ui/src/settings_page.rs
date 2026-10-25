@@ -80,8 +80,9 @@ enum Section {
 /// Navigation order, shared by the desktop rail and the compact section list.
 /// Device-local settings come first; replicated settings for the attached
 /// machine follow. Remote, Shared spaces, Machine group and Traverse configure
-/// the local desktop listener, or the serving headless listener in a browser.
-/// Choosing a machine lives in `crate::remote`.
+/// the local desktop listener, or the serving headless listener in a browser;
+/// Traverse, the least used, comes last. Choosing a machine lives in
+/// `crate::remote`.
 #[cfg(feature = "remote-hosting")]
 const SECTIONS: [Section; 16] = [
     Section::General,
@@ -139,22 +140,6 @@ const SECTIONS: [Section; 12] = [
 enum SectionGroup {
     Device,
     Machine,
-}
-
-impl SectionGroup {
-    fn index(self) -> usize {
-        match self {
-            Self::Device => 0,
-            Self::Machine => 1,
-        }
-    }
-
-    fn advanced_toggle_id(self) -> &'static str {
-        match self {
-            Self::Device => "settings-device-advanced-toggle",
-            Self::Machine => "settings-advanced-toggle",
-        }
-    }
 }
 
 /// The group of the remote sections, which configure the listener of the
@@ -275,16 +260,11 @@ impl Section {
         }
     }
 
-    /// Sections that sit in their group's collapsible **Advanced** subgroup:
-    /// the screen and browser the agent drives and the machine's upkeep, and
-    /// the Traverse services this machine publishes to.
+    /// Sections that configure the screen and browser the agent drives, and
+    /// the machine's upkeep, which share the machine group's collapsible
+    /// **Advanced** subgroup.
     fn advanced(self) -> bool {
-        match self {
-            Self::ComputerUse | Self::Browser | Self::Maintenance => true,
-            #[cfg(feature = "remote-hosting")]
-            Self::Traverse => true,
-            _ => false,
-        }
+        matches!(self, Self::ComputerUse | Self::Browser | Self::Maintenance)
     }
 
     /// A section is navigable when at least one row can do real work for this
@@ -478,10 +458,9 @@ pub struct SettingsPage {
     /// Whether this page holds the store's archived threads.
     archived_held: bool,
     capabilities: SettingsCapabilities,
-    /// Whether each group's **Advanced** subgroup is open, by
-    /// [`SectionGroup::index`], once the user has said. `None` keeps the
-    /// capability-derived default.
-    advanced_expanded: [Option<bool>; 2],
+    /// Whether the machine group's **Advanced** subgroup is open, once the user
+    /// has said. `None` keeps the capability-derived default.
+    advanced_expanded: Option<bool>,
     /// Latches the one usage refresh fired when Usage becomes the active
     /// section; cleared as soon as the page shows anything else.
     usage_refresh_sent: bool,
@@ -720,7 +699,7 @@ impl SettingsPage {
             section,
             archived_held: false,
             capabilities,
-            advanced_expanded: [None; 2],
+            advanced_expanded: None,
             usage_refresh_sent: false,
             home_url_input: SettingsInput::new(home_url_input.clone()),
             auto_settle_input: SettingsInput::new(auto_settle_input.clone()),
@@ -971,7 +950,7 @@ impl SettingsPage {
         // Arriving from a deep link or the palette must not leave the selected
         // section hidden inside a folded subgroup.
         if section.advanced() {
-            self.advanced_expanded[section.group().index()] = Some(true);
+            self.advanced_expanded = Some(true);
         }
         // Which section is open is this page's business; *that* a detail is
         // open is navigation, and belongs to the window's one history.
@@ -1039,23 +1018,23 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    fn advanced_expanded(&self, group: SectionGroup) -> bool {
-        self.advanced_expanded[group.index()].unwrap_or(!self.capabilities.folds_advanced())
+    fn advanced_expanded(&self) -> bool {
+        self.advanced_expanded
+            .unwrap_or(!self.capabilities.folds_advanced())
     }
 
-    /// A group's **Advanced** subgroup disclosure, shared by the rail and the
+    /// The **Advanced** subgroup's disclosure, shared by the rail and the
     /// compact section list: the same caption style as a group's, plus the
     /// chevron that opens it.
-    fn advanced_toggle(&self, group: SectionGroup, cx: &mut Context<Self>) -> AnyElement {
-        let expanded = self.advanced_expanded(group);
-        let selector = group.advanced_toggle_id();
+    fn advanced_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let expanded = self.advanced_expanded();
         let spacing = &cx.theme().tokens.spacing;
         div()
             .pl(px(crate::material::CARD_INSET))
             .pt(spacing.sm)
             .pb(spacing.sm)
             .child(
-                Button::new(selector)
+                Button::new("settings-advanced-toggle")
                     .text()
                     .xsmall()
                     .text_caption(cx)
@@ -1066,10 +1045,9 @@ impl SettingsPage {
                     })
                     .label(crate::tr!("settings.advanced"))
                     .aria_expanded(expanded)
-                    .debug_selector(move || selector.into())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.advanced_expanded[group.index()] =
-                            Some(!this.advanced_expanded(group));
+                    .debug_selector(|| "settings-advanced-toggle".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.advanced_expanded = Some(!this.advanced_expanded());
                         cx.notify();
                     })),
             )
@@ -1148,23 +1126,19 @@ impl SettingsPage {
                 .items(plain),
             );
             if sections.iter().any(|section| section.advanced()) {
-                tabs = tabs.child(self.advanced_toggle(group, cx));
-                if self.advanced_expanded(group) {
+                tabs = tabs.child(self.advanced_toggle(cx));
+                if self.advanced_expanded() {
                     tabs = tabs.child(
-                        TabBar::new(if group == SectionGroup::Device {
-                            "settings-device-advanced-tabs"
-                        } else {
-                            "settings-advanced-tabs"
-                        })
-                        .rail()
-                        .aria_label(crate::tr!("settings.advanced"))
-                        .items(
-                            sections
-                                .into_iter()
-                                .filter(|section| section.advanced())
-                                .map(|section| self.nav_item(section, cx))
-                                .collect::<Vec<_>>(),
-                        ),
+                        TabBar::new("settings-advanced-tabs")
+                            .rail()
+                            .aria_label(crate::tr!("settings.advanced"))
+                            .items(
+                                sections
+                                    .into_iter()
+                                    .filter(|section| section.advanced())
+                                    .map(|section| self.nav_item(section, cx))
+                                    .collect::<Vec<_>>(),
+                            ),
                     );
                 }
             }
@@ -1202,6 +1176,7 @@ impl SettingsPage {
     /// The page draws no header and no back row: in compact every page wears
     /// the shell's one nav bar (`crate::shell`).
     pub(crate) fn render_compact_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        let advanced_expanded = self.advanced_expanded();
         let mut column = v_flex()
             .w_full()
             .p(px(crate::material::COMPACT_PAGE_INSET))
@@ -1231,8 +1206,8 @@ impl SettingsPage {
             }
             if !advanced.is_empty() {
                 card = card
-                    .child(self.advanced_toggle(group, cx))
-                    .when(self.advanced_expanded(group), |card| {
+                    .child(self.advanced_toggle(cx))
+                    .when(advanced_expanded, |card| {
                         card.child(crate::material::grouped(advanced, cx))
                     });
             }
@@ -3115,7 +3090,7 @@ mod tests {
             probe.update(cx, |probe, cx| {
                 probe.page.update(cx, |page, cx| {
                     page.capabilities = capabilities;
-                    page.advanced_expanded = [None; 2];
+                    page.advanced_expanded = None;
                     assert_eq!(
                         page.capabilities.can_manage_local_permissions(),
                         local_permissions

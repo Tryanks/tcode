@@ -1270,39 +1270,39 @@ mod section {
                     ),
                 );
             }
-            let add = projects
-                .filter(|projects| !projects.is_empty())
-                .map(|projects| {
-                    let options: Vec<(String, String, bool)> = projects
-                        .iter()
-                        .map(|project| {
-                            (
-                                project.id.clone(),
-                                project.name.clone(),
-                                space.project_ids.contains(&project.id),
-                            )
-                        })
-                        .collect();
-                    let space_id = space.id.clone();
-                    Button::new(SharedString::from(format!("space-add-project-{space_id}")))
-                        .ghost()
-                        .outline()
-                        .compact()
-                        .icon(IconName::Plus)
-                        .label(crate::tr!("spaces.projects.add"))
-                        .dropdown_menu(move |mut menu, _, _| {
-                            for (project_id, name, shared) in &options {
-                                menu = menu.menu_with_check(
-                                    name.clone(),
-                                    *shared,
-                                    Box::new(ToggleShare {
-                                        space_id: space_id.clone(),
-                                        project_id: project_id.clone(),
-                                    }),
-                                );
-                            }
-                            menu
-                        })
+            // Without projects to offer the button stays, disabled, so the
+            // empty text's "add one here" names a control that is there.
+            let options: Vec<(String, String, bool)> = projects
+                .unwrap_or_default()
+                .iter()
+                .map(|project| {
+                    (
+                        project.id.clone(),
+                        project.name.clone(),
+                        space.project_ids.contains(&project.id),
+                    )
+                })
+                .collect();
+            let space_id = space.id.clone();
+            let add = Button::new(SharedString::from(format!("space-add-project-{space_id}")))
+                .ghost()
+                .outline()
+                .compact()
+                .icon(IconName::Plus)
+                .label(crate::tr!("spaces.projects.add"))
+                .disabled(options.is_empty())
+                .dropdown_menu(move |mut menu, _, _| {
+                    for (project_id, name, shared) in &options {
+                        menu = menu.menu_with_check(
+                            name.clone(),
+                            *shared,
+                            Box::new(ToggleShare {
+                                space_id: space_id.clone(),
+                                project_id: project_id.clone(),
+                            }),
+                        );
+                    }
+                    menu
                 });
             crate::material::section(
                 Some(crate::tr!("spaces.projects.title").into_owned().into()),
@@ -1318,7 +1318,7 @@ mod section {
             .when(!space.project_ids.is_empty(), |section| {
                 section.child(chips)
             })
-            .children(add.map(|add| h_flex().child(add)))
+            .child(h_flex().child(add))
             .into_any_element()
         }
 
