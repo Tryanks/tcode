@@ -2770,6 +2770,7 @@ impl ChatView {
         } else {
             match &title {
                 Some(title) => crate::material::bar_title(title.clone(), cx)
+                    .debug_selector(|| "chat-title".into())
                     // Keep a few words of the title even when the diff panel and
                     // the git/Open buttons squeeze the header; without a floor it
                     // collapses to a lone "I…".
@@ -2859,7 +2860,9 @@ impl ChatView {
                     .gap_2()
                     .items_center()
                     .child(
-                        window_caption::drag_region(title_el.flex_grow(0.))
+                        // Sized by its text, not `bar_title`'s zero basis, so the title
+                        // runs its full length and the badge follows it.
+                        window_caption::drag_region(title_el.flex_initial())
                             .context_menu(title_menu),
                     )
                     .when_some(
