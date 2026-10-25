@@ -14,7 +14,12 @@ impl AppState {
                 self.clear_approval(session_id, request_id);
             }
             AgentEvent::TurnCompleted { .. } => {
-                self.clear_approvals(session_id);
+                if let Some(requests) = self.approvals.get_mut(session_id) {
+                    requests.retain(|request| request.parent_item_id.is_some());
+                    if requests.is_empty() {
+                        self.approvals.remove(session_id);
+                    }
+                }
             }
             _ => {}
         }
@@ -80,6 +85,7 @@ mod tests {
     fn request(id: &str) -> agent::ApprovalRequest {
         agent::ApprovalRequest {
             id: id.into(),
+            parent_item_id: None,
             turn_id: None,
             kind: agent::ApprovalKind::ExecCommand {
                 command: "cargo test".into(),

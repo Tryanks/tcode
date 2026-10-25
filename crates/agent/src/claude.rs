@@ -2910,9 +2910,15 @@ impl Mapper {
         }
         self.pending_approvals
             .insert(request_id.clone(), PendingApproval { input, suggestions });
+        let parent_item_id = request
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .and_then(|agent_id| self.task_tools.get(agent_id))
+            .cloned();
         vec![AgentEvent::ApprovalRequested(ApprovalRequest {
             id: request_id,
             turn_id: self.current_turn_id.clone(),
+            parent_item_id,
             kind,
             options,
         })]
@@ -5194,6 +5200,16 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"launched"}"#,
         );
         turn_completed_after_count(&launched, 1);
+
+        // Between turns, the background subagent asks for permission.
+        let asked = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"ctrl-bg","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cp a b"},"tool_use_id":"toolu_cp","agent_id":"ae5779035aeb8a94d"}}"#,
+        );
+        let [AgentEvent::ApprovalRequested(request)] = asked.as_slice() else {
+            panic!("expected one approval request, got {asked:?}");
+        };
+        assert_eq!(request.parent_item_id.as_deref(), Some("toolu_agent"));
 
         let notification = feed(
             &mut m,

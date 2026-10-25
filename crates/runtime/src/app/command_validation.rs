@@ -691,6 +691,7 @@ mod tests {
             &id,
             &AgentEvent::ApprovalRequested(agent::ApprovalRequest {
                 id: "approval".into(),
+                parent_item_id: None,
                 turn_id: None,
                 options: Vec::new(),
                 kind: agent::ApprovalKind::ExecCommand {

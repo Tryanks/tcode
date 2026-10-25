@@ -2416,6 +2416,7 @@ fn approval_request(
     };
     ApprovalRequest {
         id,
+        parent_item_id: None,
         turn_id,
         kind: approval_kind,
         options: options

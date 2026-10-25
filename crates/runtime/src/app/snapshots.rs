@@ -967,7 +967,8 @@ impl AppState {
         &'a [agent::ApprovalRequest],
         Option<&'a tcode_core::session::PendingUserInput>,
     ) {
-        if !session.turn_in_flight {
+        // Not the turn: a background subagent asks between its parent's turns.
+        if !matches!(session.runtime, Runtime::Live(_)) {
             return (&[], None);
         }
         (
