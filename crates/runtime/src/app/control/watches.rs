@@ -145,15 +145,18 @@ impl AppState {
             ..WatchAnswer::from(&watch)
         });
         let detail = watch.id.clone();
+        let watched = watch.thread_ids.clone();
         meta.control_watches.push(watch);
         self.store_meta(meta, cx);
-        self.audit(
-            caller,
-            &caller.thread_id,
-            action::NOTIFY_WHEN,
-            Some(detail),
-            cx,
-        );
+        for target in &watched {
+            self.audit(
+                caller,
+                target,
+                action::NOTIFY_WHEN,
+                Some(detail.clone()),
+                cx,
+            );
+        }
         Ok(answer)
     }
 

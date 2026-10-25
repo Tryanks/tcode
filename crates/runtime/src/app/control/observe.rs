@@ -1148,7 +1148,13 @@ impl AppState {
                         mcp_servers: caps.mcp_servers,
                         native_computer_use: caps.native_computer_use,
                     },
-                    version: status.provider_versions.get(&kind).cloned(),
+                    version: status.provider_versions.get(&kind).map(|version| {
+                        tcode_protocol::ProviderVersionStatus {
+                            // The full command carries the host's PATH and HOME.
+                            update_command: None,
+                            ..version.clone()
+                        }
+                    }),
                     models: status
                         .model_catalogs
                         .get(&kind)
