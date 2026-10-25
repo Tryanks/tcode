@@ -5849,6 +5849,62 @@ mod tests {
         shell.read_with(cx, |shell, _| shell.store().expect("attached"))
     }
 
+    /// A long title takes the header's free width; it is cut only once the
+    /// header runs out of room, whether or not a pull request is linked.
+    #[gpui::test]
+    fn a_long_title_uses_the_headers_free_width(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = crate::store::tests::scratch_root("long-title");
+        let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+        let project = tcode_core::project::Project::from_root(root.join("project"));
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            project.root.clone(),
+            None,
+        );
+        meta.id = "first".into();
+        meta.title = "Investigate why the composer drops its stop button mid-turn".into();
+        meta.project_id = Some(project.id.clone());
+        let host =
+            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
+                .unwrap();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = vec![project];
+            state.sessions = vec![meta].into();
+        }))
+        .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let (shell, _transport, cx) = mount(cx);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| {
+            *store = WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            );
+            store.select_session("first".into());
+        });
+        driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+            })
+        });
+        resize(cx, 1600.);
+        shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+        draw(cx);
+        let title = cx.debug_bounds("chat-title").expect("thread title");
+        assert!(
+            title.size.width > px(300.),
+            "the title is cut to {:?} in a 1600px window",
+            title.size.width
+        );
+        driver.shutdown(cx, &store, &host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// The model picker raises the keyboard only where it cannot cover the
     /// list: a desktop window (even a narrow one) focuses the search as it
     /// opens; a phone leaves it unfocused, with the picker still owning focus

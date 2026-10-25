@@ -208,10 +208,14 @@ impl Composer {
 
         let trigger = Button::new("model-picker")
             .debug_selector(|| "model-picker".into())
+            // The model name truncates so the row's other chips and its
+            // actions keep room.
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
             .when(
                 self.compact || composer_state.conversation_read_only,
-                // The model name truncates so the row's other chips keep room.
-                |button| button.w_full().max_w(px(160.)).min_w_0().overflow_hidden(),
+                |button| button.max_w(px(160.)),
             )
             .ghost()
             .chip()
@@ -219,22 +223,17 @@ impl Composer {
             .disabled(!self.interactive(cx))
             .child(
                 h_flex()
+                    .min_w_0()
+                    .overflow_hidden()
                     .when(
                         self.compact || composer_state.conversation_read_only,
-                        |el| el.w_full().min_w_0().overflow_hidden(),
+                        |el| el.w_full(),
                     )
                     .gap_1p5()
                     .items_center()
                     .text_body(self.compact, cx)
                     .child(tinted_provider_glyph(provider, store))
-                    .child(
-                        div()
-                            .when(
-                                self.compact || composer_state.conversation_read_only,
-                                |el| el.min_w_0().truncate(),
-                            )
-                            .child(display),
-                    )
+                    .child(div().min_w_0().truncate().child(display))
                     .child(
                         Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
                     ),

@@ -486,6 +486,38 @@ fn change_watch<T: 'static>(
     })
     .detach();
 }
+/// Pauses or resumes every watch of the active thread.
+fn set_watches_paused(
+    store: &Entity<WorkspaceStore>,
+    paused: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(session_id) = store.read(cx).active_session_id() else {
+        return;
+    };
+    let task = store.update(cx, |store, cx| {
+        store.command(
+            Command::SetPullRequestWatchesPaused { session_id, paused },
+            cx,
+        )
+    });
+    window
+        .spawn(cx, async move |cx| {
+            if let Err(error) = task.await {
+                _ = cx.update(|window, cx| {
+                    window.push_notification(
+                        Notification::warning(
+                            crate::tr!("pull_requests.monitoring_failed", reason = error.message)
+                                .into_owned(),
+                        ),
+                        cx,
+                    )
+                });
+            }
+        })
+        .detach();
+}
 fn change_link<T: 'static>(
     store: &Entity<WorkspaceStore>,
     action: &ChangeLink,
@@ -1519,6 +1551,10 @@ impl Render for PullRequestsPanel {
             .is_some_and(|meta| {
                 !meta.is_settled() && meta.archived_at.is_none() && meta.parent_session_id.is_none()
             });
+        let watches_paused = session
+            .as_deref()
+            .and_then(|id| store.thread_meta(id))
+            .is_some_and(|meta| meta.pull_request_watches_paused);
         let agent_tools = store
             .session_status()
             .and_then(|status| status.injected_tools.clone());
@@ -1642,6 +1678,28 @@ impl Render for PullRequestsPanel {
         }
         let agent_tools = agent_tools.map(|tools| self.agent_tools(&tools, cx));
         let count = links.iter().filter(|link| link.visible()).count();
+        // Monitoring pauses and resumes for the whole thread, beside the watches it governs.
+        let monitoring = (!read_only
+            && watchable
+            && tcode_core::pull_request::watched(&links).next().is_some())
+        .then(|| {
+            let paused = watches_paused;
+            let store = self.store.clone();
+            Button::new("pr-monitoring")
+                .debug_selector(|| "pr-monitoring".into())
+                .ghost()
+                .icon(if paused {
+                    IconName::Play
+                } else {
+                    IconName::Pause
+                })
+                .label(crate::tr!(if paused {
+                    "pull_requests.resume_monitoring"
+                } else {
+                    "pull_requests.pause_monitoring"
+                }))
+                .on_click(move |_, window, cx| set_watches_paused(&store, !paused, window, cx))
+        });
         let link_button = |id: &'static str| {
             let store = self.store.clone();
             let session = session.clone();
@@ -1718,6 +1776,7 @@ impl Render for PullRequestsPanel {
                 .child(rows)
                 .child(summary)
                 .children(agent_tools)
+                .children(monitoring.map(|button| button.outline().w_full()))
                 .when(!read_only, |sheet| {
                     sheet.child(link_button("link-pr").w_full())
                 })
@@ -1745,6 +1804,7 @@ impl Render for PullRequestsPanel {
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(summary)
+                    .children(monitoring.map(|button| button.xsmall()))
                     .when(!read_only, |footer| {
                         footer.child(
                             link_button("link-pr")

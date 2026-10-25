@@ -263,6 +263,7 @@ impl AppState {
                 | Command::ForkThread { .. }
                 | Command::MoveSession { .. }
                 | Command::WatchPullRequest { .. }
+                | Command::SetPullRequestWatchesPaused { .. }
                 | Command::RunPullRequestAction { .. }
                 | Command::EditPullRequestReviewDraft { .. }
                 | Command::SetControlGrant { .. }
@@ -284,16 +285,6 @@ impl AppState {
                     "This thread is no longer available on the host.",
                 ))
             };
-        }
-        if matches!(command, Command::Interrupt { .. })
-            && self.find_meta(session_id).is_some_and(|meta| {
-                !meta.pull_request_watches_paused
-                    && tcode_core::pull_request::watched(&meta.pull_requests)
-                        .next()
-                        .is_some()
-            })
-        {
-            return Ok(());
         }
         let active = self.resident(session_id).ok_or_else(|| {
             error(
@@ -412,6 +403,7 @@ impl AppState {
         }
         if matches!(command, Command::Interrupt { .. })
             && !active.turn_in_flight
+            && active.delivery_in_flight.is_none()
             && !active.timeline.turn_running
             && active.background_task_count == 0
         {
