@@ -245,7 +245,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Move a thread, this one included, into another project in your grant's scope, continuing its conversation in that project's root or in cwd inside it. The thread's provider session restarts in the new directory and its first turn there receives a handoff of the conversation so far, shown to the user; the Tcode transcript stays as it is. Threads with a dedicated worktree cannot be moved; a busy thread other than this one is refused as busy; this thread moves at once, and its provider restarts in the new directory when your current turn ends. Typical flow for starting something new: clone or mkdir it with your shell, create_project on that directory, then move_thread on your own thread id."
+        description = "Move a thread into another project in your grant's scope, continuing its conversation in that project's root or in cwd inside it. The thread's provider session restarts in the new directory and its first turn there receives a handoff of the conversation so far, shown to the user; the Tcode transcript stays as it is. This thread may also move itself into a project outside that scope while the project has no threads yet, such as one you just created. Threads with a dedicated worktree cannot be moved; a busy thread other than this one is refused as busy; this thread moves at once, and its provider restarts in the new directory when your current turn ends. Typical flow for starting something new: clone or mkdir it with your shell, create_project on that directory, then move_thread on your own thread id."
     )]
     async fn move_thread(&self, Parameters(p): Parameters<MoveThreadParams>) -> CallToolResult {
         self.run(ControlOp::MoveThread(p)).await

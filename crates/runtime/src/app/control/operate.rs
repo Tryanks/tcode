@@ -990,8 +990,45 @@ impl AppState {
         })
     }
 
-    /// Move a thread into a project the grant reaches; a thread may move itself, keeping the
-    /// turn that asked ([`AppState::move_session_by`]).
+    /// Whether `caller` may move `thread_id` into `project`: into a project its grant reaches,
+    /// or, for the caller itself, into a project that has no threads yet, whose history the
+    /// move therefore opens to no one.
+    fn move_target_refusal(
+        &self,
+        caller: &Caller,
+        thread_id: &str,
+        project: &Project,
+    ) -> Option<String> {
+        if caller
+            .grant
+            .scope
+            .reaches(caller.project_id.as_deref(), Some(project.id.as_str()))
+        {
+            return None;
+        }
+        let empty = !self
+            .sessions
+            .iter()
+            .chain(self.residents.live.values().map(|session| &session.meta))
+            .chain(self.residents.parked.values().map(|session| &session.meta))
+            .any(|meta| meta.project_id.as_deref() == Some(project.id.as_str()));
+        if thread_id == caller.thread_id && empty {
+            return None;
+        }
+        Some(format!(
+            "refused: project {} is outside your grant's scope ({}){}",
+            project.id,
+            caller.grant.scope.describe(),
+            if thread_id == caller.thread_id {
+                " and already has threads"
+            } else {
+                ""
+            }
+        ))
+    }
+
+    /// Move a thread into a project [`Self::move_target_refusal`] allows; a thread may move
+    /// itself, keeping the turn that asked ([`AppState::move_session_by`]).
     pub(super) fn op_move_thread(
         &mut self,
         caller: &Caller,
@@ -1011,16 +1048,8 @@ impl AppState {
             .find(|project| project.id == params.project_id)
             .cloned()
             .ok_or_else(|| format!("unknown project: {}", params.project_id))?;
-        if !caller
-            .grant
-            .scope
-            .reaches(caller.project_id.as_deref(), Some(project.id.as_str()))
-        {
-            return Err(format!(
-                "refused: project {} is outside your grant's scope ({})",
-                project.id,
-                caller.grant.scope.describe()
-            ));
+        if let Some(refusal) = self.move_target_refusal(caller, &params.thread_id, &project) {
+            return Err(refusal);
         }
         let cwd = params
             .cwd

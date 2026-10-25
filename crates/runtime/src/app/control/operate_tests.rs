@@ -724,44 +724,70 @@ fn git_answers_with_the_outcome_and_refuses_unsafe_checkouts() {
     );
 }
 
-/// A thread moves itself with `move_thread` only into a project its grant reaches. The move
-/// is audited in the thread with the project it went to, and the turn that asked keeps its
-/// provider until it ends, when the provider leaves the old directory.
+/// On the default project-scope grant a quick chat moves itself into a project it just
+/// created, which has no threads yet, but not into a project with threads outside its scope;
+/// a wider grant reaches that one. Each move is audited in the thread with the project it
+/// went to, and the turn that asked keeps its provider until it ends, when the provider
+/// leaves the old directory.
 #[test]
 fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
     let store = TestStore::new("tcode-control-move-thread");
     let quick = store.root().join("quick");
     let demo = store.root().join("demo");
-    std::fs::create_dir_all(&quick).unwrap();
-    std::fs::create_dir_all(&demo).unwrap();
+    let taken = store.root().join("taken");
+    for dir in [&quick, &demo, &taken] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
     let cx = &mut TestAppContext::default();
     let state = host(&store, cx);
     let (commands, _provider) = smol::channel::unbounded();
-    let demo_id = state.update(cx, |state, cx| {
+    let (demo_id, taken_id) = state.update(cx, |state, cx| {
         let quick_id = state.create_project(quick.clone(), cx).unwrap();
         let demo_id = state.create_project(demo.clone(), cx).unwrap();
+        let taken_id = state.create_project(taken.clone(), cx).unwrap();
+        let mut owner = thread("owner", &taken_id, ProviderKind::Codex);
+        owner.cwd = taken.clone();
+        state.persist_meta(&owner, cx);
         let mut caller = thread("caller", &quick_id, ProviderKind::ClaudeCode);
         caller.cwd = quick.clone();
         let mut session = ActiveSession::new(caller, false, Vec::new());
         session.runtime = Runtime::Live(commands);
         session.turn_in_flight = true;
         park(state, session);
-        demo_id
+        (demo_id, taken_id)
     });
-    let move_self = || {
+    let move_self = |project_id: &str, request_id: &str| {
         ControlOp::MoveThread(MoveThreadParams {
             thread_id: "caller".into(),
-            project_id: demo_id.clone(),
+            project_id: project_id.into(),
             cwd: None,
-            request_id: Some("move-1".into()),
+            request_id: Some(request_id.into()),
+        })
+    };
+    let audits = |state: &TestEntity| {
+        state.read(|state| {
+            state
+                .resident("caller")
+                .unwrap()
+                .timeline
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.content {
+                    EntryContent::ControlAction(action) => {
+                        Some((action.action.clone(), action.detail.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
         })
     };
 
     state.update(cx, |state, cx| {
         assert_eq!(
-            call(state, cx, "caller", move_self()),
+            call(state, cx, "caller", move_self(&taken_id, "move-1")),
             Err(format!(
-                "refused: project {demo_id} is outside your grant's scope (project)"
+                "refused: project {taken_id} is outside your grant's scope (project) and \
+                 already has threads"
             ))
         );
         assert_eq!(
@@ -769,14 +795,7 @@ fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
             quick,
             "a refused move changes nothing"
         );
-        let mut caller = state.find_meta("caller").unwrap();
-        caller.control_grant = Some(ControlGrant {
-            scope: ControlScope::Host,
-            tiers: [ControlTier::Operate].into_iter().collect(),
-            ..ControlGrant::none()
-        });
-        state.store_meta(caller, cx);
-        let moved = call(state, cx, "caller", move_self()).unwrap();
+        let moved = call(state, cx, "caller", move_self(&demo_id, "move-2")).unwrap();
         assert_eq!(moved["project_id"], demo_id.as_str());
         assert_eq!(moved["cwd"], demo.display().to_string());
     });
@@ -789,25 +808,14 @@ fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
             matches!(session.runtime, Runtime::Live(_)),
             "the turn that asked keeps its provider"
         );
-        let audits: Vec<_> = session
-            .timeline
-            .entries
-            .iter()
-            .filter_map(|entry| match &entry.content {
-                EntryContent::ControlAction(action) => {
-                    Some((action.action.clone(), action.detail.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            audits,
-            [(
-                tcode_core::control::action::MOVE.to_owned(),
-                Some(format!("demo ({})", demo.display()))
-            )]
-        );
     });
+    assert_eq!(
+        audits(&state),
+        [(
+            tcode_core::control::action::MOVE.to_owned(),
+            Some(format!("demo ({})", demo.display()))
+        )]
+    );
     state.update(cx, |state, cx| {
         state.on_event(
             "caller",
@@ -823,4 +831,21 @@ fn move_thread_moves_the_caller_within_its_grant_and_keeps_its_turn() {
             Runtime::Idle
         ));
     });
+
+    state.update(cx, |state, cx| {
+        let mut caller = state.find_meta("caller").unwrap();
+        caller.control_grant = Some(ControlGrant {
+            scope: ControlScope::Host,
+            tiers: [ControlTier::Operate].into_iter().collect(),
+            ..ControlGrant::none()
+        });
+        state.store_meta(caller, cx);
+        call(state, cx, "caller", move_self(&taken_id, "move-3")).unwrap();
+        assert_eq!(
+            state.find_meta("caller").unwrap().project_id.as_deref(),
+            Some(taken_id.as_str())
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(audits(&state).len(), 2);
 }
