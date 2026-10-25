@@ -33,6 +33,7 @@ pub mod markdown;
 #[cfg(target_os = "macos")]
 mod macos_backdrop;
 pub mod material;
+mod move_thread_dialog;
 mod orchestrate_settings;
 pub mod overlay;
 /// The shared pairing form: origin validation, stale-result

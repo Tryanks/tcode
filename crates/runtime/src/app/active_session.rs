@@ -160,6 +160,9 @@ pub struct ActiveSession {
     /// user picks a different model we compare against this to decide whether a
     /// restart is needed before the next turn.
     pub(super) live_model: Option<String>,
+    /// The directory the live provider process was started in; a move to another
+    /// directory restarts it before the next turn.
+    pub(super) live_cwd: PathBuf,
     pub(super) live_option_selections: Vec<OptionSelection>,
     pub(super) confirmed_option_selections: Vec<OptionSelection>,
     /// A transient "the next queued send carries an injected context prefix of
@@ -246,6 +249,7 @@ impl ActiveSession {
         draft: bool,
         provider_commands: Vec<ProviderCommand>,
     ) -> Self {
+        let live_cwd = meta.cwd.clone();
         Self {
             meta,
             timeline: Timeline::default(),
@@ -256,6 +260,7 @@ impl ActiveSession {
             pending_relay: None,
             runtime: Runtime::Idle,
             live_model: None,
+            live_cwd,
             live_option_selections: Vec::new(),
             confirmed_option_selections: Vec::new(),
             pending_context_len: None,
@@ -370,14 +375,51 @@ impl ActiveSession {
     }
 
     pub(super) fn launch_settings_changed_while_live(&self) -> bool {
-        self.model_changed_while_live() || self.options_changed_while_live()
+        self.model_changed_while_live()
+            || self.options_changed_while_live()
+            || self.cwd_changed_while_live()
+    }
+
+    /// Whether the live provider runs in another directory than `meta.cwd`: the thread
+    /// moved while it was live.
+    pub(super) fn cwd_changed_while_live(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_)) && self.live_cwd != self.meta.cwd
     }
 
     /// A settings restart must not kill Claude-owned background work or race a
-    /// turn whose provider delivery acknowledgement has not landed yet.
+    /// turn whose provider delivery acknowledgement has not landed yet. A thread that
+    /// moved itself also keeps the turn that made the call.
     pub(super) fn settings_restart_deferred(&self) -> bool {
         self.launch_settings_changed_while_live()
-            && (self.background_task_count > 0 || self.delivery_in_flight.is_some())
+            && (self.background_task_count > 0
+                || self.delivery_in_flight.is_some()
+                || (self.turn_in_flight && self.cwd_changed_while_live()))
+    }
+
+    /// The queued message the next dispatch would send, if one could go now.
+    fn next_dispatchable(&self) -> Option<&QueuedMessage> {
+        if self.turn_in_flight
+            || self.delivery_in_flight.is_some()
+            || self.settings_restart_deferred()
+            || !matches!(self.runtime, Runtime::Live(_))
+        {
+            return None;
+        }
+        let now = SystemTime::now();
+        self.queue
+            .iter()
+            .find(|message| message.not_before.is_none_or(|time| time <= now))
+    }
+
+    /// The id and text of the message that opens the fresh provider session of a moved
+    /// thread, which carries the handoff; `None` until that session is live and a message
+    /// can go.
+    pub(super) fn moved_handoff_message(&self) -> Option<(u64, String)> {
+        if self.meta.moved_from.is_none() || self.cwd_changed_while_live() {
+            return None;
+        }
+        self.next_dispatchable()
+            .map(|message| (message.id, message.text.clone()))
     }
 
     pub(super) fn turn_options(&self) -> TurnOptions {
@@ -615,22 +657,10 @@ impl ActiveSession {
     /// finish. (Steering — the other way to send mid-turn — never goes through
     /// here; see [`AppState::steer`].)
     pub(super) fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
-        if self.turn_in_flight
-            || self.delivery_in_flight.is_some()
-            || self.settings_restart_deferred()
-        {
-            return Ok(false);
-        }
-        let Runtime::Live(commands) = &self.runtime else {
+        let Some(send) = self.next_dispatchable().cloned() else {
             return Ok(false);
         };
-        let now = SystemTime::now();
-        let Some(send) = self
-            .queue
-            .iter()
-            .find(|message| message.not_before.is_none_or(|time| time <= now))
-            .cloned()
-        else {
+        let Runtime::Live(commands) = &self.runtime else {
             return Ok(false);
         };
         let text = send.wire_text(&self.provider_commands);

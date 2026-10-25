@@ -422,6 +422,17 @@ pub enum Command {
     ForkThread {
         id: String,
     },
+    /// Move a thread into another project, continuing in `cwd` (the project root when
+    /// absent; a relative path is taken from the root, and the directory must lie inside
+    /// it). The next turn starts a fresh provider session there and hands it the
+    /// conversation so far. Refused for archived threads, drafts, native subagent mirrors,
+    /// threads with a dedicated worktree and busy threads.
+    MoveSession {
+        session_id: String,
+        project_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<PathBuf>,
+    },
     DeleteSession {
         session_id: String,
         remove_worktree: bool,
@@ -630,6 +641,7 @@ impl Command {
             | Self::ReorderActive { session_id, .. }
             | Self::SetAutoSettle { session_id, .. }
             | Self::ArchiveSession { session_id, .. }
+            | Self::MoveSession { session_id, .. }
             | Self::UnarchiveSession { session_id, .. }
             | Self::RenameSession { session_id, .. }
             | Self::RegenerateSessionTitle { session_id }

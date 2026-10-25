@@ -508,6 +508,8 @@ pub enum EntryContent {
         to_provider: agent::ProviderKind,
         to_model: Option<String>,
         prompt: Option<String>,
+        /// The directory the thread moved from, when the handoff follows a move.
+        moved_from: Option<std::path::PathBuf>,
     },
     /// The provider changed the model actually serving this session.
     ModelChanged {
@@ -770,6 +772,7 @@ impl Timeline {
                 to_provider,
                 to_model,
                 prompt,
+                moved_from,
             } => {
                 let turn = self.begin_user_turn();
                 let id = self.synthetic_id("relay", ts);
@@ -781,6 +784,7 @@ impl Timeline {
                         to_provider: *to_provider,
                         to_model: to_model.clone(),
                         prompt: prompt.clone(),
+                        moved_from: moved_from.clone(),
                     },
                     ts,
                     turn,
@@ -1665,6 +1669,7 @@ mod tests {
                 to_provider: agent::ProviderKind::Codex,
                 to_model: Some("gpt-5".into()),
                 prompt: None,
+                moved_from: None,
             },
             user_msg("u2", "after"),
         ]);

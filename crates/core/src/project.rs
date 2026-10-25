@@ -152,6 +152,10 @@ pub struct SessionMeta {
     /// resume it in place.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending_fork: bool,
+    /// The directory a move to another project took this thread from, until the next turn
+    /// hands the conversation to a fresh provider session in `cwd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_from: Option<PathBuf>,
     /// Set when this thread was imported from another tool's local history
     /// ("claude:<id>" / "codex:<id>"). Used to keep re-imports idempotent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,6 +382,7 @@ impl SessionMeta {
             worktree: None,
             resume_cursor: None,
             pending_fork: false,
+            moved_from: None,
             imported_from: None,
             option_selections: Vec::new(),
             acp_agent_id: None,

@@ -898,6 +898,16 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::ForkThread { id } => {
             response = CommandResponse::SessionId(app.fork_thread(&id, cx));
         }
+        Command::MoveSession {
+            session_id,
+            project_id,
+            cwd,
+        } => {
+            return CommandOutcome::Immediate(
+                app.move_session(&session_id, &project_id, cwd, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::MergeWorktree { session_id } => {
             app.merge_worktree(&session_id, cx);
         }

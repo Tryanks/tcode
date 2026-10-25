@@ -39,6 +39,7 @@ pub enum ControlOp {
     PullRequest(PullRequestParams),
     Git(GitParams),
     CreateProject(CreateProjectParams),
+    MoveThread(MoveThreadParams),
     NotifyWhen(NotifyWhenParams),
     CancelNotify(CancelNotifyParams),
     Reference(ReferenceParams),
@@ -70,7 +71,7 @@ impl ToolRequirement {
 }
 
 /// Tool name → requirement.
-pub const TOOLS: [(&str, ToolRequirement); 32] = [
+pub const TOOLS: [(&str, ToolRequirement); 33] = [
     ("list_projects", ToolRequirement::Tier(ControlTier::Observe)),
     ("list_threads", ToolRequirement::Tier(ControlTier::Observe)),
     ("get_thread", ToolRequirement::Tier(ControlTier::Observe)),
@@ -120,6 +121,7 @@ pub const TOOLS: [(&str, ToolRequirement); 32] = [
         "create_project",
         ToolRequirement::Tier(ControlTier::Operate),
     ),
+    ("move_thread", ToolRequirement::Tier(ControlTier::Operate)),
     ("notify_when", ToolRequirement::Tier(ControlTier::Operate)),
     ("cancel_notify", ToolRequirement::Tier(ControlTier::Operate)),
     (
@@ -178,6 +180,7 @@ impl ControlOp {
             Self::PullRequest(_) => "pull_request",
             Self::Git(_) => "git",
             Self::CreateProject(_) => "create_project",
+            Self::MoveThread(_) => "move_thread",
             Self::NotifyWhen(_) => "notify_when",
             Self::CancelNotify(_) => "cancel_notify",
             Self::Reference(_) => "reference",
@@ -258,6 +261,7 @@ impl ControlOp {
             Self::ControlThread(p) => p.changes.iter().map(|c| c.thread_id.as_str()).collect(),
             Self::PullRequest(p) => vec![p.thread_id.as_str()],
             Self::Git(p) => vec![p.thread_id.as_str()],
+            Self::MoveThread(p) => vec![p.thread_id.as_str()],
             Self::NotifyWhen(p) => p.thread_ids.iter().map(String::as_str).collect(),
             Self::Reference(p) => vec![p.thread_id.as_str()],
             Self::RespondInput(p) => vec![p.thread_id.as_str()],

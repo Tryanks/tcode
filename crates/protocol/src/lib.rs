@@ -219,7 +219,10 @@ pub use wire::{
 // every offered server's tools with the servers that offer them
 // (InjectedServer), and SessionStatus gains control; RuntimeNotice gains
 // review_recorded and reference_boundary_crossed; AddThreadReference answers
-// ThreadReferenceAdded.
+// ThreadReferenceAdded. Thread moves: the protocol adds the MoveSession
+// command, SessionMeta carries moved_from, and the provider_relay event and
+// timeline entry carry moved_from, the directory a moved thread's handoff
+// left.
 pub const PROTOCOL_VERSION: u32 = 19;
 
 #[cfg(test)]

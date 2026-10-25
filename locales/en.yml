@@ -7,6 +7,7 @@ chat:
   discard_delivery: "Discard"
   history_record_too_large: A history record exceeds the 8 MiB response limit.
   relayed: "Relayed from %{from} to %{to}"
+  moved: "Moved here from %{from}; %{to} continues in a new session"
   relay_handoff: "Handoff sent to %{to}"
   model_changed: "Model changed: %{from} → %{to}"
   model_changed_to: "Model changed to %{to}"
@@ -270,6 +271,12 @@ sidebar:
   ctx_regenerating_title: "Regenerating…"
   ctx_fork: "Fork"
   ctx_merge_worktree: "Merge back"
+  ctx_move_thread: "Move to project…"
+  move_thread_title: "Move to project"
+  move_thread_confirm: "The provider session restarts in the new project's directory and receives a handoff of the conversation so far. The thread's transcript stays as it is."
+  move_thread_action: "Move"
+  move_thread_empty: "There is no other project to move this thread into. Add one first."
+  move_thread_failed: "Could not move the thread: %{reason}"
   fork_title_suffix: "(fork)"
   fork_unsupported: "This provider does not support conversation forks."
   fork_empty: "This conversation is empty and cannot be forked."
@@ -2488,6 +2495,7 @@ control:
     git_publish_branch: "publish the branch"
     git_initialize: "initialize git"
     create_project: "create a project"
+    move: "move to another project"
     reference: "reference a thread"
   settings:
     enabled: "Let agents operate Tcode"

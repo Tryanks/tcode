@@ -588,12 +588,15 @@ impl AppState {
                 active.turn_in_flight = false;
                 restart = !active.queue.is_empty() && active.launch_settings_changed_while_live();
                 restart_deferred = restart && active.background_task_count > 0;
+                // A thread that moved during this turn leaves the old directory now,
+                // whether or not anything waits to go.
+                let moved = active.cwd_changed_while_live() && active.background_task_count == 0;
                 if restart_deferred {
                     log::info!(
                         "deferring settings restart for {} background task(s)",
                         active.background_task_count
                     );
-                } else if restart {
+                } else if restart || moved {
                     active.shutdown_to_idle();
                 }
                 true

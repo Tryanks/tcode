@@ -5243,6 +5243,276 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
     });
 }
 
+/// One provider process a test launched: the directory and resume cursor it started with,
+/// and its command and event channels.
+type Launch = (
+    PathBuf,
+    Option<agent::ResumeCursor>,
+    smol::channel::Receiver<SessionCommand>,
+    smol::channel::Sender<AgentEvent>,
+);
+
+/// A launcher that records every start and gives each its own channels.
+fn recording_launcher() -> (ProviderLauncher, Arc<std::sync::Mutex<Vec<Launch>>>) {
+    let launches = Arc::new(std::sync::Mutex::new(Vec::<Launch>::new()));
+    let recorded = launches.clone();
+    let launcher = ProviderLauncher(Arc::new(move |provider, options: SessionOptions| {
+        let (commands, command_rx) = smol::channel::unbounded();
+        let (event_tx, events) = smol::channel::unbounded();
+        recorded
+            .lock()
+            .unwrap()
+            .push((options.cwd, options.resume, command_rx, event_tx));
+        Box::pin(async move {
+            Ok(SessionHandle {
+                provider,
+                commands,
+                events,
+            })
+        })
+    }));
+    (launcher, launches)
+}
+
+/// A thread moved from a quick chat into a new project keeps its transcript, survives a
+/// restart of the host in its new place, and its next turn starts a fresh provider session
+/// in the new directory that is handed the conversation so far. A busy thread and a thread
+/// with its own worktree are refused with the reason.
+#[test]
+fn moved_thread_continues_in_the_new_project_with_a_handoff() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-move-session-test");
+    let quick = test_store.root().join("quick");
+    let demo = test_store.root().join("demo");
+    std::fs::create_dir_all(&quick).unwrap();
+    std::fs::create_dir_all(demo.join("app")).unwrap();
+    let quick_project = Project::from_root(quick.clone());
+    test_store.upsert_project(&quick_project).unwrap();
+    let (launcher, launches) = recording_launcher();
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(launcher.clone());
+        state
+    });
+    let command = |state: &TestEntity, cx: &mut TestAppContext, id, command| {
+        through_pipe(
+            state,
+            cx,
+            id,
+            tcode_protocol::ClientPayload::Command(command),
+        )
+        .into_iter()
+        .find_map(|message| match message {
+            HostMessage::Ack { id: acked, result } if acked == id => Some(result),
+            _ => None,
+        })
+        .unwrap()
+    };
+    let next_send = |cx: &mut TestAppContext, launch: usize| {
+        cx.run_until(|_| {
+            launches
+                .lock()
+                .unwrap()
+                .get(launch)
+                .is_some_and(|launch| !launch.2.is_empty())
+        });
+        let launches = launches.lock().unwrap();
+        let (_, _, commands, events) = &launches[launch];
+        match commands.try_recv() {
+            Ok(SessionCommand::SendTurn {
+                delivery_id, text, ..
+            }) => (delivery_id, text, events.clone()),
+            other => panic!("expected SendTurn, got {other:?}"),
+        }
+    };
+
+    let Ok(CommandResponse::SessionId(Some(session_id))) = command(
+        &state,
+        cx,
+        1,
+        Command::StartDraft {
+            project_id: quick_project.id.clone(),
+            cwd: quick.clone(),
+        },
+    ) else {
+        panic!("draft not started");
+    };
+    command(
+        &state,
+        cx,
+        2,
+        Command::SendTurn {
+            session_id: session_id.clone(),
+            text: "let's start the demo".into(),
+            attachment_paths: Vec::new(),
+        },
+    )
+    .unwrap();
+    let (delivery_id, _, events) = next_send(cx, 0);
+    for event in [
+        AgentEvent::SessionStarted {
+            provider_session_id: "native-1".into(),
+            resume: agent::ResumeCursor(serde_json::json!("native-1")),
+            model: None,
+        },
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+        },
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: "assistant-1".into(),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage {
+                text: "The demo will be a static site.".into(),
+            },
+        }),
+    ] {
+        events.try_send(event).unwrap();
+    }
+    cx.run_until(|state| {
+        state
+            .resident(&session_id)
+            .is_some_and(|session| session.turn_in_flight)
+    });
+
+    let Ok(CommandResponse::ProjectId(Some(demo_id))) =
+        command(&state, cx, 3, Command::CreateProject { root: demo.clone() })
+    else {
+        panic!("project not created");
+    };
+    let move_to_demo = || Command::MoveSession {
+        session_id: session_id.clone(),
+        project_id: demo_id.clone(),
+        cwd: Some(PathBuf::from("app")),
+    };
+    assert_eq!(
+        command(&state, cx, 4, move_to_demo()).unwrap_err().code,
+        "thread_busy"
+    );
+    events
+        .try_send(AgentEvent::TurnCompleted {
+            turn_id: "turn-1".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        })
+        .unwrap();
+    cx.run_until(|state| {
+        state
+            .resident(&session_id)
+            .is_some_and(|session| !session.turn_in_flight)
+    });
+
+    state.update(cx, |state, cx| {
+        let mut worktree = SessionMeta::new(ProviderKind::ClaudeCode, quick.clone(), None);
+        worktree.id = "worktree-thread".into();
+        worktree.project_id = Some(quick_project.id.clone());
+        worktree.worktree = Some(WorktreeInfo {
+            root_project_path: quick.clone(),
+            base: "main".into(),
+            branch: "tcode/worktree-thread".into(),
+        });
+        state.persist_meta(&worktree, cx);
+    });
+    let refusal = command(
+        &state,
+        cx,
+        5,
+        Command::MoveSession {
+            session_id: "worktree-thread".into(),
+            project_id: demo_id.clone(),
+            cwd: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refusal.code, "worktree_session");
+    assert!(
+        refusal
+            .message
+            .contains("move the worktree's branch instead")
+    );
+
+    command(&state, cx, 6, move_to_demo()).unwrap();
+    state.read(|state| {
+        let session = state.resident(&session_id).unwrap();
+        assert!(matches!(session.runtime, Runtime::Idle));
+        let meta = state.find_meta(&session_id).unwrap();
+        assert_eq!(meta.project_id.as_deref(), Some(demo_id.as_str()));
+        assert_eq!(meta.cwd, demo.join("app"));
+        assert_eq!(meta.resume_cursor, None);
+    });
+    cx.run_until_parked();
+    drop(state);
+
+    // A host restarted after the move keeps the thread where it went, with its transcript.
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(launcher);
+        state
+    });
+    state.read(|state| {
+        let meta = state.find_meta(&session_id).unwrap();
+        assert_eq!(meta.project_id.as_deref(), Some(demo_id.as_str()));
+        assert_eq!(meta.cwd, demo.join("app"));
+    });
+    state.update(cx, |state, cx| state.select_session(&session_id, cx));
+    cx.run_until(|state| {
+        state
+            .selected_session()
+            .is_some_and(|session| session.timeline.turns.len() == 1)
+    });
+    command(
+        &state,
+        cx,
+        7,
+        Command::SendTurn {
+            session_id: session_id.clone(),
+            text: "what did we decide?".into(),
+            attachment_paths: Vec::new(),
+        },
+    )
+    .unwrap();
+    let (_, text, _) = next_send(cx, 1);
+    {
+        let launches = launches.lock().unwrap();
+        assert_eq!(launches[1].0, demo.join("app"));
+        assert_eq!(launches[1].1, None, "a fresh provider session");
+    }
+    assert!(
+        text.starts_with(tcode_core::relay::RELAY_PREAMBLE),
+        "{text}"
+    );
+    assert!(text.contains("let's start the demo"), "{text}");
+    assert!(text.contains("The demo will be a static site."), "{text}");
+    assert!(
+        text.contains(&format!(
+            "moved from `{}` to `{}`",
+            quick.display(),
+            demo.join("app").display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("what did we decide?\n</new-user-message>"),
+        "{text}"
+    );
+    state.read(|state| {
+        let session = state.selected_session().unwrap();
+        let relay = session
+            .timeline
+            .entries
+            .iter()
+            .find_map(|entry| match &entry.content {
+                EntryContent::ProviderRelay {
+                    prompt, moved_from, ..
+                } => Some((prompt.clone(), moved_from.clone())),
+                _ => None,
+            })
+            .expect("the handoff is shown in the thread");
+        assert_eq!(relay, (Some(text.clone()), Some(quick.clone())));
+        assert!(session.meta.moved_from.is_none());
+    });
+}
+
 /// A live session with `provider`, nothing queued, no turn in flight.
 fn live_session(
     provider: ProviderKind,

@@ -453,6 +453,17 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             session_id: "a".into(),
             thread_id: "b".into(),
         },
+        // A space moves its threads only between its own projects.
+        Command::MoveSession {
+            session_id: "a".into(),
+            project_id: host.b.id.clone(),
+            cwd: None,
+        },
+        Command::MoveSession {
+            session_id: "b".into(),
+            project_id: host.a.id.clone(),
+            cwd: None,
+        },
     ] {
         denied(host.request(member.clone(), ClientPayload::Command(command)));
     }

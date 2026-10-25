@@ -127,7 +127,7 @@ pub fn error_card(id: &str, message: &str, cx: &App) -> AnyElement {
 }
 
 pub fn relay_divider(id: &str, cx: &App) -> AnyElement {
-    dividers::relay_divider(id, ProviderKind::ClaudeCode, ProviderKind::Codex, cx)
+    dividers::relay_divider(id, ProviderKind::ClaudeCode, ProviderKind::Codex, None, cx)
 }
 
 pub fn model_change_divider(id: &str, cx: &App) -> AnyElement {

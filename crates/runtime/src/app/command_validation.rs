@@ -111,6 +111,7 @@ impl AppState {
                 ));
             }
             Command::ToggleProjectCollapsed { project_id }
+            | Command::MoveSession { project_id, .. }
             | Command::SetProjectIcon { project_id, .. }
             | Command::SetProjectRoot { project_id, .. }
             | Command::DeleteProject { project_id }
@@ -260,6 +261,7 @@ impl AppState {
                 | Command::MarkSessionUnread { .. }
                 | Command::MarkSessionRead { .. }
                 | Command::ForkThread { .. }
+                | Command::MoveSession { .. }
                 | Command::WatchPullRequest { .. }
                 | Command::RunPullRequestAction { .. }
                 | Command::EditPullRequestReviewDraft { .. }

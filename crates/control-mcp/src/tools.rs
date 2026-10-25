@@ -245,6 +245,13 @@ impl ControlTools {
     }
 
     #[tool(
+        description = "Move a thread into another project in your grant's scope, continuing its conversation in that project's root or in cwd inside it. The thread's provider session restarts in the new directory and its first turn there receives a handoff of the conversation so far, shown to the user; the Tcode transcript stays as it is. This thread may also move itself into a project outside that scope while the project has no threads yet, such as one you just created. Threads with a dedicated worktree cannot be moved; a busy thread other than this one is refused as busy; this thread moves at once, and its provider restarts in the new directory when your current turn ends. Typical flow for starting something new: clone or mkdir it with your shell, create_project on that directory, then move_thread on your own thread id."
+    )]
+    async fn move_thread(&self, Parameters(p): Parameters<MoveThreadParams>) -> CallToolResult {
+        self.run(ControlOp::MoveThread(p)).await
+    }
+
+    #[tool(
         description = "Register a wake on other threads' events (idle, turn_completed, needs_input, needs_approval, settled, pr_changed) instead of polling. When one fires you receive a message \"[control] thread <id> (\"<title>\") <event>: <detail>\" as from an agent; the detail of turn_completed and idle names the turn (numbered as outline numbers them) and quotes the head of the message that started it. idle means the thread has no work left, and pr_changed fires for pull requests the watched thread itself watches. once removes the watch after it fires. Returns the watch id for cancel_notify; a thread that is unknown or outside your grant is listed under skipped with the reason, and no watch is stored when every thread is skipped. The watch is stored on this thread and survives a restart."
     )]
     async fn notify_when(&self, Parameters(p): Parameters<NotifyWhenParams>) -> CallToolResult {

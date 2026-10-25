@@ -46,16 +46,24 @@ pub(crate) fn relay_divider(
     id: &str,
     from: ProviderKind,
     to: ProviderKind,
+    moved_from: Option<&std::path::Path>,
     cx: &App,
 ) -> AnyElement {
-    divider(
-        SharedString::from(format!("relay-{id}")),
-        crate::tr!(
+    let label = match moved_from {
+        Some(dir) => crate::tr!(
+            "chat.moved",
+            from = dir.to_string_lossy(),
+            to = to.display_name()
+        ),
+        None => crate::tr!(
             "chat.relayed",
             from = from.display_name(),
             to = to.display_name()
-        )
-        .into_owned(),
+        ),
+    };
+    divider(
+        SharedString::from(format!("relay-{id}")),
+        label.into_owned(),
         cx.theme().muted_foreground,
         cx,
     )

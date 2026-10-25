@@ -178,12 +178,7 @@ impl AppState {
                     self.ensure_session_started(&session_id, cx);
                 }
             } else if is_live {
-                if self
-                    .residents
-                    .parked
-                    .get_mut(&session_id)
-                    .is_some_and(|parked| parked.dispatch_next_pending().is_err())
-                {
+                if self.dispatch_next_queued(&session_id, cx).is_err() {
                     log::warn!(
                         "parked session {session_id}: scheduled dispatch failed (process gone)"
                     );
@@ -250,9 +245,8 @@ impl AppState {
         }
 
         let model_changed = active.model_changed_while_live();
-        let options_changed = active.options_changed_while_live();
         let restart_deferred = active.settings_restart_deferred();
-        if model_changed || options_changed {
+        if active.launch_settings_changed_while_live() {
             if restart_deferred {
                 log::info!(
                     "deferring provider settings restart (background tasks: {}, delivery pending: {})",
@@ -267,7 +261,7 @@ impl AppState {
                     );
                 } else {
                     log::info!(
-                        "launch-time option changed while live; restarting provider before next turn"
+                        "launch-time setting changed while live; restarting provider before next turn"
                     );
                 }
                 active.shutdown_to_idle();
@@ -412,30 +406,12 @@ impl AppState {
             self.send_turn_assembled(target_id, text, attachments, cx);
             return;
         };
-        let transcript = render_relay_transcript(
-            &active.timeline,
-            &active.meta.cwd,
-            pending.from_provider,
-            pending.from_model.as_deref(),
-            RELAY_TRANSCRIPT_MAX_CHARS,
-        );
-        let event = AgentEvent::ProviderRelay {
-            from_provider: pending.from_provider,
-            from_model: pending.from_model,
-            to_provider: active.meta.provider,
-            to_model: active.meta.model.clone(),
-            prompt: Some(assemble_relay_prompt(&transcript, &text)),
-        };
-        let session_id = active.meta.id.clone();
         active.shutdown_to_idle();
         active.meta.resume_cursor = None;
         active.meta.pending_fork = false;
-        active.meta.updated_at = now_secs();
-        let meta = active.meta.clone();
-
-        self.persist_meta(&meta, cx);
-        self.close_abandoned_turn(&session_id, cx);
-        self.record_event(&session_id, &event, cx);
+        let Some(transcript) = self.record_relay(target_id, pending, &text, cx) else {
+            return;
+        };
 
         let default_window = self.default_context_window(target_id);
         let Some(active) = self.resident_mut(target_id) else {
@@ -458,13 +434,87 @@ impl AppState {
         }
     }
 
+    /// Record the handoff that gives a fresh provider session the conversation so far,
+    /// opening the turn of `text`, the message it travels with, and return the transcript
+    /// that message carries to the provider. `from` is the backend the native history
+    /// belongs to; a move to another directory ([`Self::move_session`]) is a relay too,
+    /// from the same backend, and the event names the directory it left.
+    fn record_relay(
+        &mut self,
+        target_id: &str,
+        from: PendingRelay,
+        text: &str,
+        cx: &mut HostCx,
+    ) -> Option<String> {
+        let active = self.resident_mut(target_id)?;
+        let moved_from = active.meta.moved_from.take();
+        let mut transcript = render_relay_transcript(
+            &active.timeline,
+            moved_from.as_deref().unwrap_or(&active.meta.cwd),
+            from.from_provider,
+            from.from_model.as_deref(),
+            RELAY_TRANSCRIPT_MAX_CHARS,
+        );
+        if let Some(from_dir) = &moved_from {
+            transcript.push_str(&format!(
+                "The thread has since moved from `{}` to `{}`, the directory you now run in.\n",
+                from_dir.display(),
+                active.meta.cwd.display()
+            ));
+        }
+        let event = AgentEvent::ProviderRelay {
+            from_provider: from.from_provider,
+            from_model: from.from_model,
+            to_provider: active.meta.provider,
+            to_model: active.meta.model.clone(),
+            prompt: Some(assemble_relay_prompt(&transcript, text)),
+            moved_from,
+        };
+        active.meta.updated_at = now_secs();
+        let meta = active.meta.clone();
+        self.persist_meta(&meta, cx);
+        self.close_abandoned_turn(&meta.id, cx);
+        self.record_event(&meta.id, &event, cx);
+        Some(transcript)
+    }
+
+    /// Give the first turn of a moved thread's fresh provider session the conversation so
+    /// far; a thread with nothing worth handing over just starts over there.
+    fn hand_off_moved_conversation(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some(active) = self.resident(target_id) else {
+            return;
+        };
+        let Some((message_id, text)) = active.moved_handoff_message() else {
+            return;
+        };
+        if !has_meaningful_history(&active.timeline) {
+            let active = self.resident_mut(target_id).unwrap();
+            active.meta.moved_from = None;
+            let meta = active.meta.clone();
+            self.persist_meta(&meta, cx);
+            return;
+        }
+        let from = PendingRelay {
+            from_provider: active.meta.provider,
+            from_model: active.meta.model.clone(),
+            from_profile: active.meta.profile_id.clone(),
+        };
+        let transcript = self.record_relay(target_id, from, &text, cx);
+        if let Some(message) = self
+            .resident_mut(target_id)
+            .and_then(|active| active.queue.iter_mut().find(|m| m.id == message_id))
+        {
+            message.relay_transcript = transcript;
+        }
+    }
+
     /// Submit the first eligible queue entry when the live provider can accept
     /// a turn. It remains queued until the adapter emits its correlated `TurnAccepted`;
     /// only that provider-boundary acknowledgement persists the user bubble.
     pub(super) fn dispatch_next_queued(
         &mut self,
         target_id: &str,
-        _cx: &mut HostCx,
+        cx: &mut HostCx,
     ) -> Result<bool, ()> {
         let Some(active) = self.resident(target_id) else {
             return Ok(false);
@@ -472,6 +522,7 @@ impl AppState {
         if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
             return Ok(false);
         }
+        self.hand_off_moved_conversation(target_id, cx);
         self.resident_mut(target_id)
             .ok_or(())?
             .dispatch_next_pending()
@@ -542,6 +593,9 @@ impl AppState {
             return;
         }
         if parked.queue.is_empty() {
+            if parked.cwd_changed_while_live() && parked.background_task_count == 0 {
+                parked.shutdown_to_idle();
+            }
             if parked.background_task_count > 0 {
                 log::info!(
                     "retaining parked session {session_id} for {} background task(s)",
@@ -552,13 +606,7 @@ impl AppState {
             self.mark_resident_idle(session_id, cx);
             return;
         }
-        match self
-            .residents
-            .parked
-            .get_mut(session_id)
-            .unwrap()
-            .dispatch_next_pending()
-        {
+        match self.dispatch_next_queued(session_id, cx) {
             Ok(true) => {}
             Ok(false) => {}
             Err(()) => {
