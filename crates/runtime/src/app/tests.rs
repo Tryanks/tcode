@@ -10130,21 +10130,6 @@ fn query_reply(messages: &[HostMessage], id: u64) -> QueryResponse {
         .expect("the query is answered")
 }
 
-/// The live records among `messages`, in order.
-fn live_records(messages: &[HostMessage]) -> Vec<SessionEventRecord> {
-    messages
-        .iter()
-        .filter_map(|message| match message {
-            HostMessage::Event(EventEnvelope {
-                request_id: None,
-                event: ServerEvent::SessionEvent(record),
-                ..
-            }) => Some(record.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 fn open_stored_session(store: &SessionStore, id: &str) -> SessionMeta {
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
     meta.id = id.into();
