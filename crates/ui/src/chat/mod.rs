@@ -435,6 +435,9 @@ pub struct ChatView {
     /// rows are only spliced during a frame, never between two frames.
     timeline_stale: bool,
     history_placeholder_height: gpui::Pixels,
+    /// Height of the phone row floating over the foot of the timeline, zero
+    /// while it is absent. The last row's padding holds it so the tail clears it.
+    phone_strip_height: gpui::Pixels,
     /// Distance to scroll back once a page has filled the reservation the
     /// reader had scrolled into. Applied by the render after the frame that
     /// measured the page, never between frames: GPUI resolves the wheel and
@@ -748,6 +751,7 @@ impl ChatView {
             list_state,
             timeline_stale: false,
             history_placeholder_height: px(0.),
+            phone_strip_height: px(0.),
             reservation_scroll_back: None,
             carried_anchor: false,
             rows: Vec::new(),
@@ -2403,9 +2407,11 @@ impl ChatView {
         cx.notify();
     }
 
-    /// The phone entry to the Agents view: a pill above the composer that
-    /// opens the sheet, shown while the thread has agents.
-    fn render_agents_pill(
+    /// The phone's row over the foot of the timeline: the Agents pill first,
+    /// then the linked pull requests, scrolling sideways when they overflow.
+    /// It floats over the chat instead of taking height from it, so each chip
+    /// carries its own backing; the last row's padding clears it at the tail.
+    fn render_phone_strip(
         &self,
         agents: Option<&crate::agents_panel::Agents>,
         cx: &mut Context<Self>,
@@ -2413,7 +2419,45 @@ impl ChatView {
         if !self.window_state.read(cx).compact {
             return None;
         }
-        let agents = agents?;
+        let agents = agents.map(|agents| self.render_agents_pill(agents, cx));
+        let pull_requests = self.render_pull_request_pill(cx);
+        if agents.is_none() && pull_requests.is_none() {
+            return None;
+        }
+        let radius = crate::material::radius_chip(cx);
+        Some(
+            crate::material::bar("phone-strip", crate::material::Bar::Toolbar, true, cx)
+                .debug_selector(|| "phone-strip".into())
+                .absolute()
+                .bottom_0()
+                .left_0()
+                .px_0()
+                .child(
+                    h_flex()
+                        .id("phone-strip-scroll")
+                        .size_full()
+                        .items_center()
+                        .px(px(crate::material::COMPACT_PAGE_INSET))
+                        .gap(cx.theme().tokens.spacing.xs)
+                        .children(
+                            agents
+                                .into_iter()
+                                .chain(pull_requests)
+                                .map(|chip| floating_backing(radius, cx).child(chip)),
+                        )
+                        .overflow_x_scroll_area(),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The phone entry to the Agents view: a pill that opens the sheet, shown
+    /// while the thread has agents.
+    fn render_agents_pill(
+        &self,
+        agents: &crate::agents_panel::Agents,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let label: SharedString = match agents.count() {
             1 => crate::tr!("agents.pill_one").into_owned(),
             count => crate::tr!("agents.pill", count = count).into_owned(),
@@ -2433,28 +2477,23 @@ impl ChatView {
             .when_some(cue, |pill, color| {
                 pill.child(div().size(px(6.)).rounded_full().bg(color))
             });
-        Some(
-            crate::material::bar("agents-pill-row", crate::material::Bar::Toolbar, true, cx)
-                .child(
-                    crate::widgets::Popover::new("agents-sheet")
-                        .bottom_sheet(crate::tr!("agents.title"))
-                        .on_open_change(move |open, _, cx| {
-                            // Opening an agent dismisses the sheet from inside
-                            // the panel's own update.
-                            let (shown, open) = (shown.clone(), *open);
-                            cx.defer(move |cx| {
-                                let _ = shown.update(cx, |panel, cx| panel.set_shown(open, cx));
-                            });
-                        })
-                        .trigger_with(move |_, _, _, _| pill.into_any_element())
-                        .content(move |_, _, cx| {
-                            let sheet = cx.entity().downgrade();
-                            panel.update(cx, |panel, _| panel.in_sheet(sheet));
-                            div().w_full().child(panel.clone()).into_any_element()
-                        }),
-                )
-                .into_any_element(),
-        )
+        crate::widgets::Popover::new("agents-sheet")
+            .bottom_sheet(crate::tr!("agents.title"))
+            .on_open_change(move |open, _, cx| {
+                // Opening an agent dismisses the sheet from inside
+                // the panel's own update.
+                let (shown, open) = (shown.clone(), *open);
+                cx.defer(move |cx| {
+                    let _ = shown.update(cx, |panel, cx| panel.set_shown(open, cx));
+                });
+            })
+            .trigger_with(move |_, _, _, _| pill.into_any_element())
+            .content(move |_, _, cx| {
+                let sheet = cx.entity().downgrade();
+                panel.update(cx, |panel, _| panel.in_sheet(sheet));
+                div().w_full().child(panel.clone()).into_any_element()
+            })
+            .into_any_element()
     }
 
     /// The way back from an agent to the thread it was reached from. Unlabelled,
@@ -2575,28 +2614,26 @@ impl ChatView {
         self.pull_requests.read(cx).detail()
     }
 
-    /// The phone's entry to the linked pull requests: a chip in the row above the
-    /// composer that opens them in a bottom sheet.
+    /// The phone's entry to the linked pull requests: one chip naming every
+    /// number, which opens them in a bottom sheet.
     fn render_pull_request_pill(&self, cx: &App) -> Option<AnyElement> {
         let links = self.active_pull_requests(cx)?;
-        let badge = crate::pull_requests::badge(&links, 14., cx)?;
+        let numbers = crate::pull_requests::numbers(&links, cx)?;
         let label = crate::pull_requests::badge_label(&links, cx)?;
         let panel = self.pull_requests.clone();
         Some(
-            crate::material::bar("phone-pr-row", crate::material::Bar::Toolbar, true, cx)
-                .child(
-                    crate::widgets::Popover::new("phone-pull-requests")
-                        .bottom_sheet(crate::tr!("pull_requests.title").into_owned())
-                        .trigger(
-                            Button::new("phone-pr-pill")
-                                .ghost()
-                                .chip()
-                                .touch(true)
-                                .aria_label(label)
-                                .child(badge),
-                        )
-                        .content(move |_, _, _| panel.clone()),
+            crate::widgets::Popover::new("phone-pull-requests")
+                .bottom_sheet(crate::tr!("pull_requests.title").into_owned())
+                .trigger(
+                    Button::new("phone-pr-pill")
+                        .debug_selector(|| "phone-pr-pill".into())
+                        .ghost()
+                        .outline()
+                        .chip()
+                        .aria_label(label)
+                        .child(numbers),
                 )
+                .content(move |_, _, _| panel.clone())
                 .into_any_element(),
         )
     }
@@ -2851,6 +2888,9 @@ impl ChatView {
                 h_flex()
                     .flex_1()
                     .min_w(px(168.))
+                    // The title keeps its floor; numbers past the stretch's end
+                    // clip here rather than run under the git button.
+                    .overflow_hidden()
                     .gap_2()
                     .items_center()
                     .child(
@@ -2862,27 +2902,38 @@ impl ChatView {
                     .when_some(
                         self.active_pull_requests(cx).and_then(|links| {
                             Some((
-                                crate::pull_requests::badge(&links, 14., cx)?,
+                                crate::pull_requests::numbers(&links, cx)?,
                                 crate::pull_requests::badge_label(&links, cx)?,
                             ))
                         }),
-                        |header, (badge, label)| {
+                        |header, (numbers, label)| {
+                            // Every number shows until the numbers reach half the
+                            // title's stretch; past that they clip, so the title
+                            // keeps the other half however many are linked.
                             header.child(
-                                Button::new("header-pr-badge")
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .selected(
-                                        right_panel_open && right_tab == RightTab::PullRequests,
-                                    )
-                                    .tooltip(crate::tr!("pull_requests.toggle"))
-                                    .aria_label(label)
-                                    .child(badge)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store.update(cx, |store, cx| {
-                                            store.toggle_pull_requests_panel(cx)
-                                        })
-                                    })),
+                                h_flex()
+                                    .flex_none()
+                                    .max_w(gpui::relative(0.5))
+                                    .overflow_hidden()
+                                    .child(
+                                        Button::new("header-pr-badge")
+                                            .debug_selector(|| "header-pr-badge".into())
+                                            .ghost()
+                                            .small()
+                                            .compact()
+                                            .selected(
+                                                right_panel_open
+                                                    && right_tab == RightTab::PullRequests,
+                                            )
+                                            .tooltip(crate::tr!("pull_requests.toggle"))
+                                            .aria_label(label)
+                                            .child(numbers)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.workspace_store.update(cx, |store, cx| {
+                                                    store.toggle_pull_requests_panel(cx)
+                                                })
+                                            })),
+                                    ),
                             )
                         },
                     ),
@@ -3488,35 +3539,40 @@ impl ChatView {
         // insets; span the region and center with flex instead.
         div()
             .absolute()
-            .bottom(px(12.))
+            .bottom(px(12.) + self.phone_strip_height)
             .left_0()
             .right_0()
             .flex()
             .justify_center()
             .child(
-                // The outline button's bg is ~transparent; an opaque popover
-                // backing keeps the pill readable over the chat text below.
-                div()
-                    .block_mouse_except_scroll()
-                    .rounded(crate::material::radius_button(cx))
-                    .bg(cx.theme().popover)
-                    .shadow_md()
-                    .child(
-                        Button::new("scroll-to-end")
-                            .debug_selector(|| "scroll-to-end".into())
-                            .outline()
-                            .small()
-                            .icon(IconName::ChevronDown)
-                            .label(crate::tr!("chat.scroll_end"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.list_state.set_follow_mode(FollowMode::Tail);
-                                this.list_state.scroll_to_end();
-                                cx.notify();
-                            })),
-                    ),
+                floating_backing(crate::material::radius_button(cx), cx).child(
+                    Button::new("scroll-to-end")
+                        .debug_selector(|| "scroll-to-end".into())
+                        .outline()
+                        .small()
+                        .icon(IconName::ChevronDown)
+                        .label(crate::tr!("chat.scroll_end"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.list_state.set_follow_mode(FollowMode::Tail);
+                            this.list_state.scroll_to_end();
+                            cx.notify();
+                        })),
+                ),
             )
             .into_any_element()
     }
+}
+
+/// An opaque backing for a control floating over the timeline: an outline or
+/// ghost button's fill is near transparent, and the chat text scrolling
+/// beneath would show through it. Scrolling still reaches the timeline.
+fn floating_backing(radius: gpui::Pixels, cx: &App) -> gpui::Div {
+    div()
+        .flex_none()
+        .block_mouse_except_scroll()
+        .rounded(radius)
+        .bg(cx.theme().popover)
+        .shadow_md()
 }
 
 fn markdown_entries_for_residency(
@@ -3724,6 +3780,21 @@ impl Render for ChatView {
                 .filter(|agents| !agents.is_empty())
         };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), agents.as_ref(), cx);
+        let phone_strip = self.render_phone_strip(agents.as_ref(), cx);
+        let phone_strip_height = if phone_strip.is_some() {
+            px(crate::material::bar_height(
+                crate::material::Bar::Toolbar,
+                true,
+            ))
+        } else {
+            px(0.)
+        };
+        if phone_strip_height != self.phone_strip_height {
+            if let Some(last) = self.rows.len().checked_sub(1) {
+                self.list_state.remeasure_items(last..last + 1);
+            }
+            self.phone_strip_height = phone_strip_height;
+        }
         let panel = self.workspace_store.read(cx).panel_state();
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let terminal_height = panel.terminal_height;
@@ -3827,7 +3898,7 @@ impl Render for ChatView {
                     .when(index == 0, |item| item.pt(px(TIMELINE_EDGE_PADDING)))
                     .map(|item| {
                         if index + 1 == item_count {
-                            item.pb(px(TIMELINE_EDGE_PADDING))
+                            item.pb(px(TIMELINE_EDGE_PADDING) + this.phone_strip_height)
                         } else if row.last_in_turn {
                             item.pb(px(TURN_GAP))
                         } else if continued {
@@ -4062,7 +4133,8 @@ impl Render for ChatView {
                     )
                     .when(show_jump_to_latest, |this| {
                         this.child(self.render_scroll_pill(cx))
-                    }),
+                    })
+                    .children(phone_strip),
             )
             .child(
                 v_flex()
@@ -4075,16 +4147,12 @@ impl Render for ChatView {
                     .gap_2()
                     .children(delivery_rows),
             )
-            .children(self.render_agents_pill(agents.as_ref(), cx))
             .child(
                 div()
                     .id("chat-composer")
                     .debug_selector(|| "chat-composer".into())
                     .w_full()
                     .flex_none()
-                    .when(self.window_state.read(cx).compact, |container| {
-                        container.children(self.render_pull_request_pill(cx))
-                    })
                     .child(composer),
             );
 

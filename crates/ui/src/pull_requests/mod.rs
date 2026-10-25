@@ -157,6 +157,38 @@ pub fn badge(links: &[ThreadPullRequestLink], _size: f32, cx: &App) -> Option<An
             .into_any_element(),
     )
 }
+/// Every visible linked pull request's number in link order, each in its own state's glyph and
+/// color: the thread's header and the phone's row show them all, where the sidebar's rows can
+/// afford only [`badge`].
+pub fn numbers(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
+    let label = badge_label(links, cx)?;
+    let spacing = &cx.theme().tokens.spacing;
+    Some(
+        h_flex()
+            .id("pull-request-numbers")
+            .aria_label(label)
+            .flex_none()
+            .items_center()
+            .gap(spacing.xs)
+            .text_token(&cx.theme().tokens.typography.xs)
+            .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+                "tnum".into(),
+                1,
+            )])))
+            .children(links.iter().filter(|link| link.visible()).map(|link| {
+                let (glyph, color, _) =
+                    appearance(PullRequestBadgeState::of(link.snapshot.as_ref()), cx);
+                h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(spacing.xxs)
+                    .text_color(color)
+                    .child(Icon::new(glyph))
+                    .child(format!("#{}", link.key.number))
+            }))
+            .into_any_element(),
+    )
+}
 pub fn sidebar_badge(
     links: &[ThreadPullRequestLink],
     id: &str,
