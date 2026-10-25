@@ -136,7 +136,8 @@ impl<M: InputModeKind> InputHandler for ConfiguredInput<M> {
         self.inner.apple_press_and_hold_enabled()
     }
     fn accepts_text_input(&mut self, window: &mut Window, cx: &mut App) -> bool {
-        self.inner.accepts_text_input(window, cx)
+        !self.entity.read(cx).presentation().is_disabled()
+            && self.inner.accepts_text_input(window, cx)
     }
     fn text_input_editable_range(
         &mut self,

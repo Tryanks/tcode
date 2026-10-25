@@ -351,6 +351,12 @@ impl RenderOnce for Input {
                 })
                 .focused(focused)
                 .disabled(self.disabled)
+                // GPUI gives focus to any tracked handle under a press, and a
+                // focused handle with an input handler raises the soft
+                // keyboard; a field that takes no text is not a focus target.
+                .when(disabled, |this| {
+                    this.capture_any_mouse_down(|_, window, _| window.prevent_default())
+                })
                 .role(self.role)
                 .styles(|styles| styles.focused(|style| style.border_color(theme.ring)))
                 .when_some(aria_label.clone(), |this, label| {
@@ -593,13 +599,42 @@ impl RenderOnce for NumberInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, Context, EntityInputHandler as _, Render, TestAppContext};
+    use gpui::{
+        AppContext as _, Context, EntityInputHandler as _, Modifiers, Render, TestAppContext,
+    };
     use std::{cell::Cell, rc::Rc};
 
     struct Field(Entity<TextareaState>, bool);
     impl Render for Field {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             Textarea::new(&self.0).disabled(self.1)
+        }
+    }
+
+    // GPUI focuses any tracked handle under a press, and the platform raises
+    // the soft keyboard for a focused handle with an input handler, so a
+    // disabled field has to refuse the press to stay keyboard-free on a phone.
+    #[gpui::test]
+    fn a_press_focuses_an_enabled_field_but_not_a_disabled_one(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        for disabled in [false, true] {
+            let (field, cx) = cx.add_window_view(|window, cx| {
+                Field(cx.new(|cx| TextareaState::new(window, cx)), disabled)
+            });
+            let input = field.read_with(cx, |field, _| field.0.clone());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let bounds = input
+                .read_with(cx, |state, _| state.text_bounds())
+                .expect("the field was painted");
+            cx.simulate_mouse_down(
+                bounds.center(),
+                gpui::MouseButton::Left,
+                Modifiers::default(),
+            );
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let focused =
+                cx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window));
+            assert_eq!(focused, !disabled, "disabled={disabled}");
         }
     }
 
