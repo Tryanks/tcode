@@ -44,6 +44,7 @@ final class GPUITextInput: UIView, UITextInput {
     private var servingOldSnapshot = false
     private var synchronizationPending = false
     private var snapshot: Snapshot?
+    private var framePending = false
 
     private struct Snapshot: Equatable {
         var text: String
@@ -128,7 +129,19 @@ final class GPUITextInput: UIView, UITextInput {
         body()
         snapshot = liveSnapshot()
         editing = false
-        gpui_ios_request_frame()
+        presentAfterEdits()
+    }
+
+    // One keystroke can be several UIKit edits in the same run-loop turn: Backspace
+    // selects the previous character, then deletes it. Present only their result,
+    // without waiting for the display link's next tick.
+    private func presentAfterEdits() {
+        guard !framePending else { return }
+        framePending = true
+        RunLoop.main.perform(inModes: [.common]) { [weak self] in
+            self?.framePending = false
+            _ = gpui_ios_request_frame()
+        }
     }
 
     private var documentLength: Int {
