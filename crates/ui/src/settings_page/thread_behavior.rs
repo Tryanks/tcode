@@ -327,8 +327,8 @@ impl SettingsPage {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .child(project.name.clone()),
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(project.name.clone())),
                     )
                     .children(summary.map(|summary| div().text_secondary(true, cx).child(summary)))
                     .child(

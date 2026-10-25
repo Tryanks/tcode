@@ -316,9 +316,9 @@ impl Popover {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
                                 .text_title(cx)
-                                .children(self.sheet_title),
+                                .overflow_hidden()
+                                .children(self.sheet_title.map(super::fade_text)),
                         )
                         .child(
                             Button::new("touch-picker-close")

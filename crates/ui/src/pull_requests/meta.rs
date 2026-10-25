@@ -538,9 +538,9 @@ impl PullRequestView {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .truncate()
+                                        .overflow_hidden()
                                         .text_secondary(compact, cx)
-                                        .child(secondary)
+                                        .child(crate::widgets::fade_text(secondary))
                                 }))
                                 .on_click(move |_, _, cx| {
                                     toggle_view.update(cx, |view, cx| {

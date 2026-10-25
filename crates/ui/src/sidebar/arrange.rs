@@ -175,11 +175,7 @@ impl Render for ThreadDragView {
             .w(width)
             .shadow_lg()
             .text_color(cx.theme().sidebar_foreground)
-            .child(
-                truncated_sidebar_label()
-                    .text_body(false, cx)
-                    .child(self.title.clone()),
-            )
+            .child(sidebar_label(self.title.clone()).text_body(false, cx))
             .when_some(action, |row, action| {
                 row.child(
                     h_flex()
@@ -1131,7 +1127,12 @@ impl SessionsSidebar {
                         .child(meta.title.clone()),
                 )
                 .when_some(project, |column, project| {
-                    column.child(div().truncate().text_secondary(true, cx).child(project))
+                    column.child(
+                        div()
+                            .text_secondary(true, cx)
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(project)),
+                    )
                 }),
         )
         .child(handle)

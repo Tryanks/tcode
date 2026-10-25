@@ -258,11 +258,11 @@ pub fn sidebar_badge(
                                 })
                                 .child(Icon::new(glyph).text_color(color))
                                 .child(div().child(format!("#{}", key.number)))
-                                .child(div().flex_1().min_w_0().truncate().child(
-                                    snapshot.map_or_else(
+                                .child(div().flex_1().min_w_0().overflow_hidden().child(
+                                    crate::widgets::fade_text(snapshot.map_or_else(
                                         || key.repository.clone(),
                                         |s| s.title.clone(),
-                                    ),
+                                    )),
                                 ))
                                 .children(
                                     caption.clone().map(|caption| {
@@ -835,7 +835,12 @@ impl PullRequestsPanel {
                 .items_center()
                 .min_w_0()
                 .overflow_hidden()
-                .child(div().min_w_0().truncate().child(source.clone()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(source.clone())),
+                )
                 // The author gives way first, whole: a line too narrow for it wraps it onto
                 // a second line this one-line box clips. The box is exactly one line of
                 // line 2's text tall; stretching
@@ -867,13 +872,13 @@ impl PullRequestsPanel {
                 .child(
                     div()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .map(|mut branches| {
                             branches.style().flex_shrink = Some(100.);
                             branches
                         })
                         .font_family(mono.clone())
-                        .child(format!(" · {branches}")),
+                        .child(crate::widgets::fade_text(format!(" · {branches}"))),
                 )
                 .when_some(layer.clone(), |line, layer| {
                     line.child(sep())
@@ -921,7 +926,12 @@ impl PullRequestsPanel {
                     link.is_some_and(|link| link.source == PullRequestSource::Dismissed),
                     |line| line.child(Icon::new(IconName::Unlink)),
                 )
-                .child(div().min_w_0().truncate().child(lead));
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(lead)),
+                );
             tail_layer(line, layer).into_any_element()
         };
         let detail = detail.join(" · ");
@@ -1175,7 +1185,7 @@ impl PullRequestsPanel {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .truncate()
+                                    .overflow_hidden()
                                     .text_body(compact, cx)
                                     .text_color(if visible {
                                         cx.theme().foreground
@@ -1185,7 +1195,7 @@ impl PullRequestsPanel {
                                     .when(snapshot.is_none(), |title| {
                                         title.font_family(cx.theme().mono_font_family.clone())
                                     })
-                                    .child(title),
+                                    .child(crate::widgets::fade_text(title)),
                             )
                             .when(
                                 snapshot.is_some_and(|snapshot| {

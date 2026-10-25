@@ -315,8 +315,8 @@ impl SourceControlPanel {
                     .child(
                         div()
                             .text_color(header_color)
-                            .truncate()
-                            .child(host.to_owned()),
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(host.to_owned())),
                     )
                     .child(div().text_secondary(compact, cx).child(kind_line)),
             )

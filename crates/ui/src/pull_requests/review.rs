@@ -481,17 +481,22 @@ impl PullRequestView {
                         div()
                             .flex_none()
                             .max_w(px(220.))
-                            .truncate()
+                            .overflow_hidden()
                             .font_family(cx.theme().mono_font_family.clone())
-                            .child(format!("{}:{}", comment.path, comment.end_line)),
+                            .child(crate::widgets::fade_text(format!(
+                                "{}:{}",
+                                comment.path, comment.end_line
+                            ))),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
                             .text_color(muted)
-                            .child(comment.body.lines().next().unwrap_or_default().to_owned()),
+                            .child(crate::widgets::fade_text(
+                                comment.body.lines().next().unwrap_or_default().to_owned(),
+                            )),
                     )
                     .when(!comment.placed, |row| {
                         row.child(
@@ -612,7 +617,12 @@ impl PullRequestView {
             .text_secondary(compact, cx)
             .text_color(cx.theme().foreground)
             .child(Icon::new(IconName::MessageSquare).text_color(cx.theme().muted_foreground))
-            .child(div().min_w_0().truncate().child(summary))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(summary)),
+            )
             .when(stale, |bar| {
                 bar.child(
                     h_flex()

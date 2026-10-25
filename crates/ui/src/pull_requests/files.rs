@@ -652,17 +652,17 @@ impl PullRequestView {
                                     div()
                                         .flex_none()
                                         .max_w(px(220.))
-                                        .truncate()
+                                        .overflow_hidden()
                                         .font_family(cx.theme().mono_font_family.clone())
-                                        .child(line),
+                                        .child(crate::widgets::fade_text(line)),
                                 )
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .truncate()
+                                        .overflow_hidden()
                                         .text_color(muted)
-                                        .child(excerpt),
+                                        .child(crate::widgets::fade_text(excerpt)),
                                 )
                                 .when(thread.outdated, |row| {
                                     row.child(material::semantic_chip(
@@ -1062,11 +1062,17 @@ impl PullRequestView {
                     div()
                         .flex_shrink(8.)
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_color(muted)
-                        .child(directory),
+                        .child(crate::widgets::fade_text(directory)),
                 )
-                .child(div().flex_shrink(1.).min_w_0().truncate().child(name)),
+                .child(
+                    div()
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(name)),
+                ),
         )
         .children(availability.map(|(icon, color)| Icon::new(icon).text_color(color)))
         .child(
@@ -1456,16 +1462,16 @@ impl DiffListHost for PullRequestView {
             .children(entry.previous_path.as_ref().map(|previous| {
                 div()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("{previous} →"))
+                    .child(crate::widgets::fade_text(format!("{previous} →")))
             }))
             .child(
                 div()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_color(cx.theme().foreground)
-                    .child(entry.path.clone()),
+                    .child(crate::widgets::fade_text(entry.path.clone())),
             )
             .into_any_element()
     }

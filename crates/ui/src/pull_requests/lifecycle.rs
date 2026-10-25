@@ -1239,50 +1239,54 @@ impl Render for MergeDialog {
         let muted = cx.theme().muted_foreground;
         let state = self.state.as_ref().and_then(|state| state.as_ref().ok());
         let head = state.map(|state| state.head.clone());
-        let facts = v_flex()
-            .gap_1p5()
-            .child(self.fact("pull_requests.merge.host", key.host.clone(), cx))
-            .child(
-                self.fact(
-                    "pull_requests.merge.repository",
-                    div()
-                        .font_family(mono.clone())
-                        .child(key.repository.clone()),
-                    cx,
-                ),
-            )
-            .child(
-                self.fact(
-                    "pull_requests.merge.pull_request",
-                    div()
-                        .truncate()
-                        .child(format!("#{number} {}", target.title)),
-                    cx,
-                ),
-            )
-            .child(
-                self.fact(
-                    "pull_requests.merge.into",
-                    div()
-                        .truncate()
-                        .font_family(mono.clone())
-                        .child(format!("{} ← {}", target.base_branch, target.head_branch)),
-                    cx,
-                ),
-            )
-            .child(
-                self.fact(
-                    "pull_requests.merge.head",
-                    match &head {
-                        Some(head) => div()
+        let facts =
+            v_flex()
+                .gap_1p5()
+                .child(self.fact("pull_requests.merge.host", key.host.clone(), cx))
+                .child(
+                    self.fact(
+                        "pull_requests.merge.repository",
+                        div()
                             .font_family(mono.clone())
-                            .child(short(head))
-                            .into_any_element(),
-                        None => Spinner::new().into_any_element(),
-                    },
+                            .child(key.repository.clone()),
+                        cx,
+                    ),
+                )
+                .child(
+                    self.fact(
+                        "pull_requests.merge.pull_request",
+                        div()
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(format!(
+                                "#{number} {}",
+                                target.title
+                            ))),
+                        cx,
+                    ),
+                )
+                .child(self.fact(
+                    "pull_requests.merge.into",
+                    div().overflow_hidden().font_family(mono.clone()).child(
+                        crate::widgets::fade_text(format!(
+                            "{} ← {}",
+                            target.base_branch, target.head_branch
+                        )),
+                    ),
                     cx,
-                ),
-            );
+                ))
+                .child(
+                    self.fact(
+                        "pull_requests.merge.head",
+                        match &head {
+                            Some(head) => div()
+                                .font_family(mono.clone())
+                                .child(short(head))
+                                .into_any_element(),
+                            None => Spinner::new().into_any_element(),
+                        },
+                        cx,
+                    ),
+                );
         let view = cx.entity();
         let compact = target.window_state.read(cx).compact;
         let method = match (state, self.method) {

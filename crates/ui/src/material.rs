@@ -432,9 +432,9 @@ pub fn bar_title(title: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .flex_1()
         .min_w_0()
-        .truncate()
+        .overflow_hidden()
         .text_title(cx)
-        .child(title.into())
+        .child(crate::widgets::fade_text(title.into()))
 }
 
 /// The height of a [`selectable_row`]. gpui-base carries no control-height

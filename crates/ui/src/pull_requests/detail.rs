@@ -879,10 +879,10 @@ impl PullRequestView {
                         .id("pr-detail-branches")
                         .min_w_0()
                         .max_w(px(320.))
-                        .truncate()
+                        .overflow_hidden()
                         .font_family(cx.theme().mono_font_family.clone())
                         // gpui-base has no middle truncation; the tooltip holds the full pair.
-                        .child(format!("{base} ← {head}"))
+                        .child(crate::widgets::fade_text(format!("{base} ← {head}")))
                         .tooltip(move |window, cx| {
                             Tooltip::new(
                                 crate::tr!(
