@@ -63,6 +63,18 @@ pub fn haptic_long_press() {
     ios::ffi::host_haptic_long_press();
 }
 
+/// Play UIKit's light impact.
+#[cfg(target_os = "ios")]
+pub fn haptic_threshold() {
+    ios::ffi::host_haptic_threshold();
+}
+
+/// Play UIKit's selection-changed tick.
+#[cfg(target_os = "ios")]
+pub fn haptic_selection() {
+    ios::ffi::host_haptic_selection();
+}
+
 /// Make UIKit's authorized payload available to the editor's synchronous Paste action.
 #[cfg(target_os = "ios")]
 pub fn with_native_paste(item: gpui::ClipboardItem, paste: impl FnOnce()) {

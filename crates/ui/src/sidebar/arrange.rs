@@ -339,6 +339,7 @@ impl SessionsSidebar {
             this.compact_model_dirty = true;
             cx.notify();
         });
+        crate::haptics::threshold();
         cx.new(|_| ThreadDragView {
             sidebar,
             title: dragged.title.clone(),
@@ -427,6 +428,9 @@ impl SessionsSidebar {
         }
         let drag = self.drag.as_mut().expect("checked above");
         let row = matches!(zone, DropZone::Row { .. });
+        if (drag.gap, drag.over) != (gap, over) {
+            crate::haptics::selection();
+        }
         if (drag.gap, drag.over) != (gap, over) || (row && drag.width != width) {
             drag.gap = gap;
             drag.over = over;

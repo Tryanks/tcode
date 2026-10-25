@@ -166,6 +166,14 @@ pub fn haptic_long_press() {
     with_activity(jni_str!("gpuiHapticLongPress"), jni_sig!("()V"), Vec::new());
 }
 
+pub fn haptic_threshold() {
+    with_activity(jni_str!("gpuiHapticThreshold"), jni_sig!("()V"), Vec::new());
+}
+
+pub fn haptic_selection() {
+    with_activity(jni_str!("gpuiHapticSelection"), jni_sig!("()V"), Vec::new());
+}
+
 pub(crate) fn configure_input(configuration: TextInputConfiguration) {
     // GPUI has no separate multiline flag; Enter explicitly requests a line break.
     with_activity(
