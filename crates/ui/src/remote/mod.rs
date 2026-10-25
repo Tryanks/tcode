@@ -43,16 +43,26 @@ use crate::window_state::{Destination, WindowState};
 
 #[cfg(feature = "remote-hosting")]
 mod hosting;
+#[cfg(feature = "remote-hosting")]
+mod traverse;
 
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+mod access;
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
 mod group;
-#[cfg(target_family = "wasm")]
-pub(crate) mod hosted;
 mod qr;
 pub(crate) mod spaces;
 
+#[cfg(target_family = "wasm")]
+pub(crate) use access::AccessSection;
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+pub(crate) use group::GroupSection;
 #[cfg(feature = "remote-hosting")]
 pub use hosting::{HostingPanel, RemoteController, machine_name};
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+pub(crate) use spaces::SpacesSection;
+#[cfg(feature = "remote-hosting")]
+pub use traverse::TraversePanel;
 
 /// Where this window's workspace comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +181,40 @@ fn report<T: 'static>(
             }
         })
         .detach();
+}
+
+/// A dialog's confirmation; `false` keeps the dialog open.
+type Submit = Rc<dyn Fn(&mut Window, &mut App) -> bool>;
+
+/// A form dialog's buttons: Cancel, and `confirm`, which runs `submit` as
+/// Enter does and closes the dialog when it succeeds. `id` prefixes the
+/// buttons' ids.
+fn submit_actions(
+    dialog: crate::overlay::Dialog,
+    id: &'static str,
+    confirm: SharedString,
+    submit: Submit,
+) -> crate::overlay::Dialog {
+    let ok = submit.clone();
+    dialog.on_ok(move |_, window, cx| ok(window, cx)).footer(
+        crate::overlay::DialogActions::new()
+            .child(
+                Button::new(SharedString::from(format!("{id}-cancel")))
+                    .label(crate::tr!("spaces.cancel"))
+                    .on_click(|_, window, cx| window.close_dialog(cx)),
+            )
+            .child(
+                Button::new(SharedString::from(format!("{id}-ok")))
+                    .debug_selector(move || format!("{id}-ok"))
+                    .primary()
+                    .label(confirm)
+                    .on_click(move |_, window, cx| {
+                        if submit(window, cx) {
+                            window.close_dialog(cx);
+                        }
+                    }),
+            ),
+    )
 }
 
 type Row = gpui::Stateful<gpui::Div>;
@@ -696,9 +740,18 @@ impl RemotePanel {
             } => {
                 let group = spaces::local(cx)
                     .and_then(|spaces| spaces.read(cx).group().map(|group| group.name.clone()));
-                hosting::invitation_card(&invitation, remaining, group, compact, cx)
+                access::invitation_card(
+                    &invitation.url(),
+                    remaining,
+                    group.as_deref(),
+                    compact,
+                    hosting::new_invitation(),
+                    cx,
+                )
             }
-            InvitationOffer::Expired => hosting::expired_invitation_row(compact, cx),
+            InvitationOffer::Expired => {
+                access::expired_invitation_row(compact, hosting::new_invitation(), cx)
+            }
             InvitationOffer::NotHosting | InvitationOffer::PairingOff => {
                 let note = if offer == InvitationOffer::PairingOff {
                     crate::tr!("hosts.invite.pairing_off")

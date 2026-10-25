@@ -108,13 +108,11 @@ impl SettingsPage {
                     settling,
                     cx,
                 )
-                .child(
-                    div()
-                        .pl(px(crate::material::CARD_INSET))
-                        .pt(cx.theme().tokens.spacing.sm)
-                        .text_secondary(compact, cx)
-                        .child(crate::tr!("settings.auto_settle.footnote")),
-                ),
+                .child(crate::settings_rows::footnote(
+                    crate::tr!("settings.auto_settle.footnote"),
+                    compact,
+                    cx,
+                )),
             )
             .child(crate::settings_rows::settings_group(
                 crate::tr!("settings.panels_section"),
