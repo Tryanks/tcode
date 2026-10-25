@@ -288,7 +288,13 @@ fn branch_row(
                 .cursor_pointer()
                 .text_body(compact, cx)
                 .hover(|s| s.bg(cx.theme().muted))
-                .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(name.to_string())),
+                )
                 .when(is_current, |this| {
                     this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
                 })

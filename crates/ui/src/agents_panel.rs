@@ -687,7 +687,13 @@ impl AgentsPanel {
             .items_center()
             .text_body(compact, cx)
             .child(Self::status_mark(row, cx))
-            .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(title.clone())),
+            )
             .children(Self::delivery_badges(row, cx))
             .children(trailing);
         let line_two = h_flex()
@@ -705,7 +711,12 @@ impl AgentsPanel {
                     .flex_none(),
                 )
             })
-            .child(div().min_w_0().truncate().child(row.detail.clone()))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(row.detail.clone())),
+            )
             .when_some(row.execution, |line, execution| {
                 line.child(div().flex_none().child("·")).child(
                     div()
@@ -726,13 +737,13 @@ impl AgentsPanel {
                         .w_full()
                         .text_secondary(false, cx)
                         .line_clamp(2)
-                        .text_ellipsis()
+                        .overflow_hidden()
                         .text_color(if row.execution == Some(AgentExecution::Failed) {
                             cx.theme().danger
                         } else {
                             muted
                         })
-                        .child(preview),
+                        .child(crate::widgets::fade_text(preview)),
                 )
             });
         let label = SharedString::from(title);

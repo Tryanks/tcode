@@ -445,9 +445,8 @@ fn render_menu_row(
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_ellipsis()
                     .text_color(muted)
-                    .child(row.secondary.clone()),
+                    .child(crate::widgets::fade_text(row.secondary.clone())),
             )
         })
         .on_mouse_move(cx.listener(move |this, _, _, cx| {

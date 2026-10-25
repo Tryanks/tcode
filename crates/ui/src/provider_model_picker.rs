@@ -390,12 +390,16 @@ fn option_row(
         v_flex()
             .flex_1()
             .min_w_0()
-            .child(div().truncate().child(option.name.clone()))
             .child(
                 div()
-                    .truncate()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(option.name.clone())),
+            )
+            .child(
+                div()
+                    .overflow_hidden()
                     .text_meta_mono(false, cx)
-                    .child(option.id.clone()),
+                    .child(crate::widgets::fade_text(option.id.clone())),
             ),
     )
     .when(is_selected, |row| row.child(Icon::new(IconName::Check)))

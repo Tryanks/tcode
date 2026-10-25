@@ -103,9 +103,8 @@ pub(crate) fn subagent_row(
                 .min_w_0()
                 .flex_1()
                 .overflow_hidden()
-                .text_ellipsis()
                 .text_color(muted)
-                .child(one_line(description)),
+                .child(crate::widgets::fade_text(one_line(description))),
         )
         .when_some(
             summary.as_deref().filter(|summary| !summary.is_empty()),
@@ -115,9 +114,8 @@ pub(crate) fn subagent_row(
                         .max_w(px(180.))
                         .min_w_0()
                         .overflow_hidden()
-                        .text_ellipsis()
                         .text_meta_mono(false, cx)
-                        .child(one_line(summary)),
+                        .child(crate::widgets::fade_text(one_line(summary))),
                 )
             },
         );

@@ -6,18 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(target_family = "wasm")]
 use web_time::{SystemTime, UNIX_EPOCH};
 
-/// Queue bubbles collapse whitespace and clip long messages (the full text is
-/// still what gets sent).
-fn truncate_queued(text: &str) -> String {
-    const MAX: usize = 80;
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= MAX {
-        return normalized;
-    }
-    let clipped: String = normalized.chars().take(MAX).collect();
-    format!("{clipped}…")
-}
-
 impl Composer {
     /// Queued messages with edit, send-now and removal actions. Scheduled
     /// messages also show a live countdown.
@@ -105,17 +93,17 @@ impl Composer {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
                             .text_body(self.compact, cx)
                             .text_color(cx.theme().foreground)
-                            .child(truncate_queued(
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(crate::chat::model::one_line(
                                 &tcode_core::notice::host_notice(&message.text).map_or_else(
                                     || message.text.clone(),
                                     |notice| {
                                         crate::chat::components::disclosure::notice_label(&notice)
                                     },
                                 ),
-                            )),
+                            ))),
                     )
                     .when_some(countdown, |row, countdown| {
                         row.child(

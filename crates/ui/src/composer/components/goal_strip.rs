@@ -93,7 +93,13 @@ impl Composer {
                 "composer.goal_header",
                 status = status_label(goal.status)
             )))
-            .child(div().flex_1().min_w_0().truncate().child(usage))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(usage)),
+            )
             .when_some(pause, |row, (icon, status, label)| {
                 row.child(
                     Button::new("goal-pause")

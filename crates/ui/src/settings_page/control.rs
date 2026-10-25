@@ -252,8 +252,8 @@ impl SettingsPage {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .child(project.name.clone()),
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(project.name.clone())),
                     )
                     .children(own.map(|grant| {
                         div()
@@ -379,8 +379,8 @@ impl SettingsPage {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .child(project.name.clone()),
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(project.name.clone())),
                     )
                     .child(div().text_secondary(false, cx).child(summary))
                     .child(

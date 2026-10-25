@@ -196,8 +196,8 @@ impl GroupSection {
                             .flex_1()
                             .min_w_0()
                             .text_body(compact, cx)
-                            .truncate()
-                            .child(machine.name.clone()),
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(machine.name.clone())),
                     )
                     .when(machine.this_machine, |row| {
                         row.child(
@@ -252,11 +252,11 @@ impl GroupSection {
                             .flex_1()
                             .min_w_0()
                             .text_body(compact, cx)
-                            .truncate()
-                            .child(super::device_label(
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(super::device_label(
                                 &device.name,
                                 device.platform.as_deref(),
-                            )),
+                            ))),
                     )
                     .child(
                         Button::new(SharedString::from(format!("group-admit-{id}")))
@@ -297,7 +297,12 @@ impl GroupSection {
                 v_flex()
                     .px(px(CARD_INSET))
                     .gap(cx.theme().tokens.spacing.xxs)
-                    .child(div().text_title(cx).truncate().child(group.name.clone()))
+                    .child(
+                        div()
+                            .text_title(cx)
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(group.name.clone())),
+                    )
                     .child(Self::note(
                         if group.machines.len() == 1 {
                             crate::tr!("group.summary.machine_one")

@@ -135,7 +135,12 @@ impl Render for MoveThreadDialog {
                             .flex_1()
                             .min_w_0()
                             .child(div().text_body(false, cx).child(project.name.clone()))
-                            .child(div().text_secondary(false, cx).truncate().child(root)),
+                            .child(
+                                div()
+                                    .text_secondary(false, cx)
+                                    .overflow_hidden()
+                                    .child(crate::widgets::fade_text(root)),
+                            ),
                     ),
             );
         }
