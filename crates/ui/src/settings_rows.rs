@@ -68,6 +68,16 @@ pub fn settings_group(
         .child(crate::material::group(cx).children(rows))
 }
 
+/// The note under a [`settings_group`]'s card, aligned with its rows' text:
+/// what holds for the group as a whole.
+pub fn footnote(text: impl Into<SharedString>, compact: bool, cx: &App) -> gpui::Div {
+    div()
+        .pl(px(crate::material::CARD_INSET))
+        .pt(cx.theme().tokens.spacing.sm)
+        .text_secondary(compact, cx)
+        .child(text.into())
+}
+
 /// Left description block (title + muted description). `reset` is the
 /// per-item "restore default" affordance and rides inline right after the
 /// title, so it reads as belonging to that setting rather than to the row's
@@ -86,9 +96,11 @@ pub fn row_labels(
         .gap_0p5()
         .child(
             h_flex()
+                .min_w_0()
                 .items_center()
                 .gap_1()
-                .child(div().text_body(compact, cx).child(title.into()))
+                // A long title wraps rather than running under the control.
+                .child(div().min_w_0().text_body(compact, cx).child(title.into()))
                 .children(reset),
         )
         .children(description.map(|desc| div().text_secondary(compact, cx).child(desc)))

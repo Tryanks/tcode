@@ -1,4 +1,4 @@
-//! Settings → Remote's machine group: machines that admit the devices any
+//! Settings → Machine group: machines that admit the devices any
 //! member admits, so a device paired with one reaches all of them. The
 //! state and its changes go through [`Spaces`], the machine's hosting-state
 //! owner.
@@ -8,26 +8,23 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, Window, div, px,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
-use gpui_base::{h_flex, v_flex};
+use gpui_base::v_flex;
 use tcode_protocol::{DeviceAccess, GroupAction, GroupInfo, GroupMachineInfo, HostingState};
 
-use super::report;
-use super::spaces::{Spaces, SpacesObserver};
-use crate::icon::IconName;
-use crate::material::{CARD_INSET, group_caption, group_row, notice, section_gap};
-use crate::overlay::{DialogActions, DialogButtons, Notification, OverlayExt as _};
+use super::spaces::{Resolve, Spaces, SpacesObserver};
+use super::{Submit, report, submit_actions};
+use crate::icon::{Icon, IconName};
+use crate::material::{empty_row, group_row, notice, section_gap};
+use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
+use crate::settings_rows::{footnote, row_frame, settings_group};
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::ButtonVariant;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
-
-type Resolve = fn(&Entity<WorkspaceStore>, &mut App) -> Option<Entity<Spaces>>;
-/// A dialog's confirmation; `false` keeps the dialog open.
-type Submit = Rc<dyn Fn(&mut Window, &mut App) -> bool>;
 
 pub(crate) struct GroupSection {
     store: Entity<WorkspaceStore>,
@@ -128,69 +125,55 @@ impl GroupSection {
         });
     }
 
-    fn note(text: SharedString, compact: bool, cx: &App) -> AnyElement {
-        div()
-            .text_secondary(compact, cx)
-            .child(text)
-            .into_any_element()
-    }
-
-    fn intro(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .w_full()
-            .p(px(CARD_INSET))
-            .gap(cx.theme().tokens.spacing.md)
-            .child(Self::note(
-                crate::tr!("group.intro").into_owned().into(),
-                compact,
-                cx,
-            ))
+    /// Not in a group: what one risks, the two ways in, and what one is.
+    fn intro(&self, compact: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let risk = notice(cx.theme().warning, cx)
+            .text_body(compact, cx)
+            .debug_selector(|| "group-risk".into())
+            .child(Icon::new(IconName::TriangleAlert).text_color(cx.theme().warning_foreground))
+            .child(div().flex_1().min_w_0().child(crate::tr!("group.risk")))
+            .into_any_element();
+        let actions = group_row(cx)
+            .flex_wrap()
+            .gap_2()
             .child(
-                div()
-                    .text_secondary(compact, cx)
-                    .text_color(cx.theme().warning_foreground)
-                    .child(crate::tr!("group.risk")),
+                Button::new("group-create")
+                    .debug_selector(|| "group-create".into())
+                    .ghost()
+                    .outline()
+                    .compact()
+                    .icon(IconName::Plus)
+                    .label(crate::tr!("group.create.action"))
+                    .on_click(cx.listener(|section, _, window, cx| section.create(window, cx))),
             )
             .child(
-                h_flex()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(
-                        Button::new("group-create")
-                            .debug_selector(|| "group-create".into())
-                            .ghost()
-                            .outline()
-                            .compact()
-                            .icon(IconName::Plus)
-                            .label(crate::tr!("group.create.action"))
-                            .on_click(
-                                cx.listener(|section, _, window, cx| section.create(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("group-join")
-                            .ghost()
-                            .outline()
-                            .compact()
-                            .label(crate::tr!("group.join.action"))
-                            .on_click(
-                                cx.listener(|section, _, window, cx| section.join(window, cx)),
-                            ),
-                    ),
+                Button::new("group-join")
+                    .debug_selector(|| "group-join".into())
+                    .ghost()
+                    .outline()
+                    .compact()
+                    .label(crate::tr!("group.join.action"))
+                    .on_click(cx.listener(|section, _, window, cx| section.join(window, cx))),
             )
-            .into_any_element()
+            .into_any_element();
+        vec![
+            risk,
+            settings_group(crate::tr!("group.section"), vec![actions], cx)
+                .child(footnote(crate::tr!("group.intro"), compact, cx))
+                .into_any_element(),
+        ]
     }
 
-    fn machines_block(
+    fn machines_group(
         &self,
         group: &GroupInfo,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut rows = v_flex().w_full();
+        let mut rows = Vec::new();
         for machine in &group.machines {
             let remove = machine.clone();
-            rows = rows.child(
+            rows.push(
                 group_row(cx)
                     .child(
                         div()
@@ -224,17 +207,14 @@ impl GroupSection {
                                 },
                             )),
                         )
-                    }),
+                    })
+                    .into_any_element(),
             );
         }
-        v_flex()
-            .w_full()
-            .child(group_caption(crate::tr!("group.machines.title"), cx))
-            .child(rows)
-            .into_any_element()
+        settings_group(crate::tr!("group.machines.section"), rows, cx).into_any_element()
     }
 
-    fn declined_block(
+    fn declined_group(
         &self,
         group: &GroupInfo,
         compact: bool,
@@ -243,11 +223,11 @@ impl GroupSection {
         if group.declined.is_empty() {
             return None;
         }
-        let mut rows = v_flex().w_full();
+        let mut rows = Vec::new();
         for device in &group.declined {
             let id = device.id.clone();
-            rows = rows.child(
-                group_row(cx)
+            rows.push(
+                row_frame(compact, cx)
                     .child(
                         div()
                             .flex_1()
@@ -268,74 +248,72 @@ impl GroupSection {
                             .on_click(cx.listener(move |section, _, window, cx| {
                                 section.act(GroupAction::Admit(id.clone()), window, cx);
                             })),
-                    ),
+                    )
+                    .into_any_element(),
             );
         }
         Some(
-            v_flex()
-                .w_full()
-                .child(group_caption(crate::tr!("group.declined.title"), cx))
-                .child(div().px(px(CARD_INSET)).child(Self::note(
-                    crate::tr!("group.declined.description").into_owned().into(),
+            settings_group(crate::tr!("group.declined.section"), rows, cx)
+                .child(footnote(
+                    crate::tr!("group.declined.description"),
                     compact,
                     cx,
-                )))
-                .child(rows)
+                ))
                 .into_any_element(),
         )
     }
 
-    /// The group's name, notes and actions sit at the card inset; the machine
-    /// and device lists are [`group_row`]s, which carry that inset themselves.
-    fn detail(&self, group: &GroupInfo, compact: bool, cx: &mut Context<Self>) -> AnyElement {
-        let leave = group.clone();
-        v_flex()
-            .w_full()
-            .py(px(CARD_INSET))
-            .gap(section_gap(cx))
+    /// In a group: its name and size, its machines, the devices waiting for
+    /// this machine, and the way out.
+    fn detail(&self, group: &GroupInfo, compact: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let count = if group.machines.len() == 1 {
+            crate::tr!("group.summary.machine_one")
+        } else {
+            crate::tr!("group.summary.machines", count = group.machines.len())
+        };
+        let name = row_frame(compact, cx)
             .debug_selector(|| "group-detail".into())
             .child(
-                v_flex()
-                    .px(px(CARD_INSET))
-                    .gap(cx.theme().tokens.spacing.xxs)
-                    .child(
-                        div()
-                            .text_title(cx)
-                            .overflow_hidden()
-                            .child(crate::widgets::fade_text(group.name.clone())),
-                    )
-                    .child(Self::note(
-                        if group.machines.len() == 1 {
-                            crate::tr!("group.summary.machine_one")
-                        } else {
-                            crate::tr!("group.summary.machines", count = group.machines.len())
-                        }
-                        .into_owned()
-                        .into(),
-                        compact,
-                        cx,
-                    )),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_body(compact, cx)
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(group.name.clone())),
             )
-            .child(div().px(px(CARD_INSET)).child(Self::note(
-                crate::tr!("group.detail_note").into_owned().into(),
-                compact,
-                cx,
-            )))
-            .child(self.machines_block(group, compact, cx))
-            .children(self.declined_block(group, compact, cx))
-            .child(
-                h_flex().px(px(CARD_INSET)).child(
-                    Button::new("group-leave")
-                        .ghost()
-                        .compact()
-                        .danger()
-                        .label(crate::tr!("group.leave"))
-                        .on_click(cx.listener(move |section, _, window, cx| {
-                            section.leave(&leave, window, cx);
-                        })),
-                ),
-            )
-            .into_any_element()
+            .child(div().flex_none().text_secondary(compact, cx).child(count))
+            .into_any_element();
+        let leave = group.clone();
+        let leave_row = crate::material::accessible_clickable(
+            group_row(cx),
+            "group-leave",
+            gpui::Role::Button,
+            crate::tr!("group.leave"),
+            cx,
+        )
+        .debug_selector(|| "group-leave".into())
+        .cursor_pointer()
+        .hover(|style| style.bg(cx.theme().list_hover))
+        .text_body(compact, cx)
+        .text_color(cx.theme().danger_foreground)
+        .child(crate::tr!("group.leave"))
+        .on_click(cx.listener(move |section, _, window, cx| {
+            section.leave(&leave, window, cx);
+        }))
+        .into_any_element();
+        let mut groups = vec![
+            settings_group(crate::tr!("group.section"), vec![name], cx)
+                .child(footnote(crate::tr!("group.detail_note"), compact, cx))
+                .into_any_element(),
+            self.machines_group(group, compact, cx),
+        ];
+        groups.extend(self.declined_group(group, compact, cx));
+        groups.push(
+            crate::material::group(cx)
+                .child(leave_row)
+                .into_any_element(),
+        );
+        groups
     }
 }
 
@@ -344,20 +322,23 @@ impl gpui::Render for GroupSection {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let spaces = self.spaces(cx);
         self.observer.watch(spaces.as_ref(), cx);
-        let Some(spaces) = spaces else {
-            return div().into_any_element();
-        };
-        let group = spaces.read(cx).group().cloned();
-        let body = match &group {
-            Some(group) => self.detail(group, compact, cx),
-            None => self.intro(compact, cx),
+        let body = match spaces.map(|spaces| spaces.read(cx).group().cloned()) {
+            None => vec![
+                settings_group(
+                    crate::tr!("group.section"),
+                    vec![empty_row(crate::tr!("remote.hosting_off"), cx).into_any_element()],
+                    cx,
+                )
+                .into_any_element(),
+            ],
+            Some(Some(group)) => self.detail(&group, compact, cx),
+            Some(None) => self.intro(compact, cx),
         };
         v_flex()
             .w_full()
+            .gap(section_gap(cx))
             .debug_selector(|| "group-section".into())
-            .child(group_caption(crate::tr!("group.section"), cx))
-            .child(crate::material::group(cx).child(body))
-            .into_any_element()
+            .children(body)
     }
 }
 
@@ -425,39 +406,22 @@ fn open_create(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
     window.open_dialog(cx, move |dialog, _, _| {
         let field = field.clone();
         let brought = brought.clone();
-        let ok = submit.clone();
-        let create = submit.clone();
-        dialog
-            .title(crate::tr!("group.create.title").into_owned())
-            .on_ok(move |_, window, cx| ok(window, cx))
-            .content(move |content, _, cx| {
-                content.child(
-                    v_flex()
-                        .gap_3()
-                        .debug_selector(|| "group-create-dialog".into())
-                        .child(Input::new(&field))
-                        .child(brought_warning(&brought, cx)),
-                )
-            })
-            .footer(
-                DialogActions::new()
-                    .child(
-                        Button::new("group-create-cancel")
-                            .label(crate::tr!("spaces.cancel"))
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
+        submit_actions(
+            dialog
+                .title(crate::tr!("group.create.title").into_owned())
+                .content(move |content, _, cx| {
+                    content.child(
+                        v_flex()
+                            .gap_3()
+                            .debug_selector(|| "group-create-dialog".into())
+                            .child(Input::new(&field))
+                            .child(brought_warning(&brought, cx)),
                     )
-                    .child(
-                        Button::new("group-create-ok")
-                            .debug_selector(|| "group-create-ok".into())
-                            .primary()
-                            .label(crate::tr!("group.create.confirm"))
-                            .on_click(move |_, window, cx| {
-                                if create(window, cx) {
-                                    window.close_dialog(cx);
-                                }
-                            }),
-                    ),
-            )
+                }),
+            "group-create",
+            crate::tr!("group.create.confirm").into_owned().into(),
+            submit.clone(),
+        )
     });
     name.update(cx, |name, cx| name.focus(window, cx));
 }
@@ -520,49 +484,33 @@ fn open_join(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
         let link_field = link_field.clone();
         let address_field = address_field.clone();
         let brought = brought.clone();
-        let ok = submit.clone();
-        let join = submit.clone();
-        dialog
-            .title(crate::tr!("group.join.title").into_owned())
-            .on_ok(move |_, window, cx| ok(window, cx))
-            .content(move |content, _, cx| {
-                content.child(
-                    v_flex()
-                        .gap_3()
-                        .debug_selector(|| "group-join-dialog".into())
-                        .child(
-                            div()
-                                .text_secondary(false, cx)
-                                .child(crate::tr!("group.join.description")),
-                        )
-                        .child(Input::new(&link_field))
-                        .child(
-                            div()
-                                .text_caption(cx)
-                                .child(crate::tr!("group.join.address")),
-                        )
-                        .child(Input::new(&address_field))
-                        .child(brought_warning(&brought, cx)),
-                )
-            })
-            .footer(
-                DialogActions::new()
-                    .child(
-                        Button::new("group-join-cancel")
-                            .label(crate::tr!("spaces.cancel"))
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
+        submit_actions(
+            dialog
+                .title(crate::tr!("group.join.title").into_owned())
+                .content(move |content, _, cx| {
+                    content.child(
+                        v_flex()
+                            .gap_3()
+                            .debug_selector(|| "group-join-dialog".into())
+                            .child(
+                                div()
+                                    .text_secondary(false, cx)
+                                    .child(crate::tr!("group.join.description")),
+                            )
+                            .child(Input::new(&link_field))
+                            .child(
+                                div()
+                                    .text_caption(cx)
+                                    .child(crate::tr!("group.join.address")),
+                            )
+                            .child(Input::new(&address_field))
+                            .child(brought_warning(&brought, cx)),
                     )
-                    .child(
-                        Button::new("group-join-ok")
-                            .primary()
-                            .label(crate::tr!("group.join.confirm"))
-                            .on_click(move |_, window, cx| {
-                                if join(window, cx) {
-                                    window.close_dialog(cx);
-                                }
-                            }),
-                    ),
-            )
+                }),
+            "group-join",
+            crate::tr!("group.join.confirm").into_owned().into(),
+            submit.clone(),
+        )
     });
     link.update(cx, |link, cx| link.focus(window, cx));
 }

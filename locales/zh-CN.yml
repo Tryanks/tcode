@@ -359,6 +359,9 @@ settings:
   plugins: "插件"
   plugins_section: "插件"
   remote: "远程连接"
+  spaces: "共享空间"
+  group: "主机组"
+  traverse: "Traverse"
   archived: "已归档对话"
   maintenance: "维护"
   archived_section: "已归档对话"
@@ -1319,6 +1322,8 @@ toast:
   hide_details: "收起详情"
   copy_error: "复制错误"
 remote:
+  failed: "无法更新远程连接：%{error}"
+  hosting_off: "本机未开启托管。请先在远程连接中开启。"
   host:
     section: "本机"
     title: "允许其他设备连接本机"
@@ -1328,7 +1333,7 @@ remote:
     title: "主机名称"
     description: "显示给其他设备。"
   traverse:
-    title: "Traverse"
+    section: "TRAVERSE"
     description: "让设备在其他网络中也能连接到这台机器的中继与查找服务。全部关闭时，设备只能在局域网内或通过在设备上输入的地址连接。"
     official: "官方 Traverse"
     custom: "自建 Traverse"
@@ -1339,18 +1344,17 @@ remote:
     add_title: "添加自建 Traverse"
     add: "添加"
     remove: "移除这个 Traverse 实例"
-    status:
-      while_hosting: "托管时显示"
+    chip:
       live: "已更新"
       cached: "缓存"
       bundled: "内置"
       failed: "失败"
-      relays: "%{count} 个中继"
-      relays_one: "1 个中继"
-      best: "最快 %{ms} ms（%{relay}）"
-      lookup_ok: "查找正常"
-      lookup_failed: "查找失败"
-      lookup_pending: "查找未检查"
+      unchecked: "未检查"
+    status:
+      live: "已更新"
+      cached: "缓存"
+      bundled: "内置"
+      failed: "失败"
       manifest: "清单"
       fetched: "%{time}获取"
       relays_title: "中继"
@@ -1597,13 +1601,13 @@ group:
     title: "组里的每一台主机都会接纳以下已与本机配对的设备："
     none: "本机还没有配对任何设备，因此不会带入任何设备。"
   machines:
-    title: "主机"
+    section: "主机"
     this: "本机"
     remove: "移除"
     remove_title: "将 %{name} 移出主机组？"
     remove_description: "从现在起，其他主机不再与它同步，也不再接纳它带来的设备。它已经带入的设备仍保有访问权限。"
   declined:
-    title: "等待本机接纳"
+    section: "等待本机接纳"
     description: "本机已关闭新设备配对期间，其他主机接纳了这些设备。"
     admit: "接纳"
   remove_device:

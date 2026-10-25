@@ -67,19 +67,47 @@ enum Section {
     Plugins,
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     Remote,
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    Spaces,
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    Group,
+    #[cfg(feature = "remote-hosting")]
+    Traverse,
     Archived,
     Maintenance,
 }
 
 /// Navigation order, shared by the desktop rail and the compact section list.
 /// Device-local settings come first; replicated settings for the attached
-/// machine follow. Remote configures the local desktop listener, or the serving
-/// headless listener in a browser. Choosing a machine, and the invitation other
-/// devices pair with, live in `crate::remote`.
-#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-const SECTIONS: [Section; 13] = [
+/// machine follow. Remote, Shared spaces, Machine group and Traverse configure
+/// the local desktop listener, or the serving headless listener in a browser;
+/// Traverse, the least used, comes last. Choosing a machine lives in
+/// `crate::remote`.
+#[cfg(feature = "remote-hosting")]
+const SECTIONS: [Section; 16] = [
     Section::General,
     Section::Remote,
+    Section::Spaces,
+    Section::Group,
+    Section::Traverse,
+    Section::Threads,
+    Section::Control,
+    Section::Providers,
+    Section::SourceControl,
+    Section::Usage,
+    Section::Orchestrate,
+    Section::Plugins,
+    Section::Archived,
+    Section::ComputerUse,
+    Section::Browser,
+    Section::Maintenance,
+];
+#[cfg(all(target_family = "wasm", not(feature = "remote-hosting")))]
+const SECTIONS: [Section; 15] = [
+    Section::General,
+    Section::Remote,
+    Section::Spaces,
+    Section::Group,
     Section::Threads,
     Section::Control,
     Section::Providers,
@@ -112,6 +140,61 @@ const SECTIONS: [Section; 12] = [
 enum SectionGroup {
     Device,
     Machine,
+}
+
+/// The group of the remote sections, which configure the listener of the
+/// machine this client runs on: a desktop's own, under This device. A browser
+/// has none, so they configure the machine serving it.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+fn remote_group() -> SectionGroup {
+    if cfg!(target_family = "wasm") {
+        SectionGroup::Machine
+    } else {
+        SectionGroup::Device
+    }
+}
+
+/// The remote sections' views: the machine's hosting switches, invitation
+/// and devices; its shared spaces; its group; and on a desktop, its Traverse
+/// sources.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+struct RemotePanels {
+    remote: gpui::AnyView,
+    spaces: Entity<crate::remote::SpacesSection>,
+    group: Entity<crate::remote::GroupSection>,
+    #[cfg(feature = "remote-hosting")]
+    traverse: Entity<crate::remote::TraversePanel>,
+}
+
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+impl RemotePanels {
+    /// A desktop manages its own listener; a browser, the machine serving it,
+    /// with that machine's pairing switch on the Remote page.
+    fn new(store: &Entity<WorkspaceStore>, window: &mut Window, cx: &mut App) -> Self {
+        #[cfg(feature = "remote-hosting")]
+        let (remote, resolve): (gpui::AnyView, crate::remote::spaces::Resolve) = (
+            cx.new(|cx| crate::remote::HostingPanel::new(store.clone(), window, cx))
+                .into(),
+            crate::remote::spaces::this_machine,
+        );
+        #[cfg(not(feature = "remote-hosting"))]
+        let (remote, resolve): (gpui::AnyView, crate::remote::spaces::Resolve) = {
+            let _ = window;
+            let resolve: crate::remote::spaces::Resolve = crate::remote::spaces::for_store;
+            (
+                cx.new(|_| crate::remote::AccessSection::new(store.clone(), resolve, true))
+                    .into(),
+                resolve,
+            )
+        };
+        Self {
+            remote,
+            spaces: cx.new(|_| crate::remote::SpacesSection::new(store.clone(), resolve)),
+            group: cx.new(|_| crate::remote::GroupSection::new(store.clone(), resolve)),
+            #[cfg(feature = "remote-hosting")]
+            traverse: cx.new(|cx| crate::remote::TraversePanel::new(window, cx)),
+        }
+    }
 }
 
 /// Capabilities relevant to Settings applicability. The OS-specific questions
@@ -159,13 +242,9 @@ impl Section {
         match self {
             Self::General => SectionGroup::Device,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-            Self::Remote => {
-                if cfg!(target_family = "wasm") {
-                    SectionGroup::Machine
-                } else {
-                    SectionGroup::Device
-                }
-            }
+            Self::Remote | Self::Spaces | Self::Group => remote_group(),
+            #[cfg(feature = "remote-hosting")]
+            Self::Traverse => remote_group(),
             Self::Threads
             | Self::ProjectThreadRules
             | Self::SourceControl
@@ -195,7 +274,9 @@ impl Section {
         match self {
             Self::Browser => cx.preview_backend,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-            Self::Remote => cx.hosting,
+            Self::Remote | Self::Spaces | Self::Group => cx.hosting,
+            #[cfg(feature = "remote-hosting")]
+            Self::Traverse => cx.hosting,
             Self::Threads
             | Self::ProjectThreadRules
             | Self::General
@@ -233,6 +314,12 @@ impl Section {
             Self::Plugins => "settings-nav-plugins",
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => "settings-nav-remote",
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            Self::Spaces => "settings-nav-spaces",
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            Self::Group => "settings-nav-group",
+            #[cfg(feature = "remote-hosting")]
+            Self::Traverse => "settings-nav-traverse",
             Self::Archived => "settings-nav-archived",
             Self::Maintenance => "settings-nav-maintenance",
         }
@@ -252,6 +339,12 @@ impl Section {
             Self::Plugins => IconName::Puzzle,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => IconName::Network,
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            Self::Spaces => IconName::Users,
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            Self::Group => IconName::HardDrive,
+            #[cfg(feature = "remote-hosting")]
+            Self::Traverse => IconName::Link,
             Self::Archived => IconName::Inbox,
             Self::Maintenance => IconName::Settings2,
         }
@@ -271,6 +364,12 @@ impl Section {
             Self::Plugins => crate::tr!("settings.plugins"),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => crate::tr!("settings.remote"),
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            Self::Spaces => crate::tr!("settings.spaces"),
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            Self::Group => crate::tr!("settings.group"),
+            #[cfg(feature = "remote-hosting")]
+            Self::Traverse => crate::tr!("settings.traverse"),
             Self::Archived => crate::tr!("settings.archived"),
             Self::Maintenance => crate::tr!("settings.maintenance"),
         }
@@ -344,12 +443,9 @@ pub struct SettingsPage {
     /// Each enabled profile's native plugin catalog.
     plugins_panel: Entity<PluginsSettingsPanel>,
     source_control_panel: Entity<crate::source_control_settings::SourceControlPanel>,
-    /// Hosting this machine. Absent where the client cannot listen at all.
+    /// The remote sections. Absent where the client cannot listen at all.
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-    #[cfg(not(target_family = "wasm"))]
-    hosting_panel: Entity<crate::remote::HostingPanel>,
-    #[cfg(target_family = "wasm")]
-    hosting_panel: Entity<crate::remote::hosted::HostedPanel>,
+    remote: RemotePanels,
     /// Shared provider/model picker configured for background thread titles.
     title_model_picker: Entity<ProviderModelPicker>,
     /// Shared provider/model picker configured for fallback reviews.
@@ -415,6 +511,12 @@ impl SettingsPage {
                 "plugins" => Section::Plugins,
                 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
                 "remote" => Section::Remote,
+                #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+                "spaces" => Section::Spaces,
+                #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+                "group" => Section::Group,
+                #[cfg(feature = "remote-hosting")]
+                "traverse" => Section::Traverse,
                 "archived" => Section::Archived,
                 "thread_behavior" | "threads" => Section::Threads,
                 "maintenance" => Section::Maintenance,
@@ -546,11 +648,7 @@ impl SettingsPage {
             )
         });
         #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-        #[cfg(not(target_family = "wasm"))]
-        let hosting_panel =
-            cx.new(|cx| crate::remote::HostingPanel::new(store.clone(), window, cx));
-        #[cfg(target_family = "wasm")]
-        let hosting_panel = cx.new(|cx| crate::remote::hosted::HostedPanel::new(store.clone(), cx));
+        let remote = RemotePanels::new(&store, window, cx);
         // Editable fields start empty and are seeded by `hydrate_inputs` once
         // the host's settings actually arrive, so a portable client never shows
         // its local defaults as if they were the host's configuration.
@@ -589,7 +687,7 @@ impl SettingsPage {
             plugins_panel,
             source_control_panel,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-            hosting_panel,
+            remote,
             title_model_picker,
             fallback_review_model_picker,
             device_name_input: SettingsInput {
@@ -1286,7 +1384,13 @@ impl SettingsPage {
             Section::Control => self.render_control(cx),
             Section::Plugins => v_flex().child(self.plugins_panel.clone()),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-            Section::Remote => v_flex().child(self.hosting_panel.clone()),
+            Section::Remote => v_flex().child(self.remote.remote.clone()),
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            Section::Spaces => v_flex().child(self.remote.spaces.clone()),
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            Section::Group => v_flex().child(self.remote.group.clone()),
+            #[cfg(feature = "remote-hosting")]
+            Section::Traverse => v_flex().child(self.remote.traverse.clone()),
             Section::Archived => self.render_archived(cx),
             Section::Maintenance => self.render_maintenance(cx),
         };
