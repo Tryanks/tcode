@@ -359,6 +359,9 @@ settings:
   plugins: "Plugins"
   plugins_section: "PLUGINS"
   remote: "Remote"
+  spaces: "Shared spaces"
+  group: "Machine group"
+  traverse: "Traverse"
   archived: "Archived Threads"
   maintenance: "Maintenance"
   archived_section: "ARCHIVED THREADS"
@@ -1326,6 +1329,8 @@ toast:
   hide_details: "Hide details"
   copy_error: "Copy error"
 remote:
+  failed: "Could not update remote access: %{error}"
+  hosting_off: "This machine is not hosting. Turn it on in Remote first."
   host:
     section: "THIS MACHINE"
     title: "Let other devices connect to this machine"
@@ -1335,7 +1340,7 @@ remote:
     title: "Machine name"
     description: "Shown to other devices."
   traverse:
-    title: "Traverse"
+    section: "TRAVERSE"
     description: "Relay and lookup services that let devices reach this machine off its network. With all of them off, devices reach it on the LAN or at an address entered on the device."
     official: "Official Traverse"
     custom: "Self-hosted Traverse"
@@ -1346,18 +1351,17 @@ remote:
     add_title: "Add self-hosted Traverse"
     add: "Add"
     remove: "Remove this Traverse instance"
+    chip:
+      live: "Live"
+      cached: "Cached"
+      bundled: "Bundled"
+      failed: "Failed"
+      unchecked: "Unchecked"
     status:
-      while_hosting: "Shown while hosting"
       live: "live"
       cached: "cached"
       bundled: "bundled"
       failed: "failed"
-      relays: "%{count} relays"
-      relays_one: "1 relay"
-      best: "best %{ms} ms (%{relay})"
-      lookup_ok: "lookup ok"
-      lookup_failed: "lookup failed"
-      lookup_pending: "lookup unchecked"
       manifest: "Manifest"
       fetched: "fetched %{time}"
       relays_title: "Relays"
@@ -1604,13 +1608,13 @@ group:
     title: "Every machine in the group will admit these devices, which are paired with this machine now:"
     none: "No devices are paired with this machine yet, so none are brought into the group."
   machines:
-    title: "Machines"
+    section: "MACHINES"
     this: "This machine"
     remove: "Remove"
     remove_title: "Remove %{name} from the group?"
     remove_description: "The other machines stop syncing with it and stop admitting the devices it brings from now on. Devices it already brought keep their access."
   declined:
-    title: "Waiting for this machine"
+    section: "WAITING FOR THIS MACHINE"
     description: "Other machines admitted these devices while this machine was not accepting new devices."
     admit: "Admit"
   remove_device:

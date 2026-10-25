@@ -12,11 +12,17 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
+
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EntityId, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
 };
 use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
@@ -26,7 +32,7 @@ use tcode_core::project::Project;
 use tcode_protocol::{GroupAction, GroupInfo, HostedDevice};
 use tcode_protocol::{HostingAction, HostingState, SpaceAction, SpaceInfo};
 
-use super::report;
+use super::{Submit, report, submit_actions};
 use crate::icon::Icon;
 use crate::overlay::{DialogActions, Notification, OverlayExt as _};
 use crate::store::WorkspaceStore;
@@ -62,6 +68,8 @@ enum SpacesHost {
 pub(crate) struct Spaces {
     host: SpacesHost,
     state: Option<HostingState>,
+    /// When `state` was read: its invitation's lifetime counts down from then.
+    read_at: Instant,
     /// Bumped by every change made here, so a read that was in flight across
     /// it cannot put back what the change replaced.
     generation: u64,
@@ -96,6 +104,7 @@ impl Spaces {
         let mut spaces = Self {
             host,
             state: None,
+            read_at: Instant::now(),
             generation: 0,
             refreshing: false,
             #[cfg(feature = "remote-hosting")]
@@ -138,6 +147,24 @@ impl Spaces {
     /// only while it does.
     pub(crate) fn accepting(&self) -> bool {
         self.state.as_ref().is_some_and(|state| state.enabled)
+    }
+
+    /// Whether the machine has answered at least once.
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    pub(crate) fn loaded(&self) -> bool {
+        self.state.is_some()
+    }
+
+    /// The machine's invitation link and the seconds it has left, or `None`
+    /// once it has expired.
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    pub(crate) fn invitation(&self) -> Option<(String, u64)> {
+        let state = self.state.as_ref()?;
+        let remaining = state
+            .expires_in_secs
+            .saturating_sub(self.read_at.elapsed().as_secs());
+        let link = state.invite.clone()?;
+        (remaining > 0).then_some((link, remaining))
     }
 
     /// The names of the spaces sharing `project_id`.
@@ -220,12 +247,13 @@ impl Spaces {
     }
 
     fn set_state(&mut self, state: Option<HostingState>, cx: &mut Context<Self>) {
-        // The invitation countdown changes every read; only what spaces show
-        // is worth a repaint.
+        // The invitation's countdown changes every read and is kept from
+        // `read_at`; only what the views show is worth a repaint.
         let shown = |state: &Option<HostingState>| {
             state.as_ref().map(|state| {
                 (
                     state.enabled,
+                    state.invite.clone(),
                     state.spaces.clone(),
                     state.devices.clone(),
                     state.group.clone(),
@@ -234,6 +262,7 @@ impl Spaces {
         };
         let changed = shown(&self.state) != shown(&state);
         self.state = state;
+        self.read_at = Instant::now();
         if changed {
             cx.notify();
         }
@@ -256,7 +285,18 @@ impl Spaces {
         action: GroupAction,
         cx: &mut Context<Self>,
     ) -> Task<Result<HostingState, String>> {
-        self.run(vec![HostingAction::Group(action)], cx)
+        self.act_hosting(HostingAction::Group(action), cx)
+    }
+
+    /// Change how the machine admits devices: pairing, its invitation, a
+    /// device's access.
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    pub(crate) fn act_hosting(
+        &mut self,
+        action: HostingAction,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<HostingState, String>> {
+        self.run(vec![action], cx)
     }
 
     fn run(
@@ -628,8 +668,6 @@ pub(crate) fn shared_badge(project_id: &str, names: &[String], cx: &App) -> AnyE
 }
 
 type Created = Rc<dyn Fn(&SpaceInfo, &mut Window, &mut App)>;
-/// A dialog's confirmation; `false` keeps the dialog open.
-type Submit = Rc<dyn Fn(&mut Window, &mut App) -> bool>;
 
 /// Name a new space. With `share`, the project is added once the space
 /// exists. The disclosure is part of the decision, so it is never optional.
@@ -678,12 +716,8 @@ pub(crate) fn open_create(
     let field = name.clone();
     window.open_dialog(cx, move |dialog, _, _| {
         let field = field.clone();
-        let ok = submit.clone();
-        let create = submit.clone();
-        dialog
-            .title(title.clone())
-            .on_ok(move |_, window, cx| ok(window, cx))
-            .content(move |content, _, cx| {
+        submit_actions(
+            dialog.title(title.clone()).content(move |content, _, cx| {
                 content.child(
                     v_flex()
                         .gap_3()
@@ -695,25 +729,11 @@ pub(crate) fn open_create(
                                 .child(crate::tr!("spaces.create.disclosure")),
                         ),
                 )
-            })
-            .footer(
-                DialogActions::new()
-                    .child(
-                        Button::new("spaces-create-cancel")
-                            .label(crate::tr!("spaces.cancel"))
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        Button::new("spaces-create-ok")
-                            .primary()
-                            .label(crate::tr!("spaces.create.action"))
-                            .on_click(move |_, window, cx| {
-                                if create(window, cx) {
-                                    window.close_dialog(cx);
-                                }
-                            }),
-                    ),
-            )
+            }),
+            "spaces-create",
+            crate::tr!("spaces.create.action").into_owned().into(),
+            submit.clone(),
+        )
     });
     name.update(cx, |name, cx| name.focus(window, cx));
 }
@@ -755,7 +775,8 @@ fn open_shared(
     window: &mut Window,
     cx: &mut App,
 ) {
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let model = spaces.read(cx);
         let Some(space) = model.space(&space_id).cloned() else {
             return dialog;
@@ -767,7 +788,15 @@ fn open_shared(
         dialog
             .title(title)
             .content(move |content, _, cx| {
-                content.child(link_body(&space, accepting, description.clone(), true, cx))
+                content.child(link_block(
+                    &space,
+                    accepting,
+                    description.clone(),
+                    true,
+                    None,
+                    compact,
+                    cx,
+                ))
             })
             .footer(
                 DialogActions::new().child(
@@ -808,34 +837,59 @@ fn link_unavailable(space: &SpaceInfo, accepting: bool) -> Option<SharedString> 
     )
 }
 
-/// A space's link as the dialog after sharing shows it: the QR, the line
-/// about it and Copy — or why there is no link.
-fn link_body(
+/// Retire a space's link for a new one.
+type Regenerate = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// A space's link: its QR beside `description`, with Copy where `copy` and
+/// Regenerate where `regenerate` is given — or, without a link, why not,
+/// with Regenerate when that is what brings it back.
+fn link_block(
     space: &SpaceInfo,
     accepting: bool,
     description: String,
+    copy: bool,
+    regenerate: Option<Regenerate>,
     compact: bool,
     cx: &App,
 ) -> AnyElement {
+    let regenerate_button = |regenerate: Regenerate| {
+        Button::new(SharedString::from(format!("space-regenerate-{}", space.id)))
+            .compact()
+            .label(crate::tr!("spaces.link.regenerate"))
+            .on_click(move |_, window, cx| regenerate(window, cx))
+    };
     let Some(link) = space.link.clone() else {
         let reason = link_unavailable(space, accepting).unwrap_or_default();
-        return div()
-            .text_secondary(false, cx)
-            .text_color(if space.link_dead {
-                cx.theme().danger_foreground
-            } else {
-                cx.theme().muted_foreground
+        return h_flex()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .flex_wrap()
+            .child(
+                div()
+                    .flex_1()
+                    // The narrowest the reason gets before the button wraps
+                    // under it: a layout breakpoint.
+                    .min_w(px(160.))
+                    .text_secondary(compact, cx)
+                    .text_color(if space.link_dead {
+                        cx.theme().danger_foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .child(reason),
+            )
+            .when_some(regenerate.filter(|_| space.link_dead), |row, regenerate| {
+                row.child(regenerate_button(regenerate).primary())
             })
-            .child(reason)
             .into_any_element();
     };
-    let text = v_flex()
-        .flex_1()
-        .min_w_0()
-        .gap_3()
-        .child(div().text_secondary(false, cx).child(description))
-        .child(
-            h_flex().gap_2().flex_wrap().child(
+    let has_actions = copy || regenerate.is_some();
+    let actions = h_flex()
+        .gap_2()
+        .flex_wrap()
+        .when(copy, |actions| {
+            actions.child(
                 Button::new(SharedString::from(format!("space-copy-{}", space.id)))
                     .ghost()
                     .outline()
@@ -845,13 +899,62 @@ fn link_body(
                         let link = link.clone();
                         move |_, window, cx| copy_link(link.clone(), window, cx)
                     }),
-            ),
-        );
-    super::qr::beside_qr(text, &link, compact, cx).into_any_element()
+            )
+        })
+        .when_some(regenerate, |actions, regenerate| {
+            actions.child(regenerate_button(regenerate).ghost().outline())
+        });
+    let text = v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_3()
+        .child(div().text_secondary(compact, cx).child(description))
+        .when(has_actions, |text| text.child(actions));
+    super::qr::beside_qr(text, &link, compact, cx)
+        .debug_selector(|| "space-link".into())
+        .into_any_element()
 }
 
+/// "2 projects · 3 members · 1 online".
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-pub(crate) use section::SpacesSection;
+fn summary(space: &SpaceInfo) -> String {
+    let counted = |one: &str, many: &str, count: usize| {
+        if count == 1 {
+            crate::tr!(one).into_owned()
+        } else {
+            crate::tr!(many, count = count).into_owned()
+        }
+    };
+    let mut parts = vec![
+        counted(
+            "spaces.summary.project_one",
+            "spaces.summary.projects",
+            space.project_ids.len(),
+        ),
+        counted(
+            "spaces.summary.member_one",
+            "spaces.summary.members",
+            space.members.len(),
+        ),
+    ];
+    let online = space
+        .members
+        .iter()
+        .filter(|member| member.path.is_some())
+        .count();
+    if online > 0 {
+        parts.push(crate::tr!("spaces.summary.online", count = online).into_owned());
+    }
+    parts.join(" · ")
+}
+
+/// Which machine a hosting view manages, given the window's attachment:
+/// [`this_machine`] or [`for_store`].
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+pub(crate) type Resolve = fn(&Entity<WorkspaceStore>, &mut App) -> Option<Entity<Spaces>>;
+
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+pub(crate) use section::{SpacesSection, member_badge};
 
 #[cfg(feature = "remote-hosting")]
 pub(super) use machines::machine_links;
@@ -860,15 +963,14 @@ pub(super) use machines::machine_links;
 mod section {
     use super::*;
     use crate::icon::IconName;
+    use crate::material::{group_caption, group_row, grouped};
     use crate::overlay::DialogButtons;
-    use crate::settings_rows::ToggleRow;
+    use crate::scroll::ScrollableElement as _;
+    use crate::settings_rows::{ToggleRow, footnote, row_frame, settings_group};
     use crate::sizing::Sizable as _;
     use crate::widgets::ButtonVariant;
     use crate::widgets::checkbox::Checkbox;
     use crate::widgets::menu::DropdownMenu as _;
-    use gpui::prelude::FluentBuilder as _;
-    use gpui::px;
-    use tcode_protocol::HostedDevice;
 
     /// Move a member to another space.
     #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -878,193 +980,40 @@ mod section {
         space_id: String,
     }
 
-    type Resolve = fn(&Entity<WorkspaceStore>, &mut App) -> Option<Entity<Spaces>>;
-
-    /// Settings → Remote's spaces: one row per space, the selected one open
-    /// on its link, projects and members.
+    /// Settings → Shared spaces: one row per space, which opens the space's
+    /// dialog.
     pub(crate) struct SpacesSection {
         store: Entity<WorkspaceStore>,
         resolve: Resolve,
-        expanded: Option<String>,
         observer: SpacesObserver,
     }
 
     impl SpacesSection {
-        /// `resolve` names the machine: this one for the hosting panel, the
-        /// attached one for the browser's.
+        /// `resolve` names the machine: this one for the desktop's settings,
+        /// the attached one for the browser's.
         pub(crate) fn new(store: Entity<WorkspaceStore>, resolve: Resolve) -> Self {
             Self {
                 store,
                 resolve,
-                expanded: None,
                 observer: SpacesObserver::default(),
             }
         }
 
-        fn act(&mut self, action: SpaceAction, window: &mut Window, cx: &mut Context<Self>) {
+        fn open(&mut self, space_id: String, window: &mut Window, cx: &mut Context<Self>) {
             if let Some(spaces) = (self.resolve)(&self.store, cx) {
-                let task = spaces.update(cx, |spaces, cx| spaces.act(vec![action], cx));
-                report("spaces.failed", task, window, cx);
+                open_space(spaces, space_id, window, cx);
             }
-        }
-
-        fn on_toggle_share(
-            &mut self,
-            action: &ToggleShare,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            if let Some(spaces) = (self.resolve)(&self.store, cx) {
-                toggle_share(&spaces, action, window, cx);
-            }
-        }
-
-        fn on_move_member(
-            &mut self,
-            action: &MoveMember,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            self.act(
-                SpaceAction::MoveMember {
-                    device_id: action.device_id.clone(),
-                    space_id: action.space_id.clone(),
-                },
-                window,
-                cx,
-            );
         }
 
         fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             let Some(spaces) = (self.resolve)(&self.store, cx) else {
                 return;
             };
-            let section = cx.entity().downgrade();
+            let shown = spaces.clone();
             open_create(
                 spaces,
                 None,
-                move |space, _, cx| {
-                    let id = space.id.clone();
-                    let _ = section.update(cx, |section, cx| {
-                        section.expanded = Some(id);
-                        cx.notify();
-                    });
-                },
-                window,
-                cx,
-            );
-        }
-
-        fn rename(&mut self, space: &SpaceInfo, window: &mut Window, cx: &mut Context<Self>) {
-            let Some(spaces) = (self.resolve)(&self.store, cx) else {
-                return;
-            };
-            let name = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(crate::tr!("spaces.create.placeholder"))
-                    .default_value(space.name.clone())
-            });
-            let id = space.id.clone();
-            let submit: Submit = Rc::new({
-                let name = name.clone();
-                move |window, cx| {
-                    let typed = name.read(cx).value().trim().to_owned();
-                    if typed.is_empty() {
-                        return false;
-                    }
-                    let task = spaces.update(cx, |spaces, cx| {
-                        spaces.act(
-                            vec![SpaceAction::Rename {
-                                id: id.clone(),
-                                name: typed,
-                            }],
-                            cx,
-                        )
-                    });
-                    report("spaces.failed", task, window, cx);
-                    true
-                }
-            });
-            let field = name.clone();
-            window.open_dialog(cx, move |dialog, _, _| {
-                let field = field.clone();
-                let ok = submit.clone();
-                let save = submit.clone();
-                dialog
-                    .title(crate::tr!("spaces.rename_title").into_owned())
-                    .on_ok(move |_, window, cx| ok(window, cx))
-                    .content(move |content, _, _| content.child(Input::new(&field)))
-                    .footer(
-                        DialogActions::new()
-                            .child(
-                                Button::new("spaces-rename-cancel")
-                                    .label(crate::tr!("spaces.cancel"))
-                                    .on_click(|_, window, cx| window.close_dialog(cx)),
-                            )
-                            .child(
-                                Button::new("spaces-rename-ok")
-                                    .primary()
-                                    .label(crate::tr!("spaces.rename_action"))
-                                    .on_click(move |_, window, cx| {
-                                        if save(window, cx) {
-                                            window.close_dialog(cx);
-                                        }
-                                    }),
-                            ),
-                    )
-            });
-            name.update(cx, |name, cx| name.focus(window, cx));
-        }
-
-        fn delete(&mut self, space: &SpaceInfo, window: &mut Window, cx: &mut Context<Self>) {
-            let Some(spaces) = (self.resolve)(&self.store, cx) else {
-                return;
-            };
-            let id = space.id.clone();
-            let name = space.name.clone();
-            let members = space.members.len();
-            window.open_alert_dialog(cx, move |alert, _, _| {
-                let spaces = spaces.clone();
-                let id = id.clone();
-                alert
-                    .title(quoted("spaces.delete_title", &name))
-                    .description(if members == 0 {
-                        crate::tr!("spaces.delete_description_empty")
-                    } else {
-                        crate::tr!("spaces.delete_description")
-                    })
-                    .button_props(
-                        DialogButtons::default()
-                            .ok_variant(ButtonVariant::Danger)
-                            .ok_text(crate::tr!("spaces.delete_action"))
-                            .cancel_text(crate::tr!("spaces.cancel"))
-                            .show_cancel(true),
-                    )
-                    .on_ok(move |_, window, cx| {
-                        let task = spaces.update(cx, |spaces, cx| {
-                            spaces.act(vec![SpaceAction::Delete { id: id.clone() }], cx)
-                        });
-                        report("spaces.failed", task, window, cx);
-                        true
-                    })
-            });
-        }
-
-        fn remove_member(
-            &mut self,
-            space: &SpaceInfo,
-            member: &HostedDevice,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            let Some(spaces) = (self.resolve)(&self.store, cx) else {
-                return;
-            };
-            open_remove_member(
-                spaces,
-                space.name.clone(),
-                member.id.clone(),
-                member.name.clone(),
+                move |space, window, cx| open_space(shown.clone(), space.id.clone(), window, cx),
                 window,
                 cx,
             );
@@ -1073,7 +1022,6 @@ mod section {
         fn space_row(
             &self,
             space: &SpaceInfo,
-            expanded: bool,
             compact: bool,
             cx: &mut Context<Self>,
         ) -> AnyElement {
@@ -1094,43 +1042,29 @@ mod section {
                 None
             };
             crate::material::accessible_clickable(
-                crate::material::group_row(cx),
+                group_row(cx),
                 SharedString::from(format!("space-row-{id}")),
                 gpui::Role::Button,
                 space.name.clone(),
                 cx,
             )
-            .aria_expanded(expanded)
             .debug_selector({
                 let id = id.clone();
                 move || format!("space-row-{id}")
             })
             .cursor_pointer()
             .hover(|style| style.bg(cx.theme().list_hover))
-            .on_click(cx.listener(move |section, _, _, cx| {
-                section.expanded = if section.expanded.as_deref() == Some(id.as_str()) {
-                    None
-                } else {
-                    Some(id.clone())
-                };
-                cx.notify();
+            .on_click(cx.listener(move |section, _, window, cx| {
+                section.open(id.clone(), window, cx);
             }))
-            .child(
-                Icon::new(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .text_color(cx.theme().muted_foreground),
-            )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(cx.theme().tokens.spacing.xxs)
+                    .gap_0p5()
                     .child(
                         div()
-                            .text_title(cx)
+                            .text_body(compact, cx)
                             .overflow_hidden()
                             .child(crate::widgets::fade_text(space.name.clone())),
                     )
@@ -1139,10 +1073,99 @@ mod section {
             .children(
                 status.map(|(label, bg, fg)| crate::material::semantic_chip(label, bg, fg, cx)),
             )
+            .child(Icon::new(IconName::ChevronRight).text_color(cx.theme().muted_foreground))
             .into_any_element()
         }
+    }
 
-        fn link_block(
+    impl gpui::Render for SpacesSection {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let compact = crate::window_seam::window_is_compact(window, cx);
+            let spaces = (self.resolve)(&self.store, cx);
+            self.observer.watch(spaces.as_ref(), cx);
+            let Some(spaces) = spaces else {
+                return settings_group(
+                    crate::tr!("spaces.section"),
+                    vec![
+                        crate::material::empty_row(crate::tr!("remote.hosting_off"), cx)
+                            .into_any_element(),
+                    ],
+                    cx,
+                )
+                .debug_selector(|| "spaces-section".into())
+                .into_any_element();
+            };
+            let list = spaces.read(cx).spaces().to_vec();
+            let mut rows = list
+                .iter()
+                .map(|space| self.space_row(space, compact, cx))
+                .collect::<Vec<_>>();
+            rows.push(
+                group_row(cx)
+                    .child(
+                        Button::new("spaces-new")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Plus)
+                            .label(crate::tr!("spaces.new"))
+                            .on_click(
+                                cx.listener(|section, _, window, cx| section.create(window, cx)),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+            v_flex()
+                .w_full()
+                .debug_selector(|| "spaces-section".into())
+                .child(group_caption(crate::tr!("spaces.section"), cx))
+                .child(grouped(rows, cx))
+                .child(footnote(crate::tr!("spaces.intro"), compact, cx))
+                .into_any_element()
+        }
+    }
+
+    /// One space as its dialog shows it: the link, the projects and the
+    /// members. It follows the space, so a change made anywhere shows here.
+    struct SpaceDialog {
+        spaces: Entity<Spaces>,
+        space_id: String,
+        _observe: Subscription,
+    }
+
+    impl SpaceDialog {
+        fn act(&self, action: SpaceAction, window: &mut Window, cx: &mut App) {
+            let task = self
+                .spaces
+                .update(cx, |spaces, cx| spaces.act(vec![action], cx));
+            report("spaces.failed", task, window, cx);
+        }
+
+        fn on_toggle_share(
+            &mut self,
+            action: &ToggleShare,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            toggle_share(&self.spaces, action, window, cx);
+        }
+
+        fn on_move_member(
+            &mut self,
+            action: &MoveMember,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.act(
+                SpaceAction::MoveMember {
+                    device_id: action.device_id.clone(),
+                    space_id: action.space_id.clone(),
+                },
+                window,
+                cx,
+            );
+        }
+
+        fn link_section(
             &self,
             space: &SpaceInfo,
             accepting: bool,
@@ -1150,97 +1173,45 @@ mod section {
             cx: &mut Context<Self>,
         ) -> AnyElement {
             let id = space.id.clone();
-            let regenerate = |cx: &mut Context<Self>| {
-                let id = id.clone();
-                Button::new(SharedString::from(format!("space-regenerate-{id}")))
-                    .compact()
-                    .label(crate::tr!("spaces.link.regenerate"))
-                    .on_click(cx.listener(move |section, _, window, cx| {
-                        section.act(SpaceAction::RegenerateLink { id: id.clone() }, window, cx);
-                    }))
-            };
-            let body = match &space.link {
-                Some(link) => {
-                    let text = v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_secondary(compact, cx)
-                                .child(quoted("spaces.link.description", &space.name)),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .flex_wrap()
-                                .child(
-                                    Button::new(SharedString::from(format!("space-copy-{id}")))
-                                        .ghost()
-                                        .outline()
-                                        .compact()
-                                        .label(crate::tr!("spaces.link.copy"))
-                                        .on_click({
-                                            let link = link.clone();
-                                            move |_, window, cx| copy_link(link.clone(), window, cx)
-                                        }),
-                                )
-                                .child(regenerate(cx).ghost().outline()),
-                        );
-                    super::super::qr::beside_qr(text, link, compact, cx)
-                        .debug_selector(|| "space-link".into())
-                        .into_any_element()
+            let regenerate: Regenerate = Rc::new({
+                let (spaces, id) = (self.spaces.clone(), id.clone());
+                move |window, cx| {
+                    let task = spaces.update(cx, |spaces, cx| {
+                        spaces.act(vec![SpaceAction::RegenerateLink { id: id.clone() }], cx)
+                    });
+                    report("spaces.failed", task, window, cx);
                 }
-                None => {
-                    let reason = link_unavailable(space, accepting).unwrap_or_default();
-                    h_flex()
-                        .w_full()
-                        .gap_3()
-                        .items_center()
-                        .flex_wrap()
-                        .child(
-                            div()
-                                .flex_1()
-                                // The narrowest the reason gets before the
-                                // button wraps under it: a layout breakpoint.
-                                .min_w(px(160.))
-                                .text_secondary(compact, cx)
-                                .text_color(if space.link_dead {
-                                    cx.theme().danger_foreground
-                                } else {
-                                    cx.theme().muted_foreground
-                                })
-                                .child(reason),
-                        )
-                        .when(space.link_dead, |row| row.child(regenerate(cx).primary()))
-                        .into_any_element()
-                }
-            };
-            let toggle_id = space.id.clone();
-            v_flex()
-                .w_full()
-                .gap_3()
-                .child(div().px(px(crate::material::CARD_INSET)).child(body))
-                .child(ToggleRow::new(
+            });
+            crate::material::section(None, cx)
+                .child(link_block(
+                    space,
+                    accepting,
+                    quoted("spaces.link.description", &space.name),
+                    true,
+                    Some(regenerate),
+                    compact,
+                    cx,
+                ))
+                .child(crate::material::group(cx).child(ToggleRow::new(
                     SharedString::from(format!("space-link-enabled-{id}")),
                     crate::tr!("spaces.link.enabled"),
                     space.link_enabled,
                     compact,
-                    cx.listener(move |section, enabled: &bool, window, cx| {
-                        section.act(
+                    cx.listener(move |dialog, enabled: &bool, window, cx| {
+                        dialog.act(
                             SpaceAction::SetLinkEnabled {
-                                id: toggle_id.clone(),
+                                id: id.clone(),
                                 enabled: *enabled,
                             },
                             window,
                             cx,
                         );
                     }),
-                ))
+                )))
                 .into_any_element()
         }
 
-        fn projects_block(
+        fn projects_section(
             &self,
             space: &SpaceInfo,
             projects: Option<&[Project]>,
@@ -1292,8 +1263,8 @@ mod section {
                         .icon(IconName::Close)
                         .aria_label(crate::tr!("spaces.projects.remove", name = label))
                         .on_click(cx.listener(
-                            move |section, _, window, cx| {
-                                section.on_toggle_share(&action, window, cx);
+                            move |dialog, _, window, cx| {
+                                dialog.on_toggle_share(&action, window, cx);
                             },
                         )),
                     ),
@@ -1333,38 +1304,32 @@ mod section {
                             menu
                         })
                 });
-            v_flex()
-                .w_full()
-                .child(crate::material::group_caption(
-                    crate::tr!("spaces.projects.title"),
-                    cx,
-                ))
-                .child(
-                    v_flex()
-                        .w_full()
-                        .px(px(crate::material::CARD_INSET))
-                        .gap(cx.theme().tokens.spacing.sm)
-                        .when(space.project_ids.is_empty(), |column| {
-                            column.child(
-                                div()
-                                    .text_secondary(compact, cx)
-                                    .child(crate::tr!("spaces.projects.empty")),
-                            )
-                        })
-                        .when(!space.project_ids.is_empty(), |column| column.child(chips))
-                        .children(add.map(|add| h_flex().child(add))),
+            crate::material::section(
+                Some(crate::tr!("spaces.projects.title").into_owned().into()),
+                cx,
+            )
+            .when(space.project_ids.is_empty(), |section| {
+                section.child(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("spaces.projects.empty")),
                 )
-                .into_any_element()
+            })
+            .when(!space.project_ids.is_empty(), |section| {
+                section.child(chips)
+            })
+            .children(add.map(|add| h_flex().child(add)))
+            .into_any_element()
         }
 
-        fn members_block(
+        fn members_section(
             &self,
             space: &SpaceInfo,
             others: &[(String, String)],
             compact: bool,
             cx: &mut Context<Self>,
         ) -> AnyElement {
-            let mut rows = v_flex().w_full();
+            let mut rows = Vec::new();
             for member in &space.members {
                 let status_color = match &member.path {
                     Some(_) => cx.theme().success,
@@ -1390,8 +1355,8 @@ mod section {
                             menu
                         })
                 });
-                let remove_space = space.clone();
-                let remove_member = member.clone();
+                let space_name = space.name.clone();
+                let (member_id, member_name) = (member.id.clone(), member.name.clone());
                 let controls = h_flex()
                     .gap_2()
                     .items_center()
@@ -1415,8 +1380,15 @@ mod section {
                             .compact()
                             .danger()
                             .label(crate::tr!("spaces.members.remove"))
-                            .on_click(cx.listener(move |section, _, window, cx| {
-                                section.remove_member(&remove_space, &remove_member, window, cx);
+                            .on_click(cx.listener(move |dialog, _, window, cx| {
+                                open_remove_member(
+                                    dialog.spaces.clone(),
+                                    space_name.clone(),
+                                    member_id.clone(),
+                                    member_name.clone(),
+                                    window,
+                                    cx,
+                                );
                             })),
                     );
                 let name = div()
@@ -1428,180 +1400,196 @@ mod section {
                         &member.name,
                         member.platform.as_deref(),
                     )));
-                rows = rows.child(
-                    if compact {
-                        crate::material::group_row_stacked(cx)
-                    } else {
-                        crate::material::group_row(cx)
-                    }
-                    .child(name)
-                    .child(controls),
+                rows.push(
+                    row_frame(compact, cx)
+                        .child(name)
+                        .child(controls)
+                        .into_any_element(),
                 );
             }
-            v_flex()
-                .w_full()
-                .child(crate::material::group_caption(
-                    crate::tr!("spaces.members.title"),
-                    cx,
-                ))
-                .when(space.members.is_empty(), |column| {
-                    column.child(crate::material::empty_row(
-                        crate::tr!("spaces.members.empty"),
-                        cx,
-                    ))
-                })
-                .child(rows)
-                .into_any_element()
+            if rows.is_empty() {
+                rows.push(
+                    crate::material::empty_row(crate::tr!("spaces.members.empty"), cx)
+                        .into_any_element(),
+                );
+            }
+            crate::material::section(
+                Some(crate::tr!("spaces.members.title").into_owned().into()),
+                cx,
+            )
+            .child(grouped(rows, cx))
+            .into_any_element()
         }
+    }
 
-        fn detail(
-            &self,
-            space: &SpaceInfo,
-            all: &[SpaceInfo],
-            accepting: bool,
-            projects: Option<&[Project]>,
-            compact: bool,
-            cx: &mut Context<Self>,
-        ) -> AnyElement {
-            let others: Vec<(String, String)> = all
+    impl gpui::Render for SpaceDialog {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let compact = crate::window_seam::window_is_compact(window, cx);
+            let model = self.spaces.read(cx);
+            let Some(space) = model.space(&self.space_id).cloned() else {
+                return div()
+                    .text_secondary(compact, cx)
+                    .child(crate::tr!("spaces.missing"))
+                    .into_any_element();
+            };
+            let accepting = model.accepting();
+            let projects = model.projects(cx);
+            let others: Vec<(String, String)> = model
+                .spaces()
                 .iter()
                 .filter(|other| other.id != space.id)
                 .map(|other| (other.id.clone(), other.name.clone()))
                 .collect();
-            let rename_space = space.clone();
-            let delete_space = space.clone();
-            let inset = px(crate::material::CARD_INSET);
-            // The actions sit at the card inset; the link, projects and
-            // members blocks carry it themselves, as their rows do.
-            v_flex()
+            div()
+                .id("space-dialog-body")
                 .w_full()
-                .pt(cx.theme().tokens.spacing.xs)
-                .pb(inset)
-                .gap(crate::material::section_gap(cx))
-                .debug_selector(|| "space-detail".into())
-                .child(self.link_block(space, accepting, compact, cx))
-                .child(self.projects_block(space, projects, compact, cx))
-                .child(self.members_block(space, &others, compact, cx))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll_area()
+                .on_action(cx.listener(Self::on_toggle_share))
+                .on_action(cx.listener(Self::on_move_member))
                 .child(
-                    h_flex()
-                        .px(inset)
-                        .gap_2()
-                        .flex_wrap()
-                        .child(
-                            Button::new(SharedString::from(format!("space-rename-{}", space.id)))
-                                .ghost()
-                                .outline()
-                                .compact()
-                                .label(crate::tr!("spaces.rename"))
-                                .on_click(cx.listener(move |section, _, window, cx| {
-                                    section.rename(&rename_space, window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("space-delete-{}", space.id)))
-                                .ghost()
-                                .compact()
-                                .danger()
-                                .label(crate::tr!("spaces.delete"))
-                                .on_click(cx.listener(move |section, _, window, cx| {
-                                    section.delete(&delete_space, window, cx);
-                                })),
-                        ),
+                    v_flex()
+                        .w_full()
+                        .gap(crate::material::section_gap(cx))
+                        .debug_selector(|| "space-detail".into())
+                        .child(self.link_section(&space, accepting, compact, cx))
+                        .child(self.projects_section(&space, projects.as_deref(), compact, cx))
+                        .child(self.members_section(&space, &others, compact, cx)),
                 )
                 .into_any_element()
         }
     }
 
-    impl gpui::Render for SpacesSection {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let spaces = (self.resolve)(&self.store, cx);
-            self.observer.watch(spaces.as_ref(), cx);
-            let Some(spaces) = spaces else {
-                return div().into_any_element();
-            };
-            let compact = crate::window_seam::window_is_compact(window, cx);
-            let model = spaces.read(cx);
-            let list = model.spaces().to_vec();
-            let accepting = model.accepting();
-            let projects = model.projects(cx);
-            if self
-                .expanded
-                .as_ref()
-                .is_some_and(|id| !list.iter().any(|space| &space.id == id))
-            {
-                self.expanded = None;
+    /// A space's dialog: its link, projects and members, with Rename and
+    /// Delete.
+    pub(crate) fn open_space(
+        spaces: Entity<Spaces>,
+        space_id: String,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let body = cx.new(|cx| SpaceDialog {
+            _observe: cx.observe(&spaces, |_, _, cx| cx.notify()),
+            spaces: spaces.clone(),
+            space_id: space_id.clone(),
+        });
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let body = body.clone();
+            let space = spaces.read(cx).space(&space_id).cloned();
+            let mut leading = Vec::new();
+            if let Some(space) = &space {
+                leading.push(
+                    Button::new(SharedString::from(format!("space-delete-{}", space.id)))
+                        .danger()
+                        .label(crate::tr!("spaces.delete"))
+                        .on_click({
+                            let (spaces, space) = (spaces.clone(), space.clone());
+                            move |_, window, cx| confirm_delete(spaces.clone(), &space, window, cx)
+                        }),
+                );
+                leading.push(
+                    Button::new(SharedString::from(format!("space-rename-{}", space.id)))
+                        .label(crate::tr!("spaces.rename"))
+                        .on_click({
+                            let (spaces, space) = (spaces.clone(), space.clone());
+                            move |_, window, cx| open_rename(spaces.clone(), &space, window, cx)
+                        }),
+                );
             }
-            let mut group = crate::material::group(cx);
-            if list.is_empty() {
-                group = group.child(crate::material::empty_row(crate::tr!("spaces.intro"), cx));
-            }
-            for space in &list {
-                let expanded = self.expanded.as_deref() == Some(space.id.as_str());
-                group = group.child(self.space_row(space, expanded, compact, cx));
-                if expanded {
-                    let detail =
-                        self.detail(space, &list, accepting, projects.as_deref(), compact, cx);
-                    group = group.child(detail);
-                }
-                group = group.child(crate::material::row_hairline(
-                    px(crate::material::CARD_INSET),
-                    cx,
-                ));
-            }
-            group = group.child(
-                crate::material::group_row(cx).child(
-                    Button::new("spaces-new")
-                        .ghost()
-                        .compact()
-                        .icon(IconName::Plus)
-                        .label(crate::tr!("spaces.new"))
-                        .on_click(cx.listener(|section, _, window, cx| section.create(window, cx))),
-                ),
-            );
-            v_flex()
-                .w_full()
-                .debug_selector(|| "spaces-section".into())
-                .on_action(cx.listener(Self::on_toggle_share))
-                .on_action(cx.listener(Self::on_move_member))
-                .child(crate::material::group_caption(
-                    crate::tr!("spaces.section"),
-                    cx,
-                ))
-                .child(group)
-                .into_any_element()
-        }
+            dialog
+                .title(space.map(|space| space.name).unwrap_or_default())
+                .wide()
+                .content(move |content, _, _| content.child(body.clone()))
+                .footer(
+                    DialogActions::new().w_full().leading(leading).child(
+                        Button::new("space-done")
+                            .primary()
+                            .label(crate::tr!("spaces.done"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    ),
+                )
+        });
     }
 
-    /// "2 projects · 3 members · 1 online".
-    fn summary(space: &SpaceInfo) -> String {
-        let counted = |one: &str, many: &str, count: usize| {
-            if count == 1 {
-                crate::tr!(one).into_owned()
-            } else {
-                crate::tr!(many, count = count).into_owned()
+    fn open_rename(spaces: Entity<Spaces>, space: &SpaceInfo, window: &mut Window, cx: &mut App) {
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::tr!("spaces.create.placeholder"))
+                .default_value(space.name.clone())
+        });
+        let id = space.id.clone();
+        let submit: Submit = Rc::new({
+            let name = name.clone();
+            move |window, cx| {
+                let typed = name.read(cx).value().trim().to_owned();
+                if typed.is_empty() {
+                    return false;
+                }
+                let task = spaces.update(cx, |spaces, cx| {
+                    spaces.act(
+                        vec![SpaceAction::Rename {
+                            id: id.clone(),
+                            name: typed,
+                        }],
+                        cx,
+                    )
+                });
+                report("spaces.failed", task, window, cx);
+                true
             }
-        };
-        let mut parts = vec![
-            counted(
-                "spaces.summary.project_one",
-                "spaces.summary.projects",
-                space.project_ids.len(),
-            ),
-            counted(
-                "spaces.summary.member_one",
-                "spaces.summary.members",
-                space.members.len(),
-            ),
-        ];
-        let online = space
-            .members
-            .iter()
-            .filter(|member| member.path.is_some())
-            .count();
-        if online > 0 {
-            parts.push(crate::tr!("spaces.summary.online", count = online).into_owned());
-        }
-        parts.join(" · ")
+        });
+        let field = name.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let field = field.clone();
+            submit_actions(
+                dialog
+                    .title(crate::tr!("spaces.rename_title").into_owned())
+                    .content(move |content, _, _| content.child(Input::new(&field))),
+                "spaces-rename",
+                crate::tr!("spaces.rename_action").into_owned().into(),
+                submit.clone(),
+            )
+        });
+        name.update(cx, |name, cx| name.focus(window, cx));
+    }
+
+    fn confirm_delete(
+        spaces: Entity<Spaces>,
+        space: &SpaceInfo,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let id = space.id.clone();
+        let name = space.name.clone();
+        let members = space.members.len();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let spaces = spaces.clone();
+            let id = id.clone();
+            alert
+                .title(quoted("spaces.delete_title", &name))
+                .description(if members == 0 {
+                    crate::tr!("spaces.delete_description_empty")
+                } else {
+                    crate::tr!("spaces.delete_description")
+                })
+                .button_props(
+                    DialogButtons::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(crate::tr!("spaces.delete_action"))
+                        .cancel_text(crate::tr!("spaces.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, window, cx| {
+                    let task = spaces.update(cx, |spaces, cx| {
+                        spaces.act(vec![SpaceAction::Delete { id: id.clone() }], cx)
+                    });
+                    report("spaces.failed", task, window, cx);
+                    // The space's own dialog goes with it.
+                    window.close_all_dialogs(cx);
+                    true
+                })
+        });
     }
 
     /// Removing a member unpairs the device. The link it joined by still
@@ -1705,14 +1693,10 @@ mod section {
     }
 }
 
-#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-pub(crate) use section::member_badge;
-
 #[cfg(feature = "remote-hosting")]
 mod machines {
     use super::*;
     use crate::icon::IconName;
-    use gpui::px;
 
     /// This machine's spaces on the Machines page, one group row each:
     /// the link's state, its QR on demand and Copy. A paused or dead link
@@ -1735,7 +1719,7 @@ mod machines {
             let id = space.id.clone();
             let open = open_qr == Some(id.as_str()) && space.link.is_some();
             let (status, color) = match link_unavailable(&space, accepting) {
-                None => (summary_line(&space), cx.theme().muted_foreground),
+                None => (summary(&space).into(), cx.theme().muted_foreground),
                 Some(reason) if space.link_dead => (reason, cx.theme().danger_foreground),
                 Some(reason) => (reason, cx.theme().muted_foreground),
             };
@@ -1819,20 +1803,20 @@ mod machines {
                 )
                 .child(controls);
             let mut row = v_flex().w_full().child(line);
-            if open && let Some(link) = &space.link {
+            if open {
                 row = row.child(
-                    super::super::qr::beside_qr(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_body(compact, cx)
-                            .child(quoted("spaces.link.description", &space.name)),
-                        link,
-                        compact,
-                        cx,
-                    )
-                    .px(px(crate::material::CARD_INSET))
-                    .pb(px(crate::material::CARD_INSET)),
+                    div()
+                        .px(px(crate::material::CARD_INSET))
+                        .pb(px(crate::material::CARD_INSET))
+                        .child(link_block(
+                            &space,
+                            accepting,
+                            quoted("spaces.link.description", &space.name),
+                            false,
+                            None,
+                            compact,
+                            cx,
+                        )),
                 );
             }
             rows.push(row.into_any_element());
@@ -1842,17 +1826,6 @@ mod machines {
                 .debug_selector(|| "hosts-spaces".into())
                 .into_any_element(),
         )
-    }
-
-    fn summary_line(space: &SpaceInfo) -> SharedString {
-        let projects = space.project_ids.len();
-        if projects == 1 {
-            crate::tr!("spaces.summary.project_one")
-        } else {
-            crate::tr!("spaces.summary.projects", count = projects)
-        }
-        .into_owned()
-        .into()
     }
 }
 
