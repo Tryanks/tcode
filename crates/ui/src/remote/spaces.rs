@@ -1714,7 +1714,7 @@ mod machines {
     use crate::icon::IconName;
     use gpui::px;
 
-    /// This machine's spaces on the Machines page, one compact row each:
+    /// This machine's spaces on the Machines page, one group row each:
     /// the link's state, its QR on demand and Copy. A paused or dead link
     /// says so and offers the one action that brings it back.
     pub(in crate::remote) fn machine_links<V: 'static>(
@@ -1794,13 +1794,7 @@ mod machines {
                         }),
                 );
             }
-            let inset = px(crate::material::COMPACT_PAGE_INSET);
-            let line = h_flex()
-                .w_full()
-                .px(inset)
-                .py(cx.theme().tokens.spacing.sm)
-                .gap_3()
-                .items_center()
+            let line = crate::material::group_row(cx)
                 .debug_selector({
                     let id = id.clone();
                     move || format!("machine-space-{id}")
@@ -1818,7 +1812,7 @@ mod machines {
                         )
                         .child(
                             div()
-                                .text_secondary(true, cx)
+                                .text_secondary(compact, cx)
                                 .text_color(color)
                                 .child(status),
                         ),
@@ -1831,28 +1825,21 @@ mod machines {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_body(true, cx)
+                            .text_body(compact, cx)
                             .child(quoted("spaces.link.description", &space.name)),
                         link,
                         compact,
                         cx,
                     )
-                    .px(inset)
-                    .pb(cx.theme().tokens.spacing.sm),
+                    .px(px(crate::material::CARD_INSET))
+                    .pb(px(crate::material::CARD_INSET)),
                 );
             }
             rows.push(row.into_any_element());
         }
         Some(
-            v_flex()
-                .w_full()
+            crate::settings_rows::settings_group(crate::tr!("spaces.machines.section"), rows, cx)
                 .debug_selector(|| "hosts-spaces".into())
-                .child(crate::material::list_caption(
-                    crate::tr!("spaces.machines.section").into_owned().into(),
-                    true,
-                    cx,
-                ))
-                .child(crate::material::plain_list(rows, cx))
                 .into_any_element(),
         )
     }

@@ -24,6 +24,26 @@ pub const FIELD_WIDTH: f32 = 240.;
 /// Max width of the settings content column, a reading measure for its forms.
 pub const CONTENT_MAX_WIDTH: f32 = 768.;
 
+/// The centred column a settings-form page scrolls: `column` at
+/// [`CONTENT_MAX_WIDTH`] inside the page inset.
+pub fn content_column(column: gpui::Div, compact: bool, cx: &App) -> gpui::Div {
+    let spacing = &cx.theme().tokens.spacing;
+    let inset = if compact {
+        px(crate::material::COMPACT_PAGE_INSET)
+    } else {
+        spacing.xl
+    };
+    h_flex()
+        .w_full()
+        .justify_center()
+        .px(inset)
+        .py(spacing.xl)
+        // Keep this width definite before capping it. Reversing these
+        // constraints makes nested multiline inputs resolve their percentage
+        // width to zero when the cap applies.
+        .child(column.w(px(CONTENT_MAX_WIDTH)).max_w_full())
+}
+
 /// A captioned group of settings rows: the unit every settings page is
 /// composed of.
 pub fn settings_group(

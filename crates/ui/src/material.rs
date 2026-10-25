@@ -522,19 +522,6 @@ pub fn list_caption(label: SharedString, compact: bool, cx: &App) -> Div {
     .child(label)
 }
 
-/// Stack [`list_row`]s with a hairline between them, indented to the text.
-pub fn plain_list(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
-    let mut list = v_flex().w_full();
-    let last = rows.len().saturating_sub(1);
-    for (index, row) in rows.into_iter().enumerate() {
-        list = list.child(row);
-        if index != last {
-            list = list.child(row_hairline(px(COMPACT_PAGE_INSET), cx));
-        }
-    }
-    list
-}
-
 /// Shared wordmark.
 pub fn brand_wordmark(cx: &App) -> impl IntoElement {
     gpui_base::h_flex().items_center().gap_2().child(

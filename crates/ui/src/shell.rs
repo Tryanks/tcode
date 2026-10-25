@@ -1571,10 +1571,10 @@ impl AppShell {
 // Compact chrome
 // ---------------------------------------------------------------------------
 
-/// Room a nav bar reserves on each side for its controls, so the centered title
-/// keeps the same box on every page: enough for the widest fixed back label
-/// ([`Destination::back_label`]) — which never truncates — and for two 44pt
-/// icon buttons on the other side.
+/// The least room a nav bar keeps on each side for its controls, so the
+/// centered title keeps the same box on every page whose controls fit it: two
+/// 44pt icon buttons. A wider back label ([`Destination::back_label`]), which
+/// never truncates, takes more.
 const NAV_CONTROL_WIDTH: f32 = 104.;
 
 /// Navigation header with a centered title and at most two trailing actions.
@@ -1596,8 +1596,10 @@ fn nav_bar(
     let hosts_caption = window_caption::compact_hosts_caption();
     // The 44pt controls keep their glyphs clear of the edge inside their own hit
     // box, so the strip takes the dense inset, not the page inset.
+    let spacing = &cx.theme().tokens.spacing;
+    let (column_gap, control_gap) = (spacing.md, spacing.xs);
     let strip = crate::material::bar("compact-nav", crate::material::Bar::Strip, false, cx)
-        .relative()
+        .gap(column_gap)
         .when(traffic_lights > Pixels::ZERO, |strip| {
             strip.pl(traffic_lights)
         })
@@ -1608,16 +1610,23 @@ fn nav_bar(
         .bg(crate::material::content_surface(cx))
         .child(
             window_drag_area("compact-nav-drag", strip, window, cx)
+                // The two sides grow alike from nothing, so the title is centered
+                // while it fits; a side never shrinks below its controls, so a
+                // label wider than the reserved room pushes the title, which
+                // truncates, instead of running into it.
                 .child(
-                    // Centered in the room the controls leave it: the back
-                    // label and the trailing actions each reserve their own
-                    // width, so a long title truncates instead of colliding
-                    // with them.
+                    h_flex()
+                        .flex_1()
+                        .flex_basis(px(0.))
+                        .min_w(px(NAV_CONTROL_WIDTH))
+                        .h_full()
+                        .items_center()
+                        .children(back)
+                        .child(window_caption::drag_region(div().flex_1().h_full())),
+                )
+                .child(
                     v_flex()
-                        .absolute()
-                        .inset_0()
-                        .pl(traffic_lights + px(NAV_CONTROL_WIDTH))
-                        .pr(px(NAV_CONTROL_WIDTH))
+                        .min_w_0()
                         .items_center()
                         .justify_center()
                         .child(
@@ -1630,10 +1639,21 @@ fn nav_bar(
                         )
                         .children(subtitle),
                 )
-                .children(back)
-                .child(window_caption::drag_region(div().flex_1().h_full()))
-                .children(actions)
-                .children(hosts_caption.then(|| window_caption::caption_controls(window, cx))),
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .flex_basis(px(0.))
+                        .min_w(px(NAV_CONTROL_WIDTH))
+                        .h_full()
+                        .items_center()
+                        .justify_end()
+                        .gap(control_gap)
+                        .child(window_caption::drag_region(div().flex_1().h_full()))
+                        .children(actions)
+                        .children(
+                            hosts_caption.then(|| window_caption::caption_controls(window, cx)),
+                        ),
+                ),
         )
         .child(crate::material::faded_hairline(cx))
 }
@@ -1766,7 +1786,7 @@ impl AppShell {
             .bg(crate::material::content_surface(cx))
             .child(nav_bar(
                 back,
-                crate::tr!("hosts.pair.title").into_owned().into(),
+                crate::tr!("hosts.pair.page_title").into_owned().into(),
                 None,
                 vec![],
                 window,
@@ -1863,7 +1883,7 @@ impl AppShell {
         let store = attachment.link.store.read(cx);
         // A remote machine's list is headed by the machine, with the link's
         // state where every other page puts its context. The local list is
-        // just Threads: the Hosts row below already names this machine.
+        // just Threads; the way to the machines is the Back control.
         let (title, subtitle): (SharedString, Option<SharedString>) = match store.remote_host_name()
         {
             Some(_) => (
@@ -2630,20 +2650,31 @@ impl AppShell {
             RightTab::Diff,
         );
         let title: SharedString = if self.destination(cx) == Destination::Pair {
-            crate::tr!("hosts.pair.title").into_owned().into()
+            crate::tr!("hosts.pair.page_title").into_owned().into()
         } else {
             crate::tr!("hosts.title").into_owned().into()
         };
         window_drag_area(
             "hosts-header-drag",
             crate::material::bar("hosts-header", crate::material::Bar::Strip, false, cx)
+                // The body's inset, so the title stays over the content column at every width.
+                .px(cx.theme().tokens.spacing.xl)
+                .justify_center()
                 .when(hosts_caption, |strip| strip.relative()),
             window,
             cx,
         )
-        .child(window_caption::drag_region(crate::material::bar_title(
-            title, cx,
-        )))
+        .child(
+            h_flex()
+                .w(px(crate::settings_rows::CONTENT_MAX_WIDTH))
+                .max_w_full()
+                .when(hosts_caption, |column| {
+                    column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
+                })
+                .child(window_caption::drag_region(crate::material::bar_title(
+                    title, cx,
+                ))),
+        )
         .children(hosts_caption.then(|| {
             div()
                 .absolute()

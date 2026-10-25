@@ -1,5 +1,8 @@
 use gpui::{AnyElement, App, IntoElement as _, ParentElement as _, Styled as _, div, px};
 use gpui_base::{h_flex, v_flex};
+
+use crate::theme::ActiveTheme as _;
+
 /// A QR code as `(width_in_modules, dark_module_flags)`, row-major.
 fn qr_modules(payload: &str) -> Option<(usize, Vec<bool>)> {
     let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
@@ -71,6 +74,9 @@ pub(super) fn qr_element(payload: &str, cx: &App) -> Option<AnyElement> {
             .p(px(crate::material::CARD_INSET))
             .rounded(crate::material::radius_card(cx))
             .bg(gpui::white())
+            // On a light card the white would not show where the code ends.
+            .border_1()
+            .border_color(cx.theme().border)
             .child(grid)
             .into_any_element(),
     )

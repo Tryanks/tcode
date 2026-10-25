@@ -1313,12 +1313,7 @@ impl SettingsPage {
         scroll: &ScrollHandle,
         cx: &App,
     ) -> AnyElement {
-        let spacing = &cx.theme().tokens.spacing;
-        let inset = if self.window_state.read(cx).compact {
-            px(crate::material::COMPACT_PAGE_INSET)
-        } else {
-            spacing.xl
-        };
+        let compact = self.window_state.read(cx).compact;
         crate::scroll::page_viewport(
             "settings-scroll-bounce",
             scroll,
@@ -1329,17 +1324,7 @@ impl SettingsPage {
                 .overflow_y_scroll()
                 .lock_scroll_axis()
                 .track_scroll(scroll)
-                .child(
-                    gpui_base::h_flex()
-                        .w_full()
-                        .justify_center()
-                        .px(inset)
-                        .py(spacing.xl)
-                        // Keep this width definite before capping it. Reversing
-                        // these constraints makes nested multiline inputs resolve
-                        // their percentage width to zero when the cap applies.
-                        .child(column.w(px(CONTENT_MAX_WIDTH)).max_w_full()),
-                ),
+                .child(crate::settings_rows::content_column(column, compact, cx)),
         )
         .into_any_element()
     }
