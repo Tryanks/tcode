@@ -1531,7 +1531,13 @@ fn turn_row(
         compact,
         cx,
     )
-    .child(div().flex_1().min_w_0().truncate().child(label))
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .child(crate::widgets::fade_text(label)),
+    )
     .when(selected, |this| this.child(Icon::new(IconName::Check)))
     .on_click(move |_, window, cx| {
         panel.update(cx, |this, cx| {
@@ -1569,8 +1575,8 @@ fn base_row(
         div()
             .flex_1()
             .min_w_0()
-            .truncate()
-            .child(branch.to_string()),
+            .overflow_hidden()
+            .child(crate::widgets::fade_text(branch.to_string())),
     )
     .when(selected, |row| row.child(Icon::new(IconName::Check)))
     .on_click(move |_, window, cx| on_pick(chosen.clone(), window, cx))

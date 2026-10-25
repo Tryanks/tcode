@@ -350,7 +350,7 @@ impl AddProjectDialog {
                     let name = directory_name(&recent.path);
                     let accessible_name =
                         crate::tr!("sidebar.open_recent", name = name.clone()).into_owned();
-                    let path = middle_truncate(&recent.path, 76);
+                    let path = recent.path.display().to_string();
                     let ago = humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
                     let counts = tool_counts(&recent.threads);
                     rows = rows.child(
@@ -375,12 +375,24 @@ impl AddProjectDialog {
                                         .w_full()
                                         .justify_between()
                                         .gap_3()
-                                        .child(div().text_body(false, cx).font_bold().child(name))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_body(false, cx)
+                                                .font_bold()
+                                                .overflow_hidden()
+                                                .child(crate::widgets::fade_text(name)),
+                                        )
                                         .child(
                                             div().flex_none().text_secondary(false, cx).child(ago),
                                         ),
                                 )
-                                .child(div().text_secondary(false, cx).child(path))
+                                .child(
+                                    div()
+                                        .text_secondary(false, cx)
+                                        .overflow_hidden()
+                                        .child(crate::widgets::fade_text(path)),
+                                )
                                 .child(div().text_secondary(false, cx).child(counts)),
                         ),
                     );
@@ -620,21 +632,6 @@ fn directory_name(path: &Path) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| path.display().to_string())
-}
-
-fn middle_truncate(path: &Path, max_chars: usize) -> String {
-    let text = path.display().to_string();
-    let chars: Vec<_> = text.chars().collect();
-    if chars.len() <= max_chars {
-        return text;
-    }
-    let left = (max_chars - 1) / 2;
-    let right = max_chars - left - 1;
-    format!(
-        "{}…{}",
-        chars[..left].iter().collect::<String>(),
-        chars[chars.len() - right..].iter().collect::<String>()
-    )
 }
 
 fn tool_counts(threads: &[ExternalThread]) -> String {

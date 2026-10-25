@@ -373,9 +373,10 @@ impl ProviderCard {
                                         .flex_1()
                                         .min_w_0()
                                         .overflow_hidden()
-                                        .text_ellipsis()
                                         .text_code(cx)
-                                        .child(summary.clone().unwrap_or_else(|| command.clone())),
+                                        .child(crate::widgets::fade_text(
+                                            summary.clone().unwrap_or_else(|| command.clone()),
+                                        )),
                                 )
                                 .child(
                                     Button::new("copy-command")

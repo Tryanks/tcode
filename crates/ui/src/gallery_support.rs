@@ -141,6 +141,8 @@ pub fn model_change_divider(id: &str, cx: &App) -> AnyElement {
 }
 
 pub fn callback(id: &str, callback: &OrchestrateCallback, expanded: bool, cx: &App) -> AnyElement {
-    let label = disclosure::callback_label(callback).into();
-    disclosure::callback_row(id, label, callback, expanded, |_, _, _| {}, None, cx)
+    let event = disclosure::callback_event_label(callback)
+        .into_owned()
+        .into();
+    disclosure::callback_row(id, event, callback, expanded, |_, _, _| {}, None, cx)
 }

@@ -490,9 +490,9 @@ impl Composer {
                     .child(
                         div()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
                             .text_meta_mono(self.compact, cx)
-                            .child(name),
+                            .child(crate::widgets::fade_text(name)),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_image_preview(index, window, cx);

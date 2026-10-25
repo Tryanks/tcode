@@ -59,7 +59,12 @@ pub(super) fn badge(
         )
         .aria_label(label.clone())
         .tooltip(url.clone())
-        .child(div().min_w_0().truncate().child(label.clone()))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .child(crate::widgets::fade_text(label.clone())),
+        )
         .on_click(move |_, window, cx| {
             crate::widgets::stop_click_propagation(window, cx);
             let source = view.read(cx).opened_image_source(&url.to_string().into());

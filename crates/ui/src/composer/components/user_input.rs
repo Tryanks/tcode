@@ -132,19 +132,19 @@ impl Composer {
             div()
                 .flex_none()
                 .max_w_1_2()
-                .truncate()
+                .overflow_hidden()
                 .text_title(cx)
-                .child(title),
+                .child(crate::widgets::fade_text(title)),
         )
         .when(!expanded, |strip| {
             strip.child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_body(self.compact, cx)
                     .text_color(muted)
-                    .child(question.question.clone()),
+                    .child(crate::widgets::fade_text(question.question.clone())),
             )
         })
         .when(expanded, |strip| strip.child(div().flex_1()))

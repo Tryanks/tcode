@@ -697,16 +697,14 @@ impl CommandPalette {
                             div()
                                 .text_body(compact, cx)
                                 .overflow_hidden()
-                                .text_ellipsis()
-                                .child(item.label.clone()),
+                                .child(crate::widgets::fade_text(item.label.clone())),
                         )
                         .when_some(item.subtitle.clone(), |this, sub| {
                             this.child(
                                 div()
                                     .text_secondary(compact, cx)
                                     .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(sub),
+                                    .child(crate::widgets::fade_text(sub)),
                             )
                         }),
                 )

@@ -1916,9 +1916,9 @@ impl ChatView {
                     div()
                         .max_w_3_4()
                         .px(cx.theme().tokens.spacing.md)
-                        .truncate()
                         .text_secondary(false, cx)
-                        .child(author),
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(author)),
                 )
                 .child(bubble)
                 .into_any_element()
@@ -2000,9 +2000,10 @@ impl ChatView {
         match &notice {
             HostNotice::Orchestrate(callbacks) => {
                 for callback in callbacks {
-                    let label = label(components::disclosure::callback_label(callback));
+                    let event =
+                        label(components::disclosure::callback_event_label(callback).into_owned());
                     column =
-                        column.child(self.compose_callback_row(turn, key(), label, callback, cx));
+                        column.child(self.compose_callback_row(turn, key(), event, callback, cx));
                 }
             }
             HostNotice::PullRequest { .. }
@@ -2024,7 +2025,7 @@ impl ChatView {
         &self,
         turn: usize,
         key: String,
-        label: SharedString,
+        event: SharedString,
         callback: &OrchestrateCallback,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2047,7 +2048,7 @@ impl ChatView {
         let toggle_key = key.clone();
         components::disclosure::callback_row(
             &key,
-            label,
+            event,
             callback,
             expanded,
             cx.listener(move |this, _, _, cx| {
@@ -2500,7 +2501,6 @@ impl ChatView {
     /// it is its arrow, named by its tooltip and its accessibility label.
     fn parent_link(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (parent_id, title) = parent_session(self.workspace_store.read(cx))?;
-        let short = components::disclosure::truncate_chars(&title, 24);
         let name: SharedString = crate::tr!("agents.back_to_parent", title = title)
             .into_owned()
             .into();
@@ -2511,7 +2511,16 @@ impl ChatView {
                 .ghost()
                 .xsmall()
                 .icon(IconName::ArrowLeft)
-                .when(labelled, |link| link.label(short))
+                // The parent's title fades rather than pushing this thread's
+                // title out of the header.
+                .when(labelled, |link| {
+                    link.max_w(px(160.)).child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(title.clone())),
+                    )
+                })
                 .aria_label(name.clone())
                 .tooltip(name)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -3501,10 +3510,10 @@ impl ChatView {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
                         .text_body(false, cx)
                         .text_color(cx.theme().foreground)
-                        .child(project.name),
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(project.name)),
                 )
                 .when_some(last_activity, |row, last_activity| {
                     row.child(div().flex_none().text_secondary(false, cx).child(

@@ -178,9 +178,9 @@ impl CommitDialog {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .overflow_hidden()
                     .text_code(cx)
-                    .child(path),
+                    .child(crate::widgets::fade_text(path)),
             )
             .when(file.insertions > 0, |this| {
                 this.child(

@@ -393,8 +393,7 @@ pub(crate) fn work_log_outcome(
 /// `text` collapsed to a single spaced line: every whitespace run (newlines
 /// included) becomes one space, so a multi-line command shows its full content
 /// in a one-line preview instead of just its first line. Clipped to more
-/// characters than any row can render; the visual ellipsis comes from the
-/// row's `text_ellipsis`.
+/// characters than any row can render; the row fades out what does not fit.
 pub(crate) fn one_line(text: &str) -> String {
     const MAX_CHARS: usize = 600;
     text.split_whitespace()

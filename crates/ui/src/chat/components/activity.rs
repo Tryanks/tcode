@@ -5,8 +5,8 @@ use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::widgets::spinner::Spinner;
 use gpui::{
     AnyElement, App, ClickEvent, Div, HighlightStyle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledText, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -70,9 +70,8 @@ pub(crate) fn activity_row(
             let summary = activity_summary(
                 binary_name(command),
                 Some(
-                    StyledText::new(preview)
-                        .with_highlights(breaks.into_iter().map(|range| (range, marker_style)))
-                        .into_any_element(),
+                    crate::widgets::fade_text(preview)
+                        .with_highlights(breaks.into_iter().map(|range| (range, marker_style))),
                 ),
                 true,
                 cx,
@@ -123,8 +122,7 @@ pub(crate) fn activity_row(
                 let summary = div()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_ellipsis()
-                    .child(crate::tr!("chat.thinking_done"))
+                    .child(crate::widgets::fade_text(crate::tr!("chat.thinking_done")))
                     .into_any_element();
                 (
                     ItemStatus::Completed,
@@ -231,7 +229,7 @@ pub(super) fn activity_copy_items(entry: &TimelineEntry) -> Vec<(String, String)
 /// chevron sits right after the words, and only the argument shrinks.
 fn activity_summary(
     primary: impl IntoElement,
-    argument: Option<AnyElement>,
+    argument: Option<crate::widgets::FadeText>,
     monospace: bool,
     cx: &App,
 ) -> AnyElement {
@@ -250,12 +248,11 @@ fn activity_summary(
             row.child(
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
                     .text_secondary(false, cx)
                     .when(monospace, |text| {
                         text.font_family(cx.theme().mono_font_family.clone())
                     })
+                    .overflow_hidden()
                     .child(argument),
             )
         })
@@ -272,8 +269,8 @@ fn binary_name(command: &str) -> String {
         .to_string()
 }
 
-fn argument(text: String) -> Option<AnyElement> {
-    (!text.is_empty()).then(|| text.into_any_element())
+fn argument(text: String) -> Option<crate::widgets::FadeText> {
+    (!text.is_empty()).then(|| crate::widgets::fade_text(text))
 }
 
 fn activity_detail(

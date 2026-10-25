@@ -826,12 +826,11 @@ impl HostingPanel {
                             .min_w_0()
                             .justify_end()
                             .text_secondary(false, cx)
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(crate::tr!("remote.traverse.status.while_hosting")),
-                            )
+                            .child(div().min_w_0().overflow_hidden().child(
+                                crate::widgets::fade_text(crate::tr!(
+                                    "remote.traverse.status.while_hosting"
+                                )),
+                            ))
                             .into_any_element(),
                     ),
                     None,
@@ -1213,7 +1212,12 @@ fn traverse_status_toggle(
         })
         .flex_none(),
     )
-    .child(div().min_w_0().truncate().child(summary))
+    .child(
+        div()
+            .min_w_0()
+            .overflow_hidden()
+            .child(crate::widgets::fade_text(summary)),
+    )
     .on_click(cx.listener(move |this, _, _, cx| {
         this.toggle_traverse_status(index, cx);
     }))
@@ -1236,7 +1240,12 @@ fn traverse_status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement
             .gap_3()
             .items_center()
             .justify_between()
-            .child(div().min_w_0().truncate().child(name))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(name)),
+            )
             .child(value)
     };
     let error = |text: &str| div().w_full().text_color(danger).child(text.to_owned());

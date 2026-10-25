@@ -312,11 +312,11 @@ fn file_edit_row_header(
                 .child(
                     div()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_color(style.muted)
                         .font_family(style.mono.clone())
                         .debug_selector(|| "file-edit-path".into())
-                        .child(row.path.clone()),
+                        .child(crate::widgets::fade_text(row.path.clone())),
                 ),
         )
         .when_some(row.counts, |element, (added, deleted)| {

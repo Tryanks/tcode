@@ -383,11 +383,10 @@ fn render_item(
             this.child(
                 div()
                     .flex_none()
-                    .whitespace_nowrap()
                     .when_some(label_max_w, |label, width| {
-                        label.max_w(width).overflow_hidden().text_ellipsis()
+                        label.max_w(width).overflow_hidden()
                     })
-                    .child(label.clone()),
+                    .child(super::fade_text(label.clone())),
             )
             .when_some(tally, |this, tally| {
                 this.child(

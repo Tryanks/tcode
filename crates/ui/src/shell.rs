@@ -1624,9 +1624,9 @@ fn nav_bar(
                             div()
                                 .max_w_full()
                                 .min_w_0()
-                                .truncate()
+                                .overflow_hidden()
                                 .text_title(cx)
-                                .child(title),
+                                .child(crate::widgets::fade_text(title)),
                         )
                         .children(subtitle),
                 )
@@ -1668,9 +1668,9 @@ fn nav_subtitle(text: impl Into<SharedString>, cx: &App) -> AnyElement {
     div()
         .max_w_full()
         .min_w_0()
-        .truncate()
+        .overflow_hidden()
         .text_secondary(true, cx)
-        .child(text.into())
+        .child(crate::widgets::fade_text(text.into()))
         .into_any_element()
 }
 

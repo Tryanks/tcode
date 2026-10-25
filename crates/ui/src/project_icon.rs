@@ -272,9 +272,9 @@ impl Picker {
         .child(
             div()
                 .w_full()
-                .truncate()
+                .overflow_hidden()
                 .text_secondary(false, cx)
-                .child(entry.name.clone()),
+                .child(crate::widgets::fade_text(entry.name.clone())),
         )
         .on_click(cx.listener(move |this, _, window, cx| {
             if this.saving {

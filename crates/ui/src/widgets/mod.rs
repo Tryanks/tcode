@@ -5,6 +5,7 @@ pub mod button;
 pub mod checkbox;
 pub mod choice;
 pub(crate) mod copy;
+mod fade_text;
 pub mod input;
 pub mod kbd;
 pub mod menu;
@@ -19,6 +20,7 @@ pub mod tooltip;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
 pub use checkbox::Checkbox;
+pub use fade_text::{FadeText, fade_text};
 pub use input::{Input, Textarea};
 pub use kbd::Kbd;
 pub use popover::Popover;

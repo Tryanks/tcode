@@ -360,11 +360,11 @@ pub(crate) trait DiffListHost: Sized + 'static {
             .unwrap_or_default();
         div()
             .min_w_0()
-            .truncate()
+            .overflow_hidden()
             .text_body(false, cx)
             .font_medium()
             .text_color(cx.theme().foreground)
-            .child(path)
+            .child(crate::widgets::fade_text(path))
             .into_any_element()
     }
     fn header_leading(&self, _file: usize, _cx: &mut Context<Self>) -> Option<AnyElement> {

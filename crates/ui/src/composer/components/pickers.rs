@@ -225,7 +225,12 @@ impl Composer {
                     .items_center()
                     .text_chip(cx)
                     .child(tinted_provider_glyph(provider, store))
-                    .child(div().min_w_0().truncate().child(display))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(display)),
+                    )
                     .child(
                         Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
                     ),
@@ -480,7 +485,12 @@ impl Composer {
                     .text_chip(cx)
                     .text_color(muted)
                     .child(Icon::empty().path("icons/lock.svg"))
-                    .child(div().min_w_0().truncate().child(label))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(label)),
+                    )
                     .when(pending, |row| {
                         row.child(
                             div()

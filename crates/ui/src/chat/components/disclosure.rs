@@ -17,7 +17,6 @@ use tcode_core::notice::{CallbackEvent, HostNotice, OrchestrateCallback};
 
 use super::super::model::one_line;
 
-const CALLBACK_TITLE_MAX_CHARS: usize = 24;
 const DISCLOSURE_CARD_MAX_HEIGHT: f32 = 320.;
 
 /// One line naming a notice. A row per callback names only its callback.
@@ -40,19 +39,28 @@ pub(crate) fn notice_label(notice: &HostNotice) -> String {
 }
 
 pub(crate) fn callback_label(callback: &OrchestrateCallback) -> String {
-    let title = truncate_chars(&callback.title, CALLBACK_TITLE_MAX_CHARS);
-    let event = match &callback.event {
+    format!(
+        "{} {}",
+        one_line(&callback.title),
+        callback_event_label(callback)
+    )
+}
+
+/// What became of the callback's child, which its row keeps in view however
+/// long the child's title is.
+pub(crate) fn callback_event_label(callback: &OrchestrateCallback) -> Cow<'static, str> {
+    match &callback.event {
         CallbackEvent::Ended(state) => localized_callback_state(state),
         CallbackEvent::Approval => crate::tr!("chat.orchestrate_state_approval"),
         CallbackEvent::Question => crate::tr!("chat.orchestrate_state_question"),
-    };
-    format!("{title} {event}")
+    }
 }
 
 /// `on_open` opens the child the callback reports on, while it still exists.
+/// `event` follows the child's title and does not fade with it.
 pub(crate) fn callback_row(
     key: &str,
-    label: SharedString,
+    event: SharedString,
     callback: &OrchestrateCallback,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -78,7 +86,17 @@ pub(crate) fn callback_row(
             .child(crate::tr!("agents.open_child"))
             .into_any_element()
     });
-    disclosure_with(key, label, &body, expanded, on_toggle, open, cx)
+    let title = one_line(&callback.title).into();
+    disclosure_with(
+        key,
+        title,
+        Some(event),
+        &body,
+        expanded,
+        on_toggle,
+        open,
+        cx,
+    )
 }
 
 /// A centered disclosure notification with a height-capped verbatim body: the
@@ -93,12 +111,14 @@ pub(crate) fn disclosure(
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
-    disclosure_with(key, label, full_text, expanded, on_toggle, None, cx)
+    disclosure_with(key, label, None, full_text, expanded, on_toggle, None, cx)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn disclosure_with(
     key: &str,
     label: SharedString,
+    suffix: Option<SharedString>,
     full_text: &str,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -111,7 +131,10 @@ fn disclosure_with(
     let toggle = Button::new(SharedString::from(format!("disclosure-{key}")))
         .ghost()
         .small()
-        .aria_label(label.clone())
+        .aria_label(match &suffix {
+            Some(suffix) => format!("{label} {suffix}").into(),
+            None => label.clone(),
+        })
         .aria_expanded(expanded)
         // A long notice (a `[control]` message is one) truncates inside the row instead of
         // spilling past both edges of the centered divider.
@@ -119,7 +142,19 @@ fn disclosure_with(
         .overflow_hidden()
         .text_token(&cx.theme().tokens.typography.xs)
         .icon(Icon::new(chevron(expanded)).text_color(muted))
-        .child(div().min_w_0().truncate().text_color(muted).child(label))
+        .child(
+            h_flex()
+                .min_w_0()
+                .gap_1()
+                .text_color(muted)
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(label)),
+                )
+                .children(suffix.map(|suffix| div().flex_none().child(suffix))),
+        )
         .on_click(on_toggle)
         .debug_selector({
             let selector = format!("disclosure-{key}");
@@ -175,15 +210,6 @@ fn localized_callback_state(state: &str) -> Cow<'static, str> {
         "failed" => crate::tr!("chat.orchestrate_state_failed"),
         other => Cow::Owned(other.to_string()),
     }
-}
-
-pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
-    let text = one_line(text);
-    if text.chars().count() <= max {
-        return text;
-    }
-    let head: String = text.chars().take(max).collect();
-    format!("{head}…")
 }
 
 fn chevron(open: bool) -> IconName {

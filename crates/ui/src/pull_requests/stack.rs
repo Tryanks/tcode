@@ -455,7 +455,13 @@ pub(super) fn operation_chip(
                             h_flex()
                                 .gap_2()
                                 .child(div().font_family(mono.clone()).child(format!("#{number}")))
-                                .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(crate::widgets::fade_text(title.clone())),
+                                )
                         })),
                 )
                 .child(
@@ -466,10 +472,13 @@ pub(super) fn operation_chip(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
+                                .overflow_hidden()
                                 .font_family(mono.clone())
                                 .text_color(muted)
-                                .child(tr_with("operation_id", &[("id", id.clone())])),
+                                .child(crate::widgets::fade_text(tr_with(
+                                    "operation_id",
+                                    &[("id", id.clone())],
+                                ))),
                         )
                         .child(
                             Button::new("pr-stack-copy-id")
@@ -687,14 +696,20 @@ fn map_content(
         .items_center()
         .text_secondary(compact, cx)
         .child(Icon::new(IconName::Layers))
-        .child(div().flex_1().min_w_0().truncate().child(tr_with(
-            "head",
-            &[
-                ("stack", map.stack.number.to_string()),
-                ("count", map.rows.len().to_string()),
-                ("base", map.stack.base.clone()),
-            ],
-        )))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(crate::widgets::fade_text(tr_with(
+                    "head",
+                    &[
+                        ("stack", map.stack.number.to_string()),
+                        ("count", map.rows.len().to_string()),
+                        ("base", map.stack.base.clone()),
+                    ],
+                ))),
+        )
         .child(
             Button::new("pr-stack-about")
                 .ghost()
@@ -865,12 +880,12 @@ fn map_content(
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
+                .overflow_hidden()
                 .text_body(compact, cx)
                 .when(title.is_none(), |text| {
                     text.font_family(mono.clone()).text_color(muted)
                 })
-                .child(name),
+                .child(crate::widgets::fade_text(name)),
         )
         .child(trailing)
         .children(condition.map(|condition| div().text_color(muted).child(condition.into_owned())))
@@ -1007,14 +1022,18 @@ pub(super) fn caption(
                 })
                 .child(Icon::new(IconName::Layers))
                 .child(
-                    div().flex_1().min_w_0().truncate().child(
-                        crate::tr!(
-                            "pull_requests.stack_caption",
-                            count = stack.layers.len().to_string(),
-                            base = stack.base.clone()
-                        )
-                        .into_owned(),
-                    ),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(
+                            crate::tr!(
+                                "pull_requests.stack_caption",
+                                count = stack.layers.len().to_string(),
+                                base = stack.base.clone()
+                            )
+                            .into_owned(),
+                        )),
                 )
                 .children(
                     operation.map(|operation| operation_chip(None, operation, links, compact, cx)),
@@ -1546,16 +1565,16 @@ fn layer_row(
                 .min_w_0()
                 .child(
                     div()
-                        .truncate()
+                        .overflow_hidden()
                         .text_body(false, cx)
-                        .child(layer.title.clone()),
+                        .child(crate::widgets::fade_text(layer.title.clone())),
                 )
                 .when(branch, |text| {
                     text.child(
                         div()
-                            .truncate()
+                            .overflow_hidden()
                             .text_meta_mono(false, cx)
-                            .child(layer.head_branch.clone()),
+                            .child(crate::widgets::fade_text(layer.head_branch.clone())),
                     )
                 }),
         )
@@ -1883,14 +1902,14 @@ impl Render for MergeStackDialog {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .truncate()
+                                        .overflow_hidden()
                                         .text_body(false, cx)
-                                        .child(
+                                        .child(crate::widgets::fade_text(
                                             row.link
                                                 .and_then(|link| link.snapshot.as_ref())
                                                 .map(|snapshot| snapshot.title.clone())
                                                 .unwrap_or_else(|| row.layer.head_branch.clone()),
-                                        ),
+                                        )),
                                 )
                                 .child(Spinner::new())
                                 .into_any_element()
@@ -2668,9 +2687,9 @@ fn progress_view(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_meta_mono(false, cx)
-                        .child(layer.branch.clone()),
+                        .child(crate::widgets::fade_text(layer.branch.clone())),
                 )
                 .child(div().flex_none().child(text))
                 .into_any_element()

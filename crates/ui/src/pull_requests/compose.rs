@@ -864,10 +864,12 @@ impl PullRequestView {
                         escape_view.update(cx, |view, cx| view.close_editor(&escape_slot, cx));
                     }
                 })
-                .children(
-                    spec.context
-                        .map(|context| div().text_secondary(compact, cx).truncate().child(context)),
-                )
+                .children(spec.context.map(|context| {
+                    div()
+                        .text_secondary(compact, cx)
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(context))
+                }))
                 .child(
                     Textarea::new(&input)
                         .disabled(submitting)

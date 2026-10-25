@@ -1103,16 +1103,16 @@ impl PullRequestView {
                 head.child(Icon::new(IconName::File)).child(
                     div()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
                         .text_meta_mono(compact, cx)
                         .text_color(cx.theme().foreground)
-                        .child(match thread.anchor.as_ref() {
+                        .child(crate::widgets::fade_text(match thread.anchor.as_ref() {
                             Some(anchor) if anchor.start_line != anchor.end_line => {
                                 format!("{}:{}–{}", thread.path, anchor.start_line, anchor.end_line)
                             }
                             Some(anchor) => format!("{}:{}", thread.path, anchor.end_line),
                             None => thread.path.clone(),
-                        }),
+                        })),
                 )
             })
             .when(inline, |head| head.children(lines.clone()))
@@ -1792,12 +1792,12 @@ fn media_stand_in(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .child(if title.trim().is_empty() {
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(if title.trim().is_empty() {
                         text
                     } else {
                         format!("{text} · {title}")
-                    }),
+                    })),
             )
             .child(open(
                 crate::tr!("pull_requests.open_on_host", host_name = host_name)
@@ -1868,7 +1868,13 @@ fn media_stand_in(
                         })
                         .text_color(muted),
                     )
-                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(name)),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("pr-media-external-{url}")))
                             .outline()

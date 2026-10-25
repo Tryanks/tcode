@@ -1145,7 +1145,12 @@ mod section {
                     .flex_1()
                     .min_w_0()
                     .gap(cx.theme().tokens.spacing.xxs)
-                    .child(div().text_title(cx).truncate().child(space.name.clone()))
+                    .child(
+                        div()
+                            .text_title(cx)
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(space.name.clone())),
+                    )
                     .child(div().text_secondary(compact, cx).child(summary(space))),
             )
             .children(
@@ -1448,11 +1453,11 @@ mod section {
                     .flex_1()
                     .min_w_0()
                     .text_body(compact, cx)
-                    .truncate()
-                    .child(super::super::device_label(
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(super::super::device_label(
                         &member.name,
                         member.platform.as_deref(),
-                    ));
+                    )));
                 rows = rows.child(
                     if compact {
                         crate::material::group_row_stacked(cx)
@@ -1724,7 +1729,12 @@ mod section {
             .bg(cx.theme().muted)
             .text_caption(cx)
             .child(Icon::empty().path("icons/users.svg"))
-            .child(div().min_w_0().truncate().child(name.to_owned()))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(name.to_owned())),
+            )
             .into_any_element()
     }
 }
@@ -1834,7 +1844,12 @@ mod machines {
                         .flex_1()
                         .min_w_0()
                         .gap(cx.theme().tokens.spacing.xxs)
-                        .child(div().text_title(cx).truncate().child(space.name.clone()))
+                        .child(
+                            div()
+                                .text_title(cx)
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(space.name.clone())),
+                        )
                         .child(
                             div()
                                 .text_secondary(true, cx)

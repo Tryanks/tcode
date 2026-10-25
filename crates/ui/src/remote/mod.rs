@@ -394,10 +394,9 @@ impl RemotePanel {
                         .min_w_0()
                         .gap(cx.theme().tokens.spacing.xxs)
                         .child(
-                            div()
-                                .text_title(cx)
-                                .truncate()
-                                .child(crate::tr!("hosts.this_computer")),
+                            div().text_title(cx).overflow_hidden().child(
+                                crate::widgets::fade_text(crate::tr!("hosts.this_computer")),
+                            ),
                         )
                         .when_some(failure, |column, reason| {
                             column.child(
@@ -476,14 +475,18 @@ impl RemotePanel {
                 .flex_1()
                 .min_w_0()
                 .gap(cx.theme().tokens.spacing.xxs)
-                .child(div().text_title(cx).truncate().child(name.clone()))
+                .child(
+                    div()
+                        .text_title(cx)
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(name.clone())),
+                )
                 .when_some(host.space_name.as_deref(), |column, space| {
-                    column.child(
-                        div()
-                            .text_secondary(true, cx)
-                            .truncate()
-                            .child(crate::tr!("member.space", space = space).into_owned()),
-                    )
+                    column.child(div().text_secondary(true, cx).overflow_hidden().child(
+                        crate::widgets::fade_text(
+                            crate::tr!("member.space", space = space).into_owned(),
+                        ),
+                    ))
                 })
                 .when(
                     host.space_name.is_none() && host.group_id.is_some(),
@@ -491,8 +494,8 @@ impl RemotePanel {
                         column.child(
                             div()
                                 .text_secondary(true, cx)
-                                .truncate()
-                                .child(crate::tr!("hosts.in_group")),
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(crate::tr!("hosts.in_group"))),
                         )
                     },
                 )
@@ -675,8 +678,8 @@ impl RemotePanel {
                                         .flex_1()
                                         .min_w_0()
                                         .text_body(true, cx)
-                                        .truncate()
-                                        .child(title),
+                                        .overflow_hidden()
+                                        .child(crate::widgets::fade_text(title)),
                                 )
                                 .child(
                                     Icon::new(IconName::ChevronRight)
@@ -764,8 +767,8 @@ impl RemotePanel {
                         .flex_1()
                         .min_w_0()
                         .text_body(true, cx)
-                        .truncate()
-                        .child(title),
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(title)),
                 )
                 .child(
                     Icon::new(IconName::ChevronRight)

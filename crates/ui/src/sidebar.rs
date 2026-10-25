@@ -74,11 +74,13 @@ const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(fal
 /// operating system's reduced-motion preference is enabled.
 const FLAT_REORDER_SPRING: SpringConfig = SpringConfig::new(420., 41., 1.);
 
-/// A sidebar label that owns the remaining row width and always truncates on
-/// one line. `text_ellipsis` alone still leaves GPUI's default wrapping on,
-/// which lets a glyph move onto a second line at resize boundaries.
-fn truncated_sidebar_label() -> gpui::Div {
-    div().flex_1().min_w_0().truncate()
+/// A sidebar label that owns the remaining row width, on one line.
+fn sidebar_label(text: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .child(crate::widgets::fade_text(text))
 }
 
 /// Fold indicator for a collapsible section header.
@@ -1847,10 +1849,10 @@ impl SessionsSidebar {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
                             .text_secondary(compact, cx)
                             .text_align(gpui::TextAlign::Right)
-                            .child(host),
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(host)),
                     )
                     .child(
                         div()
@@ -2133,10 +2135,9 @@ impl SessionsSidebar {
         )
         .child(crate::project_icon::artwork(&group.project, 16.))
         .child(
-            truncated_sidebar_label()
+            sidebar_label(name)
                 .font_medium()
-                .text_color(cx.theme().sidebar_foreground)
-                .child(name),
+                .text_color(cx.theme().sidebar_foreground),
         )
         .children(self.shared_badge(&project_id, cx))
         // Unread dot when any child thread is unread (hidden on hover so
@@ -2432,7 +2433,7 @@ impl SessionsSidebar {
         let title = if let Some(input) = &state.renaming {
             self.rename_input(input, cx).into_any_element()
         } else {
-            truncated_sidebar_label()
+            sidebar_label(meta.title.clone())
                 .text_body(false, cx)
                 .text_color(if meta.is_settled() {
                     cx.theme().muted_foreground
@@ -2442,7 +2443,6 @@ impl SessionsSidebar {
                 .when(emphasize_unread && state.show_unread, |title| {
                     title.font_semibold()
                 })
-                .child(meta.title.clone())
                 .into_any_element()
         };
         h_flex()
@@ -3060,7 +3060,7 @@ impl SessionsSidebar {
                             })
                             .unwrap_or_else(|| Icon::new(IconName::Folder).into_any_element()),
                     )
-                    .child(truncated_sidebar_label().child(project_name))
+                    .child(sidebar_label(project_name))
                 })
                 // Without a project label there is no flex-1 element on the
                 // line, so a spacer keeps the worktree glyph bottom-right.
@@ -3545,7 +3545,12 @@ impl SessionsSidebar {
                                         .text_body(true, cx)
                                         .child(crate::tr!("chat.waiting_connection")),
                                 )
-                                .child(div().truncate().text_secondary(true, cx).child(preview)),
+                                .child(
+                                    div()
+                                        .text_secondary(true, cx)
+                                        .overflow_hidden()
+                                        .child(crate::widgets::fade_text(preview)),
+                                ),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.store.update(cx, |store, cx| {
@@ -3786,13 +3791,9 @@ impl SessionsSidebar {
                         .update(cx, |state, cx| state.open_palette(cx));
                 }))
                 .child(Icon::new(IconName::Search))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(crate::tr!("mobile.search_threads")),
-                ),
+                .child(div().flex_1().min_w_0().overflow_hidden().child(
+                    crate::widgets::fade_text(crate::tr!("mobile.search_threads")),
+                )),
             )
     }
 
@@ -3835,12 +3836,12 @@ impl SessionsSidebar {
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
                 .debug_selector({
                     let name = row.name.clone();
                     move || format!("compact-group-{name}")
                 })
-                .child(row.name.clone()),
+                .overflow_hidden()
+                .child(crate::widgets::fade_text(row.name.clone())),
         )
         .children(self.shared_badge(&row.project_id, cx))
         .child(div().flex_none().child(row.count.clone()))
@@ -3945,7 +3946,7 @@ impl SessionsSidebar {
                             .child(if let Some(rename) = renaming {
                                 self.rename_input(&rename.input, cx).into_any_element()
                             } else {
-                                truncated_sidebar_label()
+                                sidebar_label(cached.title.clone())
                                     .text_body(true, cx)
                                     .text_color(if meta.is_settled() {
                                         cx.theme().muted_foreground
@@ -3958,7 +3959,6 @@ impl SessionsSidebar {
                                         let id = session_id.clone();
                                         move || format!("compact-title-{id}")
                                     })
-                                    .child(cached.title.clone())
                                     .into_any_element()
                             })
                             .when(meta.pinned_at.is_some() && !meta.is_settled(), |row| {
@@ -3986,12 +3986,12 @@ impl SessionsSidebar {
                                 line.child(
                                     div()
                                         .min_w_0()
-                                        .truncate()
                                         .debug_selector({
                                             let name = name.clone();
                                             move || format!("compact-project-{name}")
                                         })
-                                        .child(name),
+                                        .overflow_hidden()
+                                        .child(crate::widgets::fade_text(name)),
                                 )
                                 .child(div().flex_none().child("·"))
                             })
@@ -4557,10 +4557,9 @@ mod tests {
                         ),
                 )
                 .child(
-                    truncated_sidebar_label()
+                    sidebar_label("Phase 0 修复架构约束测试")
                         .debug_selector(|| "thread-title".into())
-                        .text_body(false, cx)
-                        .child("Phase 0 修复架构约束测试"),
+                        .text_body(false, cx),
                 )
         }
     }
