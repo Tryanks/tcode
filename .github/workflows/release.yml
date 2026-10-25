@@ -76,7 +76,9 @@ jobs:
             platform: linux
             arch: arm64
           - label: iOS arm64
-            os: macos-26
+            # The host targets iOS 27 (UIWindowScene.displayLink); macos-26 images
+            # ship only Xcode 26.x, so the IPA needs GitHub's Xcode 27 image.
+            os: xcode-27
             target: aarch64-apple-ios
             platform: ios
             arch: arm64
