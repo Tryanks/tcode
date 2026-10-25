@@ -386,14 +386,14 @@ impl ActiveSession {
         matches!(self.runtime, Runtime::Live(_)) && self.live_cwd != self.meta.cwd
     }
 
-    /// A settings restart must not kill Claude-owned background work or race a
-    /// turn whose provider delivery acknowledgement has not landed yet. A thread that
-    /// moved itself also keeps the turn that made the call.
+    /// A settings restart must not kill a running turn (a `/compact` included),
+    /// Claude-owned background work, or a turn whose provider delivery
+    /// acknowledgement has not landed yet.
     pub(super) fn settings_restart_deferred(&self) -> bool {
         self.launch_settings_changed_while_live()
-            && (self.background_task_count > 0
-                || self.delivery_in_flight.is_some()
-                || (self.turn_in_flight && self.cwd_changed_while_live()))
+            && (self.turn_in_flight
+                || self.background_task_count > 0
+                || self.delivery_in_flight.is_some())
     }
 
     /// The queued message the next dispatch would send, if one could go now.
