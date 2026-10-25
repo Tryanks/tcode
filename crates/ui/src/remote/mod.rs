@@ -183,6 +183,37 @@ fn report<T: 'static>(
         .detach();
 }
 
+/// Ask before a change that cannot be undone from here. `title` names what
+/// goes, `description` says in one sentence what follows, and `action` labels
+/// the danger button that runs `on_ok`.
+fn confirm_destructive(
+    title: String,
+    description: String,
+    action: String,
+    on_ok: impl Fn(&mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let on_ok = Rc::new(on_ok);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let on_ok = on_ok.clone();
+        alert
+            .title(title.clone())
+            .description(description.clone())
+            .button_props(
+                crate::overlay::DialogButtons::default()
+                    .ok_variant(crate::widgets::ButtonVariant::Danger)
+                    .ok_text(action.clone())
+                    .cancel_text(crate::tr!("spaces.cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, window, cx| {
+                on_ok(window, cx);
+                true
+            })
+    });
+}
+
 /// A dialog's confirmation; `false` keeps the dialog open.
 type Submit = Rc<dyn Fn(&mut Window, &mut App) -> bool>;
 
@@ -1117,9 +1148,32 @@ impl RemotePanel {
         cx.notify();
     }
 
-    fn on_forget(&mut self, action: &ForgetHost, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.global::<ClientAttachment>().remove_host(&action.0);
-        cx.notify();
+    fn on_forget(&mut self, action: &ForgetHost, window: &mut Window, cx: &mut Context<Self>) {
+        let id = action.0.clone();
+        let Some(name) = self
+            .client(cx)
+            .and_then(|client| {
+                client
+                    .load_hosts()
+                    .into_iter()
+                    .find(|host| host.host_id == id)
+            })
+            .map(|host| host.name)
+        else {
+            return;
+        };
+        let panel = cx.entity().downgrade();
+        confirm_destructive(
+            crate::tr!("hosts.forget_title", name = name).into_owned(),
+            crate::tr!("hosts.forget_description").into_owned(),
+            crate::tr!("hosts.forget").into_owned(),
+            move |_, cx| {
+                cx.global::<ClientAttachment>().remove_host(&id);
+                let _ = panel.update(cx, |_, cx| cx.notify());
+            },
+            window,
+            cx,
+        );
     }
 }
 

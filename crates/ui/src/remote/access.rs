@@ -258,7 +258,19 @@ impl AccessSection {
                                             window,
                                             cx,
                                         ),
-                                        None => revoke(window, cx),
+                                        None => super::confirm_destructive(
+                                            crate::tr!(
+                                                "remote.devices.revoke_title",
+                                                name = name.clone()
+                                            )
+                                            .into_owned(),
+                                            crate::tr!("remote.devices.revoke_description")
+                                                .into_owned(),
+                                            crate::tr!("remote.devices.revoke").into_owned(),
+                                            revoke.clone(),
+                                            window,
+                                            cx,
+                                        ),
                                     }),
                             ),
                     )

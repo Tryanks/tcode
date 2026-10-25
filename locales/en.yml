@@ -1382,6 +1382,8 @@ remote:
     section: "CONNECTED DEVICES"
     empty: "No devices have connected yet."
     revoke: "Remove"
+    revoke_title: "Remove «%{name}»?"
+    revoke_description: "The device is disconnected and can come back only by pairing again."
     revoke_failed: "Could not remove the device; it is still paired: %{error}"
   path:
     lan: "LAN"
@@ -1410,6 +1412,8 @@ hosts:
   empty: "No machines added yet."
   disconnect: "Disconnect"
   forget: "Remove"
+  forget_title: "Remove «%{name}»?"
+  forget_description: "This device forgets the machine; connecting again needs a new invitation."
   actions: "Actions for %{name}"
   pair_again: "Pair again"
   in_group: "In a machine group"
@@ -1518,8 +1522,8 @@ spaces:
   rename_action: "Save"
   delete: "Delete space"
   delete_title: "Delete «%{name}»?"
-  delete_description: "Its members lose access and are unpaired from this machine. The projects and their threads stay."
-  delete_description_empty: "The link stops working. The projects and their threads stay."
+  delete_description: "Its members are unpaired from this machine; the projects and their threads stay."
+  delete_description_empty: "The link stops working; the projects and their threads stay."
   delete_action: "Delete"
   summary:
     project_one: "1 project"
@@ -1558,7 +1562,7 @@ spaces:
     empty: "No one has joined yet."
     move: "Move to…"
     remove: "Remove"
-    remove_title: "Remove %{name} from «%{space}»?"
+    remove_title: "Remove «%{name}» from «%{space}»?"
     remove_description: "The device is disconnected and unpaired from this machine."
     regenerate: "Also regenerate the link"
   share:
@@ -1583,7 +1587,7 @@ group:
   failed: "Could not update the group: %{error}"
   leave: "Leave group"
   leave_title: "Leave «%{name}»?"
-  leave_description: "The other machines stop admitting devices through this one. Devices paired here stay paired with this machine."
+  leave_description: "The other machines stop admitting devices through this one; devices paired here stay paired with it."
   detail_note: "To add a device or another machine, use this machine's invitation: every machine in the group admits a device that pairs with it, and removing a device on any machine removes it from all of them."
   invitation_note: "This machine is in «%{name}»: a device that pairs with this invitation can open every machine in the group, and another machine can join the group with it."
   summary:
@@ -1611,15 +1615,15 @@ group:
     section: "MACHINES"
     this: "This machine"
     remove: "Remove"
-    remove_title: "Remove %{name} from the group?"
-    remove_description: "The other machines stop syncing with it and stop admitting the devices it brings from now on. Devices it already brought keep their access."
+    remove_title: "Remove «%{name}» from the group?"
+    remove_description: "The other machines stop syncing with it and admitting the devices it pairs from now on; devices it already brought keep their access."
   declined:
     section: "WAITING FOR THIS MACHINE"
     description: "Other machines admitted these devices while this machine was not accepting new devices."
     admit: "Admit"
   remove_device:
-    title: "Remove %{name} from the group?"
-    description: "The device is disconnected and unpaired from every machine in «%{group}», not only this one. It can come back only by pairing again."
+    title: "Remove «%{name}» from every machine?"
+    description: "The device is disconnected from every machine in «%{group}», not only this one, and can come back only by pairing again."
     action: "Remove everywhere"
 
 member:

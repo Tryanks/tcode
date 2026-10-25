@@ -1375,6 +1375,8 @@ remote:
     section: "已连接过的设备"
     empty: "尚无设备连接过本机。"
     revoke: "移除"
+    revoke_title: "移除「%{name}」？"
+    revoke_description: "该设备会被断开，之后只有重新配对才能再连接。"
     revoke_failed: "无法移除设备，它仍处于已配对状态：%{error}"
   path:
     lan: "局域网直连"
@@ -1403,6 +1405,8 @@ hosts:
   empty: "尚未添加任何主机。"
   disconnect: "断开"
   forget: "移除"
+  forget_title: "移除「%{name}」？"
+  forget_description: "本设备将不再保存这台主机，再次连接需要新的邀请。"
   actions: "%{name} 的操作"
   pair_again: "重新配对"
   in_group: "主机组成员"
@@ -1511,8 +1515,8 @@ spaces:
   rename_action: "保存"
   delete: "删除共享空间"
   delete_title: "删除「%{name}」？"
-  delete_description: "其成员将失去访问权限，并与本机解除配对。项目及其会话会保留。"
-  delete_description_empty: "链接将失效。项目及其会话会保留。"
+  delete_description: "成员会与本机解除配对，项目及其会话仍会保留。"
+  delete_description_empty: "链接将失效，项目及其会话仍会保留。"
   delete_action: "删除"
   summary:
     project_one: "1 个项目"
@@ -1551,7 +1555,7 @@ spaces:
     empty: "还没有人加入。"
     move: "移动到…"
     remove: "移除"
-    remove_title: "将 %{name} 移出「%{space}」？"
+    remove_title: "将「%{name}」移出「%{space}」？"
     remove_description: "该设备会断开连接，并与本机解除配对。"
     regenerate: "同时重新生成链接"
   share:
@@ -1576,7 +1580,7 @@ group:
   failed: "无法更新主机组：%{error}"
   leave: "退出主机组"
   leave_title: "退出「%{name}」？"
-  leave_description: "其他主机不再通过本机接纳设备。已和本机配对的设备仍与本机保持配对。"
+  leave_description: "其他主机不再通过本机接纳设备，已与本机配对的设备不受影响。"
   detail_note: "要添加设备或另一台主机，请使用本机的邀请：用它配对的设备会被组里每一台主机接纳；在任意一台主机上移除设备，会从所有主机上移除。"
   invitation_note: "本机在「%{name}」中：用这个邀请配对的设备可以打开组里的每一台主机，另一台主机也可以用它加入这个组。"
   summary:
@@ -1604,15 +1608,15 @@ group:
     section: "主机"
     this: "本机"
     remove: "移除"
-    remove_title: "将 %{name} 移出主机组？"
-    remove_description: "从现在起，其他主机不再与它同步，也不再接纳它带来的设备。它已经带入的设备仍保有访问权限。"
+    remove_title: "将「%{name}」移出主机组？"
+    remove_description: "其他主机将不再与它同步，也不再接纳它此后配对的设备；它已带入的设备仍可访问。"
   declined:
     section: "等待本机接纳"
     description: "本机已关闭新设备配对期间，其他主机接纳了这些设备。"
     admit: "接纳"
   remove_device:
-    title: "将 %{name} 移出主机组？"
-    description: "该设备会从「%{group}」里的每一台主机上断开并取消配对，而不只是本机。只有重新配对才能再加入。"
+    title: "从所有主机移除「%{name}」？"
+    description: "该设备会与「%{group}」中的每一台主机断开，而不只是本机，之后只有重新配对才能再连接。"
     action: "从所有主机移除"
 
 member:

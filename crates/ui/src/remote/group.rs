@@ -17,12 +17,11 @@ use super::spaces::{Resolve, Spaces, SpacesObserver};
 use super::{Submit, report, submit_actions};
 use crate::icon::{Icon, IconName};
 use crate::material::{empty_row, group_row, notice, section_gap};
-use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
+use crate::overlay::{Notification, OverlayExt as _};
 use crate::settings_rows::{footnote, row_frame, settings_group};
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
-use crate::widgets::ButtonVariant;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 
@@ -75,54 +74,36 @@ impl GroupSection {
             return;
         };
         let id = machine.id.clone();
-        let name = machine.name.clone();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let spaces = spaces.clone();
-            let id = id.clone();
-            alert
-                .title(crate::tr!("group.machines.remove_title", name = name.clone()).into_owned())
-                .description(crate::tr!("group.machines.remove_description"))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text(crate::tr!("group.machines.remove"))
-                        .cancel_text(crate::tr!("spaces.cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, window, cx| {
-                    let task = spaces.update(cx, |spaces, cx| {
-                        spaces.act_group(GroupAction::RemoveMachine(id.clone()), cx)
-                    });
-                    report("group.failed", task, window, cx);
-                    true
-                })
-        });
+        super::confirm_destructive(
+            crate::tr!("group.machines.remove_title", name = machine.name.clone()).into_owned(),
+            crate::tr!("group.machines.remove_description").into_owned(),
+            crate::tr!("group.machines.remove").into_owned(),
+            move |window, cx| {
+                let task = spaces.update(cx, |spaces, cx| {
+                    spaces.act_group(GroupAction::RemoveMachine(id.clone()), cx)
+                });
+                report("group.failed", task, window, cx);
+            },
+            window,
+            cx,
+        );
     }
 
     fn leave(&mut self, group: &GroupInfo, window: &mut Window, cx: &mut Context<Self>) {
         let Some(spaces) = self.spaces(cx) else {
             return;
         };
-        let name = group.name.clone();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let spaces = spaces.clone();
-            alert
-                .title(crate::tr!("group.leave_title", name = name.clone()).into_owned())
-                .description(crate::tr!("group.leave_description"))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text(crate::tr!("group.leave"))
-                        .cancel_text(crate::tr!("spaces.cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, window, cx| {
-                    let task =
-                        spaces.update(cx, |spaces, cx| spaces.act_group(GroupAction::Leave, cx));
-                    report("group.failed", task, window, cx);
-                    true
-                })
-        });
+        super::confirm_destructive(
+            crate::tr!("group.leave_title", name = group.name.clone()).into_owned(),
+            crate::tr!("group.leave_description").into_owned(),
+            crate::tr!("group.leave").into_owned(),
+            move |window, cx| {
+                let task = spaces.update(cx, |spaces, cx| spaces.act_group(GroupAction::Leave, cx));
+                report("group.failed", task, window, cx);
+            },
+            window,
+            cx,
+        );
     }
 
     /// Not in a group: what one risks, the two ways in, and what one is.
@@ -524,30 +505,14 @@ pub(crate) fn confirm_group_removal(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let on_ok = Rc::new(on_ok);
-    window.open_alert_dialog(cx, move |alert, _, _| {
-        let on_ok = on_ok.clone();
-        alert
-            .title(crate::tr!("group.remove_device.title", name = device_name.clone()).into_owned())
-            .description(
-                crate::tr!(
-                    "group.remove_device.description",
-                    group = group_name.clone()
-                )
-                .into_owned(),
-            )
-            .button_props(
-                DialogButtons::default()
-                    .ok_variant(ButtonVariant::Danger)
-                    .ok_text(crate::tr!("group.remove_device.action"))
-                    .cancel_text(crate::tr!("spaces.cancel"))
-                    .show_cancel(true),
-            )
-            .on_ok(move |_, window, cx| {
-                on_ok(window, cx);
-                true
-            })
-    });
+    super::confirm_destructive(
+        crate::tr!("group.remove_device.title", name = device_name).into_owned(),
+        crate::tr!("group.remove_device.description", group = group_name).into_owned(),
+        crate::tr!("group.remove_device.action").into_owned(),
+        on_ok,
+        window,
+        cx,
+    );
 }
 
 /// Under a machine's invitation while the machine is in a group: pairing
