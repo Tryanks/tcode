@@ -194,10 +194,18 @@ impl TranscriptMapper {
             };
             match tool {
                 ChildTool::Tool { name, input } => {
+                    let image_reads = if failed {
+                        Vec::new()
+                    } else {
+                        crate::tool_result_images(
+                            &name,
+                            block.get("content").unwrap_or(&Value::Null),
+                        )
+                    };
                     events.push(AgentEvent::ItemCompleted(self.item(
                         id,
                         ItemContent::ToolCall {
-                            image_reads: Vec::new(),
+                            image_reads,
                             name,
                             input,
                             output: Some(output),
@@ -430,6 +438,7 @@ fn should_skip(value: &Value) -> bool {
         Some("queue-operation" | "summary" | "file-history-snapshot")
     ) || value.get("attachment").is_some()
         || value.get("isMeta").and_then(Value::as_bool) == Some(true)
+        || value.get("isSynthetic").and_then(Value::as_bool) == Some(true)
 }
 
 fn is_user_noise(text: &str) -> bool {
@@ -503,5 +512,25 @@ mod tests {
         ));
         assert!(tail.read_appended().unwrap().is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Claude's Read of an image yields the image block and then a synthetic
+    /// user text with the display scale; the child shows the image on its
+    /// tool call and nothing as a user message.
+    #[test]
+    fn image_read_shows_the_image_and_not_the_synthetic_scale_note() {
+        let mut mapper = TranscriptMapper::new("spawn-1");
+        mapper.map_value(&serde_json::json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"read","name":"Read","input":{"file_path":"/tmp/shot.png"}}]}}));
+        let completed = mapper.map_value(&serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"read","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}}]}]}}));
+        assert!(
+            matches!(
+                &completed[..],
+                [AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::ToolCall { image_reads, .. }, .. })]
+                    if image_reads.len() == 1 && image_reads[0].media_type == "image/png"
+            ),
+            "{completed:?}"
+        );
+        let note = mapper.map_value(&serde_json::json!({"type":"user","isSynthetic":true,"message":{"content":[{"type":"text","text":"[Image: original 2400x1602, displayed at 2000x1335. Multiply coordinates by 1.20 to map to original image.]"}]}}));
+        assert!(note.is_empty(), "{note:?}");
     }
 }
