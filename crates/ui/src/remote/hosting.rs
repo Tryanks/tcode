@@ -1325,7 +1325,7 @@ pub(super) fn invitation_card<V: 'static>(
         .children(group.map(|name| super::group::invitation_note(&name, true, cx)))
         .child(div().text_secondary(true, cx).child(crate::tr!(
             "remote.invite.expires",
-            time = crate::composer::model::format_countdown(remaining)
+            time = crate::time::format_countdown(remaining)
         )))
         .child(
             h_flex()

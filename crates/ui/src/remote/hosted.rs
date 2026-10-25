@@ -134,7 +134,7 @@ impl HostedPanel {
                 .child(div().text_body(compact, cx).child(match &state.invite {
                     Some(_) => crate::tr!(
                         "remote.invite.expires",
-                        time = crate::composer::model::format_countdown(state.expires_in_secs)
+                        time = crate::time::format_countdown(state.expires_in_secs)
                     ),
                     None => crate::tr!("remote.invite.expired"),
                 }))

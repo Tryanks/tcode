@@ -160,19 +160,6 @@ pub(super) fn parse_relative(spec: &str) -> Option<chrono::Duration> {
         .and_then(chrono::Duration::try_seconds)
 }
 
-/// Compact queue-strip countdown: hours retain an hour column, shorter waits
-/// use minutes and seconds.
-pub(crate) fn format_countdown(secs: u64) -> String {
-    let hours = secs / 3_600;
-    let minutes = (secs % 3_600) / 60;
-    let seconds = secs % 60;
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
-}
-
 pub(super) fn slash_command(
     text: &str,
     compact_offered: bool,

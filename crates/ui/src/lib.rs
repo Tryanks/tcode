@@ -57,7 +57,7 @@ mod scroll;
 pub mod scroll_capture;
 pub mod settings;
 mod settings_page;
-mod settings_rows;
+pub mod settings_rows;
 mod shell;
 mod shortcut;
 pub mod sidebar;

@@ -19,14 +19,14 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::switch::Switch;
 
 /// The width of a text field beside its row's label; gpui-base has no form-field width token.
-pub(crate) const FIELD_WIDTH: f32 = 240.;
+pub const FIELD_WIDTH: f32 = 240.;
 
 /// Max width of the settings content column, a reading measure for its forms.
-pub(crate) const CONTENT_MAX_WIDTH: f32 = 768.;
+pub const CONTENT_MAX_WIDTH: f32 = 768.;
 
 /// A captioned group of settings rows: the unit every settings page is
 /// composed of.
-pub(crate) fn settings_group(
+pub fn settings_group(
     caption: impl Into<SharedString>,
     rows: Vec<AnyElement>,
     cx: &App,
@@ -41,7 +41,7 @@ pub(crate) fn settings_group(
 /// title, so it reads as belonging to that setting rather than to the row's
 /// control on the far right. A row without a description is one whose title
 /// and control already say everything.
-pub(crate) fn row_labels(
+pub fn row_labels(
     title: impl Into<SharedString>,
     description: Option<SharedString>,
     reset: Option<AnyElement>,
@@ -65,7 +65,7 @@ pub(crate) fn row_labels(
 /// The per-item "restore default" button: icon-only, ghost, and rendered
 /// only while `overridden` — a row showing its factory value has nothing to
 /// restore, so the affordance would just be noise.
-pub(crate) fn reset_action(
+pub fn reset_action(
     id: &'static str,
     overridden: bool,
     on_reset: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -93,7 +93,7 @@ pub(crate) fn reset_action(
 
 /// A row whose control can squeeze its label: stacked on a compact window.
 /// A row whose control is a fixed affordance (a switch) is a [`ToggleRow`].
-pub(crate) fn row_frame(compact: bool, cx: &App) -> gpui::Div {
+pub fn row_frame(compact: bool, cx: &App) -> gpui::Div {
     if compact {
         crate::material::group_row_stacked(cx)
     } else {
@@ -107,7 +107,7 @@ pub(crate) fn row_frame(compact: bool, cx: &App) -> gpui::Div {
 type ToggleHandler = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
-pub(crate) struct ToggleRow {
+pub struct ToggleRow {
     id: SharedString,
     title: SharedString,
     description: Option<SharedString>,
@@ -121,7 +121,7 @@ pub(crate) struct ToggleRow {
 
 impl ToggleRow {
     /// `on_toggle` receives the state the row is being switched to.
-    pub(crate) fn new(
+    pub fn new(
         id: impl Into<SharedString>,
         title: impl Into<SharedString>,
         checked: bool,
@@ -141,26 +141,24 @@ impl ToggleRow {
         }
     }
 
-    pub(crate) fn description(mut self, description: impl Into<SharedString>) -> Self {
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
         self
     }
 
-    pub(crate) fn reset(mut self, reset: Option<AnyElement>) -> Self {
+    pub fn reset(mut self, reset: Option<AnyElement>) -> Self {
         self.reset = reset;
         self
     }
 
     /// Status shown between the labels and the switch. A clickable
     /// accessory stops its click from reaching the row.
-    #[cfg(feature = "remote-hosting")]
-    pub(crate) fn accessory(mut self, accessory: Option<AnyElement>) -> Self {
+    pub fn accessory(mut self, accessory: Option<AnyElement>) -> Self {
         self.accessory = accessory;
         self
     }
 
-    #[cfg(target_family = "wasm")]
-    pub(crate) fn disabled(mut self, disabled: bool) -> Self {
+    pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
@@ -241,11 +239,7 @@ impl RenderOnce for ToggleRow {
 }
 
 /// The trigger of a settings select.
-pub(crate) fn dropdown_trigger(
-    id: &'static str,
-    label: impl Into<SharedString>,
-    cx: &App,
-) -> Button {
+pub fn dropdown_trigger(id: &'static str, label: impl Into<SharedString>, cx: &App) -> Button {
     Button::new(id).ghost().outline().compact().child(
         h_flex()
             // One width for every select trigger, so a column of them lines up; gpui-base's
@@ -261,7 +255,7 @@ pub(crate) fn dropdown_trigger(
 
 /// One choice of a [`select_row`].
 #[derive(Clone)]
-pub(crate) struct SelectRowOption<T> {
+pub struct SelectRowOption<T> {
     pub value: T,
     pub id: SharedString,
     pub label: SharedString,
@@ -272,7 +266,7 @@ pub(crate) struct SelectRowOption<T> {
 /// A settings row whose control picks one of `options` from a menu.
 /// `menu_width` is the menu's floor, so its longest option fits.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn select_row<T: Clone + 'static>(
+pub fn select_row<T: Clone + 'static>(
     trigger_id: &'static str,
     popover_id: &'static str,
     menu_id: &'static str,
