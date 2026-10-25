@@ -616,7 +616,9 @@ impl Composer {
             return;
         }
         #[cfg(feature = "voice")]
-        self.abort_dictation(cx);
+        if self.submit_after_dictation(steer, cx) {
+            return;
+        }
         // A blocking question uses this text as the current custom answer,
         // advancing through the same path as an option click. A non-blocking
         // one leaves the composer to ordinary sends and steers.

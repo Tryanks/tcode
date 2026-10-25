@@ -10,6 +10,10 @@ pub(in super::super) struct Voice {
     state: Entity<SpeechState>,
     locale: &'static str,
     insertion: Option<Insertion>,
+    /// A send that arrived mid-dictation, with its steer flag. Platforms
+    /// recognize behind the audio, so sending at once would cut off speech
+    /// that has been spoken but not yet transcribed.
+    pending_submit: Option<bool>,
 }
 
 struct Insertion {
@@ -51,6 +55,7 @@ impl Voice {
             state,
             locale: speech_locale(),
             insertion: None,
+            pending_submit: None,
         }
     }
 }
@@ -129,8 +134,24 @@ impl Composer {
         active
     }
 
+    /// Stops an active dictation and defers the send until its final
+    /// transcript is in the draft.
+    pub(in super::super) fn submit_after_dictation(
+        &mut self,
+        steer: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.voice.state.read(cx).status().is_active() {
+            return false;
+        }
+        self.voice.pending_submit = Some(steer);
+        self.voice.state.update(cx, |state, cx| state.stop(cx));
+        true
+    }
+
     pub(in super::super) fn abort_dictation(&mut self, cx: &mut Context<Self>) {
         self.voice.insertion = None;
+        self.voice.pending_submit = None;
         self.voice.state.update(cx, |state, cx| state.cancel(cx));
     }
 
@@ -156,10 +177,9 @@ impl Composer {
             SpeechEvent::Started => {
                 // A cancelled session can have a Started event already queued.
                 if self.voice.state.read(cx).status().is_active() {
-                    let (anchor, expected) = self.input.update(cx, |input, cx| {
-                        input.focus(window, cx);
-                        (input.cursor(), input.value().to_string())
-                    });
+                    self.focus(window, cx);
+                    let input = self.input.read(cx);
+                    let (anchor, expected) = (input.cursor(), input.value().to_string());
                     self.voice.insertion = Some(Insertion {
                         anchor,
                         last_len: 0,
@@ -171,10 +191,15 @@ impl Composer {
                 self.insert_transcript(text.clone().into(), window, cx);
                 if matches!(event, SpeechEvent::Final(_)) {
                     self.voice.insertion = None;
+                    if let Some(steer) = self.voice.pending_submit.take() {
+                        let input = self.input.clone();
+                        self.submit(&input, steer, window, cx);
+                    }
                 }
             }
             SpeechEvent::Error(error) => {
                 self.voice.insertion = None;
+                self.voice.pending_submit = None;
                 let notification = Notification::error(
                     crate::tr!("composer.voice_error", error = error).into_owned(),
                 );
@@ -200,7 +225,10 @@ impl Composer {
                 };
                 window.push_notification(notification, cx);
             }
-            SpeechEvent::Cancelled => self.voice.insertion = None,
+            SpeechEvent::Cancelled => {
+                self.voice.insertion = None;
+                self.voice.pending_submit = None;
+            }
         }
         cx.notify();
     }
@@ -259,7 +287,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dictation_revises_the_draft_and_cannot_overwrite_edits_or_submission(
+    fn dictation_revises_the_draft_and_a_send_waits_for_its_final_transcript(
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -383,7 +411,7 @@ mod tests {
         });
         let submitted = sink.borrow().clone().unwrap();
         submitted
-            .try_send(PlatformEvent::Hypothesis("/model".into()))
+            .try_send(PlatformEvent::Hypothesis("/mod".into()))
             .unwrap();
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -392,17 +420,58 @@ mod tests {
             composer.read_with(cx, |composer, cx| composer.voice.state.read(cx).status()),
             SpeechStatus::Stopping,
         );
+        let picker = composer.read_with(cx, |composer, _| composer.model_picker_token);
         composer.update_in(cx, |composer, window, cx| {
             let input = composer.input.clone();
             composer.submit(&input, false, window, cx);
         });
-        _ = submitted.try_send(PlatformEvent::Hypothesis("late text".into()));
-        _ = submitted.try_send(PlatformEvent::Finished);
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "/mod"
+        );
+        submitted
+            .try_send(PlatformEvent::Phrase("/model".into()))
+            .unwrap();
+        submitted.try_send(PlatformEvent::Finished).unwrap();
         cx.run_until_parked();
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             ""
         );
+        assert_ne!(
+            composer.read_with(cx, |composer, _| composer.model_picker_token),
+            picker,
+            "the send must carry the final transcript"
+        );
+        _ = submitted.try_send(PlatformEvent::Hypothesis("late text".into()));
+        cx.run_until_parked();
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            ""
+        );
+
+        cx.update(|window, cx| {
+            crate::window_seam::override_mobile_for_test(cx, true);
+            window.blur(cx);
+        });
+        composer.update_in(cx, |composer, _, cx| {
+            composer
+                .voice
+                .state
+                .update(cx, |state, cx| state.toggle(cx));
+        });
+        let touch = sink.borrow().clone().unwrap();
+        touch
+            .try_send(PlatformEvent::Hypothesis("no keyboard".into()))
+            .unwrap();
+        cx.run_until_parked();
+        composer.update_in(cx, |composer, window, cx| {
+            assert!(
+                !composer.input.read(cx).focus_handle(cx).is_focused(window),
+                "dictation on a touch layout must not raise the software keyboard"
+            );
+            assert_eq!(composer.draft(cx), "no keyboard");
+        });
         driver.shutdown(cx, &store, &host);
     }
 }
