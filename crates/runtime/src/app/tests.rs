@@ -6614,6 +6614,56 @@ fn settings_restart_waits_for_background_follow_up() {
     });
 }
 
+/// A message sent with a new model while a turn runs (a `/compact` included)
+/// waits for that turn instead of killing it to restart the provider.
+#[test]
+fn settings_restart_waits_for_the_running_turn() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-running-turn-restart-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(TestClientState::new(store));
+    let (commands, actor) = smol::channel::unbounded();
+    let mut session = live_session(ProviderKind::ClaudeCode, commands);
+    session.meta.id = "running-turn-restart".into();
+    session.live_model = Some("claude-opus-4-8".into());
+    session.meta.model = Some("claude-sonnet-4-6".into());
+
+    state.update(cx, |state, cx| {
+        state
+            .settings
+            .provider_mut(ProviderKind::ClaudeCode)
+            .binary_path = Some("/nonexistent/tcode-test-claude".into());
+        state.install_selected(session);
+        state.on_event(
+            "running-turn-restart",
+            AgentEvent::TurnStarted {
+                turn_id: "compact".into(),
+            },
+            cx,
+        );
+        state.send_turn(
+            "running-turn-restart",
+            "continue on the new model".into(),
+            Vec::new(),
+            cx,
+        );
+        assert!(actor.try_recv().is_err());
+        assert_eq!(state.selected_session().unwrap().queue.len(), 1);
+
+        state.on_event(
+            "running-turn-restart",
+            AgentEvent::TurnCompleted {
+                turn_id: "compact".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+        assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
+        assert_eq!(state.selected_session().unwrap().queue.len(), 1);
+    });
+}
+
 #[test]
 fn fork_thread_clones_timeline_and_provider_cursor() {
     let cx = &mut TestAppContext::default();
