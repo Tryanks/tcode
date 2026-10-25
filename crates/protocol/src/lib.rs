@@ -224,9 +224,9 @@ pub use wire::{
 // timeline entry carry moved_from, the directory a moved thread's handoff
 // left.
 //
-// Unreleased: the protocol adds the SetPullRequestWatchesPaused command, and
-// Interrupt no longer pauses a thread's watches between turns.
-pub const PROTOCOL_VERSION: u32 = 19;
+// Version 20 (v0.3.1): the protocol adds the SetPullRequestWatchesPaused
+// command, and Interrupt no longer pauses a thread's watches between turns.
+pub const PROTOCOL_VERSION: u32 = 20;
 
 #[cfg(test)]
 mod tests;
