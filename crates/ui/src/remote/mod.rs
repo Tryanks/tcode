@@ -32,6 +32,7 @@ use crate::icon::{Icon, IconName};
 use crate::material::{COMPACT_PAGE_INSET, list_caption, list_row, plain_list, section_gap};
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::pairing::PairForm;
+use crate::settings_rows::CONTENT_MAX_WIDTH;
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -136,8 +137,27 @@ pub(crate) fn open_in_editor(path: &std::path::Path, cx: &App) -> Option<Result<
         .open_in_editor(path)
 }
 
-/// The Hosts content column, matching the settings and chat reading measure.
-const CONTENT_MAX_WIDTH: f32 = 768.;
+/// Tell the user why a change did not happen; a change that did shows itself.
+/// `failed` is the message key, given the error as `error`.
+fn report<T: 'static>(
+    failed: &'static str,
+    task: gpui::Task<Result<T, String>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window
+        .spawn(cx, async move |cx| {
+            if let Err(error) = task.await {
+                let _ = cx.update(|window, cx| {
+                    window.push_notification(
+                        Notification::error(crate::tr!(failed, error = error).into_owned()),
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
+}
 
 type Row = gpui::Stateful<gpui::Div>;
 
@@ -354,12 +374,7 @@ impl RemotePanel {
                     .connection_color(&store.read(cx).connection_state())
             })
             .unwrap_or(cx.theme().success);
-        div()
-            .flex_none()
-            .size(px(8.))
-            .rounded_full()
-            .bg(color)
-            .into_any_element()
+        crate::material::status_dot(color).into_any_element()
     }
 
     /// The mark on the row this window is on when there is no link to

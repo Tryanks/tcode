@@ -8,11 +8,12 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, Task, Window, div, px,
+    ParentElement as _, SharedString, Styled as _, Window, div, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{DeviceAccess, GroupAction, GroupInfo, GroupMachineInfo, HostingState};
 
+use super::report;
 use super::spaces::{Spaces, SpacesObserver};
 use crate::icon::IconName;
 use crate::material::{CARD_INSET, group_caption, group_row, notice, section_gap};
@@ -51,7 +52,7 @@ impl GroupSection {
     fn act(&mut self, action: GroupAction, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(spaces) = self.spaces(cx) {
             let task = spaces.update(cx, |spaces, cx| spaces.act_group(action, cx));
-            report(task, window, cx);
+            report("group.failed", task, window, cx);
         }
     }
 
@@ -95,7 +96,7 @@ impl GroupSection {
                     let task = spaces.update(cx, |spaces, cx| {
                         spaces.act_group(GroupAction::RemoveMachine(id.clone()), cx)
                     });
-                    report(task, window, cx);
+                    report("group.failed", task, window, cx);
                     true
                 })
         });
@@ -121,7 +122,7 @@ impl GroupSection {
                 .on_ok(move |_, window, cx| {
                     let task =
                         spaces.update(cx, |spaces, cx| spaces.act_group(GroupAction::Leave, cx));
-                    report(task, window, cx);
+                    report("group.failed", task, window, cx);
                     true
                 })
         });
@@ -360,22 +361,6 @@ impl gpui::Render for GroupSection {
     }
 }
 
-/// Tell the user why a change did not happen; a change that did shows itself.
-fn report<T: 'static>(task: Task<Result<T, String>>, window: &mut Window, cx: &mut App) {
-    window
-        .spawn(cx, async move |cx| {
-            if let Err(error) = task.await {
-                let _ = cx.update(|window, cx| {
-                    window.push_notification(
-                        Notification::error(crate::tr!("group.failed", error = error).into_owned()),
-                        cx,
-                    );
-                });
-            }
-        })
-        .detach();
-}
-
 /// What creating or joining brings: every full-access device paired with
 /// this machine. Browsers logged in to a headless machine are listed among
 /// its devices under a UUID; they sign in with the machine's password and
@@ -432,7 +417,7 @@ fn open_create(spaces: Entity<Spaces>, window: &mut Window, cx: &mut App) {
             let task = spaces.update(cx, |spaces, cx| {
                 spaces.act_group(GroupAction::Create { name: typed }, cx)
             });
-            report(task, window, cx);
+            report("group.failed", task, window, cx);
             true
         }
     });

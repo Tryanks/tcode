@@ -657,6 +657,12 @@ pub fn rail_detail(content: impl IntoElement, cx: &App) -> Div {
     )
 }
 
+/// A dot in a status color, beside the text it qualifies. A glyph, not text,
+/// so no type token sizes it.
+pub fn status_dot(color: Hsla) -> Div {
+    div().flex_none().size(px(8.)).rounded_full().bg(color)
+}
+
 /// A status badge in one semantic fill.
 pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla, cx: &App) -> Div {
     chip_surface(bg, fg, cx).child(label.into())

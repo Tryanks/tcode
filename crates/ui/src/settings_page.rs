@@ -3,23 +3,20 @@
 mod control;
 pub(crate) mod thread_behavior;
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::overlay::{DialogButtons, OverlayExt as _};
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
-use crate::widgets::switch::Switch;
 use crate::widgets::tabs::{TabBar, TabItem};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Role, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Toggled, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, v_flex};
 
@@ -39,9 +36,9 @@ use crate::window_state::WindowState;
 use tcode_core::project::SessionMeta;
 use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
 
+use crate::settings_rows::{CONTENT_MAX_WIDTH, FIELD_WIDTH, SelectRowOption, ToggleRow};
+
 const NAV_WIDTH: f32 = 255.;
-/// The width of a text field beside its row's label; gpui-base has no form-field width token.
-const FIELD_WIDTH: f32 = 240.;
 /// Archived rows rendered per page. Each row carries two buttons with click
 /// listeners, so the whole list is unaffordable once thousands are archived.
 const ARCHIVED_PER_PAGE: usize = 50;
@@ -54,9 +51,6 @@ fn page_bounds(total: usize, page: usize, per_page: usize) -> (usize, usize, usi
     let start = page * per_page;
     (page, start, start.saturating_add(per_page).min(total))
 }
-
-/// Max width of the settings content column, a reading measure for its forms.
-const CONTENT_MAX_WIDTH: f32 = 768.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -327,15 +321,6 @@ impl SettingsInput {
     }
 }
 
-#[derive(Clone)]
-struct SelectRowOption<T> {
-    value: T,
-    id: SharedString,
-    label: SharedString,
-    description: Option<SharedString>,
-    selected: bool,
-}
-
 /// Apply a settings theme mode to the live window (shared with the palette's
 /// "Toggle theme" action).
 pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
@@ -401,10 +386,6 @@ pub struct SettingsPage {
     #[cfg(all(feature = "local-permissions", target_os = "macos"))]
     local_permissions: Option<Entity<crate::local_permissions::LocalPermissions>>,
     host_permissions: Option<Entity<crate::host_permissions::HostPermissions>>,
-    /// One focus handle per toggle row, keyed by row id. The row owns keyboard
-    /// activation, so its capture-phase Space handler must be able to tell
-    /// "the row is focused" from "the inline reset button inside it is".
-    toggle_focus: HashMap<&'static str, FocusHandle>,
     /// The compact section list and the section content page each keep their
     /// reading position across rerenders.
     section_scroll: ScrollHandle,
@@ -637,7 +618,6 @@ impl SettingsPage {
             #[cfg(all(feature = "local-permissions", target_os = "macos"))]
             local_permissions,
             host_permissions: None,
-            toggle_focus: HashMap::new(),
             section_scroll: ScrollHandle::new(),
             content_scroll,
             project_rules_scroll: ScrollHandle::new(),
@@ -1364,19 +1344,6 @@ impl SettingsPage {
         .into_any_element()
     }
 
-    /// A captioned group of settings rows: the unit every settings page is
-    /// composed of.
-    fn settings_group(
-        &self,
-        caption: impl Into<SharedString>,
-        rows: Vec<AnyElement>,
-        cx: &Context<Self>,
-    ) -> gpui::Div {
-        v_flex()
-            .child(crate::material::group_caption(caption, cx))
-            .child(self.grouped_plain(rows, cx))
-    }
-
     fn render_general(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let store = self.store.read(cx);
         let settings = store.settings();
@@ -1384,13 +1351,12 @@ impl SettingsPage {
         let theme_overridden = store.client_theme_override().is_some();
         let device_name_overridden = store.client_device_name_override().is_some();
         let attachment_limit_overridden = store.client_remote_attachment_limit_override().is_some();
-        let provider_marks_reset = self.reset_action(
+        let provider_marks_reset = crate::settings_rows::reset_action(
             "reset-sidebar-provider-marks",
             settings.sidebar_provider_marks,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_sidebar_provider_marks(false), cx)
-            },
+            }),
         );
         let appearance = vec![
             self.language_row(settings.language.as_deref(), language_overridden, cx),
@@ -1411,8 +1377,16 @@ impl SettingsPage {
         ];
         v_flex()
             .gap(crate::material::section_gap(cx))
-            .child(self.settings_group(crate::tr!("settings.appearance_section"), appearance, cx))
-            .child(self.settings_group(crate::tr!("settings.device_section"), device, cx))
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("settings.appearance_section"),
+                appearance,
+                cx,
+            ))
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("settings.device_section"),
+                device,
+                cx,
+            ))
     }
 
     fn render_maintenance(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1421,16 +1395,15 @@ impl SettingsPage {
             .read(cx)
             .settings()
             .inactive_frame_throttle_disabled;
-        let frame_throttle_reset = self.reset_action(
+        let frame_throttle_reset = crate::settings_rows::reset_action(
             "reset-inactive-frame-throttle",
             throttle_disabled,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(
                     |store| store.set_inactive_frame_throttle_disabled(false),
                     cx,
                 )
-            },
+            }),
         );
         let performance = vec![self.toggle_row(
             "inactive-frame-throttle",
@@ -1444,8 +1417,12 @@ impl SettingsPage {
         )];
         v_flex()
             .gap(crate::material::section_gap(cx))
-            .child(self.settings_group(crate::tr!("settings.performance_section"), performance, cx))
-            .child(self.settings_group(
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("settings.performance_section"),
+                performance,
+                cx,
+            ))
+            .child(crate::settings_rows::settings_group(
                 crate::tr!("settings.reset_section"),
                 vec![self.restore_all_row(cx)],
                 cx,
@@ -1455,11 +1432,12 @@ impl SettingsPage {
     /// The whole-settings escape hatch: the per-item buttons cover single
     /// settings, this one covers the rest and keeps its confirm dialog.
     fn restore_all_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.row_frame(cx)
-            .child(self.row_labels(
+        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+            .child(crate::settings_rows::row_labels(
                 crate::tr!("settings.reset_all"),
-                crate::tr!("settings.restore_description"),
+                Some(crate::tr!("settings.restore_description").into()),
                 None,
+                self.window_state.read(cx).compact,
                 cx,
             ))
             .child(
@@ -1480,22 +1458,27 @@ impl SettingsPage {
         // reset together; the picker follows through the store observer.
         let overridden =
             self.store.read(cx).settings().title_generation != TitleGenerationSettings::default();
-        let reset = self.reset_action("reset-title-generation", overridden, cx, |this, _, cx| {
-            let default = TitleGenerationSettings::default();
-            this.dispatch_settings(
-                move |store| {
-                    store.set_title_generation_provider(default.provider);
-                    store.set_title_generation_model(default.model);
-                    store.set_title_generation_profile_id(default.profile_id);
-                },
-                cx,
-            );
-        });
-        self.row_frame(cx)
-            .child(self.row_labels(
+        let reset = crate::settings_rows::reset_action(
+            "reset-title-generation",
+            overridden,
+            cx.listener(|this, _, _, cx| {
+                let default = TitleGenerationSettings::default();
+                this.dispatch_settings(
+                    move |store| {
+                        store.set_title_generation_provider(default.provider);
+                        store.set_title_generation_model(default.model);
+                        store.set_title_generation_profile_id(default.profile_id);
+                    },
+                    cx,
+                );
+            }),
+        );
+        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+            .child(crate::settings_rows::row_labels(
                 crate::tr!("settings.title_generation.title"),
-                crate::tr!("settings.title_generation.description"),
+                Some(crate::tr!("settings.title_generation.description").into()),
                 reset,
+                self.window_state.read(cx).compact,
                 cx,
             ))
             .child(self.title_model_picker.clone())
@@ -1505,11 +1488,10 @@ impl SettingsPage {
     fn fallback_review_model_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let overridden =
             self.store.read(cx).settings().fallback_review != FallbackReviewSettings::default();
-        let reset = self.reset_action(
+        let reset = crate::settings_rows::reset_action(
             "reset-fallback-review-model",
             overridden,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 let default = FallbackReviewSettings::default();
                 this.dispatch_settings(
                     move |store| {
@@ -1519,13 +1501,14 @@ impl SettingsPage {
                     },
                     cx,
                 );
-            },
+            }),
         );
-        self.row_frame(cx)
-            .child(self.row_labels(
+        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+            .child(crate::settings_rows::row_labels(
                 crate::tr!("settings.fallback_review_model.title"),
-                crate::tr!("settings.fallback_review_model.description"),
+                Some(crate::tr!("settings.fallback_review_model.description").into()),
                 reset,
+                self.window_state.read(cx).compact,
                 cx,
             ))
             .child(self.fallback_review_model_picker.clone())
@@ -1534,17 +1517,22 @@ impl SettingsPage {
 
     fn device_name_row(&self, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
-        let reset = self.reset_action("reset-device-name", overridden, cx, |this, window, cx| {
-            this.dispatch_settings(|store| store.set_client_device_name(None), cx);
-            let name = this.store.read(cx).client_device_name();
-            this.device_name_input.push(name, window, cx);
-        });
-        self.row_frame(cx)
+        let reset = crate::settings_rows::reset_action(
+            "reset-device-name",
+            overridden,
+            cx.listener(|this, _, window, cx| {
+                this.dispatch_settings(|store| store.set_client_device_name(None), cx);
+                let name = this.store.read(cx).client_device_name();
+                this.device_name_input.push(name, window, cx);
+            }),
+        );
+        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
             .debug_selector(|| "settings-device-name-row".into())
-            .child(self.row_labels(
+            .child(crate::settings_rows::row_labels(
                 crate::tr!("settings.device_name.title"),
-                crate::tr!("settings.device_name.description"),
+                Some(crate::tr!("settings.device_name.description").into()),
                 reset,
+                self.window_state.read(cx).compact,
                 cx,
             ))
             .child(
@@ -1560,25 +1548,25 @@ impl SettingsPage {
     }
 
     fn remote_attachment_limit_row(&self, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
-        let reset = self.reset_action(
+        let reset = crate::settings_rows::reset_action(
             "reset-remote-attachment-limit",
             overridden,
-            cx,
-            |this, window, cx| {
+            cx.listener(|this, _, window, cx| {
                 this.dispatch_settings(
                     |store| store.set_client_remote_attachment_limit_mib(None),
                     cx,
                 );
                 let limit = remote_attachment_limit_value(this.store.read(cx));
                 this.remote_attachment_limit_input.push(limit, window, cx);
-            },
+            }),
         );
-        self.row_frame(cx)
+        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
             .debug_selector(|| "settings-remote-attachment-limit-row".into())
-            .child(self.row_labels(
+            .child(crate::settings_rows::row_labels(
                 crate::tr!("settings.remote_attachment_limit.title"),
-                crate::tr!("settings.remote_attachment_limit.description"),
+                Some(crate::tr!("settings.remote_attachment_limit.description").into()),
                 reset,
+                self.window_state.read(cx).compact,
                 cx,
             ))
             .child(
@@ -1727,13 +1715,12 @@ impl SettingsPage {
             .read(cx)
             .settings()
             .provider_update_checks_disabled;
-        let provider_updates_reset = self.reset_action(
+        let provider_updates_reset = crate::settings_rows::reset_action(
             "reset-provider-update-checks",
             update_checks_disabled,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_provider_update_checks_disabled(false), cx)
-            },
+            }),
         );
         let updates = vec![self.toggle_row(
             "provider-update-checks",
@@ -1785,11 +1772,13 @@ impl SettingsPage {
         }
         // The update toggle follows the cards it governs; above them its caption
         // would stack straight under the page's own header row.
-        section.child(
-            div()
-                .pt(crate::material::section_gap(cx))
-                .child(self.settings_group(crate::tr!("settings.updates_section"), updates, cx)),
-        )
+        section.child(div().pt(crate::material::section_gap(cx)).child(
+            crate::settings_rows::settings_group(
+                crate::tr!("settings.updates_section"),
+                updates,
+                cx,
+            ),
+        ))
     }
 
     /// Show the rate-limit windows each enabled Codex / Claude Code profile
@@ -2086,7 +2075,7 @@ impl SettingsPage {
                     col = col.child(
                         v_flex()
                             .child(crate::material::group_caption(previous, cx))
-                            .child(self.grouped_plain(std::mem::take(&mut rows), cx)),
+                            .child(crate::material::group(cx).children(std::mem::take(&mut rows))),
                     );
                 }
                 let key = start + offset;
@@ -2102,8 +2091,14 @@ impl SettingsPage {
                 let id_delete = meta.id.clone();
                 let title = meta.title.clone();
                 rows.push(
-                    self.row_frame(cx)
-                        .child(self.row_labels(meta.title.clone(), desc, None, cx))
+                    crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+                        .child(crate::settings_rows::row_labels(
+                            meta.title.clone(),
+                            Some(desc.into()),
+                            None,
+                            self.window_state.read(cx).compact,
+                            cx,
+                        ))
                         .child(
                             gpui_base::h_flex()
                                 .flex_none()
@@ -2141,7 +2136,7 @@ impl SettingsPage {
                 col = col.child(
                     v_flex()
                         .child(crate::material::group_caption(previous, cx))
-                        .child(self.grouped_plain(rows, cx)),
+                        .child(crate::material::group(cx).children(rows)),
                 );
             }
         }
@@ -2217,38 +2212,36 @@ impl SettingsPage {
     fn render_computer_use(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let compact = self.window_state.read(cx).compact;
         let settings = self.store.read(cx).settings();
-        let enabled_reset = self.reset_action(
+        let enabled_reset = crate::settings_rows::reset_action(
             "reset-cu-enabled",
             settings.computer_use.enabled,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_computer_use_enabled(false), cx),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_computer_use_enabled(false), cx)
+            }),
         );
-        let allow_input_reset = self.reset_action(
+        let allow_input_reset = crate::settings_rows::reset_action(
             "reset-cu-allow-input",
             !settings.computer_use.allow_input,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_computer_use_allow_input(true), cx)
-            },
+            }),
         );
-        let allow_foreground_fallback_reset = self.reset_action(
+        let allow_foreground_fallback_reset = crate::settings_rows::reset_action(
             "reset-cu-allow-foreground-fallback",
             settings.computer_use.allow_foreground_fallback,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(
                     |store| store.set_computer_use_allow_foreground_fallback(false),
                     cx,
                 )
-            },
+            }),
         );
-        let show_agent_cursor_reset = self.reset_action(
+        let show_agent_cursor_reset = crate::settings_rows::reset_action(
             "reset-cu-show-agent-cursor",
             !settings.computer_use.show_agent_cursor,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_computer_use_show_agent_cursor(true), cx)
-            },
+            }),
         );
         let rows = vec![
             self.toggle_row(
@@ -2297,7 +2290,7 @@ impl SettingsPage {
                         crate::tr!("computer_use.section"),
                         cx,
                     ))
-                    .child(self.grouped_plain(rows, cx))
+                    .child(crate::material::group(cx).children(rows))
                     .children(
                         agent::ProviderKind::NATIVE
                             .into_iter()
@@ -2320,19 +2313,19 @@ impl SettingsPage {
 
     fn render_browser(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let settings = self.store.read(cx).settings();
-        let enabled_reset = self.reset_action(
+        let enabled_reset = crate::settings_rows::reset_action(
             "reset-browser-enabled",
             !settings.browser.enabled,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_browser_enabled(true), cx),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_browser_enabled(true), cx)
+            }),
         );
-        let allow_eval_reset = self.reset_action(
+        let allow_eval_reset = crate::settings_rows::reset_action(
             "reset-browser-allow-eval",
             !settings.browser.allow_evaluate,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_browser_allow_evaluate(true), cx)
-            },
+            }),
         );
         let rows = vec![
             self.toggle_row(
@@ -2361,27 +2354,27 @@ impl SettingsPage {
                     crate::tr!("browser.section"),
                     cx,
                 ))
-                .child(self.grouped_plain(rows, cx)),
+                .child(crate::material::group(cx).children(rows)),
         )
     }
 
     fn home_url_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
         let overridden = self.store.read(cx).settings().browser.home_url.is_some();
-        let reset = self.reset_action(
+        let reset = crate::settings_rows::reset_action(
             "reset-browser-home-url",
             overridden,
-            cx,
-            |this, window, cx| {
+            cx.listener(|this, _, window, cx| {
                 this.dispatch_settings(|store| store.set_browser_home_url(None), cx);
                 this.home_url_input.push(String::new(), window, cx);
-            },
+            }),
         );
-        self.row_frame(cx)
-            .child(self.row_labels(
+        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+            .child(crate::settings_rows::row_labels(
                 crate::tr!("browser.home_url.title"),
-                crate::tr!("browser.home_url.description"),
+                Some(crate::tr!("browser.home_url.description").into()),
                 reset,
+                self.window_state.read(cx).compact,
                 cx,
             ))
             .child(
@@ -2397,16 +2390,15 @@ impl SettingsPage {
     }
 
     fn image_mode_row(&self, mode: ImageMode, cx: &mut Context<Self>) -> AnyElement {
-        let reset = self.reset_action(
+        let reset = crate::settings_rows::reset_action(
             "reset-cu-image-mode",
             mode != ImageMode::Auto,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(
                     |store| store.set_computer_use_image_mode(ImageMode::Auto),
                     cx,
                 );
-            },
+            }),
         );
         let label = match mode {
             ImageMode::Auto => crate::tr!("computer_use.image_mode.auto"),
@@ -2420,7 +2412,7 @@ impl SettingsPage {
             description: Some(crate::tr!(desc_key).into_owned().into()),
             selected: value == mode,
         };
-        self.select_row(
+        crate::settings_rows::select_row(
             "cu-image-mode-dropdown",
             "cu-image-mode-popover",
             "cu-image-mode-menu",
@@ -2450,10 +2442,14 @@ impl SettingsPage {
                 ),
             ],
             reset,
-            |mode, page, _, cx| {
-                page.update(cx, |page, cx| {
-                    page.dispatch_settings(|store| store.set_computer_use_image_mode(mode), cx)
-                })
+            self.window_state.read(cx).compact,
+            {
+                let page = cx.entity();
+                move |mode, _, cx| {
+                    page.update(cx, |page, cx| {
+                        page.dispatch_settings(|store| store.set_computer_use_image_mode(mode), cx)
+                    })
+                }
             },
             cx,
         )
@@ -2488,92 +2484,14 @@ impl SettingsPage {
         None
     }
 
-    /// Group sparse settings rows with spacing between them.
-    fn grouped_plain(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
-        let mut group = crate::material::group(cx);
-        for row in rows {
-            group = group.child(row);
-        }
-        group
-    }
-
-    /// Left description block (bold title + muted description). `reset` is the
-    /// per-item "restore default" affordance and rides inline right after the
-    /// title, so it reads as belonging to that setting rather than to the row's
-    /// control on the far right.
-    fn row_labels(
-        &self,
-        title: impl Into<SharedString>,
-        desc: impl Into<SharedString>,
-        reset: Option<AnyElement>,
-        cx: &Context<Self>,
-    ) -> gpui::Div {
-        let compact = self.window_state.read(cx).compact;
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_0p5()
-            .child(
-                gpui_base::h_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(div().text_body(compact, cx).child(title.into()))
-                    .children(reset),
-            )
-            .child(div().text_secondary(compact, cx).child(desc.into()))
-    }
-
-    /// The per-item "restore default" button: icon-only, ghost, and rendered
-    /// only while `overridden` — a row showing its factory value has nothing to
-    /// restore, so the affordance would just be noise.
-    fn reset_action(
-        &self,
-        id: &'static str,
-        overridden: bool,
-        cx: &mut Context<Self>,
-        on_reset: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> Option<AnyElement> {
-        if !overridden {
-            return None;
-        }
-        let label = crate::tr!("settings.reset_item").into_owned();
-        Some(
-            Button::new(id)
-                .ghost()
-                .xsmall()
-                .icon(IconName::Undo)
-                .tooltip(label.clone())
-                .aria_label(label)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    // Toggle rows are clickable as a whole; a click that lands
-                    // on this button must not also flip the switch.
-                    crate::widgets::stop_click_propagation(window, cx);
-                    on_reset(this, window, cx);
-                }))
-                .into_any_element(),
-        )
-    }
-
-    /// A row whose control can squeeze its label: stacked on a compact window.
-    /// A row whose control is a fixed affordance (a switch) uses
-    /// [`crate::material::group_row`] at both widths.
-    fn row_frame(&self, cx: &Context<Self>) -> gpui::Div {
-        if self.window_state.read(cx).compact {
-            crate::material::group_row_stacked(cx)
-        } else {
-            crate::material::group_row(cx)
-        }
-    }
-
     fn render_source_control(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let remove_credits = self.store.read(cx).settings().remove_agent_credits_on_merge;
-        let reset = self.reset_action(
+        let reset = crate::settings_rows::reset_action(
             "reset-remove-agent-credits",
             remove_credits,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_remove_agent_credits_on_merge(false), cx)
-            },
+            }),
         );
         let row = self.toggle_row(
             "remove-agent-credits",
@@ -2587,12 +2505,13 @@ impl SettingsPage {
         v_flex()
             .gap(crate::material::section_gap(cx))
             .child(self.source_control_panel.clone())
-            .child(self.grouped_plain(vec![row], cx))
+            .child(crate::material::group(cx).child(row))
     }
 
+    /// A [`ToggleRow`] for one local setting, written through `intent`.
     #[allow(clippy::too_many_arguments)]
     fn toggle_row(
-        &mut self,
+        &self,
         id: &'static str,
         title: impl Into<SharedString>,
         desc: impl Into<SharedString>,
@@ -2601,161 +2520,31 @@ impl SettingsPage {
         cx: &mut Context<Self>,
         intent: fn(&mut WorkspaceStore, bool),
     ) -> AnyElement {
-        let title = title.into();
-        let desc = desc.into();
-        // The row is the tab stop, but the inline reset button is one too, so
-        // the row owns an explicit handle (`accessible_clickable`'s implicit one
-        // cannot be queried) and applies the tab order to it by hand.
-        let focus = self
-            .toggle_focus
-            .entry(id)
-            .or_insert_with(|| cx.focus_handle().tab_stop(true).tab_index(0))
-            .clone();
-        let row_focus = focus.clone();
-        crate::material::accessible_clickable(
-            crate::material::group_row(cx),
-            SharedString::from(format!("{id}-row")),
-            Role::Switch,
-            title.clone(),
-            cx,
-        )
-        .track_focus(&focus)
-        .aria_toggled(if checked {
-            Toggled::True
-        } else {
-            Toggled::False
-        })
-        .cursor_pointer()
-        // Handle Space during capture so the native event cannot fall through
-        // to scrolling/text input before the row's synthesized click runs.
-        // Enter continues to use GPUI's standard focused-click behavior.
-        .capture_key_down(
-            cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                // Capture runs from the root down, so without this guard the row
-                // would swallow Space aimed at the reset button inside it.
-                if !row_focus.is_focused(window) {
-                    return;
-                }
-                if event.keystroke.key == "space"
-                    && !event.is_held
-                    && !event.keystroke.modifiers.modified()
-                {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    this.dispatch_settings(|store| intent(store, !checked), cx);
-                }
+        let compact = self.window_state.read(cx).compact;
+        ToggleRow::new(
+            id,
+            title,
+            checked,
+            compact,
+            cx.listener(move |this, checked: &bool, _, cx| {
+                this.dispatch_settings(|store| intent(store, *checked), cx);
             }),
         )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.dispatch_settings(|store| intent(store, !checked), cx);
-        }))
-        .child(self.row_labels(title, desc, reset, cx))
-        // The Switch is intentionally visual here; the semantic row above
-        // owns click, focus, keyboard activation, and the toggled state.
-        .child(Switch::new(id).checked(checked))
+        .description(desc)
+        .reset(reset)
         .into_any_element()
     }
 
-    fn dropdown_trigger(
-        &self,
-        id: &'static str,
-        label: impl Into<SharedString>,
-        cx: &Context<Self>,
-    ) -> Button {
-        Button::new(id).ghost().outline().compact().child(
-            gpui_base::h_flex()
-                // One width for every select trigger, so a column of them lines up; gpui-base's
-                // Select is not adopted yet.
-                .w(px(160.))
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(label.into())
-                .child(Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground)),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn select_row<T: Clone + 'static>(
-        &self,
-        trigger_id: &'static str,
-        popover_id: &'static str,
-        menu_id: &'static str,
-        menu_width: f32,
-        title: SharedString,
-        description: SharedString,
-        selected_label: SharedString,
-        options: Vec<SelectRowOption<T>>,
-        reset: Option<AnyElement>,
-        on_select: impl Fn(T, &Entity<SettingsPage>, &mut Window, &mut App) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let trigger = self.dropdown_trigger(trigger_id, selected_label, cx);
-        let page = cx.entity();
-        let on_select = Rc::new(on_select);
-        let menu_label = title.clone();
-        let compact = self.window_state.read(cx).compact;
-        let dropdown = crate::material::overlay_popover(popover_id, cx)
-            .trigger(trigger)
-            .content(move |_, _, cx| {
-                v_flex()
-                    .id(menu_id)
-                    .role(Role::Menu)
-                    .aria_label(menu_label.clone())
-                    .p_1()
-                    // Each menu names its own floor so its longest option fits; gpui-base's
-                    // Select is not adopted yet.
-                    .min_w(px(menu_width))
-                    .gap_0p5()
-                    .children(options.clone().into_iter().map(|option| {
-                        let page = page.clone();
-                        let popover = cx.entity();
-                        let on_select = on_select.clone();
-                        let label = option.label.clone();
-                        let item = crate::material::accessible_clickable(
-                            crate::material::menu_item_frame(compact, cx),
-                            option.id,
-                            Role::MenuItem,
-                            label.clone(),
-                            cx,
-                        )
-                        .aria_selected(option.selected)
-                        .w_full()
-                        .text_body(compact, cx)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().muted));
-                        let item =
-                            if let Some(description) = option.description {
-                                item.items_start().child(
-                                    v_flex().flex_1().gap_0p5().child(div().child(label)).child(
-                                        div().text_secondary(compact, cx).child(description),
-                                    ),
-                                )
-                            } else {
-                                item.child(div().flex_1().child(label))
-                            };
-                        item.when(option.selected, |item| {
-                            item.child(Icon::new(IconName::Check))
-                        })
-                        .on_click(move |_, window, cx| {
-                            on_select(option.value.clone(), &page, window, cx);
-                            popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        })
-                    }))
-            });
-
-        self.row_frame(cx)
-            .child(self.row_labels(title, description, reset, cx))
-            .child(dropdown)
-            .into_any_element()
-    }
-
     fn theme_row(&self, mode: ThemeMode, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
-        let reset = self.reset_action("reset-theme", overridden, cx, |this, window, cx| {
-            this.dispatch_settings(|store| store.set_client_theme(None), cx);
-            let fallback = this.store.read(cx).settings().theme_mode;
-            apply_theme(fallback, window, cx);
-        });
+        let reset = crate::settings_rows::reset_action(
+            "reset-theme",
+            overridden,
+            cx.listener(|this, _, window, cx| {
+                this.dispatch_settings(|store| store.set_client_theme(None), cx);
+                let fallback = this.store.read(cx).settings().theme_mode;
+                apply_theme(fallback, window, cx);
+            }),
+        );
         let label = match mode {
             ThemeMode::System => crate::tr!("settings.theme.system"),
             ThemeMode::Light => crate::tr!("settings.theme.light"),
@@ -2768,7 +2557,7 @@ impl SettingsPage {
             description: None,
             selected: value == mode,
         };
-        self.select_row(
+        crate::settings_rows::select_row(
             "theme-dropdown",
             "theme-popover",
             "theme-options-menu",
@@ -2790,11 +2579,15 @@ impl SettingsPage {
                 option(ThemeMode::Dark, "theme-option-dark", "settings.theme.dark"),
             ],
             reset,
-            |mode, page, window, cx| {
-                page.update(cx, |page, cx| {
-                    page.dispatch_settings(|store| store.set_client_theme(Some(mode)), cx)
-                });
-                apply_theme(mode, window, cx);
+            self.window_state.read(cx).compact,
+            {
+                let page = cx.entity();
+                move |mode, window, cx| {
+                    page.update(cx, |page, cx| {
+                        page.dispatch_settings(|store| store.set_client_theme(Some(mode)), cx)
+                    });
+                    apply_theme(mode, window, cx);
+                }
             },
             cx,
         )
@@ -2807,12 +2600,16 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = language.map(str::to_owned);
-        let reset = self.reset_action("reset-language", overridden, cx, |this, window, cx| {
-            this.dispatch_settings(|store| store.set_client_language(None), cx);
-            let fallback = this.store.read(cx).settings().language;
-            crate::settings::apply_locale(fallback.as_deref());
-            window.refresh();
-        });
+        let reset = crate::settings_rows::reset_action(
+            "reset-language",
+            overridden,
+            cx.listener(|this, _, window, cx| {
+                this.dispatch_settings(|store| store.set_client_language(None), cx);
+                let fallback = this.store.read(cx).settings().language;
+                crate::settings::apply_locale(fallback.as_deref());
+                window.refresh();
+            }),
+        );
         let label = match language {
             Some(LANGUAGE_ENGLISH) => crate::tr!("settings.language.english"),
             Some(LANGUAGE_SIMPLIFIED_CHINESE) => crate::tr!("settings.language.chinese"),
@@ -2825,7 +2622,7 @@ impl SettingsPage {
             description: None,
             selected: selected.as_deref() == value,
         };
-        self.select_row(
+        crate::settings_rows::select_row(
             "language-dropdown",
             "language-popover",
             "language-options-menu",
@@ -2844,14 +2641,18 @@ impl SettingsPage {
                 ),
             ],
             reset,
-            |language, page, window, cx| {
-                page.update(cx, |page, cx| {
-                    let preference = Some(language.unwrap_or("system").to_owned());
-                    page.dispatch_settings(|store| store.set_client_language(preference), cx);
-                    let effective = page.store.read(cx).settings().language;
-                    crate::settings::apply_locale(effective.as_deref());
-                });
-                window.refresh();
+            self.window_state.read(cx).compact,
+            {
+                let page = cx.entity();
+                move |language, window, cx| {
+                    page.update(cx, |page, cx| {
+                        let preference = Some(language.unwrap_or("system").to_owned());
+                        page.dispatch_settings(|store| store.set_client_language(preference), cx);
+                        let effective = page.store.read(cx).settings().language;
+                        crate::settings::apply_locale(effective.as_deref());
+                    });
+                    window.refresh();
+                }
             },
             cx,
         )
