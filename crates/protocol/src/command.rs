@@ -343,7 +343,7 @@ pub enum Command {
     SettleSession {
         session_id: String,
     },
-    /// Set or clear the thread's own `tcode_control` grant (its control chip).
+    /// Set or clear the thread's own `tcode_control` grant.
     SetControlGrant {
         session_id: String,
         grant: Option<tcode_core::control::ControlGrant>,

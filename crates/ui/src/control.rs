@@ -1,5 +1,5 @@
 //! How a `tcode_control` grant reads and is edited: one editor for Settings →
-//! Control's default and project grants and for a thread's control chip.
+//! Control's default and project grants.
 
 use std::rc::Rc;
 
@@ -7,9 +7,7 @@ use gpui::{
     AnyElement, App, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
 };
 use gpui_base::v_flex;
-use tcode_core::control::{
-    ControlCategory, ControlGrant, ControlGrantSource, ControlScope, ControlTier,
-};
+use tcode_core::control::{ControlCategory, ControlGrant, ControlScope, ControlTier};
 use tcode_core::project::Project;
 
 use crate::typography::TextRole as _;
@@ -77,7 +75,7 @@ pub(crate) fn scope_label(scope: &ControlScope) -> String {
     .into_owned()
 }
 
-/// "project · observe+organize+operate", as the chip and the lists name a grant.
+/// "project · observe+organize+operate", as the lists and grant requests name a grant.
 pub(crate) fn grant_summary(grant: &ControlGrant) -> String {
     let parts: Vec<String> = grant
         .tiers
@@ -96,15 +94,6 @@ pub(crate) fn grant_summary(grant: &ControlGrant) -> String {
         parts.join("+")
     };
     format!("{} · {allowed}", scope_label(&grant.scope))
-}
-
-pub(crate) fn source_label(source: ControlGrantSource) -> String {
-    match source {
-        ControlGrantSource::Default => crate::tr!("control.source.default"),
-        ControlGrantSource::Project => crate::tr!("control.source.project"),
-        ControlGrantSource::Thread => crate::tr!("control.source.thread"),
-    }
-    .into_owned()
 }
 
 /// A `ControlAction`'s operation in words; an operation this client does not
@@ -345,33 +334,4 @@ fn switch_row(
                 .on_click(move |next, window, cx| on_toggle(*next, window, cx)),
         )
         .into_any_element()
-}
-
-/// A grant's summary over where it came from.
-pub(crate) fn grant_heading(
-    grant: &ControlGrant,
-    source: ControlGrantSource,
-    compact: bool,
-    cx: &App,
-) -> gpui::Div {
-    v_flex()
-        .gap_0p5()
-        .child(div().text_body(compact, cx).child(grant_summary(grant)))
-        .child(div().text_secondary(compact, cx).child(crate::tr!(
-            "control.source.label",
-            source = source_label(source)
-        )))
-}
-
-pub(crate) fn when_label(when: &tcode_core::control::SelfSettleWhen) -> String {
-    use tcode_core::control::SelfSettleWhen;
-    match when {
-        SelfSettleWhen::EndOfTurn => crate::tr!("control.self_settle.end_of_turn").into_owned(),
-        SelfSettleWhen::PrMerged { url } => {
-            crate::tr!("control.self_settle.pr_merged", url = url.as_str()).into_owned()
-        }
-        SelfSettleWhen::PrClosed { url } => {
-            crate::tr!("control.self_settle.pr_closed", url = url.as_str()).into_owned()
-        }
-    }
 }
