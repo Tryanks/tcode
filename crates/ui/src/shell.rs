@@ -1080,8 +1080,10 @@ impl AppShell {
             window.blur(cx);
             return true;
         }
-        // Dialogs, menus and popovers are deferred layers that own Cancel.
-        if gpui_base::GlobalState::is_in_deferred_context(cx) {
+        // Dialogs, menus and popovers own Cancel.
+        if crate::overlay::dialog_open(window, cx)
+            || gpui_base::GlobalState::is_in_deferred_context(cx)
+        {
             window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx);
             return true;
         }
@@ -1243,7 +1245,8 @@ pub fn can_swipe_back(cx: &mut App) -> bool {
         .update(cx, |_, window, cx| {
             crate::overlay::active_sheet(window, cx).is_some() || {
                 let shell = shell.read(cx);
-                shell.compact(cx)
+                !crate::overlay::dialog_open(window, cx)
+                    && shell.compact(cx)
                     && !shell.window_state.read(cx).palette_open
                     && !gpui_base::GlobalState::is_in_deferred_context(cx)
                     && shell.nav.read(cx).depth() > 1
@@ -5509,6 +5512,40 @@ mod tests {
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.nav.read(cx).depth(), depth - 1)
         });
+    }
+
+    #[gpui::test]
+    fn image_viewer_takes_back_before_the_page_underneath(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 393.);
+        cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
+        shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        assert!(cx.cx.update(can_swipe_back));
+        let depth = shell.read_with(cx, |shell, cx| shell.nav.read(cx).depth());
+        cx.update(|window, cx| {
+            crate::image_viewer::open(
+                gpui::ImageSource::Custom(std::sync::Arc::new(|_, _| None)),
+                "image.png",
+                window,
+                cx,
+            )
+        });
+        draw(cx);
+        assert!(!cx.cx.update(can_swipe_back));
+        assert!(cx.cx.update(handle_back));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        assert!(!cx.update(|window, cx| crate::overlay::dialog_open(window, cx)));
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.nav.read(cx).depth(), depth)
+        });
+        assert!(cx.cx.update(can_swipe_back));
     }
 
     #[gpui::test]

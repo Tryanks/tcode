@@ -380,6 +380,14 @@ pub(crate) fn bind_sheet(
     state
 }
 
+pub(crate) fn dialog_open(window: &Window, cx: &App) -> bool {
+    window
+        .root::<gpui_base::Root>()
+        .flatten()
+        .and_then(|root| root.read(cx).plugin::<Overlays>())
+        .is_some_and(|overlays| !overlays.read(cx).dialogs.is_empty())
+}
+
 pub(crate) fn active_sheet(window: &Window, cx: &App) -> Option<Entity<SheetBack>> {
     let trap = gpui_base::active_focus_trap(window, cx)?;
     let overlays = window
