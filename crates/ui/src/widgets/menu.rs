@@ -542,6 +542,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
         let touch = self.touch;
         let open = Rc::new(
             move |position: Point<Pixels>,
+                  long_press: bool,
                   state: Entity<ContextMenuState>,
                   window: &mut Window,
                   cx: &mut App| {
@@ -558,6 +559,9 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                     // right-click on non-link Markdown text): open nothing.
                     if menu.read(cx).is_empty() {
                         return;
+                    }
+                    if long_press {
+                        crate::haptics::long_press();
                     }
                     let previous_focus = window.focused(cx);
                     let menu_focus = menu.focus_handle(cx);
@@ -597,7 +601,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
             let open = open.clone();
             move |event: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
-                open(event.position, state.clone(), window, cx);
+                open(event.position, false, state.clone(), window, cx);
             }
         });
         if touch {
@@ -615,7 +619,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                                     window.capture_long_press(&state);
                                     window.prevent_default();
                                     cx.stop_propagation();
-                                    open(event.position, state.clone(), window, cx);
+                                    open(event.position, true, state.clone(), window, cx);
                                 }
                             },
                         );

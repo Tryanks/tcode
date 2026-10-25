@@ -393,6 +393,18 @@ public final class GpuiActivity extends NativeActivity {
         getWindow().getDecorView().performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
     }
 
+    public void gpuiHapticThreshold() {
+        getWindow().getDecorView().performHapticFeedback(Build.VERSION.SDK_INT >= 34
+                ? HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE
+                : HapticFeedbackConstants.CONTEXT_CLICK);
+    }
+
+    public void gpuiHapticSelection() {
+        getWindow().getDecorView().performHapticFeedback(Build.VERSION.SDK_INT >= 34
+                ? HapticFeedbackConstants.SEGMENT_TICK
+                : HapticFeedbackConstants.CLOCK_TICK);
+    }
+
     public void gpuiShowKeyboard() {
         keyboardShowPending = true;
         inputView.setFocusable(true);

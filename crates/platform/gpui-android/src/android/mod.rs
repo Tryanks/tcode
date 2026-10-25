@@ -12,7 +12,8 @@ use std::{cell::RefCell, rc::Rc};
 pub(crate) use platform::AndroidPlatform;
 
 pub use host::{
-    ScrollCaptureRequest, haptic_long_press, scroll_capture_bounds, scroll_capture_rendered,
+    ScrollCaptureRequest, haptic_long_press, haptic_selection, haptic_threshold,
+    scroll_capture_bounds, scroll_capture_rendered,
 };
 #[doc(hidden)]
 pub use host::{

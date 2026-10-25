@@ -17,8 +17,13 @@ impl BackProgress {
         (f32::from(self.travel) / f32::from(self.width).max(1.)).clamp(0., 1.)
     }
 
+    /// Whether the travel alone commits, whatever the release speed.
+    pub fn past_threshold(&self) -> bool {
+        self.travel >= self.width / 3.
+    }
+
     pub fn commits(&self) -> bool {
-        self.travel >= self.width / 3. || (self.travel >= px(32.) && self.velocity >= 600.)
+        self.past_threshold() || (self.travel >= px(32.) && self.velocity >= 600.)
     }
 
     pub fn offset(progress: f32, extent: Pixels) -> Pixels {
