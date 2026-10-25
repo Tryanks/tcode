@@ -74,6 +74,16 @@ impl RemoteController {
         &self.local_settings
     }
 
+    /// The name this machine goes by: the one set in Settings → Remote, else
+    /// the device's own.
+    pub fn machine_name(&self) -> String {
+        self.local_settings
+            .remote_host_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(machine_name)
+    }
+
     pub fn save_hosting_settings(
         &mut self,
         enabled: bool,
@@ -1303,8 +1313,8 @@ fn new_invitation_button<V: 'static>(id: &'static str, cx: &mut Context<V>) -> B
 }
 
 /// The invitation this machine shows other devices: the QR to scan, the link
-/// to copy, how long it lasts and the way to a fresh one. Drawn on the Hosts
-/// page, in its plain-list vocabulary; `inset` is that page's margin.
+/// to copy, how long it lasts and the way to a fresh one. One row of the
+/// Hosts page's "This machine" group.
 pub(super) fn invitation_card<V: 'static>(
     invitation: &Invitation,
     remaining: u64,
@@ -1319,11 +1329,11 @@ pub(super) fn invitation_card<V: 'static>(
         .gap_3()
         .child(
             div()
-                .text_body(true, cx)
+                .text_body(compact, cx)
                 .child(crate::tr!("hosts.invite.description")),
         )
-        .children(group.map(|name| super::group::invitation_note(&name, true, cx)))
-        .child(div().text_secondary(true, cx).child(crate::tr!(
+        .children(group.map(|name| super::group::invitation_note(&name, compact, cx)))
+        .child(div().text_secondary(compact, cx).child(crate::tr!(
             "remote.invite.expires",
             time = crate::time::format_countdown(remaining)
         )))
@@ -1357,26 +1367,20 @@ pub(super) fn invitation_card<V: 'static>(
                 ),
         );
     beside_qr(text, &link, compact, cx)
-        .px(px(crate::material::COMPACT_PAGE_INSET))
-        .py(cx.theme().tokens.spacing.sm)
+        .p(px(crate::material::CARD_INSET))
         .debug_selector(|| "remote-invitation".into())
         .into_any_element()
 }
 
 /// The invitation ran out: say so, next to the button that mints another.
-pub(super) fn expired_invitation_row<V: 'static>(cx: &mut Context<V>) -> AnyElement {
-    h_flex()
-        .w_full()
-        .px(px(crate::material::COMPACT_PAGE_INSET))
-        .py(cx.theme().tokens.spacing.sm)
-        .gap_3()
-        .items_center()
+pub(super) fn expired_invitation_row<V: 'static>(compact: bool, cx: &mut Context<V>) -> AnyElement {
+    group_row(cx)
         .debug_selector(|| "remote-invitation-expired".into())
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_body(true, cx)
+                .text_body(compact, cx)
                 .child(crate::tr!("remote.invite.expired")),
         )
         .child(new_invitation_button("remote-new-invitation", cx).primary())

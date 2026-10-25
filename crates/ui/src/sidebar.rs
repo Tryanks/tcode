@@ -1771,92 +1771,82 @@ impl SessionsSidebar {
         )
     }
 
-    /// The feature area: the window's persistent entries, directly under the
-    /// search field at both widths. Today it holds one — Hosts — and the next
-    /// one is a row in this list, not another one-off control.
-    fn render_feature_rows(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = self.window_state.read(cx).compact;
+    /// The machine this window is on, as the control that leads to Machines:
+    /// an outlined one-line control at the top of the wide sidebar, the
+    /// height of the search row under it, so it never reads as a caption.
+    /// Compact has none; Machines is the root its Back returns to.
+    fn render_machine_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.window_state.read(cx).route() == Route::Hosts;
         let store = self.store.read(cx);
-        // A remote link has a machine to name and a state to report: the dot
-        // says whether the link is up, hovering says how it is carried. The
-        // window that is the host itself has neither, so its row is the
-        // entry alone.
-        let remote = store.remote_host_name().map(|_| {
-            let connection_state = store.connection_state();
-            (
-                SharedString::from(store.machine_label()),
-                cx.theme().connection_color(&connection_state),
-                SharedString::from(crate::remote::connection_label(&connection_state)),
-            )
-        });
-        div()
-            .flex_none()
-            .px(if compact {
-                px(COMPACT_PAGE_INSET)
-            } else {
-                cx.theme().tokens.spacing.sm
-            })
-            .pb_1()
+        let connection_state = store.connection_state();
+        let dot = cx.theme().connection_color(&connection_state);
+        // Local, the control says "This machine" and the tooltip its name;
+        // remote, the control names the machine and the tooltip the link.
+        let (name, detail): (SharedString, Option<SharedString>) = match store.remote_host_name() {
+            Some(_) => (
+                store.machine_label().into(),
+                Some(crate::remote::connection_label(&connection_state).into()),
+            ),
+            None => (
+                crate::tr!("hosts.this_computer").into_owned().into(),
+                crate::remote::local_machine_name(cx).map(SharedString::from),
+            ),
+        };
+        let tooltip_name = name.clone();
+        let control = Button::new("sidebar-hosts")
+            .ghost()
+            .outline()
+            .selected(active)
+            .w_full()
+            .aria_label(crate::tr!("hosts.title"))
+            .debug_selector(|| "sidebar-feature-hosts".into())
+            // A toggle: on Machines (or Pair over it) it closes the route,
+            // back to the workspace the window was showing.
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.window_state.update(cx, |state, cx| {
+                    if state.route() == Route::Hosts {
+                        state.back(cx);
+                    } else {
+                        state.go(Destination::Hosts, cx);
+                    }
+                });
+            }))
             .child(
-                crate::material::selectable_row(
-                    crate::material::accessible_clickable(
-                        h_flex(),
-                        "sidebar-hosts",
-                        Role::Button,
-                        crate::tr!("hosts.title"),
-                        cx,
-                    ),
-                    active,
-                    compact,
-                    cx,
-                )
-                .debug_selector(|| "sidebar-feature-hosts".into())
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.window_state
-                        .update(cx, |state, cx| state.go(Destination::Hosts, cx));
-                }))
-                // The row truncates a long machine or space name; the tooltip
-                // carries it whole, above the link's state.
-                .when_some(remote.clone(), |row, (host, _, connection)| {
-                    row.tooltip(move |window, cx| {
-                        let (host, connection) = (host.clone(), connection.clone());
-                        Tooltip::element(move |_, cx| {
-                            v_flex().child(host.clone()).child(
-                                div()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(connection.clone()),
-                            )
-                        })
-                        .build(window, cx)
-                    })
-                })
-                .text_body(compact, cx)
-                .child(
-                    Icon::new(IconName::Network)
-                        .flex_none()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(cx.theme().sidebar_foreground)
-                        .child(crate::tr!("hosts.title")),
-                )
-                .when_some(remote, |row, (host, connection_color, _)| {
-                    row.child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap(cx.theme().tokens.spacing.sm)
+                    .items_center()
+                    .text_body(false, cx)
+                    .child(crate::material::status_dot(dot))
+                    .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_secondary(compact, cx)
-                            .text_align(gpui::TextAlign::Right)
                             .overflow_hidden()
-                            .child(crate::widgets::fade_text(host)),
+                            .child(crate::widgets::fade_text(name)),
                     )
-                    .child(crate::material::status_dot(connection_color))
-                }),
+                    .child(
+                        Icon::new(IconName::ChevronRight)
+                            .flex_none()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
             )
+            // `Button::tooltip` takes text; this one has two lines.
+            .map(|control| {
+                gpui::StatefulInteractiveElement::tooltip(control, move |window, cx| {
+                    let (name, detail) = (tooltip_name.clone(), detail.clone());
+                    Tooltip::element(move |_, cx| {
+                        v_flex()
+                            .child(name.clone())
+                            .children(detail.clone().map(|detail| {
+                                div().text_color(cx.theme().muted_foreground).child(detail)
+                            }))
+                    })
+                    .build(window, cx)
+                })
+            });
+        div().flex_none().px_2().pb_1().child(control)
     }
 
     fn render_layout_toggle(&self, layout: SidebarLayout, cx: &mut Context<Self>) -> Button {
@@ -3730,7 +3720,6 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_archive))
             .on_action(cx.listener(Self::on_delete))
             .child(self.render_compact_search(cx))
-            .child(self.render_feature_rows(cx))
             .child(
                 bar("compact-layout-bar", Bar::Section, true, cx)
                     .items_center()
@@ -4467,8 +4456,8 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_toggle_share))
             .on_action(cx.listener(Self::on_new_space_and_share))
             .child(self.render_app_row(window, cx))
+            .child(self.render_machine_control(cx))
             .child(self.render_search_row(cx))
-            .child(self.render_feature_rows(cx))
             .child(header)
             .child(if self.store.read(cx).threads_loading() {
                 if self.store.read(cx).pending_sessions().is_empty() {

@@ -1,5 +1,8 @@
 use gpui::{AnyElement, App, IntoElement as _, ParentElement as _, Styled as _, div, px};
 use gpui_base::{h_flex, v_flex};
+
+use crate::theme::ActiveTheme as _;
+
 /// A QR code as `(width_in_modules, dark_module_flags)`, row-major.
 fn qr_modules(payload: &str) -> Option<(usize, Vec<bool>)> {
     let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
@@ -21,7 +24,7 @@ pub(super) fn beside_qr(
     compact: bool,
     cx: &App,
 ) -> gpui::Div {
-    let qr = qr_element(payload, cx);
+    let qr = qr_element(payload, compact, cx);
     let layout = if compact {
         v_flex().items_center().children(qr).child(text)
     } else {
@@ -39,15 +42,19 @@ pub(super) fn beside_qr(
 /// Paint the matrix as one flex row per module row, collapsing consecutive
 /// same-colour modules into a single box — a per-module element would be
 /// thousands of nodes repainting every countdown tick.
-pub(super) fn qr_element(payload: &str, cx: &App) -> Option<AnyElement> {
-    const MODULE: f32 = 4.;
+///
+/// A module is a whole number of points, so it stays crisp: 4 on a compact
+/// layout, where the code is held up to another phone's camera, 3 on a wide
+/// one, where it sits beside its text without outgrowing it.
+pub(super) fn qr_element(payload: &str, compact: bool, cx: &App) -> Option<AnyElement> {
+    let module: f32 = if compact { 4. } else { 3. };
     let (width, modules) = qr_modules(payload)?;
     // A QR is scanned by a camera, not read by a human: it must stay black on
     // white in both themes, so neither colour comes from the palette.
     let dark = gpui::black();
     let mut grid = v_flex().flex_none();
     for row in modules.chunks(width) {
-        let mut line = h_flex().flex_none().h(px(MODULE));
+        let mut line = h_flex().flex_none().h(px(module));
         let mut start = 0;
         while start < row.len() {
             let mut end = start + 1;
@@ -58,8 +65,8 @@ pub(super) fn qr_element(payload: &str, cx: &App) -> Option<AnyElement> {
             // height would collapse to nothing and paint no modules at all.
             let run = div()
                 .flex_none()
-                .h(px(MODULE))
-                .w(px((end - start) as f32 * MODULE));
+                .h(px(module))
+                .w(px((end - start) as f32 * module));
             line = line.child(if row[start] { run.bg(dark) } else { run });
             start = end;
         }
@@ -71,6 +78,9 @@ pub(super) fn qr_element(payload: &str, cx: &App) -> Option<AnyElement> {
             .p(px(crate::material::CARD_INSET))
             .rounded(crate::material::radius_card(cx))
             .bg(gpui::white())
+            // On a light card the white would not show where the code ends.
+            .border_1()
+            .border_color(cx.theme().border)
             .child(grid)
             .into_any_element(),
     )

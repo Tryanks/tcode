@@ -1571,10 +1571,10 @@ impl AppShell {
 // Compact chrome
 // ---------------------------------------------------------------------------
 
-/// Room a nav bar reserves on each side for its controls, so the centered title
-/// keeps the same box on every page: enough for the widest fixed back label
-/// ([`Destination::back_label`]) — which never truncates — and for two 44pt
-/// icon buttons on the other side.
+/// The least room a nav bar keeps on each side for its controls, so the
+/// centered title keeps the same box on every page whose controls fit it: two
+/// 44pt icon buttons. A wider back label ([`Destination::back_label`]), which
+/// never truncates, takes more.
 const NAV_CONTROL_WIDTH: f32 = 104.;
 
 /// Navigation header with a centered title and at most two trailing actions.
@@ -1594,30 +1594,40 @@ fn nav_bar(
     // own controls out of the content and stays draggable by its top strip.
     let traffic_lights = window_caption::traffic_light_inset(window);
     let hosts_caption = window_caption::compact_hosts_caption();
-    // The 44pt controls keep their glyphs clear of the edge inside their own hit
-    // box, so the strip takes the dense inset, not the page inset.
+    let (dense, tight) = (cx.theme().tokens.spacing.sm, cx.theme().tokens.spacing.xs);
+    // The sides carry the strip's insets themselves, so their floor is
+    // measured from the window's edge (or the platform's controls). The 44pt
+    // controls keep their glyphs clear of the edge inside their own hit box,
+    // so the inset is the dense one, not the page inset.
     let strip = crate::material::bar("compact-nav", crate::material::Bar::Strip, false, cx)
-        .relative()
-        .when(traffic_lights > Pixels::ZERO, |strip| {
-            strip.pl(traffic_lights)
-        })
-        .when(hosts_caption, |strip| strip.pr_0());
+        .px_0()
+        .gap(Pixels::ZERO)
+        .pl(traffic_lights);
     v_flex()
         .flex_none()
         .w_full()
         .bg(crate::material::content_surface(cx))
         .child(
             window_drag_area("compact-nav-drag", strip, window, cx)
+                // The two sides grow alike from nothing, so the title is centered
+                // while it fits; a side never shrinks below its controls, so a
+                // label wider than the reserved room pushes the title, which
+                // truncates, instead of running into it.
                 .child(
-                    // Centered in the room the controls leave it: the back
-                    // label and the trailing actions each reserve their own
-                    // width, so a long title truncates instead of colliding
-                    // with them.
+                    h_flex()
+                        .flex_1()
+                        .flex_basis(px(0.))
+                        .min_w(px(NAV_CONTROL_WIDTH))
+                        .h_full()
+                        .items_center()
+                        .when(traffic_lights == Pixels::ZERO, |side| side.pl(dense))
+                        .pr(tight)
+                        .children(back)
+                        .child(window_caption::drag_region(div().flex_1().h_full())),
+                )
+                .child(
                     v_flex()
-                        .absolute()
-                        .inset_0()
-                        .pl(traffic_lights + px(NAV_CONTROL_WIDTH))
-                        .pr(px(NAV_CONTROL_WIDTH))
+                        .min_w_0()
                         .items_center()
                         .justify_center()
                         .child(
@@ -1630,10 +1640,22 @@ fn nav_bar(
                         )
                         .children(subtitle),
                 )
-                .children(back)
-                .child(window_caption::drag_region(div().flex_1().h_full()))
-                .children(actions)
-                .children(hosts_caption.then(|| window_caption::caption_controls(window, cx))),
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .flex_basis(px(0.))
+                        .min_w(px(NAV_CONTROL_WIDTH))
+                        .h_full()
+                        .items_center()
+                        .justify_end()
+                        .gap(tight)
+                        .when(!hosts_caption, |side| side.pr(dense))
+                        .child(window_caption::drag_region(div().flex_1().h_full()))
+                        .children(actions)
+                        .children(
+                            hosts_caption.then(|| window_caption::caption_controls(window, cx)),
+                        ),
+                ),
         )
         .child(crate::material::faded_hairline(cx))
 }
@@ -1766,7 +1788,7 @@ impl AppShell {
             .bg(crate::material::content_surface(cx))
             .child(nav_bar(
                 back,
-                crate::tr!("hosts.pair.title").into_owned().into(),
+                crate::tr!("hosts.pair.page_title").into_owned().into(),
                 None,
                 vec![],
                 window,
@@ -1863,7 +1885,7 @@ impl AppShell {
         let store = attachment.link.store.read(cx);
         // A remote machine's list is headed by the machine, with the link's
         // state where every other page puts its context. The local list is
-        // just Threads: the Hosts row below already names this machine.
+        // just Threads; the way to the machines is the Back control.
         let (title, subtitle): (SharedString, Option<SharedString>) = match store.remote_host_name()
         {
             Some(_) => (
@@ -2629,21 +2651,44 @@ impl AppShell {
             false,
             RightTab::Diff,
         );
-        let title: SharedString = if self.destination(cx) == Destination::Pair {
-            crate::tr!("hosts.pair.title").into_owned().into()
+        let pairing = self.destination(cx) == Destination::Pair;
+        let title: SharedString = if pairing {
+            crate::tr!("hosts.pair.page_title").into_owned().into()
         } else {
             crate::tr!("hosts.title").into_owned().into()
         };
+        // Machines is a root the sidebar switches to; Pair is pushed over it,
+        // so only Pair has somewhere to go back to.
+        let back = pairing.then(|| {
+            back_button("hosts-back", Destination::Hosts.back_label())
+                .debug_selector(|| "hosts-back".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.window_state
+                        .update(cx, |state, cx| state.close_pair(cx));
+                }))
+        });
         window_drag_area(
             "hosts-header-drag",
-            crate::material::bar("hosts-header", crate::material::Bar::Strip, false, cx)
-                .when(hosts_caption, |strip| strip.relative()),
+            crate::settings_rows::content_header(
+                crate::material::bar("hosts-header", crate::material::Bar::Strip, false, cx),
+                cx,
+            )
+            .when(hosts_caption, |strip| strip.relative()),
             window,
             cx,
         )
-        .child(window_caption::drag_region(crate::material::bar_title(
-            title, cx,
-        )))
+        .child(
+            crate::settings_rows::content_header_column()
+                .items_center()
+                .gap(cx.theme().tokens.spacing.xs)
+                .when(hosts_caption, |column| {
+                    column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
+                })
+                .children(back)
+                .child(window_caption::drag_region(crate::material::bar_title(
+                    title, cx,
+                ))),
+        )
         .children(hosts_caption.then(|| {
             div()
                 .absolute()
@@ -6547,6 +6592,35 @@ mod tests {
         });
     }
 
+    /// Wide, the pairing page is pushed over Machines, and its header's Back
+    /// returns to Machines rather than leaving the Hosts route; Machines, a
+    /// root the sidebar switches to, has no Back.
+    #[gpui::test]
+    fn the_wide_pair_page_goes_back_to_machines(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        draw(cx);
+        assert!(
+            cx.debug_bounds("hosts-back").is_none(),
+            "Machines is a root"
+        );
+        state.update(cx, |state, cx| state.go(Destination::Pair, cx));
+        draw(cx);
+        let back = cx
+            .debug_bounds("hosts-back")
+            .expect("the pairing page offers Back");
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.destination(cx)),
+            Destination::Hosts
+        );
+        assert!(cx.debug_bounds("hosts-route").is_some());
+    }
+
     /// A store selection can come from the sidebar or palette. In wide layout
     /// it switches the content column away from Hosts without requiring Back.
     #[gpui::test]
@@ -6607,6 +6681,31 @@ mod tests {
         draw(cx);
         assert_eq!(state.read_with(cx, |state, _| state.route()), Route::Chat);
         assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+
+        // The control toggles: on Machines, or on Pair over it, a click returns
+        // to the thread the window was showing.
+        let click_control = |cx: &mut VisualTestContext| {
+            let control = cx
+                .debug_bounds("sidebar-feature-hosts")
+                .expect("the Machines control is visible");
+            cx.simulate_click(control.center(), gpui::Modifiers::default());
+            draw(cx);
+        };
+        for pairing in [false, true] {
+            click_control(cx);
+            assert_eq!(state.read_with(cx, |state, _| state.route()), Route::Hosts);
+            if pairing {
+                state.update(cx, |state, cx| state.go(Destination::Pair, cx));
+                draw(cx);
+            }
+            click_control(cx);
+            assert_eq!(
+                state.read_with(cx, |state, _| state.history().to_vec()),
+                vec![Destination::Hosts, Destination::Thread],
+                "pairing: {pairing}"
+            );
+            assert!(cx.debug_bounds("hosts-route").is_none());
+        }
     }
 
     /// Settings replaces the whole window, unlike the Hosts route: the left

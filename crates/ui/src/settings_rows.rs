@@ -24,6 +24,38 @@ pub const FIELD_WIDTH: f32 = 240.;
 /// Max width of the settings content column, a reading measure for its forms.
 pub const CONTENT_MAX_WIDTH: f32 = 768.;
 
+/// The centred column a settings-form page scrolls: `column` at
+/// [`CONTENT_MAX_WIDTH`] inside the page inset.
+pub fn content_column(column: gpui::Div, compact: bool, cx: &App) -> gpui::Div {
+    let spacing = &cx.theme().tokens.spacing;
+    let inset = if compact {
+        px(crate::material::COMPACT_PAGE_INSET)
+    } else {
+        spacing.xl
+    };
+    h_flex()
+        .w_full()
+        .justify_center()
+        .px(inset)
+        .py(spacing.xl)
+        // Keep this width definite before capping it. Reversing these
+        // constraints makes nested multiline inputs resolve their percentage
+        // width to zero when the cap applies.
+        .child(column.w(px(CONTENT_MAX_WIDTH)).max_w_full())
+}
+
+/// The top strip of a page whose body is a [`content_column`]: the body's
+/// inset, so its [`content_header_column`] stays over the content at every
+/// width.
+pub fn content_header(strip: gpui_base::Toolbar, cx: &App) -> gpui_base::Toolbar {
+    strip.px(cx.theme().tokens.spacing.xl).justify_center()
+}
+
+/// The column inside a [`content_header`], as wide as the content below it.
+pub fn content_header_column() -> gpui::Div {
+    h_flex().w(px(CONTENT_MAX_WIDTH)).max_w_full()
+}
+
 /// A captioned group of settings rows: the unit every settings page is
 /// composed of.
 pub fn settings_group(
