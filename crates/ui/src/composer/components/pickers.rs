@@ -213,10 +213,6 @@ impl Composer {
             .w_full()
             .min_w_0()
             .overflow_hidden()
-            .when(
-                self.compact || composer_state.conversation_read_only,
-                |button| button.max_w(px(160.)),
-            )
             .ghost()
             .chip()
             .touch(self.compact)
@@ -225,13 +221,9 @@ impl Composer {
                 h_flex()
                     .min_w_0()
                     .overflow_hidden()
-                    .when(
-                        self.compact || composer_state.conversation_read_only,
-                        |el| el.w_full(),
-                    )
                     .gap_1p5()
                     .items_center()
-                    .text_body(self.compact, cx)
+                    .text_chip(cx)
                     .child(tinted_provider_glyph(provider, store))
                     .child(div().min_w_0().truncate().child(display))
                     .child(
@@ -377,7 +369,7 @@ impl Composer {
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .text_body(self.compact, cx)
+                    .text_chip(cx)
                     .text_color(muted)
                     .child(div().whitespace_nowrap().child(label))
                     .child(Icon::new(IconName::ChevronDown)),
@@ -467,7 +459,7 @@ impl Composer {
     pub(in super::super) fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = self.workspace_store.read(cx).composer_state();
         let Some(control) = PermissionControl::from_composer(&composer) else {
-            return permission_notice(&composer, self.compact, cx);
+            return permission_notice(&composer, cx);
         };
         let muted = cx.theme().muted_foreground;
         let label = control.shown_label();
@@ -485,7 +477,7 @@ impl Composer {
                     .overflow_hidden()
                     .gap_1p5()
                     .items_center()
-                    .text_body(self.compact, cx)
+                    .text_chip(cx)
                     .text_color(muted)
                     .child(Icon::empty().path("icons/lock.svg"))
                     .child(div().min_w_0().truncate().child(label))
@@ -493,7 +485,7 @@ impl Composer {
                         row.child(
                             div()
                                 .flex_none()
-                                .text_secondary(self.compact, cx)
+                                .text_secondary(false, cx)
                                 .child(crate::tr!("permission.pending")),
                         )
                     })
@@ -937,7 +929,7 @@ fn render_compact_model_footer(
         };
         footer = footer.child(group(label.into(), track, cx));
     } else {
-        footer = footer.child(permission_notice(&composer_state, true, cx));
+        footer = footer.child(permission_notice(&composer_state, cx));
     }
     footer
         .child(div().h(cx.theme().tokens.spacing.sm).flex_none())
@@ -1212,11 +1204,7 @@ impl PermissionControl {
     }
 }
 
-fn permission_notice(
-    composer: &crate::store::ComposerState,
-    compact: bool,
-    cx: &App,
-) -> AnyElement {
+fn permission_notice(composer: &crate::store::ComposerState, cx: &App) -> AnyElement {
     let Some(notice) = composer.provider.and_then(agent::permission_notice) else {
         return div().into_any_element();
     };
@@ -1231,7 +1219,7 @@ fn permission_notice(
         .py_1()
         .gap_1p5()
         .items_center()
-        .text_body(compact, cx)
+        .text_chip(cx)
         .text_color(muted)
         .child(Icon::empty().path("icons/lock.svg"))
         .child(notice)

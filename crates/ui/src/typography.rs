@@ -4,8 +4,9 @@
 //! `xl` 20/28, `mono_md` 13/20) but no helper that applies a whole token to an
 //! element, and no role names. This module is that one place: a view names the
 //! role of a run of text and never picks a pixel size. A compact (touch)
-//! layout reads one step up the same scale; gpui-base has no touch scale, so
-//! that rule lives here and nowhere else.
+//! layout reads one step up the same scale, except where a role says
+//! otherwise; gpui-base has no touch scale, so that rule lives here and
+//! nowhere else.
 
 use crate::theme::ActiveTheme as _;
 use gpui::{App, Styled};
@@ -27,6 +28,13 @@ pub trait TextRole: Styled + Sized {
         } else {
             &typography.sm
         })
+    }
+
+    /// The label of a composer chip: `sm` on every layout. The chip is drawn
+    /// 28 tall on a touch layout too, and the phone row has to fit a model
+    /// name beside the send control, so it does not take the touch step up.
+    fn text_chip(self, cx: &App) -> Self {
+        self.text_token(&cx.theme().tokens.typography.sm)
     }
 
     /// A page, panel or sheet title: `md`, medium weight.
