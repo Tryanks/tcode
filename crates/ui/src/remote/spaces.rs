@@ -717,19 +717,22 @@ pub(crate) fn open_create(
     window.open_dialog(cx, move |dialog, _, _| {
         let field = field.clone();
         submit_actions(
-            dialog.title(title.clone()).content(move |content, _, cx| {
-                content.child(
-                    v_flex()
-                        .gap_3()
-                        .debug_selector(|| "spaces-create".into())
-                        .child(Input::new(&field))
-                        .child(
-                            div()
-                                .text_secondary(false, cx)
-                                .child(crate::tr!("spaces.create.disclosure")),
-                        ),
-                )
-            }),
+            dialog
+                .title(title.clone())
+                .content(move |content, window, cx| {
+                    let compact = crate::window_seam::window_is_compact(window, cx);
+                    content.child(
+                        v_flex()
+                            .gap_3()
+                            .debug_selector(|| "spaces-create".into())
+                            .child(Input::new(&field))
+                            .child(
+                                div()
+                                    .text_secondary(compact, cx)
+                                    .child(crate::tr!("spaces.create.disclosure")),
+                            ),
+                    )
+                }),
             "spaces-create",
             crate::tr!("spaces.create.action").into_owned().into(),
             submit.clone(),
@@ -964,11 +967,9 @@ mod section {
     use super::*;
     use crate::icon::IconName;
     use crate::material::{group_caption, group_row, grouped};
-    use crate::overlay::DialogButtons;
     use crate::scroll::ScrollableElement as _;
-    use crate::settings_rows::{ToggleRow, footnote, row_frame, settings_group};
+    use crate::settings_rows::{ToggleRow, row_frame, settings_group};
     use crate::sizing::Sizable as _;
-    use crate::widgets::ButtonVariant;
     use crate::widgets::checkbox::Checkbox;
     use crate::widgets::menu::DropdownMenu as _;
 
@@ -1119,7 +1120,12 @@ mod section {
                 .debug_selector(|| "spaces-section".into())
                 .child(group_caption(crate::tr!("spaces.section"), cx))
                 .child(grouped(rows, cx))
-                .child(footnote(crate::tr!("spaces.intro"), compact, cx))
+                .child(super::super::footnote_with_docs(
+                    crate::tr!("spaces.intro"),
+                    "shared-spaces",
+                    compact,
+                    cx,
+                ))
                 .into_any_element()
         }
     }
@@ -1560,34 +1566,26 @@ mod section {
     ) {
         let id = space.id.clone();
         let name = space.name.clone();
-        let members = space.members.len();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let spaces = spaces.clone();
-            let id = id.clone();
-            alert
-                .title(quoted("spaces.delete_title", &name))
-                .description(if members == 0 {
-                    crate::tr!("spaces.delete_description_empty")
-                } else {
-                    crate::tr!("spaces.delete_description")
-                })
-                .button_props(
-                    DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text(crate::tr!("spaces.delete_action"))
-                        .cancel_text(crate::tr!("spaces.cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, window, cx| {
-                    let task = spaces.update(cx, |spaces, cx| {
-                        spaces.act(vec![SpaceAction::Delete { id: id.clone() }], cx)
-                    });
-                    report("spaces.failed", task, window, cx);
-                    // The space's own dialog goes with it.
-                    window.close_all_dialogs(cx);
-                    true
-                })
-        });
+        let description = if space.members.is_empty() {
+            crate::tr!("spaces.delete_description_empty")
+        } else {
+            crate::tr!("spaces.delete_description")
+        };
+        super::super::confirm_destructive(
+            quoted("spaces.delete_title", &name),
+            description.into_owned(),
+            crate::tr!("spaces.delete_action").into_owned(),
+            move |window, cx| {
+                let task = spaces.update(cx, |spaces, cx| {
+                    spaces.act(vec![SpaceAction::Delete { id: id.clone() }], cx)
+                });
+                report("spaces.failed", task, window, cx);
+                // The space's own dialog goes with it.
+                window.close_all_dialogs(cx);
+            },
+            window,
+            cx,
+        );
     }
 
     /// Removing a member unpairs the device. The link it joined by still
@@ -1617,14 +1615,15 @@ mod section {
                     )
                     .into_owned(),
                 )
-                .content(move |content, _, cx| {
+                .content(move |content, window, cx| {
+                    let compact = crate::window_seam::window_is_compact(window, cx);
                     content.child(
                         v_flex()
                             .gap_3()
                             .debug_selector(|| "spaces-remove-member".into())
                             .child(
                                 div()
-                                    .text_secondary(false, cx)
+                                    .text_secondary(compact, cx)
                                     .child(crate::tr!("spaces.members.remove_description")),
                             )
                             .child(

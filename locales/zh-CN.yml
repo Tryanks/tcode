@@ -1324,9 +1324,12 @@ toast:
 remote:
   failed: "无法更新远程连接：%{error}"
   hosting_off: "本机未开启托管。请先在远程连接中开启。"
+  learn_more: "了解更多"
   host:
     section: "本机"
     title: "允许其他设备连接本机"
+    start_failed: "无法启动：%{reason}"
+    port_in_use: "端口已被另一个 Tcode 占用"
   pairing:
     title: "接受新设备配对"
   host_name:
@@ -1334,7 +1337,7 @@ remote:
     description: "显示给其他设备。"
   traverse:
     section: "TRAVERSE"
-    description: "让设备在其他网络中也能连接到这台机器的中继与查找服务。全部关闭时，设备只能在局域网内或通过在设备上输入的地址连接。"
+    description: "中继与查找服务，让设备在其他网络中也能连接本机。"
     official: "官方 Traverse"
     custom: "自建 Traverse"
     url_description: "你的实例提供清单的基础 URL。"
@@ -1375,6 +1378,8 @@ remote:
     section: "已连接过的设备"
     empty: "尚无设备连接过本机。"
     revoke: "移除"
+    revoke_title: "移除「%{name}」？"
+    revoke_description: "该设备会被断开，之后只有重新配对才能再连接。"
     revoke_failed: "无法移除设备，它仍处于已配对状态：%{error}"
   path:
     lan: "局域网直连"
@@ -1403,6 +1408,8 @@ hosts:
   empty: "尚未添加任何主机。"
   disconnect: "断开"
   forget: "移除"
+  forget_title: "移除「%{name}」？"
+  forget_description: "本设备将不再保存这台主机，再次连接需要新的邀请。"
   actions: "%{name} 的操作"
   pair_again: "重新配对"
   in_group: "主机组成员"
@@ -1412,7 +1419,7 @@ hosts:
     needs_migration: "需要先升级本机数据。请退出 Tcode 后重新打开。"
     retry: "重试"
   invite:
-    description: "在另一台设备的 Tcode 中扫描此二维码，或粘贴邀请链接，即可配对并连接。"
+    description: "在另一台设备的 Tcode 中扫描此二维码或粘贴链接，即可配对并连接。"
     disabled: "远程连接未开启。"
     pairing_off: "本机已关闭新设备配对。"
     open_settings: "远程连接设置"
@@ -1420,21 +1427,21 @@ hosts:
     title: "添加主机"
     page_title: "添加主机"
     action: "连接"
-    description: "粘贴主机在“主机”页面显示的邀请链接。配对完成后会立即连接。"
+    description: "粘贴主机在“主机”页或“设置 → 远程连接”中显示的邀请链接。"
     invitation: "邀请链接"
     invitation_placeholder: "tcode://pair?…"
     scan: "扫描二维码"
     paste: "粘贴邀请链接"
     bad_invite: "这不是有效的 Tcode 邀请链接。"
     connecting: "正在连接主机…"
-    rejected: "主机拒绝了这个邀请。请确认已开启“接受新设备配对”，并使用新的邀请。"
-    unconfirmed: "无法确认配对结果。请在主机上生成新的邀请后重试。"
-    disabled: "这台主机已关闭新设备配对。请在主机上开启“接受新设备配对”后重试。"
+    rejected: "主机拒绝了这个邀请，请在主机上生成新邀请后粘贴到这里。"
+    unconfirmed: "无法确认配对结果，请用新的邀请重试。"
+    disabled: "这台主机未接受新设备，请在主机上开启“接受新设备配对”。"
     address: "主机的 IP 地址"
-    address_description: "在当前网络中没有找到这台主机。请输入它显示的 IP 地址（tcode-headless 输出中的 Addresses:，或主机的网络设置），然后用同一个邀请重新连接。"
+    address_description: "在当前网络中找不到这台主机，请输入它网络设置中显示的 IP 地址。"
     address_placeholder: "192.168.1.20"
     bad_address: "请输入 IPv4 或 IPv6 地址，不要带端口。"
-    address_unreachable: "无法通过 %{address} 连接主机。请检查地址，并确认主机的 UDP 端口在当前网络中可以接受连接。"
+    address_unreachable: "%{address} 没有响应，请检查地址，并确认主机的 UDP 端口在当前网络中可访问。"
     retry: "重试"
     failed: "添加失败：%{reason}"
 
@@ -1498,7 +1505,7 @@ project_icon:
 
 spaces:
   section: "共享空间"
-  intro: "共享空间通过一个可重复使用的链接，把你选定的项目分享给协作者。他们只能看到这些项目及其会话。"
+  intro: "共享空间通过一个可重复使用的链接，只分享你选定的项目。"
   new: "新建共享空间"
   not_hosting: "本机未开启远程连接。"
   detached: "已与这台主机断开。"
@@ -1511,8 +1518,8 @@ spaces:
   rename_action: "保存"
   delete: "删除共享空间"
   delete_title: "删除「%{name}」？"
-  delete_description: "其成员将失去访问权限，并与本机解除配对。项目及其会话会保留。"
-  delete_description_empty: "链接将失效。项目及其会话会保留。"
+  delete_description: "成员会与本机解除配对，项目及其会话仍会保留。"
+  delete_description_empty: "链接将失效，项目及其会话仍会保留。"
   delete_action: "删除"
   summary:
     project_one: "1 个项目"
@@ -1530,7 +1537,7 @@ spaces:
     disclosure: "成员会以本机的智能体和权限运行命令。"
     action: "创建"
   link:
-    description: "在另一台设备的 Tcode 中扫描此二维码，或发送链接。加入者只能看到「%{name}」。"
+    description: "扫码或发送此链接，加入者只能看到「%{name}」。"
     copy: "复制链接"
     copied: "已复制共享空间链接"
     regenerate: "重新生成链接"
@@ -1551,7 +1558,7 @@ spaces:
     empty: "还没有人加入。"
     move: "移动到…"
     remove: "移除"
-    remove_title: "将 %{name} 移出「%{space}」？"
+    remove_title: "将「%{name}」移出「%{space}」？"
     remove_description: "该设备会断开连接，并与本机解除配对。"
     regenerate: "同时重新生成链接"
   share:
@@ -1562,7 +1569,7 @@ spaces:
     separator: "、"
   shared:
     title: "「%{name}」已就绪"
-    description: "把此链接发给协作者。他们将看到「%{project}」及其会话，并使用本机的智能体工作。"
+    description: "把此链接发给协作者，他们将看到「%{project}」及其会话。"
   machines:
     section: "共享空间"
     show_qr: "显示二维码"
@@ -1571,14 +1578,14 @@ spaces:
 
 group:
   section: "主机组"
-  intro: "主机组把本机和你的其他主机连在一起。设备只要和组里任意一台主机配对，就能打开组里的每一台主机；任何一台主机离开，组都会继续存在。"
-  risk: "组里的每一台主机都能让设备进入其他所有主机。只与你信任的主机组队；在你创建或加入之前，主机组不会开启。"
+  intro: "主机组把你的多台主机连在一起，设备与其中任意一台配对后即可打开全部主机。"
+  risk: "组内每台主机都能为其他主机接纳设备，请只与你信任的主机组队。"
   failed: "无法更新主机组：%{error}"
   leave: "退出主机组"
   leave_title: "退出「%{name}」？"
-  leave_description: "其他主机不再通过本机接纳设备。已和本机配对的设备仍与本机保持配对。"
-  detail_note: "要添加设备或另一台主机，请使用本机的邀请：用它配对的设备会被组里每一台主机接纳；在任意一台主机上移除设备，会从所有主机上移除。"
-  invitation_note: "本机在「%{name}」中：用这个邀请配对的设备可以打开组里的每一台主机，另一台主机也可以用它加入这个组。"
+  leave_description: "其他主机不再通过本机接纳设备，已与本机配对的设备不受影响。"
+  detail_note: "用本机的邀请配对设备或另一台主机，即可把它加入主机组。"
+  invitation_note: "用这个邀请配对的设备或主机会加入「%{name}」。"
   summary:
     machine_one: "1 台主机"
     machines: "%{count} 台主机"
@@ -1590,7 +1597,7 @@ group:
   join:
     action: "加入主机组"
     title: "加入主机组"
-    description: "粘贴组里某台主机的邀请（在它的“主机”页或 设置 → 远程 中）。和设备配对一样，邀请只能用一次，五分钟内有效。"
+    description: "粘贴组内某台主机的邀请，可在它的“主机”页或“设置 → 远程连接”中找到。"
     placeholder: "tcode://pair?…"
     address: "主机的 IP 地址（可选）"
     address_placeholder: "仅在找不到该主机时填写，例如 192.168.1.20"
@@ -1604,15 +1611,15 @@ group:
     section: "主机"
     this: "本机"
     remove: "移除"
-    remove_title: "将 %{name} 移出主机组？"
-    remove_description: "从现在起，其他主机不再与它同步，也不再接纳它带来的设备。它已经带入的设备仍保有访问权限。"
+    remove_title: "将「%{name}」移出主机组？"
+    remove_description: "其他主机将不再与它同步，它已带入的设备仍可访问。"
   declined:
     section: "等待本机接纳"
     description: "本机已关闭新设备配对期间，其他主机接纳了这些设备。"
     admit: "接纳"
   remove_device:
-    title: "将 %{name} 移出主机组？"
-    description: "该设备会从「%{group}」里的每一台主机上断开并取消配对，而不只是本机。只有重新配对才能再加入。"
+    title: "从所有主机移除「%{name}」？"
+    description: "该设备会与「%{group}」中的每一台主机断开，只有重新配对才能再连接。"
     action: "从所有主机移除"
 
 member:

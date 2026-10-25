@@ -78,6 +78,16 @@ pub fn footnote(text: impl Into<SharedString>, compact: bool, cx: &App) -> gpui:
         .child(text.into())
 }
 
+/// A link off Tcode, beside the text it adds to.
+pub fn external_link(id: impl Into<SharedString>, label: SharedString, url: String) -> Button {
+    Button::new(id.into())
+        .ghost()
+        .xsmall()
+        .icon(IconName::ExternalLink)
+        .label(label)
+        .on_click(move |_, _, cx| cx.open_url(&url))
+}
+
 /// Left description block (title + muted description). `reset` is the
 /// per-item "restore default" affordance and rides inline right after the
 /// title, so it reads as belonging to that setting rather than to the row's
@@ -155,6 +165,7 @@ pub struct ToggleRow {
     id: SharedString,
     title: SharedString,
     description: Option<SharedString>,
+    error: Option<SharedString>,
     checked: bool,
     compact: bool,
     disabled: bool,
@@ -176,6 +187,7 @@ impl ToggleRow {
             id: id.into(),
             title: title.into(),
             description: None,
+            error: None,
             checked,
             compact,
             disabled: false,
@@ -187,6 +199,12 @@ impl ToggleRow {
 
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Why the switch did not take, under the title in the danger colour.
+    pub fn error(mut self, error: Option<SharedString>) -> Self {
+        self.error = error;
         self
     }
 
@@ -214,6 +232,7 @@ impl RenderOnce for ToggleRow {
             id,
             title,
             description,
+            error,
             checked,
             compact,
             disabled,
@@ -274,6 +293,12 @@ impl RenderOnce for ToggleRow {
         })
         .child(
             row_labels(title, description, reset, compact, cx)
+                .children(error.map(|error| {
+                    div()
+                        .text_secondary(compact, cx)
+                        .text_color(cx.theme().danger_foreground)
+                        .child(error)
+                }))
                 // An accessory takes the room the labels leave.
                 .when(has_accessory, |labels| labels.flex_none()),
         )

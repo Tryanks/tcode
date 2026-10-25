@@ -183,6 +183,58 @@ fn report<T: 'static>(
         .detach();
 }
 
+/// A page's [`footnote`](crate::settings_rows::footnote) and the link to
+/// the `anchor` section of the remote guide, which says the rest.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+fn footnote_with_docs(
+    text: impl Into<SharedString>,
+    anchor: &str,
+    compact: bool,
+    cx: &App,
+) -> gpui::Div {
+    crate::settings_rows::footnote(text, compact, cx)
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap_1()
+        .child(crate::settings_rows::external_link(
+            format!("remote-docs-{anchor}"),
+            crate::tr!("remote.learn_more").into_owned().into(),
+            format!("https://github.com/Tryanks/tcode/blob/main/docs/remote.md#{anchor}"),
+        ))
+}
+
+/// Ask before a change that cannot be undone from here. `title` names what
+/// goes, `description` says in one sentence what follows, and `action` labels
+/// the danger button that runs `on_ok`.
+fn confirm_destructive(
+    title: String,
+    description: String,
+    action: String,
+    on_ok: impl Fn(&mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let on_ok = Rc::new(on_ok);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let on_ok = on_ok.clone();
+        alert
+            .title(title.clone())
+            .description(description.clone())
+            .button_props(
+                crate::overlay::DialogButtons::default()
+                    .ok_variant(crate::widgets::ButtonVariant::Danger)
+                    .ok_text(action.clone())
+                    .cancel_text(crate::tr!("spaces.cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, window, cx| {
+                on_ok(window, cx);
+                true
+            })
+    });
+}
+
 /// A dialog's confirmation; `false` keeps the dialog open.
 type Submit = Rc<dyn Fn(&mut Window, &mut App) -> bool>;
 
@@ -242,6 +294,8 @@ pub struct RemotePanel {
     /// which Back pops back to whatever asked for it.
     window_state: Entity<WindowState>,
     form: PairForm,
+    /// Whether the window was on the paste page when it last changed pages.
+    pairing: bool,
     /// [`ClientHost::fixed_machine`]: a browser lists its one machine and
     /// no way to add or re-pair one.
     fixed_machine: bool,
@@ -272,6 +326,16 @@ impl RemotePanel {
         // A link that parses is the whole request, so it is sent as soon as
         // it lands in the field; Enter and the button only cover a retry.
         let subscriptions = vec![
+            cx.observe_in(
+                &window_state,
+                window,
+                |this: &mut Self, state, window, cx| {
+                    let pairing = state.read(cx).destination() == Destination::Pair;
+                    if std::mem::replace(&mut this.pairing, pairing) && !pairing {
+                        this.form.leave(window, cx);
+                    }
+                },
+            ),
             cx.subscribe_in(
                 &form.invitation,
                 window,
@@ -308,6 +372,7 @@ impl RemotePanel {
             local_failure: None,
             window_state,
             form,
+            pairing: false,
             fixed_machine,
             hosts_scroll: ScrollHandle::new(),
             pair_scroll: ScrollHandle::new(),
@@ -832,6 +897,7 @@ impl RemotePanel {
         let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
         let entry = |id: &'static str, title: SharedString, cx: &mut Context<Self>| {
             group_entry(id, title.clone(), compact, cx)
+                .debug_selector(move || id.into())
                 .child(
                     div()
                         .flex_1()
@@ -1023,8 +1089,8 @@ impl RemotePanel {
                         .children(scan)
                         .child(action),
                 )
-                .children(self.attempt_status(false, cx))
-                .children(self.address_prompt(false, false, cx));
+                .children(self.attempt_status(compact, cx))
+                .children(self.address_prompt(false, compact, cx));
             let page = v_flex().child(
                 crate::material::group(cx)
                     .debug_selector(|| "hosts-pair-form".into())
@@ -1036,7 +1102,7 @@ impl RemotePanel {
             .gap(section_gap(cx))
             .child(
                 div()
-                    .text_secondary(true, cx)
+                    .text_secondary(compact, cx)
                     .min_w_0()
                     .child(crate::tr!("hosts.pair.description")),
             )
@@ -1051,8 +1117,8 @@ impl RemotePanel {
                     )
                     .child(field),
             )
-            .children(self.attempt_status(true, cx))
-            .children(self.address_prompt(false, true, cx))
+            .children(self.attempt_status(compact, cx))
+            .children(self.address_prompt(false, compact, cx))
             .children(scan.map(|scan| scan.w_full()));
         self.page_with_footer(body, action.w_full().into_any_element(), cx)
     }
@@ -1117,9 +1183,32 @@ impl RemotePanel {
         cx.notify();
     }
 
-    fn on_forget(&mut self, action: &ForgetHost, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.global::<ClientAttachment>().remove_host(&action.0);
-        cx.notify();
+    fn on_forget(&mut self, action: &ForgetHost, window: &mut Window, cx: &mut Context<Self>) {
+        let id = action.0.clone();
+        let Some(name) = self
+            .client(cx)
+            .and_then(|client| {
+                client
+                    .load_hosts()
+                    .into_iter()
+                    .find(|host| host.host_id == id)
+            })
+            .map(|host| host.name)
+        else {
+            return;
+        };
+        let panel = cx.entity().downgrade();
+        confirm_destructive(
+            crate::tr!("hosts.forget_title", name = name).into_owned(),
+            crate::tr!("hosts.forget_description").into_owned(),
+            crate::tr!("hosts.forget").into_owned(),
+            move |_, cx| {
+                cx.global::<ClientAttachment>().remove_host(&id);
+                let _ = panel.update(cx, |_, cx| cx.notify());
+            },
+            window,
+            cx,
+        );
     }
 }
 

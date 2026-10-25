@@ -69,8 +69,8 @@ space. The pairing screen says **This device is already paired with that
 machine. Connect to it from Machines; to join this space instead, ask the
 owner.** A paused, dead or missing space link says **This space link is paused
 or no longer valid. Ask the owner to turn it back on or send a new one.** A
-wrong secret says **The machine rejected this invitation.
-Check that Accept new devices is on and use a new invitation.** A connection
+wrong secret says **The machine rejected this invitation; create a new one
+there and paste it here.** A connection
 failure that found no path to the machine asks for the machine's IP
 address (see [When nothing finds the machine](#when-nothing-finds-the-machine)).
 A malformed link says **That is not
@@ -816,7 +816,7 @@ list in memory and writes it back.
 | --- | --- |
 | **That is not a Tcode invitation link** | The pasted text is not a complete `tcode://pair?v=3&…` link (see [The invitation link](pair-link.md)). A link from an older Tcode is not accepted either. Copy the link again from the machine or scan the QR. |
 | **The machine rejected this invitation** | The invitation expired (five minutes), was already used, was replaced by a newer one, or five wrong secrets invalidated it. Create **New invitation** on the machine or restart `serve`; get a separate invitation for each device. |
-| **This machine is not accepting new device pairings** | Turn on **Accept new devices** on the machine (desktop **Settings → Remote**, or the logged-in browser of a headless machine). |
+| **This machine is not accepting new devices** | Turn on **Accept new devices** on the machine (desktop **Settings → Remote**, or the logged-in browser of a headless machine). |
 | Pairing asks for **Machine's IP address** | No path to the machine opened within 20 seconds: not through its relay, its Traverse lookup or the LAN lookup. The invitation is still valid. Check that Tcode is running, that the two are on the same network or the machine has a relay (`Relay:` in the `serve` output), and that the machine's UDP port is not blocked on the LAN; then type the machine's IP address in that field (see [When nothing finds the machine](#when-nothing-finds-the-machine)). |
 | **Reconnecting to ‹machine›… (attempt N)** stays up | The device keeps trying the saved relay and addresses with growing delays, and on every attempt looks for the machine on its own network (see [Finding the machine again](#finding-the-machine-again)). If the machine moved to another network with Traverse off and the device did not move with it, pair again with a new invitation. Direct paths need UDP between the two ends; a relayed connection reaches the relay over HTTPS (TCP), so it still works where UDP is blocked, as long as the machine publishes to a relay. |
 | **Access rejected · Pair again** | The machine no longer lists this device (removed, or the machine's data directory was replaced). Pair again with a new invitation if access is intended. |
@@ -1050,7 +1050,7 @@ the address only, IPv4 or IPv6: the port comes from the invitation. **Try
 again** (under the field on the Machines page) or **Connect** (on the paste
 page) sends the same invitation again, dialling that address together with
 everything the first attempt tried. If that address finds no path either,
-the field says **Could not reach the machine at ‹address›**. The address that
+the field says **Nothing answered at ‹address›**. The address that
 carried the pairing is saved like any other, so the machine is reached there
 again later. The machine's UDP port must accept
 inbound traffic on the LAN for this to work.
