@@ -821,13 +821,13 @@ impl Composer {
                 .child(Spinner::new().color(cx.theme().primary))
                 .into_any_element();
         }
-        let stopping = (turn_running || self.watching(cx)) && !has_text;
+        let stopping = turn_running && !has_text;
         let composer_state = self.workspace_store.read(cx).composer_state();
         let stop_pending = composer_state.stopping;
         let steerable = turn_running && has_text && composer_state.steering_supported;
         let armed = self.steer_gesture.as_ref().is_some_and(SteerGesture::armed);
         let (label, id): (_, &'static str) = if stopping {
-            (self.stop_label(turn_running), "stop-turn")
+            (crate::tr!("composer.stop"), "stop-turn")
         } else if turn_running {
             (crate::tr!("mobile.queue"), "steer-turn")
         } else {
@@ -894,27 +894,7 @@ impl Composer {
             .into_any_element()
     }
 
-    fn watching(&self, cx: &App) -> bool {
-        let store = self.workspace_store.read(cx);
-        store.active_session_id().is_some_and(|id| {
-            store
-                .thread_meta(&id)
-                .is_some_and(|meta| !meta.pull_request_watches_paused)
-                && tcode_core::pull_request::watched(store.pull_requests(&id))
-                    .next()
-                    .is_some()
-        })
-    }
-
-    fn stop_label(&self, turn_running: bool) -> Cow<'static, str> {
-        crate::tr!(if turn_running {
-            "composer.stop"
-        } else {
-            "composer.pause_monitoring"
-        })
-    }
-
-    fn render_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> Button {
+    fn render_stop(&self, cx: &mut Context<Self>) -> Button {
         let size = px(SEND_SIZE);
         // A filled stop square; the icon set's square is an outline. A child is
         // not an icon, so the button's width is set too.
@@ -923,7 +903,7 @@ impl Composer {
             .danger()
             .with_size(size)
             .w(size)
-            .aria_label(self.stop_label(turn_running))
+            .aria_label(crate::tr!("composer.stop"))
             .disabled(
                 !self.interactive(cx) || self.workspace_store.read(cx).composer_state().stopping,
             )
@@ -975,9 +955,7 @@ impl Composer {
                         })),
                 );
             }
-            return row
-                .child(self.render_stop(turn_running, cx))
-                .into_any_element();
+            return row.child(self.render_stop(cx)).into_any_element();
         }
 
         // First-send worktree preparation temporarily disables the send control.
@@ -1000,9 +978,6 @@ impl Composer {
         }
 
         let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
-        if !has_text && self.watching(cx) {
-            return self.render_stop(turn_running, cx).into_any_element();
-        }
         Button::new("send-message")
             .debug_selector(|| "send-message".into())
             .primary()
@@ -1089,31 +1064,56 @@ impl Render for Composer {
                     .then(|| self.render_attach_menu(cx))
             })
             .flatten();
+        // The chips give way to the send/stop control: Stop must stay
+        // reachable however long the chips' labels run.
+        let leading = || {
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .gap_1()
+                .items_center()
+        };
+        // The model name truncates to make room, down to the width of one
+        // control so the picker can still be opened.
+        let model_cell = || div().min_w(px(SEND_SIZE));
+        let primary = div()
+            .flex_none()
+            .child(self.render_primary_action(turn_running, cx));
         let control_row = if self.compact || (readonly && compact) {
             control_row_base
-                .children(attach_menu)
-                .child(div().flex_1().min_w_0().child(self.render_model_picker(cx)))
-                .child(self.render_traits_picker(cx))
-                .children(mic)
-                .child(self.render_primary_action(turn_running, cx))
+                .child(
+                    leading()
+                        .children(attach_menu)
+                        .child(div().flex_1().min_w_0().child(self.render_model_picker(cx)))
+                        .child(self.render_traits_picker(cx))
+                        .children(mic),
+                )
+                .child(primary)
         } else if compact {
             control_row_base
-                .child(self.render_model_picker(cx))
-                .child(self.render_overflow_menu(cx))
-                .child(div().flex_1())
-                .children(mic)
-                .child(self.render_context_meter(cx))
-                .child(self.render_primary_action(turn_running, cx))
+                .child(
+                    leading()
+                        .child(model_cell().child(self.render_model_picker(cx)))
+                        .child(self.render_overflow_menu(cx))
+                        .child(div().flex_1())
+                        .children(mic)
+                        .child(self.render_context_meter(cx)),
+                )
+                .child(primary)
         } else {
             control_row_base
-                .child(self.render_model_picker(cx))
-                .child(self.render_traits_picker(cx))
-                .child(divider())
-                .child(self.render_context_meter(cx))
-                .child(self.render_permission_picker(cx))
-                .child(div().flex_1())
-                .children(mic)
-                .child(self.render_primary_action(turn_running, cx))
+                .child(
+                    leading()
+                        .child(model_cell().child(self.render_model_picker(cx)))
+                        .child(self.render_traits_picker(cx))
+                        .child(divider())
+                        .child(self.render_context_meter(cx))
+                        .child(self.render_permission_picker(cx))
+                        .child(div().flex_1())
+                        .children(mic),
+                )
+                .child(primary)
         };
 
         // The row's width is known only once it is laid out, after this
@@ -1635,6 +1635,51 @@ mod replica_tests {
         assert!(!resize(1200., cx), "a row widened again kept them folded");
     }
 
+    /// A running turn widens the desktop action to spinner, steer and Stop;
+    /// at every width the row is laid out at, Stop stays inside the window and
+    /// clear of a model name too long for the row.
+    #[gpui::test]
+    fn a_running_turn_keeps_stop_on_screen_at_every_width(cx: &mut TestAppContext) {
+        let (store, incoming, _outgoing, mut status) = attach(cx);
+        status.activity.turn_running = true;
+        status.steering_supported = true;
+        status.requested_model = Some("an-unlisted-model-with-a-long-identifier".into());
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (_composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        for width in (360..=1200).step_by(20) {
+            let width = width as f32;
+            cx.simulate_resize(gpui::size(px(width), px(800.)));
+            for _ in 0..100 {
+                cx.run_until_parked();
+                if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+                    break;
+                }
+            }
+            let stop = cx
+                .debug_bounds("stop-turn")
+                .unwrap_or_else(|| panic!("no Stop at {width}px"));
+            assert!(
+                f32::from(stop.right()) <= width,
+                "Stop is clipped at {width}px: its right edge is at {:?}",
+                stop.right()
+            );
+            let picker = cx.debug_bounds("model-picker").unwrap();
+            assert!(
+                picker.right() <= stop.left(),
+                "the model picker runs under Stop at {width}px: {picker:?} vs {stop:?}"
+            );
+        }
+    }
+
     /// A value the provider reports as unavailable is shown but never sent.
     #[gpui::test]
     fn unavailable_permission_rows_cannot_be_chosen(cx: &mut TestAppContext) {
@@ -1697,7 +1742,9 @@ mod replica_tests {
     }
 
     #[gpui::test]
-    fn a_thread_waiting_on_a_watch_offers_stop_between_turns(cx: &mut TestAppContext) {
+    fn a_watched_thread_pauses_from_the_pull_request_panel_not_the_composer(
+        cx: &mut TestAppContext,
+    ) {
         use crate::store::tests::LocalHostDriver;
         use tcode_core::pull_request::{PullRequestKey, PullRequestSource, link_pull_request};
         cx.update(crate::theme::init);
@@ -1754,44 +1801,38 @@ mod replica_tests {
             cx.update(|window, cx| _ = window.draw(cx));
             assert!(store.read_with(cx, |store, _| store.waiting_for(&session_id)));
             assert!(
-                cx.debug_bounds("stop-turn").is_some(),
-                "Stop is offered between turns"
-            );
-            composer.update_in(cx, |composer, window, cx| {
-                composer.set_input_text("Check the build".into(), window, cx)
-            });
-            cx.update(|window, cx| _ = window.draw(cx));
-            assert!(
-                cx.debug_bounds("send-message").is_some(),
-                "typed text sends"
-            );
-            assert!(cx.debug_bounds("stop-turn").is_none());
-            composer.update_in(cx, |composer, window, cx| {
-                composer.set_input_text(String::new(), window, cx)
-            });
-            cx.update(|window, cx| _ = window.draw(cx));
-            let stop = cx.debug_bounds("stop-turn").unwrap();
-            cx.simulate_click(stop.center(), Modifiers::default());
-            driver.wait_until(cx, &store, "monitoring paused", |cx| {
-                store.read_with(cx, |store, _| {
-                    store
-                        .thread_meta(&session_id)
-                        .is_some_and(|meta| meta.pull_request_watches_paused)
-                })
-            });
-            cx.update(|window, cx| _ = window.draw(cx));
-            assert!(!store.read_with(cx, |store, _| store.waiting_for(&session_id)));
-            assert!(store.read_with(cx, |store, _| {
-                store.pull_requests(&session_id)[0].watch.is_some()
-            }));
-            assert!(
                 cx.debug_bounds("stop-turn").is_none(),
-                "paused monitoring is idle"
+                "no turn runs, so there is nothing to stop"
             );
-            assert!(
-                cx.debug_bounds("send-message").is_some(),
-                "the next turn can resume monitoring"
-            );
+            assert!(cx.debug_bounds("send-message").is_some());
+
+            let window_state =
+                cx.new(|_| crate::window_state::WindowState::new(false).with_compact(compact));
+            let (_panel, cx) = cx.add_window_view(|_, cx| {
+                crate::pull_requests::PullRequestsPanel::new(store.clone(), window_state, cx)
+            });
+            cx.simulate_resize(gpui::size(px(if compact { 393. } else { 400. }), px(800.)));
+            for pause in [true, false] {
+                cx.update(|window, cx| _ = window.draw(cx));
+                let monitoring = cx.debug_bounds("pr-monitoring").unwrap();
+                cx.simulate_click(monitoring.center(), Modifiers::default());
+                driver.wait_until(cx, &store, "monitoring toggled", |cx| {
+                    store.read_with(cx, |store, _| {
+                        store
+                            .thread_meta(&session_id)
+                            .is_some_and(|meta| meta.pull_request_watches_paused)
+                            == pause
+                    })
+                });
+                assert_eq!(
+                    store.read_with(cx, |store, _| store.waiting_for(&session_id)),
+                    !pause,
+                    "a paused watch is idle"
+                );
+                assert!(store.read_with(cx, |store, _| {
+                    store.pull_requests(&session_id)[0].watch.is_some()
+                }));
+            }
             driver.shutdown(cx, &store, &host);
             std::fs::remove_dir_all(root).unwrap();
         }

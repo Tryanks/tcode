@@ -856,6 +856,19 @@ impl AppState {
         }
     }
 
+    pub(crate) fn set_pull_request_watches_paused(
+        &mut self,
+        thread: &str,
+        paused: bool,
+        cx: &mut HostCx,
+    ) {
+        if paused {
+            self.pause_pull_request_watches(thread, cx);
+        } else {
+            self.resume_pull_request_watches(thread, cx);
+        }
+    }
+
     pub(super) fn pause_pull_request_watches(&mut self, thread: &str, cx: &mut HostCx) {
         self.discard_pull_request_wakes(thread, None);
         if let Some(mut meta) = self.find_meta(thread) {

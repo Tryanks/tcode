@@ -250,6 +250,7 @@ impl AppState {
                 | Command::RunPullRequestAction { session_id, .. }
                 | Command::EditPullRequestReviewDraft { session_id, .. }
                 | Command::WatchPullRequest { session_id, .. }
+                | Command::SetPullRequestWatchesPaused { session_id, .. }
                 | Command::RetryTurn { session_id, .. }
                 | Command::Interrupt { session_id }
                 | Command::CompactContext { session_id }

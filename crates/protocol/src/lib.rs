@@ -223,6 +223,9 @@ pub use wire::{
 // command, SessionMeta carries moved_from, and the provider_relay event and
 // timeline entry carry moved_from, the directory a moved thread's handoff
 // left.
+//
+// Unreleased: the protocol adds the SetPullRequestWatchesPaused command, and
+// Interrupt no longer pauses a thread's watches between turns.
 pub const PROTOCOL_VERSION: u32 = 19;
 
 #[cfg(test)]

@@ -388,6 +388,26 @@ impl Harness {
             .expect("Stop is acknowledged")
     }
 
+    fn pause(&mut self, id: u64) {
+        self.state.dispatch_command(
+            &mut self.cx,
+            id,
+            Command::SetPullRequestWatchesPaused {
+                session_id: "thread".into(),
+                paused: true,
+            },
+        );
+        let acked = self
+            .cx
+            .drain_outgoing()
+            .into_iter()
+            .find_map(|message| match message {
+                HostMessage::Ack { id: acked, result } if acked == id => Some(result.map(drop)),
+                _ => None,
+            });
+        assert_eq!(acked, Some(Ok(())), "Pause is acknowledged");
+    }
+
     fn activity(&mut self) -> tcode_protocol::SessionActivity {
         self.state.deliver(
             &mut self.cx,
@@ -992,7 +1012,7 @@ fn a_wake_steers_into_a_running_turn_and_is_not_repeated() {
 }
 
 #[test]
-fn interrupt_pauses_an_idle_watch_and_resume_catches_up_once_after_restart() {
+fn pausing_an_idle_watch_and_resume_catches_up_once_after_restart() {
     for change in [
         "FAILURE",
         "SUCCESS",
@@ -1008,7 +1028,7 @@ fn interrupt_pauses_an_idle_watch_and_resume_catches_up_once_after_restart() {
         harness.pass();
         let baseline = harness.watch("thread").unwrap();
         assert!(harness.activity().waiting);
-        assert_eq!(harness.stop(1), Ok(()));
+        harness.pause(1);
         assert_eq!(harness.watch("thread"), Some(baseline.clone()));
         let activity = harness.activity();
         assert!(
@@ -1076,13 +1096,13 @@ fn interrupt_pauses_an_idle_watch_and_resume_catches_up_once_after_restart() {
 }
 
 #[test]
-fn interrupt_blocks_an_in_flight_read_and_accepts_agent_watches_while_paused() {
+fn pausing_blocks_an_in_flight_read_and_accepts_agent_watches_while_paused() {
     let mut harness = Harness::new("tcode-watch-paused-registration");
     harness.host().checks = vec![check("build", "FAILURE")];
     harness.watch_thread("thread", START);
     let baseline = harness.watch("thread").unwrap();
     let release = harness.hold_pass();
-    assert_eq!(harness.stop(1), Ok(()));
+    harness.pause(1);
     release.send(()).unwrap();
     harness
         .cx
@@ -1283,7 +1303,7 @@ fn ending_paused_watches_prevents_a_later_turn_from_restoring_them() {
     ] {
         let mut harness = Harness::new("tcode-watch-end-paused");
         harness.watch_thread("thread", START);
-        assert_eq!(harness.stop(1), Ok(()));
+        harness.pause(1);
         let archived = matches!(command, Command::ArchiveSession { .. });
         harness.state.dispatch_command(&mut harness.cx, 2, command);
         harness.cx.run_until_parked();

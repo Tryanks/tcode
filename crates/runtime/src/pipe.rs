@@ -604,6 +604,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx,
             ));
         }
+        Command::SetPullRequestWatchesPaused { session_id, paused } => {
+            app.set_pull_request_watches_paused(&session_id, paused, cx);
+        }
         Command::RefreshHostCredentials => app.refresh_host_credentials(cx),
         Command::SetHostToken { host, token, email } => {
             return CommandOutcome::Pending(app.set_host_token(host, token, email, cx));

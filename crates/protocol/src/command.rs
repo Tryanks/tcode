@@ -109,6 +109,11 @@ pub enum Command {
         key: tcode_core::pull_request::PullRequestKey,
         watching: bool,
     },
+    /// Pauses every watch of the thread, or resumes them and catches up on what changed.
+    SetPullRequestWatchesPaused {
+        session_id: String,
+        paused: bool,
+    },
     /// Drops the host's reads of a linked pull request and syncs it, for a manual refresh.
     RefreshPullRequest {
         session_id: String,
@@ -604,6 +609,7 @@ impl Command {
             Self::LinkPullRequest { session_id, .. }
             | Self::UnlinkPullRequest { session_id, .. }
             | Self::WatchPullRequest { session_id, .. }
+            | Self::SetPullRequestWatchesPaused { session_id, .. }
             | Self::SetPullRequestFilesViewed { session_id, .. }
             | Self::RefreshPullRequest { session_id, .. }
             | Self::RunPullRequestAction { session_id, .. }
