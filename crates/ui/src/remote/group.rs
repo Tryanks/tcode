@@ -140,7 +140,12 @@ impl GroupSection {
         vec![
             risk,
             settings_group(crate::tr!("group.section"), vec![actions], cx)
-                .child(footnote(crate::tr!("group.intro"), compact, cx))
+                .child(super::footnote_with_docs(
+                    crate::tr!("group.intro"),
+                    "machine-groups",
+                    compact,
+                    cx,
+                ))
                 .into_any_element(),
         ]
     }
@@ -284,7 +289,12 @@ impl GroupSection {
         .into_any_element();
         let mut groups = vec![
             settings_group(crate::tr!("group.section"), vec![name], cx)
-                .child(footnote(crate::tr!("group.detail_note"), compact, cx))
+                .child(super::footnote_with_docs(
+                    crate::tr!("group.detail_note"),
+                    "machine-groups",
+                    compact,
+                    cx,
+                ))
                 .into_any_element(),
             self.machines_group(group, compact, cx),
         ];

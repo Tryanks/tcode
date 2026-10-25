@@ -965,7 +965,7 @@ mod section {
     use crate::icon::IconName;
     use crate::material::{group_caption, group_row, grouped};
     use crate::scroll::ScrollableElement as _;
-    use crate::settings_rows::{ToggleRow, footnote, row_frame, settings_group};
+    use crate::settings_rows::{ToggleRow, row_frame, settings_group};
     use crate::sizing::Sizable as _;
     use crate::widgets::checkbox::Checkbox;
     use crate::widgets::menu::DropdownMenu as _;
@@ -1117,7 +1117,12 @@ mod section {
                 .debug_selector(|| "spaces-section".into())
                 .child(group_caption(crate::tr!("spaces.section"), cx))
                 .child(grouped(rows, cx))
-                .child(footnote(crate::tr!("spaces.intro"), compact, cx))
+                .child(super::super::footnote_with_docs(
+                    crate::tr!("spaces.intro"),
+                    "shared-spaces",
+                    compact,
+                    cx,
+                ))
                 .into_any_element()
         }
     }

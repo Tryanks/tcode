@@ -183,6 +183,27 @@ fn report<T: 'static>(
         .detach();
 }
 
+/// A page's [`footnote`](crate::settings_rows::footnote) and the link to
+/// the `anchor` section of the remote guide, which says the rest.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+fn footnote_with_docs(
+    text: impl Into<SharedString>,
+    anchor: &str,
+    compact: bool,
+    cx: &App,
+) -> gpui::Div {
+    crate::settings_rows::footnote(text, compact, cx)
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap_1()
+        .child(crate::settings_rows::external_link(
+            format!("remote-docs-{anchor}"),
+            crate::tr!("remote.learn_more").into_owned().into(),
+            format!("https://github.com/Tryanks/tcode/blob/main/docs/remote.md#{anchor}"),
+        ))
+}
+
 /// Ask before a change that cannot be undone from here. `title` names what
 /// goes, `description` says in one sentence what follows, and `action` labels
 /// the danger button that runs `on_ok`.

@@ -78,6 +78,16 @@ pub fn footnote(text: impl Into<SharedString>, compact: bool, cx: &App) -> gpui:
         .child(text.into())
 }
 
+/// A link off Tcode, beside the text it adds to.
+pub fn external_link(id: impl Into<SharedString>, label: SharedString, url: String) -> Button {
+    Button::new(id.into())
+        .ghost()
+        .xsmall()
+        .icon(IconName::ExternalLink)
+        .label(label)
+        .on_click(move |_, _, cx| cx.open_url(&url))
+}
+
 /// Left description block (title + muted description). `reset` is the
 /// per-item "restore default" affordance and rides inline right after the
 /// title, so it reads as belonging to that setting rather than to the row's
