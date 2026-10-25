@@ -93,11 +93,13 @@ choose which gestures to handle. The same portable arena serves Android.
 
 ## Keyboard bridge
 
-The Swift host keeps a nearly transparent `UITextView` in the view hierarchy.
-When GPUI reports text focus, it becomes first responder. Marked text is sent
-through `replace_and_mark_text_in_range`; a confirmed Chinese candidate is
-sent through `replace_text_in_range`, which replaces the marked range and
-commits the composition. Text assistance and return-key presentation are
+The Swift host keeps a transparent `UIView` conforming to `UITextInput` in the
+view hierarchy. When GPUI reports text focus, it becomes first responder. Marked
+text is sent through `replace_and_mark_text_in_range`; a confirmed Chinese
+candidate is sent through `replace_text_in_range`, which replaces the marked
+range and commits the composition. UIKit can make several edits for one
+keystroke (Backspace selects the previous character, then deletes it), so the
+edits of one run-loop turn are presented together in a single frame. Text assistance and return-key presentation are
 updated from `TextInputConfiguration`. Keyboard frame notifications update
 `WindowInsets::ime` and shrink the window's visual viewport by the same cover,
 while `safeAreaInsets` update `WindowInsets::safe_area`; GPUI refreshes the
