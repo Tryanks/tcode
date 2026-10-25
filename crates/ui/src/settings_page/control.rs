@@ -448,7 +448,7 @@ impl SettingsPage {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let id = id.clone();
                             this.store
-                                .update(cx, |store, _| store.set_control_grant(id, None));
+                                .update(cx, |store, _| store.clear_control_grant(id));
                         })),
                     )
                     .into_any_element()

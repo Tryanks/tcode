@@ -1111,7 +1111,6 @@ impl Render for Composer {
                 .child(divider())
                 .child(self.render_context_meter(cx))
                 .child(self.render_permission_picker(cx))
-                .children(self.render_control_chip(cx))
                 .child(div().flex_1())
                 .children(mic)
                 .child(self.render_primary_action(turn_running, cx))
@@ -1385,7 +1384,6 @@ impl Render for Composer {
                                     .border_color(cx.theme().border)
                                     .bg(cx.theme().muted)
                                     .child(self.render_permission_picker(cx))
-                                    .children(self.render_control_chip(cx))
                                     .child(div().flex_1())
                                     .child(self.render_context_meter(cx)),
                             )

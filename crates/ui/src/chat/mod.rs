@@ -65,7 +65,7 @@ pub(crate) struct RewindTurn {
     pub(crate) mode: RewindMode,
 }
 
-gpui::actions!(tcode_chat, [OpenMoveThreadDialog]);
+gpui::actions!(tcode_chat, [OpenMoveThreadDialog, RevokeSelfSettle]);
 
 /// A changed-file chip's context-menu "View diff".
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -2629,6 +2629,18 @@ impl ChatView {
         }
     }
 
+    fn on_revoke_self_settle(
+        &mut self,
+        _: &RevokeSelfSettle,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.workspace_store.read(cx).active_session_id() {
+            self.workspace_store
+                .update(cx, |store, _| store.revoke_self_settle(id));
+        }
+    }
+
     fn on_show_agent_tools(
         &mut self,
         _: &crate::pull_requests::ShowAgentTools,
@@ -2783,6 +2795,12 @@ impl ChatView {
             .read(cx)
             .session_status()
             .is_some_and(|status| status.injected_tools.is_some());
+        let self_settles = self
+            .workspace_store
+            .read(cx)
+            .session_status()
+            .and_then(|status| status.control.as_ref())
+            .is_some_and(|control| control.self_settle.is_some());
         let movable = !is_draft && {
             let store = self.workspace_store.read(cx);
             let active = store.active_session_id();
@@ -2811,6 +2829,12 @@ impl ChatView {
                         menu.menu(
                             crate::tr!("sidebar.ctx_move_thread").into_owned(),
                             Box::new(OpenMoveThreadDialog),
+                        )
+                    })
+                    .when(self_settles, |menu| {
+                        menu.menu(
+                            crate::tr!("control.self_settle.revoke").into_owned(),
+                            Box::new(RevokeSelfSettle),
                         )
                     })
                     .when(agent_tools, |menu| {
@@ -3668,6 +3692,7 @@ impl Render for ChatView {
             })
             .on_action(cx.listener(Self::on_link_dialog))
             .on_action(cx.listener(Self::on_move_thread_dialog))
+            .on_action(cx.listener(Self::on_revoke_self_settle))
             .on_action(cx.listener(Self::on_show_agent_tools));
 
         if self.workspace_store.read(cx).chat_loading() {
