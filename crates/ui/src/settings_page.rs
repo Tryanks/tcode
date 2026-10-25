@@ -992,16 +992,29 @@ impl SettingsPage {
             false,
             cx,
         )
-        .text_body(false, cx)
         .child(
-            Button::new("settings-back")
-                .ghost()
-                .icon(IconName::ArrowLeft)
-                .label(crate::tr!("settings.back"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.window_state
-                        .update(cx, |state, cx| state.close_settings(cx));
-                })),
+            crate::material::selectable_row(
+                crate::material::accessible_clickable(
+                    gpui_base::h_flex(),
+                    "settings-back",
+                    Role::Button,
+                    crate::tr!("settings.back"),
+                    cx,
+                ),
+                false,
+                false,
+                cx,
+            )
+            .flex_1()
+            .text_body(false, cx)
+            .text_color(cx.theme().sidebar_foreground)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.window_state
+                    .update(cx, |state, cx| state.close_settings(cx));
+            }))
+            .child(Icon::new(IconName::ArrowLeft).text_color(cx.theme().muted_foreground))
+            .child(crate::tr!("settings.back")),
         )
         .into_any_element()
     }
