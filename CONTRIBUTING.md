@@ -104,6 +104,13 @@ is derived from it. **Process** is how to build, check and submit work.
    above the constant; cutting a release that has such notes bumps the number
    once and folds the notes into one line for that version.
 
+10. **An intermittently failing test is historical debt.** A test that both
+    passes and fails on the same code is deleted as soon as it is met,
+    wherever that is; it is not fixed, retried, quarantined or ignored. The
+    deletion follows the other principles: whatever code existed only to
+    satisfy that test goes with it, and the pull request names the test and
+    where its contract is still covered, or that none is.
+
 ## Process
 
 ### Reporting bugs and asking for features
@@ -252,8 +259,10 @@ never retried into green, and no seam is added to production for the test's
 sake.
 
 1. **Reproduce it as the app would.** For a failure, run the case alone and
-   inside the suite. A failure that depends on the suite's timing, on the wall clock, or
-   on a frame the platform would have drawn differently is the test driver's
+   inside the suite. A test that both passes and fails on the same code is
+   deleted under Principle 10, and that settles it. A failure that reproduces
+   every time but depends on the suite's timing, on the wall clock, or on a
+   frame the platform would have drawn differently is the test driver's
    fault, however the assertion reads: make the driver behave like the running
    app (frames, clocks, input) and stop there if that settles it. The gpui-fast
    switch (#555) was this case for every one of its ten failures.
