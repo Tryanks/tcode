@@ -1085,8 +1085,9 @@ impl Render for Composer {
                 .child(
                     leading()
                         .children(attach_menu)
-                        .child(div().flex_1().min_w_0().child(self.render_model_picker(cx)))
+                        .child(model_cell().child(self.render_model_picker(cx)))
                         .child(self.render_traits_picker(cx))
+                        .child(div().flex_1())
                         .children(mic),
                 )
                 .child(primary)
