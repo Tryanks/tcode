@@ -2,13 +2,11 @@
 use crate::{
     material::{empty_row, group_caption, group_row, group_row_stacked, section_gap},
     overlay::OverlayExt as _,
+    settings_rows::ToggleRow,
     store::WorkspaceStore,
     theme::ActiveTheme as _,
     typography::TextRole as _,
-    widgets::{
-        button::{Button, ButtonVariants as _},
-        switch::Switch,
-    },
+    widgets::button::{Button, ButtonVariants as _},
 };
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, IntoElement as _, ParentElement as _, Render,
@@ -115,18 +113,16 @@ impl HostedPanel {
         };
         column = column.child(
             crate::material::group(cx).child(
-                group_row(cx).child(
-                    Switch::new("headless-pairing-enabled")
-                        .w_full()
-                        .flex_row_reverse()
-                        .justify_between()
-                        .checked(state.enabled)
-                        .label(crate::tr!("remote.pairing.title"))
-                        .disabled(self.pending)
-                        .on_click(cx.listener(|panel, enabled: &bool, _, cx| {
-                            panel.request(HostingAction::SetEnabled(*enabled), cx)
-                        })),
-                ),
+                ToggleRow::new(
+                    "headless-pairing-enabled",
+                    crate::tr!("remote.pairing.title"),
+                    state.enabled,
+                    compact,
+                    cx.listener(|panel, enabled: &bool, _, cx| {
+                        panel.request(HostingAction::SetEnabled(*enabled), cx)
+                    }),
+                )
+                .disabled(self.pending),
             ),
         );
         if state.enabled {
@@ -138,11 +134,7 @@ impl HostedPanel {
                 .child(div().text_body(compact, cx).child(match &state.invite {
                     Some(_) => crate::tr!(
                         "remote.invite.expires",
-                        time = format!(
-                            "{}:{:02}",
-                            state.expires_in_secs / 60,
-                            state.expires_in_secs % 60
-                        )
+                        time = crate::time::format_countdown(state.expires_in_secs)
                     ),
                     None => crate::tr!("remote.invite.expired"),
                 }))

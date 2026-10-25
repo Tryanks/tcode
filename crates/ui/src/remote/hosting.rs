@@ -32,6 +32,7 @@ use super::spaces::SpacesSection;
 use crate::icon::IconName;
 use crate::material::{group_caption, group_row, group_row_stacked};
 use crate::overlay::{Notification, OverlayExt as _};
+use crate::settings_rows::{FIELD_WIDTH, ToggleRow, row_frame, row_labels};
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
@@ -284,19 +285,6 @@ pub fn machine_name() -> String {
     tcode_traverse::native_host::default_device_name()
 }
 
-/// One hosting settings row: label and description left, control right. A
-/// compact page has no room for two columns — the description would be squeezed
-/// to a word per line — so it puts the control full width underneath the text.
-/// A row whose control is a switch uses [`group_row`] at both widths: a switch
-/// never squeezes the label.
-fn row(compact: bool, cx: &App) -> gpui::Div {
-    if compact {
-        group_row_stacked(cx)
-    } else {
-        group_row(cx)
-    }
-}
-
 /// A row whose control is a text field beside the label. The label keeps
 /// [`FIELD_LABEL_BASIS`] of the width, so where the field does not fit
 /// beside it the field wraps under the label instead of squeezing it.
@@ -308,10 +296,6 @@ fn field_row(compact: bool, cx: &App) -> gpui::Div {
     }
 }
 
-/// A text field's width beside its label on a wide settings row; no owner
-/// supplies a settings field width (`SettingsPage` uses the same 240).
-const FIELD_WIDTH: f32 = 240.;
-
 /// The width a [`field_row`]'s label keeps before its field wraps under it.
 const FIELD_LABEL_BASIS: f32 = 200.;
 
@@ -319,36 +303,14 @@ const FIELD_LABEL_BASIS: f32 = 200.;
 /// truncates further.
 const STATUS_MIN_WIDTH: f32 = 96.;
 
-/// [`labels`] for a [`field_row`].
+/// [`row_labels`] for a [`field_row`].
 fn field_labels(
     title: SharedString,
     description: Option<SharedString>,
     compact: bool,
     cx: &App,
 ) -> gpui::Div {
-    labels(title, description, compact, cx).flex_basis(px(FIELD_LABEL_BASIS))
-}
-
-/// A row's title, with a description only where it says something the
-/// title and the control do not.
-fn labels(
-    title: SharedString,
-    description: Option<SharedString>,
-    compact: bool,
-    cx: &App,
-) -> gpui::Div {
-    v_flex()
-        .flex_1()
-        .min_w_0()
-        .gap(cx.theme().tokens.spacing.xxs)
-        .child(div().text_title(cx).child(title))
-        .children(
-            description.map(|description| div().text_secondary(compact, cx).child(description)),
-        )
-}
-
-fn countdown(seconds: u64) -> String {
-    format!("{}:{:02}", seconds / 60, seconds % 60)
+    row_labels(title, description, None, compact, cx).flex_basis(px(FIELD_LABEL_BASIS))
 }
 
 /// One Traverse source as the page edits it.
@@ -700,38 +662,27 @@ impl HostingPanel {
             .try_global::<RemoteController>()
             .map(|controller| (controller.is_hosting(), controller.pairing_enabled()))
             .unwrap_or_default();
-        let toggle = group_row(cx)
-            .child(labels(
-                crate::tr!("remote.host.title").into_owned().into(),
-                None,
-                compact,
-                cx,
-            ))
-            .child(
-                Switch::new("remote-hosting")
-                    .checked(hosting)
-                    .on_click(cx.listener(move |this, checked: &bool, window, cx| {
-                        this.set_hosting(*checked, window, cx);
-                    })),
-            )
-            .into_any_element();
+        let toggle = ToggleRow::new(
+            "remote-hosting",
+            crate::tr!("remote.host.title"),
+            hosting,
+            compact,
+            cx.listener(|this, checked: &bool, window, cx| {
+                this.set_hosting(*checked, window, cx);
+            }),
+        )
+        .into_any_element();
         let pairing_row = hosting.then(|| {
-            group_row(cx)
-                .debug_selector(|| "remote-pairing".into())
-                .child(labels(
-                    crate::tr!("remote.pairing.title").into_owned().into(),
-                    None,
-                    compact,
-                    cx,
-                ))
-                .child(
-                    Switch::new("remote-pairing")
-                        .checked(pairing)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.set_pairing_enabled(*checked, cx);
-                        })),
-                )
-                .into_any_element()
+            ToggleRow::new(
+                "remote-pairing",
+                crate::tr!("remote.pairing.title"),
+                pairing,
+                compact,
+                cx.listener(|this, checked: &bool, _, cx| {
+                    this.set_pairing_enabled(*checked, cx);
+                }),
+            )
+            .into_any_element()
         });
         let name_row = field_row(compact, cx)
             .child(field_labels(
@@ -792,13 +743,14 @@ impl HostingPanel {
                 .w_full()
                 .px(px(crate::material::CARD_INSET))
                 .pt(px(crate::material::CARD_INSET))
-                .child(labels(
-                    crate::tr!("remote.traverse.title").into_owned().into(),
+                .child(row_labels(
+                    crate::tr!("remote.traverse.title"),
                     Some(
                         crate::tr!("remote.traverse.description")
                             .into_owned()
                             .into(),
                     ),
+                    None,
                     compact,
                     cx,
                 ))
@@ -847,11 +799,10 @@ impl HostingPanel {
                     ),
                 ),
             };
-            let switch = Switch::new(SharedString::from(format!("remote-traverse-{index}")))
-                .checked(source.enabled)
-                .on_click(cx.listener(move |this, checked: &bool, window, cx| {
-                    this.set_traverse_enabled(index, *checked, window, cx);
-                }));
+            let switch_id = SharedString::from(format!("remote-traverse-{index}"));
+            let set_enabled = cx.listener(move |this, checked: &bool, window, cx| {
+                this.set_traverse_enabled(index, *checked, window, cx);
+            });
             let element = match (&source.url, url) {
                 (Some((input, _)), Some(url)) => {
                     let description = match url {
@@ -893,21 +844,25 @@ impl HostingPanel {
                                 )
                                 .child(remove)
                                 .children(slot)
-                                .child(switch),
+                                // Beside a text field the row cannot be one
+                                // control, so the switch is its own.
+                                .child(
+                                    Switch::new(switch_id)
+                                        .checked(source.enabled)
+                                        .on_click(set_enabled),
+                                ),
                         )
+                        .into_any_element()
                 }
-                _ => group_row(cx)
-                    .child(
-                        labels(
-                            crate::tr!("remote.traverse.official").into_owned().into(),
-                            None,
-                            compact,
-                            cx,
-                        )
-                        .when(slot.is_some(), |labels| labels.flex_none()),
-                    )
-                    .children(slot)
-                    .child(switch),
+                _ => ToggleRow::new(
+                    switch_id,
+                    crate::tr!("remote.traverse.official"),
+                    source.enabled,
+                    compact,
+                    set_enabled,
+                )
+                .accessory(slot)
+                .into_any_element(),
             };
             rows.push(
                 v_flex()
@@ -1020,16 +975,16 @@ impl HostingPanel {
                 .filter(|_| device.access == DeviceAccess::Full);
             let device_name = device.name.clone();
             group = group.child(
-                row(compact, cx)
+                row_frame(compact, cx)
                     .child(
                         h_flex()
                             .flex_1()
                             .min_w_0()
                             .gap_2()
                             .items_center()
-                            .child(labels(
-                                super::device_label(&device.name, device.platform.as_deref())
-                                    .into(),
+                            .child(row_labels(
+                                super::device_label(&device.name, device.platform.as_deref()),
+                                None,
                                 None,
                                 compact,
                                 cx,
@@ -1196,14 +1151,10 @@ fn traverse_status_toggle(
     .items_center()
     .cursor_pointer()
     .text_secondary(false, cx)
-    .child(
-        // The manifest's status dot: a glyph, not text, so no token sizes it.
-        div()
-            .flex_none()
-            .size(px(8.))
-            .rounded_full()
-            .bg(manifest_color(status.manifest.state, cx)),
-    )
+    .child(crate::material::status_dot(manifest_color(
+        status.manifest.state,
+        cx,
+    )))
     .child(
         crate::icon::Icon::new(if expanded {
             IconName::ChevronUp
@@ -1218,7 +1169,10 @@ fn traverse_status_toggle(
             .overflow_hidden()
             .child(crate::widgets::fade_text(summary)),
     )
-    .on_click(cx.listener(move |this, _, _, cx| {
+    .on_click(cx.listener(move |this, _, window, cx| {
+        // The official source's row is its switch; expanding the status
+        // must not also flip it.
+        crate::widgets::stop_click_propagation(window, cx);
         this.toggle_traverse_status(index, cx);
     }))
     .into_any_element()
@@ -1371,7 +1325,7 @@ pub(super) fn invitation_card<V: 'static>(
         .children(group.map(|name| super::group::invitation_note(&name, true, cx)))
         .child(div().text_secondary(true, cx).child(crate::tr!(
             "remote.invite.expires",
-            time = countdown(remaining)
+            time = crate::time::format_countdown(remaining)
         )))
         .child(
             h_flex()

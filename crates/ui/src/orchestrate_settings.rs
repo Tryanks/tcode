@@ -654,8 +654,7 @@ impl OrchestrateSettingsPanel {
         cx: &Context<Self>,
     ) -> AnyElement {
         // A compact page has no room for the action beside the description,
-        // which would be squeezed to a word per line, so it goes underneath —
-        // the rule `SettingsPage::row_frame` applies.
+        // which would be squeezed to a word per line, so it goes underneath.
         let row = if compact {
             v_flex().items_start().gap_2()
         } else {

@@ -1854,13 +1854,7 @@ impl SessionsSidebar {
                             .overflow_hidden()
                             .child(crate::widgets::fade_text(host)),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(px(8.))
-                            .rounded_full()
-                            .bg(connection_color),
-                    )
+                    .child(crate::material::status_dot(connection_color))
                 }),
             )
     }

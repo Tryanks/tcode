@@ -26,6 +26,7 @@ use tcode_core::project::Project;
 use tcode_protocol::{GroupAction, GroupInfo, HostedDevice};
 use tcode_protocol::{HostingAction, HostingState, SpaceAction, SpaceInfo};
 
+use super::report;
 use crate::icon::Icon;
 use crate::overlay::{DialogActions, Notification, OverlayExt as _};
 use crate::store::WorkspaceStore;
@@ -548,24 +549,6 @@ impl SpacesObserver {
     }
 }
 
-/// Tell the user why a change did not happen; a change that did shows itself.
-fn report<T: 'static>(task: Task<Result<T, String>>, window: &mut Window, cx: &mut App) {
-    window
-        .spawn(cx, async move |cx| {
-            if let Err(error) = task.await {
-                let _ = cx.update(|window, cx| {
-                    window.push_notification(
-                        Notification::error(
-                            crate::tr!("spaces.failed", error = error).into_owned(),
-                        ),
-                        cx,
-                    );
-                });
-            }
-        })
-        .detach();
-}
-
 fn quoted(key: &str, name: &str) -> String {
     crate::tr!(key, name = name).into_owned()
 }
@@ -620,7 +603,7 @@ pub(crate) fn toggle_share(
     let task = spaces.update(cx, |spaces, cx| {
         spaces.toggle_project(&action.space_id, &action.project_id, cx)
     });
-    report(task, window, cx);
+    report("spaces.failed", task, window, cx);
 }
 
 /// The mark on a project shared in at least one space, naming them.
@@ -878,11 +861,11 @@ mod section {
     use super::*;
     use crate::icon::IconName;
     use crate::overlay::DialogButtons;
+    use crate::settings_rows::ToggleRow;
     use crate::sizing::Sizable as _;
     use crate::widgets::ButtonVariant;
     use crate::widgets::checkbox::Checkbox;
     use crate::widgets::menu::DropdownMenu as _;
-    use crate::widgets::switch::Switch;
     use gpui::prelude::FluentBuilder as _;
     use gpui::px;
     use tcode_protocol::HostedDevice;
@@ -921,7 +904,7 @@ mod section {
         fn act(&mut self, action: SpaceAction, window: &mut Window, cx: &mut Context<Self>) {
             if let Some(spaces) = (self.resolve)(&self.store, cx) {
                 let task = spaces.update(cx, |spaces, cx| spaces.act(vec![action], cx));
-                report(task, window, cx);
+                report("spaces.failed", task, window, cx);
             }
         }
 
@@ -998,7 +981,7 @@ mod section {
                             cx,
                         )
                     });
-                    report(task, window, cx);
+                    report("spaces.failed", task, window, cx);
                     true
                 }
             });
@@ -1061,7 +1044,7 @@ mod section {
                         let task = spaces.update(cx, |spaces, cx| {
                             spaces.act(vec![SpaceAction::Delete { id: id.clone() }], cx)
                         });
-                        report(task, window, cx);
+                        report("spaces.failed", task, window, cx);
                         true
                     })
             });
@@ -1237,36 +1220,23 @@ mod section {
             v_flex()
                 .w_full()
                 .gap_3()
-                .child(body)
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_3()
-                        .items_center()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_body(compact, cx)
-                                .child(crate::tr!("spaces.link.enabled")),
-                        )
-                        .child(
-                            Switch::new(SharedString::from(format!("space-link-enabled-{id}")))
-                                .checked(space.link_enabled)
-                                .on_click(cx.listener(
-                                    move |section, enabled: &bool, window, cx| {
-                                        section.act(
-                                            SpaceAction::SetLinkEnabled {
-                                                id: toggle_id.clone(),
-                                                enabled: *enabled,
-                                            },
-                                            window,
-                                            cx,
-                                        );
-                                    },
-                                )),
-                        ),
-                )
+                .child(div().px(px(crate::material::CARD_INSET)).child(body))
+                .child(ToggleRow::new(
+                    SharedString::from(format!("space-link-enabled-{id}")),
+                    crate::tr!("spaces.link.enabled"),
+                    space.link_enabled,
+                    compact,
+                    cx.listener(move |section, enabled: &bool, window, cx| {
+                        section.act(
+                            SpaceAction::SetLinkEnabled {
+                                id: toggle_id.clone(),
+                                enabled: *enabled,
+                            },
+                            window,
+                            cx,
+                        );
+                    }),
+                ))
                 .into_any_element()
         }
 
@@ -1501,7 +1471,7 @@ mod section {
             let rename_space = space.clone();
             let delete_space = space.clone();
             let inset = px(crate::material::CARD_INSET);
-            // The link and the actions sit at the card inset; the projects and
+            // The actions sit at the card inset; the link, projects and
             // members blocks carry it themselves, as their rows do.
             v_flex()
                 .w_full()
@@ -1509,11 +1479,7 @@ mod section {
                 .pb(inset)
                 .gap(crate::material::section_gap(cx))
                 .debug_selector(|| "space-detail".into())
-                .child(
-                    div()
-                        .px(inset)
-                        .child(self.link_block(space, accepting, compact, cx)),
-                )
+                .child(self.link_block(space, accepting, compact, cx))
                 .child(self.projects_block(space, projects, compact, cx))
                 .child(self.members_block(space, &others, compact, cx))
                 .child(
@@ -1705,7 +1671,7 @@ mod section {
                                     let task = spaces.update(cx, |spaces, cx| {
                                         spaces.remove_member(device_id.clone(), confirm.get(), cx)
                                     });
-                                    report(task, window, cx);
+                                    report("spaces.failed", task, window, cx);
                                     window.close_dialog(cx);
                                 }),
                         ),
@@ -1824,7 +1790,7 @@ mod machines {
                         .on_click(move |_, window, cx| {
                             let task = spaces
                                 .update(cx, |spaces, cx| spaces.act(vec![action.clone()], cx));
-                            report(task, window, cx);
+                            report("spaces.failed", task, window, cx);
                         }),
                 );
             }
