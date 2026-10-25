@@ -1510,6 +1510,36 @@ impl AppShell {
         });
     }
 
+    fn on_open_thread_anchor(
+        &mut self,
+        anchor: &crate::markdown::OpenThreadAnchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.store() else {
+            return;
+        };
+        if store.read(cx).thread_meta(&anchor.thread_id).is_none() {
+            window.push_notification(
+                crate::overlay::Notification::warning(
+                    crate::tr!("control.anchor_missing").into_owned(),
+                ),
+                cx,
+            );
+            return;
+        }
+        let anchor = anchor.clone();
+        store.update(cx, |store, cx| {
+            match anchor.position {
+                Some(position) => store.select_session_at_position(anchor.thread_id, position),
+                None => store.select_session(anchor.thread_id),
+            }
+            cx.notify();
+        });
+        self.window_state
+            .update(cx, |state, cx| state.open_thread(cx));
+    }
+
     fn on_thread_undo(
         &mut self,
         _: &crate::sidebar::ThreadUndo,
@@ -2550,6 +2580,7 @@ impl AppShell {
             .on_action(cx.listener(Self::on_open_source_control))
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
+            .on_action(cx.listener(Self::on_open_thread_anchor))
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
             .child(stack)
@@ -2707,6 +2738,7 @@ impl AppShell {
                 .on_action(cx.listener(Self::on_open_source_control))
                 .key_context("TcodeShell")
                 .on_action(cx.listener(Self::on_thread_undo))
+                .on_action(cx.listener(Self::on_open_thread_anchor))
                 .child(
                     div()
                         .id("workspace")
@@ -2738,6 +2770,7 @@ impl AppShell {
                 .on_action(cx.listener(Self::on_open_source_control))
                 .key_context("TcodeShell")
                 .on_action(cx.listener(Self::on_thread_undo))
+                .on_action(cx.listener(Self::on_open_thread_anchor))
                 .child(
                     h_flex()
                         .id("workspace")
@@ -3113,6 +3146,7 @@ impl AppShell {
             .on_action(cx.listener(Self::on_open_source_control))
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
+            .on_action(cx.listener(Self::on_open_thread_anchor))
             .child(
                 div()
                     .id("workspace")
@@ -6672,7 +6706,8 @@ mod tests {
             native_rewind_prefill_available: false,
             model_pending_restart: false,
             options_pending_restart: false,
-            pull_request_tools: None,
+            injected_tools: None,
+            control: None,
         }
     }
 

@@ -43,6 +43,7 @@ fn is_provider_work(content: &EntryContent) -> bool {
         | EntryContent::ProviderRelay { .. }
         | EntryContent::ContextCompacted(_)
         | EntryContent::ContextWindowChanged { .. }
+        | EntryContent::ControlAction(_)
         | EntryContent::ModelChanged { .. } => false,
     }
 }
@@ -300,6 +301,15 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 &format!("window set to {}", agent::context_window::format(*window)),
             ),
             EntryContent::ModelChanged { .. } => {}
+            EntryContent::ControlAction(action) => activity(
+                &mut body,
+                "control",
+                &action.actor_title,
+                &match &action.detail {
+                    Some(detail) => format!("{}: {detail}", action.action),
+                    None => action.action.clone(),
+                },
+            ),
             EntryContent::Item(ItemContent::ImageRead { path, .. }) => activity(
                 &mut body,
                 "image_view",

@@ -125,6 +125,28 @@ pub(crate) fn context_compacted_divider(
     )
 }
 
+pub(crate) fn control_action_divider(
+    id: &str,
+    action: &agent::ControlAction,
+    cx: &App,
+) -> AnyElement {
+    let mut label = crate::tr!(
+        "chat.control_action",
+        actor = action.actor_title.as_str(),
+        action = crate::control::action_label(&action.action)
+    )
+    .into_owned();
+    if let Some(detail) = action.detail.as_deref().filter(|detail| !detail.is_empty()) {
+        label.push_str(&format!(" ({detail})"));
+    }
+    divider(
+        SharedString::from(format!("control-action-{id}")),
+        label,
+        cx.theme().muted_foreground,
+        cx,
+    )
+}
+
 pub(crate) fn context_window_changed_divider(id: &str, window: u64, cx: &App) -> AnyElement {
     divider(
         SharedString::from(format!("context-window-changed-{id}")),

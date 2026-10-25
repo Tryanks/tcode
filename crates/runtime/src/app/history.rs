@@ -566,6 +566,16 @@ impl SessionLog {
         &self.fold
     }
 
+    /// Every accepted record with its row, as a store read of the same rows returns them.
+    pub(super) fn event_log(&self) -> EventLog {
+        EventLog {
+            records: self.records.clone(),
+            rows: self.rows.clone(),
+            next_row: self.next_row,
+            undecodable: 0,
+        }
+    }
+
     /// The row just past the last record: the log's end cursor.
     pub(super) fn end(&self) -> u64 {
         self.next_row

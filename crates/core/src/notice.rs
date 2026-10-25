@@ -5,6 +5,10 @@
 
 use crate::pull_request_watch::{self, WatchNotice};
 
+/// Opens every `tcode_control` message the host writes into a thread: a watch firing,
+/// or the answer to a grant request.
+pub const CONTROL_CALLBACK_PREFIX: &str = "[control] ";
+
 /// Opens every orchestrate child-thread callback.
 pub const ORCHESTRATE_CALLBACK_PREFIX: &str = "[orchestrate] thread ";
 /// Follows the callback header of a child waiting on an approval.
@@ -42,6 +46,8 @@ pub enum HostNotice {
     },
     /// [`CHILD_REPORT_REMINDER`].
     ReportReminder,
+    /// `tcode_control` messages that raced into one wake, each without its prefix.
+    Control(Vec<String>),
 }
 
 /// Read a user-role message as the notice the host wrote, or `None` for
@@ -53,7 +59,22 @@ pub fn host_notice(text: &str) -> Option<HostNotice> {
     if text.trim() == CHILD_REPORT_REMINDER.trim() {
         return Some(HostNotice::ReportReminder);
     }
+    if let Some(messages) = parse_control(text) {
+        return Some(HostNotice::Control(messages));
+    }
     parse_callbacks(text).map(HostNotice::Orchestrate)
+}
+
+/// The runtime joins control messages that race into one wake with a blank line, and
+/// never merges them with orchestrate callbacks.
+fn parse_control(text: &str) -> Option<Vec<String>> {
+    text.split("\n\n")
+        .map(|message| {
+            message
+                .strip_prefix(CONTROL_CALLBACK_PREFIX)
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +256,20 @@ mod tests {
         };
         assert_eq!(question.event, CallbackEvent::Question);
         assert_eq!(question.report(), None);
+    }
+
+    #[test]
+    fn merged_control_messages_are_one_notice() {
+        assert_eq!(
+            host_notice(
+                "[control] thread a (\"First\") turn_completed: completed\n\n[control] thread b (\"Second\") idle"
+            ),
+            Some(HostNotice::Control(vec![
+                "thread a (\"First\") turn_completed: completed".into(),
+                "thread b (\"Second\") idle".into(),
+            ]))
+        );
+        assert_eq!(host_notice("[control]no space"), None);
     }
 
     #[test]

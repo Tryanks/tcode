@@ -66,6 +66,18 @@ impl AppState {
         self.schedule_terminal_projection(terminal_id, cx);
     }
 
+    pub(crate) fn write_terminal_input(
+        &mut self,
+        terminal_id: u64,
+        bytes: Vec<u8>,
+        cx: &mut HostCx,
+    ) {
+        if let Some(terminal) = self.terminal_handle(terminal_id) {
+            terminal.write_input(bytes);
+        }
+        self.schedule_terminal_projection(terminal_id, cx);
+    }
+
     /// Project immediately when the last one is a frame old, otherwise coalesce
     /// into a single wakeup at the frame boundary.
     pub(crate) fn schedule_terminal_projection(&mut self, terminal_id: u64, cx: &mut HostCx) {
@@ -323,12 +335,7 @@ impl AppState {
                     }
                 };
 
-                let workspace = &mut state
-                    .residents
-                    .live
-                    .get_mut(&session_id)
-                    .unwrap()
-                    .terminal_workspace;
+                let workspace = &mut state.resident_mut(&session_id).unwrap().terminal_workspace;
                 let terminal_id = match action {
                     TerminalSpawnAction::Open | TerminalSpawnAction::New => {
                         (workspace.terminals.len() < MAX_TERMINALS_PER_SESSION)

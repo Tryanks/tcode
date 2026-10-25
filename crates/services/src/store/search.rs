@@ -17,11 +17,23 @@ pub(super) fn create_tables(db: &Db, connection: &Connection) -> io::Result<()> 
          revision BLOB NOT NULL, end_row INTEGER NOT NULL)",
         (),
     )?;
+    // Entries are derived from the logs, so a table an older build created
+    // without the position and kind columns is dropped and extracted again.
+    let mut positioned = false;
+    db.query(connection, "PRAGMA table_info(search_entries)", (), |row| {
+        positioned |= text(row, 1)? == "position";
+        Ok(())
+    })?;
+    if !positioned {
+        db.execute(connection, "DROP TABLE IF EXISTS search_entries", ())?;
+        db.execute(connection, "DELETE FROM search_sources", ())?;
+    }
     db.execute(
         connection,
         "CREATE TABLE IF NOT EXISTS search_entries (\
          session_id TEXT NOT NULL, ordinal INTEGER NOT NULL, entry_id TEXT NOT NULL, \
-         turn INTEGER NOT NULL, text TEXT NOT NULL, folded TEXT NOT NULL, \
+         position INTEGER NOT NULL, turn INTEGER NOT NULL, kind TEXT NOT NULL, \
+         text TEXT NOT NULL, folded TEXT NOT NULL, \
          PRIMARY KEY (session_id, ordinal))",
         (),
     )?;
@@ -52,12 +64,24 @@ pub struct SearchSource {
 }
 
 /// One searchable entry as it is kept: `folded` is the lowercased text a
-/// query is matched against, `text` what a hit's snippet is cut from.
+/// query is matched against, `text` what a hit's snippet is cut from, and
+/// `position` the log row that first recorded the entry.
 pub struct IndexedEntry<'a> {
     pub entry_id: &'a str,
+    pub position: u64,
     pub turn: usize,
+    pub kind: &'a str,
     pub text: &'a str,
     pub folded: &'a str,
+}
+
+/// One stored entry a query matched.
+pub struct SearchMatch<'a> {
+    pub entry_id: &'a str,
+    pub position: u64,
+    pub turn: usize,
+    pub kind: &'a str,
+    pub text: &'a str,
 }
 
 fn current_source(db: &Db, connection: &Connection, id: &str) -> io::Result<SearchSource> {
@@ -117,13 +141,15 @@ impl SessionStore {
                     db.execute(
                         connection,
                         "INSERT INTO search_entries \
-                         (session_id, ordinal, entry_id, turn, text, folded) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                         (session_id, ordinal, entry_id, position, turn, kind, text, folded) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         (
                             id,
                             ordinal as i64,
                             entry.entry_id,
+                            entry.position as i64,
                             entry.turn as i64,
+                            entry.kind,
                             entry.text,
                             entry.folded,
                         ),
@@ -151,21 +177,23 @@ impl SessionStore {
         &self,
         id: &str,
         folded: &str,
-        mut each: impl FnMut(&str, usize, &str) -> bool,
+        mut each: impl FnMut(SearchMatch<'_>) -> bool,
     ) -> io::Result<()> {
         self.run("search entries", |db| {
             db.read(|db, connection| {
                 db.query_while(
                     connection,
-                    "SELECT entry_id, turn, text FROM search_entries \
+                    "SELECT entry_id, position, turn, kind, text FROM search_entries \
                      WHERE session_id = ?1 AND instr(folded, ?2) > 0 ORDER BY ordinal",
                     (id, folded),
                     |row| {
-                        Ok(each(
-                            &text(row, 0)?,
-                            integer(row, 1)? as usize,
-                            &text(row, 2)?,
-                        ))
+                        Ok(each(SearchMatch {
+                            entry_id: &text(row, 0)?,
+                            position: integer(row, 1)? as u64,
+                            turn: integer(row, 2)? as usize,
+                            kind: &text(row, 3)?,
+                            text: &text(row, 4)?,
+                        }))
                     },
                 )
             })

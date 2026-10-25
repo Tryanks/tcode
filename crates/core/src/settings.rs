@@ -883,6 +883,13 @@ pub enum SettingsPatch {
         provider: ProviderKind,
         enabled: bool,
     },
+    ControlEnabled(bool),
+    ControlDefaultGrant(crate::control::ControlGrant),
+    ControlProjectGrant {
+        project_id: String,
+        value: Option<crate::control::ControlGrant>,
+    },
+    SettlementAutomation(crate::control::SettlementAutomation),
     TitleGenerationProvider(ProviderKind),
     TitleGenerationModel(String),
     TitleGenerationProfileId(Option<String>),
@@ -1128,6 +1135,17 @@ pub struct Settings {
     pub browser: BrowserSettings,
     #[serde(default, skip_serializing_if = "PluginManagementSettings::is_default")]
     pub plugins: PluginManagementSettings,
+    /// What a thread's model may do in Tcode through `tcode_control`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::control::ControlSettings::is_default"
+    )]
+    pub control: crate::control::ControlSettings,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::control::SettlementAutomation::is_default"
+    )]
+    pub settlement_automation: crate::control::SettlementAutomation,
     /// Provider/model used to generate a concise title for new threads.
     #[serde(default, skip_serializing_if = "TitleGenerationSettings::is_default")]
     pub title_generation: TitleGenerationSettings,
@@ -1248,6 +1266,8 @@ impl Default for Settings {
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
             plugins: PluginManagementSettings::default(),
+            control: crate::control::ControlSettings::default(),
+            settlement_automation: crate::control::SettlementAutomation::default(),
             title_generation: TitleGenerationSettings::default(),
             fallback_review: FallbackReviewSettings::default(),
             collapsed_projects: Vec::new(),
@@ -1376,6 +1396,17 @@ impl Settings {
                     .providers
                     .insert(provider_key(provider).to_string(), enabled);
             }
+            SettingsPatch::ControlEnabled(value) => self.control.enabled = value,
+            SettingsPatch::ControlDefaultGrant(value) => self.control.default_grant = value,
+            SettingsPatch::ControlProjectGrant { project_id, value } => match value {
+                Some(value) => {
+                    self.control.project_overrides.insert(project_id, value);
+                }
+                None => {
+                    self.control.project_overrides.remove(&project_id);
+                }
+            },
+            SettingsPatch::SettlementAutomation(value) => self.settlement_automation = value,
             SettingsPatch::TitleGenerationProvider(value) => {
                 self.title_generation.provider = value;
             }

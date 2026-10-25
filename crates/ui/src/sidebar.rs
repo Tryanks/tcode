@@ -264,6 +264,12 @@ struct ThreadSettle(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadAutoSettle(String, bool);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadFollowUp(String, bool);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadPark(String, bool);
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
@@ -1035,6 +1041,17 @@ impl SessionsSidebar {
         self.store.update(cx, |store, _| {
             store.set_auto_settle(action.0.clone(), action.1)
         });
+    }
+
+    fn on_follow_up(&mut self, action: &ThreadFollowUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, _| {
+            store.set_follow_up(action.0.clone(), action.1)
+        });
+    }
+
+    fn on_park(&mut self, action: &ThreadPark, _: &mut Window, cx: &mut Context<Self>) {
+        self.store
+            .update(cx, |store, _| store.set_parked(action.0.clone(), action.1));
     }
 
     fn on_settle(&mut self, action: &ThreadSettle, window: &mut Window, cx: &mut Context<Self>) {
@@ -2424,6 +2441,20 @@ impl SessionsSidebar {
     }
 
     /// A pinned row's pin; on row hover it becomes the Unpin button.
+    /// A thread on Follow-up: attention the user asked for, not activity.
+    fn follow_up_glyph(meta: &SessionMeta, cx: &App) -> Option<gpui::Stateful<gpui::Div>> {
+        meta.follow_up.as_ref()?;
+        Some(
+            div()
+                .id(SharedString::from(format!("follow-up-{}", meta.id)))
+                .flex_none()
+                .child(Icon::new(IconName::Bell).text_color(cx.theme().muted_foreground))
+                .tooltip(|window, cx| {
+                    Tooltip::new(crate::tr!("control.follow_up.marker")).build(window, cx)
+                }),
+        )
+    }
+
     fn pin_glyph(
         &self,
         meta: &SessionMeta,
@@ -2575,6 +2606,8 @@ impl SessionsSidebar {
         let title_generating = state.title_generating;
         let blocked = state.waiting_for_approval || state.waiting_for_input;
         let auto_settle_enabled = state.auto_settle_enabled;
+        let follow_up = meta.follow_up.is_some();
+        let parked = meta.parked_at.is_some();
         row.context_menu(move |menu, _window, cx| {
             let id = session_id.clone();
             // Move up / Move down stay within the section the list shows.
@@ -2659,6 +2692,25 @@ impl SessionsSidebar {
                     Box::new(ThreadArrange(id.clone())),
                 )
             })
+            .separator()
+            .menu(
+                if follow_up {
+                    crate::tr!("control.follow_up.remove")
+                } else {
+                    crate::tr!("control.follow_up.add")
+                }
+                .into_owned(),
+                Box::new(ThreadFollowUp(id.clone(), !follow_up)),
+            )
+            .menu(
+                if parked {
+                    crate::tr!("control.follow_up.unpark")
+                } else {
+                    crate::tr!("control.follow_up.park")
+                }
+                .into_owned(),
+                Box::new(ThreadPark(id.clone(), !parked)),
+            )
             .separator()
             .label(crate::tr!("sidebar.ctx_auto_settle"))
             .menu_with_check(
@@ -2768,6 +2820,7 @@ impl SessionsSidebar {
                 )
             })
             .child(self.thread_title_or_input(meta, &state, false, cx))
+            .children(Self::follow_up_glyph(meta, cx))
             .children(self.pin_glyph(meta, &row_key, cx))
             .when_some(
                 (state.renaming.is_none())
@@ -2936,15 +2989,15 @@ impl SessionsSidebar {
                 })
                 .child(title_or_input)
                 .when(!renaming, |line| {
-                    line.children(self.pin_glyph(meta, &row_key, cx)).child(
-                        self.render_flat_thread_right_slot(
+                    line.children(Self::follow_up_glyph(meta, cx))
+                        .children(self.pin_glyph(meta, &row_key, cx))
+                        .child(self.render_flat_thread_right_slot(
                             meta,
                             &row_key,
                             tcode_core::thread_sort::shown_timestamp(meta),
                             !working,
                             cx,
-                        ),
-                    )
+                        ))
                 });
 
             let has_project = project_name.is_some();
@@ -3635,6 +3688,8 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_export_markdown))
             .on_action(cx.listener(Self::on_settle))
             .on_action(cx.listener(Self::on_auto_settle))
+            .on_action(cx.listener(Self::on_follow_up))
+            .on_action(cx.listener(Self::on_park))
             .on_action(cx.listener(Self::on_make_active))
             .on_action(cx.listener(Self::on_pin))
             .on_action(cx.listener(Self::on_unpin))
@@ -4373,6 +4428,8 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_export_markdown))
             .on_action(cx.listener(Self::on_settle))
             .on_action(cx.listener(Self::on_auto_settle))
+            .on_action(cx.listener(Self::on_follow_up))
+            .on_action(cx.listener(Self::on_park))
             .on_action(cx.listener(Self::on_make_active))
             .on_action(cx.listener(Self::on_pin))
             .on_action(cx.listener(Self::on_unpin))

@@ -37,6 +37,7 @@ pub struct HostServices {
     /// Registration-only startup data (URL and token issuer); this contains no
     /// request receiver or live backend handle.
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
+    pub control: Option<control_mcp::ControlMcpServer>,
 }
 
 impl HostServices {
@@ -49,11 +50,13 @@ impl HostServices {
         let preview = preview_mcp::start(&mut host);
         let pull_requests = pull_request_mcp::start(&mut host);
         let orchestrate = orchestrate_mcp::start(&mut host);
+        let control = control_mcp::start(&mut host);
         let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
         host.start()?;
         self.preview = Some(preview);
         self.pull_requests = Some(pull_requests);
         self.orchestrate = Some(orchestrate);
+        self.control = Some(control);
         self.computer_use = computer_use;
         Ok(())
     }
@@ -215,10 +218,14 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some(server) = services.computer_use.take() {
                 state.attach_computer_use_mcp(server.url, server.tokens);
             }
+            if let Some(server) = services.control.take() {
+                state.attach_control_mcp(server);
+            }
             let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
             state.pump_orchestrate_requests(&mut cx);
+            state.pump_control_requests(&mut cx);
             state.pump_preview_requests(preview_requests, &mut cx);
             if services.background_startup_probes {
                 state.recover_orphaned_worktrees(&mut cx);
@@ -493,10 +500,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
     let mut response = CommandResponse::Unit;
     match command {
         Command::TerminalInput { terminal_id, bytes } => {
-            if let Some(terminal) = app.terminal_handle(terminal_id) {
-                terminal.write_input(bytes);
-            }
-            app.schedule_terminal_projection(terminal_id, cx);
+            app.write_terminal_input(terminal_id, bytes, cx)
         }
         Command::ResizeTerminal {
             terminal_id,
@@ -632,7 +636,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             message,
             included,
             feature_branch,
-        } => app.run_git_action(&session_id, action, message, included, feature_branch, cx),
+        } => {
+            app.run_git_action(&session_id, action, message, included, feature_branch, cx);
+        }
         Command::RefreshAcpRegistry => app.refresh_acp_registry(cx),
         Command::InstallAcpAgent { id } => app.install_acp_agent(id, cx),
         Command::RemoveAcpAgent { id } => app.remove_acp_agent(&id, cx),
@@ -824,7 +830,46 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::SettleChildren { session_id } => {
             response = CommandResponse::ChildrenSettled(app.settle_children(&session_id, cx));
         }
-        Command::SettleSession { session_id } => app.settle_session(&session_id, cx),
+        Command::SettleSession { session_id } => {
+            app.settle_session(&session_id, cx);
+        }
+        Command::SetControlGrant { session_id, grant } => {
+            app.set_control_grant(&session_id, grant, cx)
+        }
+        Command::RespondControlGrant {
+            session_id,
+            request_id,
+            approve,
+        } => {
+            return CommandOutcome::Immediate(
+                app.respond_control_grant(&session_id, &request_id, approve, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
+        Command::AddThreadReference {
+            session_id,
+            thread_id,
+        } => {
+            return CommandOutcome::Immediate(
+                app.add_thread_reference(&session_id, &thread_id, cx)
+                    .map(|boundary_notice| CommandResponse::ThreadReferenceAdded {
+                        boundary_notice,
+                    }),
+            );
+        }
+        Command::RemoveThreadReference {
+            session_id,
+            thread_id,
+        } => app.remove_thread_reference(&session_id, &thread_id, cx),
+        Command::SetFollowUp {
+            session_id,
+            follow_up,
+        } => app.set_follow_up(&session_id, follow_up, cx),
+        Command::SetParked { session_id, parked } => app.set_parked(&session_id, parked, cx),
+        Command::DismissSettleSuggestion { session_id } => {
+            app.dismiss_settle_suggestion(&session_id, cx)
+        }
+        Command::RevokeSelfSettle { session_id } => app.revoke_self_settle(&session_id, cx),
         Command::CancelAgent { session_id } => app.cancel_child(&session_id, cx),
         Command::SetAutoSettle {
             session_id,
@@ -853,7 +898,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::ForkThread { id } => {
             response = CommandResponse::SessionId(app.fork_thread(&id, cx));
         }
-        Command::MergeWorktree { session_id } => app.merge_worktree(&session_id, cx),
+        Command::MergeWorktree { session_id } => {
+            app.merge_worktree(&session_id, cx);
+        }
         Command::DeleteSession {
             session_id,
             remove_worktree,
@@ -967,7 +1014,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.set_active_option(&session_id, &id, value, cx),
         Command::LoadBranches { session_id } => app.load_branches(&session_id, cx),
         Command::CheckoutBranch { session_id, branch } => {
-            app.checkout_branch(&session_id, branch, cx)
+            app.checkout_branch(&session_id, branch, cx);
         }
         Command::ToggleFavoriteModel { model } => app.toggle_favorite_model(&model, cx),
         Command::RewindTurn {
@@ -1178,6 +1225,14 @@ fn dispatch_query(
         Query::ArchivedSessions => {
             let archived = app.scoped_archived_sessions(&cx.principal);
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })
+        }
+        Query::ControlActivity { limit } => {
+            let activity = app.control_activity(limit as usize);
+            cx.spawn_background(async move { Ok(QueryResponse::ControlActivity(activity)) })
+        }
+        Query::ReviewRecords { limit } => {
+            let records = app.review_records(limit as usize);
+            cx.spawn_background(async move { Ok(QueryResponse::ReviewRecords(records)) })
         }
     }
 }

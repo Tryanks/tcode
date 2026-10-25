@@ -480,7 +480,6 @@ impl AppState {
     /// Finalize one submitted queue entry. Queue-id correlation makes duplicate
     /// acceptance events idempotent, including after a provider close.
     pub(super) fn on_turn_accepted(&mut self, session_id: &str, delivery_id: u64, cx: &mut HostCx) {
-        let is_active = self.residents.live.contains_key(session_id);
         let accepted = self
             .resident_mut(session_id)
             .and_then(|resident| resident.accept_turn_delivery(delivery_id));
@@ -513,16 +512,14 @@ impl AppState {
         if let Some(window) = message.context_window_changed {
             self.record_event(session_id, &AgentEvent::ContextWindowChanged { window }, cx);
         }
-        if is_active {
-            // `/orchestrate` stores its provider-only guidance as a prefix and
-            // records the byte boundary in `context_len`. Titles should describe
-            // the user's request, not that hidden orchestration configuration.
-            let title_source = message
-                .context_len
-                .and_then(|len| message.text.get(len..))
-                .unwrap_or(&message.text);
-            self.maybe_generate_title(session_id, title_source, &message.attachments, cx);
-        }
+        // `/orchestrate` stores its provider-only guidance as a prefix and
+        // records the byte boundary in `context_len`. Titles should describe
+        // the user's request, not that hidden orchestration configuration.
+        let title_source = message
+            .context_len
+            .and_then(|len| message.text.get(len..))
+            .unwrap_or(&message.text);
+        self.maybe_generate_title(session_id, title_source, &message.attachments, cx);
     }
 
     /// A parked session finished a turn: keep working through its queue, then

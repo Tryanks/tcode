@@ -35,7 +35,7 @@ mod turn_index;
 pub use log_read::LogRead;
 pub use migrate::{Migration, MigrationPhase, MigrationProgress};
 pub use projection::ProjectionPublication;
-pub use search::{IndexedEntry, SearchSource};
+pub use search::{IndexedEntry, SearchMatch, SearchSource};
 pub use superseded::DiffPass;
 pub use turn_index::TurnIndex;
 

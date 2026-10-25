@@ -4,6 +4,7 @@ use agent::{ApprovalDecision, PluginAction, ProviderKind, RewindMode};
 use gpui::{App, Context, Task};
 use tcode_core::{
     acp::AcpAgentPatch,
+    control::{ControlGrant, FollowUp, SettlementAutomation},
     git::GitAction,
     session::ReviewComment,
     settings::{
@@ -350,6 +351,56 @@ impl WorkspaceStore {
     ) {
         self.patch_settings(SettingsPatch::ProjectSettlement { project_id, value });
     }
+    pub fn set_control_enabled(&mut self, enabled: bool) {
+        self.patch_settings(SettingsPatch::ControlEnabled(enabled));
+    }
+    pub fn set_control_default_grant(&mut self, grant: ControlGrant) {
+        self.patch_settings(SettingsPatch::ControlDefaultGrant(grant));
+    }
+    pub fn set_control_project_grant(&mut self, project_id: String, value: Option<ControlGrant>) {
+        self.patch_settings(SettingsPatch::ControlProjectGrant { project_id, value });
+    }
+    pub fn set_settlement_automation(&mut self, value: SettlementAutomation) {
+        self.patch_settings(SettingsPatch::SettlementAutomation(value));
+    }
+    /// The thread's own grant; `None` returns it to its project's or the default.
+    pub fn set_control_grant(&mut self, session_id: String, grant: Option<ControlGrant>) {
+        self.dispatch(Command::SetControlGrant { session_id, grant });
+    }
+    pub fn respond_control_grant(&mut self, session_id: String, request_id: String, approve: bool) {
+        self.dispatch(Command::RespondControlGrant {
+            session_id,
+            request_id,
+            approve,
+        });
+    }
+    pub fn add_thread_reference(&mut self, session_id: String, thread_id: String) {
+        self.dispatch(Command::AddThreadReference {
+            session_id,
+            thread_id,
+        });
+    }
+    pub fn remove_thread_reference(&mut self, session_id: String, thread_id: String) {
+        self.dispatch(Command::RemoveThreadReference {
+            session_id,
+            thread_id,
+        });
+    }
+    pub fn set_follow_up(&mut self, session_id: String, on: bool) {
+        self.dispatch(Command::SetFollowUp {
+            session_id,
+            follow_up: on.then(|| FollowUp {
+                since: crate::time::now_secs(),
+                note: None,
+            }),
+        });
+    }
+    pub fn set_parked(&mut self, session_id: String, parked: bool) {
+        self.dispatch(Command::SetParked { session_id, parked });
+    }
+    pub fn revoke_self_settle(&mut self, session_id: String) {
+        self.dispatch(Command::RevokeSelfSettle { session_id });
+    }
     pub fn make_session_active(&mut self, session_id: String) {
         self.dispatch(Command::UnsettleSession { session_id });
     }
@@ -521,6 +572,13 @@ impl WorkspaceStore {
     }
     pub fn select_session_at_turn(&mut self, session_id: String, turn: usize) {
         self.pending_chat_turn = Some((session_id.clone(), turn));
+        self.select_session(session_id);
+    }
+    /// Open a thread scrolled to the turn holding the event at `position`, once
+    /// its held history reaches that far back.
+    pub fn select_session_at_position(&mut self, session_id: String, position: u64) {
+        self.pending_chat_turn = None;
+        self.pending_chat_anchor = Some((session_id.clone(), position));
         self.select_session(session_id);
     }
     pub fn send_turn(&mut self, text: String, attachment_paths: Vec<PathBuf>) {

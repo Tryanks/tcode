@@ -24,6 +24,7 @@ mod view;
 use gpui::{App, KeyBinding};
 use gpui_base::input::SelectAll;
 
+pub use link_target::OpenThreadAnchor;
 #[cfg(test)]
 pub(crate) use parse::parse;
 pub use state::{ImageResolver, MarkdownState};

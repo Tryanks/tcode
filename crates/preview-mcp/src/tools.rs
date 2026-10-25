@@ -356,6 +356,20 @@ impl PreviewTools {
     }
 }
 
+/// Every tool's name and the description its model reads.
+pub fn tool_descriptions() -> Vec<(String, String)> {
+    PreviewTools::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| {
+            (
+                tool.name.to_string(),
+                tool.description.as_deref().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
 /// The server's `instructions`, which the client reads at initialization.
 pub const INSTRUCTIONS: &str = "Drive the Tcode embedded preview browser: open/navigate URLs, inspect and \
                  automate the page, resize its canvas, press keys, scroll, wait for page \

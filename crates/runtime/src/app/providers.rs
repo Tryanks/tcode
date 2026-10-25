@@ -1222,14 +1222,22 @@ pub(super) fn session_provider_settings(
         .unwrap_or_else(|| settings.provider(meta.provider))
 }
 
+/// The in-process MCP servers a session was registered with; each attaches only where the
+/// session's provider and settings take it.
+#[derive(Default)]
+pub(super) struct McpServers {
+    pub(super) preview: Option<agent::McpRegistration>,
+    pub(super) orchestrate: Option<agent::McpRegistration>,
+    pub(super) orchestrate_report: Option<agent::McpRegistration>,
+    pub(super) computer_use: Option<agent::McpRegistration>,
+    pub(super) control: Option<agent::McpRegistration>,
+}
+
 pub(super) fn session_options(
     meta: &SessionMeta,
     settings: &Settings,
     launch_env: LaunchEnv,
-    mcp_server: Option<agent::McpRegistration>,
-    orchestrate_server: Option<agent::McpRegistration>,
-    orchestrate_report_server: Option<agent::McpRegistration>,
-    computer_use_server: Option<agent::McpRegistration>,
+    servers: McpServers,
 ) -> SessionOptions {
     // A session's binary / launch-args come from its selected profile (built-in
     // or user-created), so a third-party profile can point at its own CLI while
@@ -1253,17 +1261,22 @@ pub(super) fn session_options(
             meta.provider
                 .caps()
                 .mcp_servers
-                .then_some(mcp_server)
+                .then_some(servers.preview)
                 .flatten(),
             meta.orchestrate_enabled
-                .then_some(orchestrate_server)
+                .then_some(servers.orchestrate)
                 .flatten(),
             meta.parent_session_id
                 .is_some()
-                .then_some(orchestrate_report_server)
+                .then_some(servers.orchestrate_report)
                 .flatten(),
             computer_use_attaches(meta.provider, settings)
-                .then_some(computer_use_server)
+                .then_some(servers.computer_use)
+                .flatten(),
+            meta.provider
+                .caps()
+                .mcp_servers
+                .then_some(servers.control)
                 .flatten(),
         ]
         .into_iter()

@@ -242,13 +242,22 @@ impl AppState {
 
     /// Check out `branch` in the active session's cwd, if the working tree is
     /// clean. Runs git off the main thread; reports success/failure as an
-    /// `RuntimeEvent` the chat view turns into a notification.
-    pub fn checkout_branch(&mut self, target_id: &str, branch: String, cx: &mut HostCx) {
+    /// `RuntimeEvent` the chat view turns into a notification, and on the
+    /// returned channel.
+    pub fn checkout_branch(
+        &mut self,
+        target_id: &str,
+        branch: String,
+        cx: &mut HostCx,
+    ) -> smol::channel::Receiver<Result<(), String>> {
+        let (done, outcome) = smol::channel::bounded(1);
         let Some(active) = self.resident(target_id) else {
-            return;
+            let _ = done.try_send(Err("the thread is not open".into()));
+            return outcome;
         };
         if Self::checkout_blocked(active) {
-            return;
+            let _ = done.try_send(Err("busy: a turn is running in this thread".into()));
+            return outcome;
         }
         let cwd = active.meta.cwd.clone();
         let session_id = active.meta.id.clone();
@@ -259,28 +268,38 @@ impl AppState {
             let result = host_cx
                 .unblock(move || checkout_if_clean(&cwd, &branch_for_task))
                 .await;
-            host_cx.enqueue(move |state, cx| match result {
-                Ok(()) => {
-                    if let Some(cwd) = state
-                        .resident(&target_id)
-                        .filter(|active| active.meta.id == session_id)
-                        .map(|active| active.meta.cwd.clone())
-                    {
-                        state.refresh_session_git_branch(session_id.clone(), cwd, cx);
+            host_cx.enqueue(move |state, cx| {
+                let checked_out = match result {
+                    Ok(()) => {
+                        if let Some(cwd) = state
+                            .resident(&target_id)
+                            .filter(|active| active.meta.id == session_id)
+                            .map(|active| active.meta.cwd.clone())
+                        {
+                            state.refresh_session_git_branch(session_id.clone(), cwd, cx);
+                        }
+                        emit_runtime(
+                            cx,
+                            RuntimeEvent::Notice(RuntimeNotice::SwitchedBranch { branch }),
+                        );
+                        Ok(())
                     }
-                    emit_runtime(
-                        cx,
-                        RuntimeEvent::Notice(RuntimeNotice::SwitchedBranch { branch }),
-                    );
-                }
-                Err(CheckoutError::Dirty) => {
-                    emit_runtime(cx, RuntimeEvent::Error(RuntimeError::DirtyTree));
-                }
-                Err(CheckoutError::Git(message)) => {
-                    emit_runtime(cx, RuntimeEvent::Error(RuntimeError::External(message)))
-                }
+                    Err(CheckoutError::Dirty) => {
+                        emit_runtime(cx, RuntimeEvent::Error(RuntimeError::DirtyTree));
+                        Err("the working tree has uncommitted changes".into())
+                    }
+                    Err(CheckoutError::Git(message)) => {
+                        emit_runtime(
+                            cx,
+                            RuntimeEvent::Error(RuntimeError::External(message.clone())),
+                        );
+                        Err(message)
+                    }
+                };
+                let _ = done.try_send(checked_out);
             });
         });
+        outcome
     }
 
     /// Toggle a model id in the persisted favorites list.

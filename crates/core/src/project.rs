@@ -187,6 +187,28 @@ pub struct SessionMeta {
     /// `cancel`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expectation: Option<ChildExpectation>,
+    /// This thread's own `tcode_control` grant, set from its control chip or an approved
+    /// request; absent means its project's or the default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_grant: Option<crate::control::ControlGrant>,
+    /// Grants the model asked for that the user has not answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_grant_requests: Vec<crate::control::ControlGrantRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<crate::control::ThreadReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<crate::control::FollowUp>,
+    /// Parked (unix secs): set aside on purpose, exempt from automatic settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_suggestion_dismissed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_settle: Option<crate::control::SelfSettleGrant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<crate::control::StartedBy>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_watches: Vec<crate::control::ControlWatch>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -365,6 +387,15 @@ impl SessionMeta {
             cancelled_at: None,
             result_max_chars: None,
             expectation: None,
+            control_grant: None,
+            control_grant_requests: Vec::new(),
+            references: Vec::new(),
+            follow_up: None,
+            parked_at: None,
+            settle_suggestion_dismissed_at: None,
+            self_settle: None,
+            started_by: None,
+            control_watches: Vec::new(),
             created_at: now,
             updated_at: now,
         }

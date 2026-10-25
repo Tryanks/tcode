@@ -521,6 +521,9 @@ pub enum EntryContent {
     ContextWindowChanged {
         window: u64,
     },
+    /// Another thread's model acted on this thread through `tcode_control`
+    /// (a system row naming the actor and the action).
+    ControlAction(agent::ControlAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1114,6 +1117,16 @@ impl Timeline {
                         },
                     },
                 );
+            }
+            AgentEvent::ControlAction(action) => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("control", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::ControlAction(action.clone()),
+                    ts,
+                    turn,
+                }));
             }
             AgentEvent::ContextCompacted(compaction) => {
                 let in_progress = compaction.in_progress;

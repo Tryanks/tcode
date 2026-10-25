@@ -1,4 +1,5 @@
 use super::*;
+use tcode_core::control::WatchEvent;
 
 impl AppState {
     /// Handle one canonical event from the live provider.
@@ -529,6 +530,7 @@ impl AppState {
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
+            | AgentEvent::ControlAction(_)
             | AgentEvent::ProposedPlanDelta { .. }
             | AgentEvent::ProposedPlan { .. }
             | AgentEvent::ProviderStartFailed { .. } => {}
@@ -561,9 +563,11 @@ impl AppState {
         }
         if let AgentEvent::ApprovalRequested(request) = &event {
             self.deliver_child_approval_callback(session_id, &request.id, cx);
+            self.fire_control_watches(session_id, WatchEvent::NeedsApproval, cx);
         }
         if let AgentEvent::UserInputRequested { request_id, .. } = &event {
             self.deliver_child_user_input_callback(session_id, request_id, cx);
+            self.fire_control_watches(session_id, WatchEvent::NeedsInput, cx);
         }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
@@ -614,6 +618,14 @@ impl AppState {
         // describe what comes next, not the turn that just ended.
         if let AgentEvent::TurnCompleted { status, .. } = &event {
             self.settle_child_expectation(session_id, *status, cx);
+            let woken_by_control = self
+                .resident_mut(session_id)
+                .is_some_and(|session| std::mem::take(&mut session.turn_woken_by_control));
+            if !woken_by_control {
+                self.fire_control_watches(session_id, WatchEvent::TurnCompleted, cx);
+                self.fire_control_watches(session_id, WatchEvent::Idle, cx);
+            }
+            self.settle_self_if_due(session_id, true, cx);
         }
 
         if matches!(event, AgentEvent::RewindCompleted { .. })
@@ -900,7 +912,7 @@ impl AppState {
                 }
             };
             let options =
-                session_options(&title_meta, &settings, launch_env, None, None, None, None);
+                session_options(&title_meta, &settings, launch_env, McpServers::default());
             let title = generate_ai_title(
                 provider_launcher,
                 title_meta.provider,
@@ -953,7 +965,7 @@ impl AppState {
                 }
             };
             let options =
-                session_options(&review_meta, &settings, launch_env, None, None, None, None);
+                session_options(&review_meta, &settings, launch_env, McpServers::default());
             let review = run_fallback_review(
                 provider_launcher,
                 review_meta.provider,

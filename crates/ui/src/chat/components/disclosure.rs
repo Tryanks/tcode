@@ -35,6 +35,7 @@ pub(crate) fn notice_label(notice: &HostNotice) -> String {
         )
         .into_owned(),
         HostNotice::ReportReminder => crate::tr!("chat.report_reminder").into_owned(),
+        HostNotice::Control(messages) => messages.join(" · "),
     }
 }
 
@@ -112,9 +113,13 @@ fn disclosure_with(
         .small()
         .aria_label(label.clone())
         .aria_expanded(expanded)
+        // A long notice (a `[control]` message is one) truncates inside the row instead of
+        // spilling past both edges of the centered divider.
+        .max_w_full()
+        .overflow_hidden()
         .text_token(&cx.theme().tokens.typography.xs)
         .icon(Icon::new(chevron(expanded)).text_color(muted))
-        .child(div().text_color(muted).child(label))
+        .child(div().min_w_0().truncate().text_color(muted).child(label))
         .on_click(on_toggle)
         .debug_selector({
             let selector = format!("disclosure-{key}");

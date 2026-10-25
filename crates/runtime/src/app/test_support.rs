@@ -353,3 +353,40 @@ impl TestClientState {
         self.selected = Some(self.host.start_draft(project_id, cwd, cx));
     }
 }
+
+/// One JSON-RPC exchange with an in-process MCP server, as a provider makes it: the reply
+/// and the session id the server assigned.
+pub(super) fn rpc(
+    url: &str,
+    token: &str,
+    session: Option<&str>,
+    body: serde_json::Value,
+) -> (serde_json::Value, Option<String>) {
+    let mut request = ureq::post(url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Accept", "application/json, text/event-stream")
+        .set("Content-Type", "application/json");
+    if let Some(session) = session {
+        request = request
+            .set("Mcp-Session-Id", session)
+            .set("MCP-Protocol-Version", "2025-11-25");
+    }
+    let response = request
+        .send_bytes(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    let session = response.header("Mcp-Session-Id").map(str::to_owned);
+    let text = response.into_string().unwrap();
+    let json = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .find(|data| !data.trim().is_empty())
+        .unwrap_or(&text);
+    (
+        if json.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(json).unwrap()
+        },
+        session,
+    )
+}
