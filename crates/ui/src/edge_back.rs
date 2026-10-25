@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use gpui::{App, Pixels, Window, px};
+use gpui::{App, Pixels, Point, TouchPhase, Window, px};
 use gpui_base::motion::{Spring, spring};
 
 // gpui-base has no edge gesture or interactive NavStack/Sheet progress API.
@@ -42,6 +42,26 @@ pub(crate) fn settle(
         window,
         cx,
     )
+}
+
+/// GPUI flings every released pan, a swipe it does not scroll too, and spends
+/// the next touch, a tap included, on catching that invisible fling. A touch
+/// that starts and cancels at once at the pan's `origin` catches it instead.
+pub(crate) fn catch_fling(origin: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    window.defer(cx, move |window, cx| {
+        for phase in [TouchPhase::Started, TouchPhase::Cancelled] {
+            window.dispatch_event(
+                gpui::PlatformInput::Touch(gpui::TouchEvent {
+                    id: gpui::TouchId(u64::MAX),
+                    phase,
+                    position: origin,
+                    predicted_position: None,
+                    force: None,
+                }),
+                cx,
+            );
+        }
+    });
 }
 
 #[cfg(test)]
