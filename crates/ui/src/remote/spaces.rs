@@ -1442,9 +1442,7 @@ mod section {
                 .collect();
             div()
                 .id("space-dialog-body")
-                .w_full()
-                .flex_1()
-                .min_h_0()
+                .size_full()
                 .overflow_y_scroll_area()
                 .on_action(cx.listener(Self::on_toggle_share))
                 .on_action(cx.listener(Self::on_move_member))

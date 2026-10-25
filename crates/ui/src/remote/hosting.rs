@@ -304,7 +304,9 @@ pub(super) fn field_labels(
     compact: bool,
     cx: &App,
 ) -> gpui::Div {
-    row_labels(title, description, None, compact, cx).flex_basis(px(FIELD_LABEL_BASIS))
+    // Stacked, the basis would be a height.
+    row_labels(title, description, None, compact, cx)
+        .when(!compact, |labels| labels.flex_basis(px(FIELD_LABEL_BASIS)))
 }
 
 /// Start or stop hosting with `traverse` and `name`, saving them once that

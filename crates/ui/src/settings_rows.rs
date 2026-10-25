@@ -96,9 +96,11 @@ pub fn row_labels(
         .gap_0p5()
         .child(
             h_flex()
+                .min_w_0()
                 .items_center()
                 .gap_1()
-                .child(div().text_body(compact, cx).child(title.into()))
+                // A long title wraps rather than running under the control.
+                .child(div().min_w_0().text_body(compact, cx).child(title.into()))
                 .children(reset),
         )
         .children(description.map(|desc| div().text_secondary(compact, cx).child(desc)))
