@@ -143,7 +143,11 @@ impl SessionsSidebar {
                                         return;
                                     }
                                     let now = cx.background_executor().now();
+                                    let was_past = swipe.progress.past_threshold();
                                     swipe.progress.travel -= delta.x;
+                                    if swipe.progress.past_threshold() != was_past {
+                                        crate::haptics::threshold();
+                                    }
                                     if event.touch_phase == TouchPhase::Moved && delta.x != px(0.) {
                                         let elapsed =
                                             now.duration_since(swipe.last_moved_at).as_secs_f32();

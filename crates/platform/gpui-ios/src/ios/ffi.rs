@@ -102,6 +102,8 @@ unsafe extern "C" {
     fn gpui_ios_host_show_keyboard();
     fn gpui_ios_host_hide_keyboard();
     fn gpui_ios_host_haptic_long_press();
+    fn gpui_ios_host_haptic_threshold();
+    fn gpui_ios_host_haptic_selection();
     fn gpui_ios_host_text_input_changed();
     fn gpui_ios_host_configure_text_input(
         autocorrect: u8,
@@ -223,6 +225,16 @@ pub(crate) fn host_hide_keyboard() {
 pub(crate) fn host_haptic_long_press() {
     // SAFETY: UIKit work is performed by Swift on this same main-thread call.
     unsafe { gpui_ios_host_haptic_long_press() }
+}
+
+pub(crate) fn host_haptic_threshold() {
+    // SAFETY: UIKit work is performed by Swift on this same main-thread call.
+    unsafe { gpui_ios_host_haptic_threshold() }
+}
+
+pub(crate) fn host_haptic_selection() {
+    // SAFETY: UIKit work is performed by Swift on this same main-thread call.
+    unsafe { gpui_ios_host_haptic_selection() }
 }
 
 pub(crate) fn host_text_input_changed() {

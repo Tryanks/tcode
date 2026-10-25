@@ -58,6 +58,16 @@ public func gpuiHostHapticLongPress() {
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 }
 
+@_cdecl("gpui_ios_host_haptic_threshold")
+public func gpuiHostHapticThreshold() {
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+}
+
+@_cdecl("gpui_ios_host_haptic_selection")
+public func gpuiHostHapticSelection() {
+    UISelectionFeedbackGenerator().selectionChanged()
+}
+
 @_cdecl("gpui_ios_host_configure_text_input")
 public func gpuiHostConfigureTextInput(
     _ autocorrect: UInt8,
