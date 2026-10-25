@@ -72,13 +72,12 @@ impl SettingsPage {
 
     pub(super) fn render_threads(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let settings = self.store.read(cx).settings();
-        let delete_confirm_reset = self.reset_action(
+        let delete_confirm_reset = crate::settings_rows::reset_action(
             "reset-delete-confirm",
             settings.skip_delete_confirmation,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_skip_delete_confirmation(false), cx)
-            },
+            }),
         );
         let threads = vec![
             self.title_generation_row(cx),
@@ -98,19 +97,31 @@ impl SettingsPage {
         let compact = self.window_state.read(cx).compact;
         v_flex()
             .gap(crate::material::section_gap(cx))
-            .child(self.settings_group(crate::tr!("settings.threads_section"), threads, cx))
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("settings.threads_section"),
+                threads,
+                cx,
+            ))
             .child(
-                self.settings_group(crate::tr!("settings.settling_section"), settling, cx)
-                    .child(
-                        div()
-                            .pl(px(crate::material::CARD_INSET))
-                            .pt(cx.theme().tokens.spacing.sm)
-                            .text_secondary(compact, cx)
-                            .child(crate::tr!("settings.auto_settle.footnote")),
-                    ),
+                crate::settings_rows::settings_group(
+                    crate::tr!("settings.settling_section"),
+                    settling,
+                    cx,
+                )
+                .child(
+                    div()
+                        .pl(px(crate::material::CARD_INSET))
+                        .pt(cx.theme().tokens.spacing.sm)
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("settings.auto_settle.footnote")),
+                ),
             )
-            .child(self.settings_group(crate::tr!("settings.panels_section"), panels, cx))
-            .child(self.settings_group(
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("settings.panels_section"),
+                panels,
+                cx,
+            ))
+            .child(crate::settings_rows::settings_group(
                 crate::tr!("settings.model_limits_section"),
                 model_limits,
                 cx,
@@ -118,25 +129,26 @@ impl SettingsPage {
     }
 
     fn panel_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let auto_open_task_panel_reset = self.reset_action(
+        let auto_open_task_panel_reset = crate::settings_rows::reset_action(
             "reset-auto-open-task-panel",
             settings.auto_open_task_panel,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_auto_open_task_panel(false), cx),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_auto_open_task_panel(false), cx)
+            }),
         );
-        let live_command_panel_reset = self.reset_action(
+        let live_command_panel_reset = crate::settings_rows::reset_action(
             "reset-live-command-panel",
             settings.live_command_panel_disabled,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_live_command_panel_disabled(false), cx)
-            },
+            }),
         );
-        let word_wrap_reset = self.reset_action(
+        let word_wrap_reset = crate::settings_rows::reset_action(
             "reset-word-wrap",
             settings.word_wrap_diffs,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_word_wrap_diffs(false), cx),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_word_wrap_diffs(false), cx)
+            }),
         );
         vec![
             self.toggle_row(
@@ -170,13 +182,12 @@ impl SettingsPage {
     }
 
     fn model_limit_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let abort_on_fallback_reset = self.reset_action(
+        let abort_on_fallback_reset = crate::settings_rows::reset_action(
             "reset-abort-on-model-fallback",
             !settings.abort_on_model_fallback,
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_abort_on_model_fallback(true), cx)
-            },
+            }),
         );
         let mut rows = vec![self.toggle_row(
             "abort-on-model-fallback",
@@ -188,13 +199,12 @@ impl SettingsPage {
             WorkspaceStore::set_abort_on_model_fallback,
         )];
         if settings.abort_on_model_fallback {
-            let advisor_reset = self.reset_action(
+            let advisor_reset = crate::settings_rows::reset_action(
                 "reset-fallback-review-advisor",
                 settings.fallback_review_advisor,
-                cx,
-                |this, _, cx| {
+                cx.listener(|this, _, _, cx| {
                     this.dispatch_settings(|store| store.set_fallback_review_advisor(false), cx)
-                },
+                }),
             );
             rows.push(self.toggle_row(
                 "fallback-review-advisor",
@@ -207,11 +217,12 @@ impl SettingsPage {
             ));
             rows.push(self.fallback_review_model_row(cx));
         }
-        let resume_on_limit_reset_reset = self.reset_action(
+        let resume_on_limit_reset_reset = crate::settings_rows::reset_action(
             "reset-resume-on-limit-reset",
             !settings.resume_on_limit_reset,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_resume_on_limit_reset(true), cx),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_resume_on_limit_reset(true), cx)
+            }),
         );
         rows.push(self.toggle_row(
             "resume-on-limit-reset",
@@ -229,13 +240,12 @@ impl SettingsPage {
     /// a phone lists every project as a link to its rules page; a wide window
     /// adds overrides from a menu and edits them in a dialog.
     fn settling_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let reset = self.reset_action(
+        let reset = crate::settings_rows::reset_action(
             "reset-auto-settle",
             settings.auto_settle_after_days != Some(3.),
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_auto_settle_after_days(Some(3.)), cx)
-            },
+            }),
         );
         let mut rows = vec![self.toggle_row(
             "auto-settle-inactive",
@@ -248,11 +258,12 @@ impl SettingsPage {
         )];
         if settings.auto_settle_after_days.is_some() {
             rows.push(
-                self.row_frame(cx)
-                    .child(self.row_labels(
+                crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+                    .child(crate::settings_rows::row_labels(
                         crate::tr!("settings.auto_settle.days"),
-                        crate::tr!("settings.auto_settle.days_description"),
+                        Some(crate::tr!("settings.auto_settle.days_description").into()),
                         None,
+                        self.window_state.read(cx).compact,
                         cx,
                     ))
                     .child(
@@ -262,11 +273,12 @@ impl SettingsPage {
                     .into_any_element(),
             );
         }
-        let merge_reset = self.reset_action(
+        let merge_reset = crate::settings_rows::reset_action(
             "reset-auto-settle-on-merge",
             settings.auto_settle_on_merge,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_auto_settle_on_merge(false), cx),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_auto_settle_on_merge(false), cx)
+            }),
         );
         rows.push(self.toggle_row(
             "auto-settle-on-merge",
@@ -299,11 +311,12 @@ impl SettingsPage {
             // Phone: every project is a row that pushes its rules page; there
             // is no dropdown or dialog to pick one from.
             rows.push(
-                self.row_frame(cx)
-                    .child(self.row_labels(
+                crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+                    .child(crate::settings_rows::row_labels(
                         crate::tr!("settings.auto_settle.overrides"),
-                        crate::tr!("settings.auto_settle.overrides_description"),
+                        Some(crate::tr!("settings.auto_settle.overrides_description").into()),
                         None,
+                        self.window_state.read(cx).compact,
                         cx,
                     ))
                     .into_any_element(),
@@ -356,29 +369,31 @@ impl SettingsPage {
                     description: None,
                 })
                 .collect();
-            rows.push(
-                self.select_row(
-                    "add-project-rules",
-                    "project-rules-popover",
-                    "project-rules-menu",
-                    240.,
-                    crate::tr!("settings.auto_settle.overrides")
-                        .into_owned()
-                        .into(),
-                    crate::tr!("settings.auto_settle.overrides_description")
-                        .into_owned()
-                        .into(),
-                    crate::tr!("settings.auto_settle.add_override")
-                        .into_owned()
-                        .into(),
-                    options,
-                    None,
-                    |project, page, window, cx| {
+            rows.push(crate::settings_rows::select_row(
+                "add-project-rules",
+                "project-rules-popover",
+                "project-rules-menu",
+                240.,
+                crate::tr!("settings.auto_settle.overrides")
+                    .into_owned()
+                    .into(),
+                crate::tr!("settings.auto_settle.overrides_description")
+                    .into_owned()
+                    .into(),
+                crate::tr!("settings.auto_settle.add_override")
+                    .into_owned()
+                    .into(),
+                options,
+                None,
+                self.window_state.read(cx).compact,
+                {
+                    let page = cx.entity();
+                    move |project, window, cx| {
                         page.update(cx, |page, cx| page.edit_project_rules(project, window, cx))
-                    },
-                    cx,
-                ),
-            );
+                    }
+                },
+                cx,
+            ));
             for project in projects.into_iter().filter(|project| {
                 settings
                     .project_settlement_overrides

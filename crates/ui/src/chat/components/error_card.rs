@@ -123,7 +123,7 @@ pub(crate) fn error_card(
                     .text_color(cx.theme().danger_foreground)
                     .child(crate::tr!(
                         "chat.limit_resume.resumes_in",
-                        countdown = crate::composer::model::format_countdown(remaining_secs)
+                        countdown = crate::time::format_countdown(remaining_secs)
                     )),
             )
             .child(div().flex_1())

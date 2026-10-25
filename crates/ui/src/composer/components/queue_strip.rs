@@ -77,7 +77,7 @@ impl Composer {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                format_countdown(fire_at.saturating_sub(now))
+                crate::time::format_countdown(fire_at.saturating_sub(now))
             });
             strip = strip.child(
                 h_flex()

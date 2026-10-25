@@ -10,6 +10,19 @@ pub(crate) fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Compact countdown: hours retain an hour column, shorter waits use minutes
+/// and seconds.
+pub(crate) fn format_countdown(secs: u64) -> String {
+    let hours = secs / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 /// Compact relative-time label (e.g. "5m ago") from an elapsed-seconds count.
 pub fn humanize_ago(secs: u64) -> String {
     if secs < 60 {

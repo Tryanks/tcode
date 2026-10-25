@@ -64,23 +64,23 @@ impl SettingsPage {
         let compact = self.window_state.read(cx).compact;
         let projects = self.store.read(cx).projects();
 
-        let enabled_reset = self.reset_action(
+        let enabled_reset = crate::settings_rows::reset_action(
             "reset-control-enabled",
             !control.enabled,
-            cx,
-            |this, _, cx| this.dispatch_settings(|store| store.set_control_enabled(true), cx),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_control_enabled(true), cx)
+            }),
         );
         let automation = settings.settlement_automation;
-        let automation_reset = self.reset_action(
+        let automation_reset = crate::settings_rows::reset_action(
             "reset-settlement-automation",
             !automation.is_default(),
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(
                     |store| store.set_settlement_automation(SettlementAutomation::default()),
                     cx,
                 )
-            },
+            }),
         );
         let automation_label = |value: SettlementAutomation| -> SharedString {
             match value {
@@ -129,7 +129,7 @@ impl SettingsPage {
                 cx,
                 WorkspaceStore::set_control_enabled,
             ),
-            self.select_row(
+            crate::settings_rows::select_row(
                 "settlement-automation-dropdown",
                 "settlement-automation-popover",
                 "settlement-automation-menu",
@@ -143,28 +143,31 @@ impl SettingsPage {
                 automation_label(automation),
                 automation_options,
                 automation_reset,
-                |value, page, _, cx| {
-                    page.update(cx, |page, cx| {
-                        page.dispatch_settings(
-                            move |store| store.set_settlement_automation(value),
-                            cx,
-                        )
-                    })
+                self.window_state.read(cx).compact,
+                {
+                    let page = cx.entity();
+                    move |value, _, cx| {
+                        page.update(cx, |page, cx| {
+                            page.dispatch_settings(
+                                move |store| store.set_settlement_automation(value),
+                                cx,
+                            )
+                        })
+                    }
                 },
                 cx,
             ),
         ];
 
-        let default_reset = self.reset_action(
+        let default_reset = crate::settings_rows::reset_action(
             "reset-control-default-grant",
             control.default_grant != ControlGrant::default_grant(),
-            cx,
-            |this, _, cx| {
+            cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(
                     |store| store.set_control_default_grant(ControlGrant::default_grant()),
                     cx,
                 )
-            },
+            }),
         );
         let page = cx.entity();
         let default_editor = crate::control::grant_editor(
@@ -184,20 +187,25 @@ impl SettingsPage {
         let thread_rows = self.control_thread_rows(compact, cx);
         let activity_rows = self.control_activity_rows(compact, cx);
         let default_heading = vec![
-            self.row_frame(cx)
-                .child(self.row_labels(
+            crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+                .child(crate::settings_rows::row_labels(
                     crate::control::grant_summary(&control.default_grant),
-                    crate::tr!("control.settings.default_grant_description"),
+                    Some(crate::tr!("control.settings.default_grant_description").into()),
                     default_reset,
+                    self.window_state.read(cx).compact,
                     cx,
                 ))
                 .into_any_element(),
         ];
         v_flex()
             .gap(crate::material::section_gap(cx))
-            .child(self.settings_group(crate::tr!("control.title"), general, cx))
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("control.title"),
+                general,
+                cx,
+            ))
             .child(
-                self.settings_group(
+                crate::settings_rows::settings_group(
                     crate::tr!("control.settings.default_grant"),
                     default_heading,
                     cx,
@@ -205,9 +213,21 @@ impl SettingsPage {
                 .gap_2()
                 .child(default_editor),
             )
-            .child(self.settings_group(crate::tr!("control.settings.overrides"), project_rows, cx))
-            .child(self.settings_group(crate::tr!("control.settings.threads"), thread_rows, cx))
-            .child(self.settings_group(crate::tr!("control.settings.activity"), activity_rows, cx))
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("control.settings.overrides"),
+                project_rows,
+                cx,
+            ))
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("control.settings.threads"),
+                thread_rows,
+                cx,
+            ))
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("control.settings.activity"),
+                activity_rows,
+                cx,
+            ))
     }
 
     fn control_project_rows(
@@ -222,11 +242,12 @@ impl SettingsPage {
             // Phone: every project is a row that opens its grant in place; there
             // is no dropdown or dialog to pick one from.
             rows.push(
-                self.row_frame(cx)
-                    .child(self.row_labels(
+                crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+                    .child(crate::settings_rows::row_labels(
                         crate::tr!("control.settings.overrides"),
-                        crate::tr!("control.settings.overrides_description"),
+                        Some(crate::tr!("control.settings.overrides_description").into()),
                         None,
+                        self.window_state.read(cx).compact,
                         cx,
                     ))
                     .into_any_element(),
@@ -330,22 +351,24 @@ impl SettingsPage {
             .collect();
         let default_grant = control.default_grant.clone();
         let store = self.store.clone();
-        rows.push(
-            self.select_row(
-                "add-project-grant",
-                "project-grant-popover",
-                "project-grant-menu",
-                240.,
-                crate::tr!("control.settings.overrides").into_owned().into(),
-                crate::tr!("control.settings.overrides_description")
-                    .into_owned()
-                    .into(),
-                crate::tr!("control.settings.add_override")
-                    .into_owned()
-                    .into(),
-                options,
-                None,
-                move |project, page, window, cx| {
+        rows.push(crate::settings_rows::select_row(
+            "add-project-grant",
+            "project-grant-popover",
+            "project-grant-menu",
+            240.,
+            crate::tr!("control.settings.overrides").into_owned().into(),
+            crate::tr!("control.settings.overrides_description")
+                .into_owned()
+                .into(),
+            crate::tr!("control.settings.add_override")
+                .into_owned()
+                .into(),
+            options,
+            None,
+            self.window_state.read(cx).compact,
+            {
+                let page = cx.entity();
+                move |project, window, cx| {
                     let grant = default_grant.clone();
                     let id = project.id.clone();
                     page.update(cx, |page, cx| {
@@ -355,10 +378,10 @@ impl SettingsPage {
                         )
                     });
                     open_project_grant(store.clone(), project, window, cx);
-                },
-                cx,
-            ),
-        );
+                }
+            },
+            cx,
+        ));
         for project in projects
             .iter()
             .filter(|project| control.project_overrides.contains_key(&project.id))
@@ -435,8 +458,14 @@ impl SettingsPage {
                     .map(crate::control::grant_summary)
                     .unwrap_or_default();
                 let id = meta.id.clone();
-                self.row_frame(cx)
-                    .child(self.row_labels(meta.title.clone(), summary, None, cx))
+                crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+                    .child(crate::settings_rows::row_labels(
+                        meta.title.clone(),
+                        Some(summary.into()),
+                        None,
+                        self.window_state.read(cx).compact,
+                        cx,
+                    ))
                     .child(
                         Button::new(SharedString::from(format!(
                             "revoke-thread-grant-{}",
@@ -474,7 +503,7 @@ impl SettingsPage {
             }
             Some(Err(error)) => {
                 return vec![
-                    self.row_frame(cx)
+                    crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
                         .child(
                             div()
                                 .flex_1()
@@ -523,8 +552,14 @@ impl SettingsPage {
             if let Some(detail) = entry.action.detail.as_deref().filter(|d| !d.is_empty()) {
                 action.push_str(&format!(" ({detail})"));
             }
-            self.row_frame(cx)
-                .child(self.row_labels(title, action, None, cx))
+            crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+                .child(crate::settings_rows::row_labels(
+                    title,
+                    Some(action.into()),
+                    None,
+                    self.window_state.read(cx).compact,
+                    cx,
+                ))
                 .child(
                     div()
                         .flex_none()
