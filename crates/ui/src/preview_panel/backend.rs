@@ -233,7 +233,8 @@ impl PreviewPanel {
                 // view under the pointer (`send_window_event` hit-tests
                 // whenever no native view owns the press) and GPUI's own view
                 // then drops the event, so a resize handle stops following
-                // the pointer over the page. A hidden view is not hit-tested.
+                // the pointer over the page. A hidden view is not hit-tested;
+                // it hides and returns without motion (`yield_to_resize_handles`).
                 && !self.backend.seam_pressed
                 && !resize_drag_active(cx)
                 && (!window_state.compact
@@ -256,6 +257,10 @@ impl PreviewPanel {
     /// and show it again, at the size the drag left, when the button is
     /// released. Window listeners, so this holds whether or not anything
     /// re-renders this panel in between.
+    ///
+    /// The page goes and comes back at once, with no fade: gpui-webview 0.8
+    /// draws a native view, which offers only `set_visible` and bounds, no
+    /// opacity, so neither an exit nor an entry can be animated here.
     #[cfg(not(target_os = "android"))]
     pub(super) fn yield_to_resize_handles(
         &self,
