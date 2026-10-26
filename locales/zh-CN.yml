@@ -70,6 +70,7 @@ chat:
   toggle_diff: "切换 diff 面板"
   toggle_tasks: "切换任务面板"
   toggle_preview: "切换预览浏览器"
+  header_more: "更多"
   open: "打开"
   reveal_in_file_manager: "在文件管理器中显示"
   copy_path: "复制路径"

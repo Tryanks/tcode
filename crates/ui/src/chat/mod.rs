@@ -68,6 +68,31 @@ pub(crate) struct RewindTurn {
 
 gpui::actions!(tcode_chat, [OpenMoveThreadDialog, RevokeSelfSettle]);
 
+/// Show or hide one of the panels a thread's header toggles, as its button
+/// or its row in the header's overflow menu does.
+#[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_chat, no_json)]
+enum TogglePanel {
+    Terminal,
+    Plan,
+    Agents,
+    Preview,
+    Diff,
+    PullRequests,
+}
+
+/// Whether each panel the header toggles is showing; `None` for one this
+/// thread does not offer.
+#[derive(Clone, Copy)]
+struct HeaderPanels {
+    terminal: bool,
+    plan: bool,
+    agents: Option<bool>,
+    preview: Option<bool>,
+    diff: bool,
+    pull_requests: Option<bool>,
+}
+
 /// A changed-file chip's context-menu "View diff".
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_chat, no_json)]
@@ -102,8 +127,15 @@ pub(crate) use crate::material::{
 const HEADER_LABELS_MIN_WIDTH: f32 = 700.;
 /// At 16pt padding the compact header fits: that title and badge, the git
 /// and Open split buttons as icon and chevron, and five panel toggles measure
-/// 531pt; the pane menu adds its 24pt button and 4pt gap.
+/// 531pt; the pane menu adds its 24pt button and 4pt gap. Below it the panel
+/// toggles, the pull request badge, the Open button and the pane menu fold
+/// into one overflow menu.
 pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 560.;
+/// At 8pt padding a side the overflow header fits: the sidebar toggle, the title's
+/// 168pt stretch, the git split button as icon and chevron, and the overflow
+/// button measure 295pt. It holds no text but the title, so it measures the
+/// same in every locale.
+pub(crate) const HEADER_OVERFLOW_MIN_WIDTH: f32 = 300.;
 /// The way back to the parent thread, each with the 8pt gap that follows it.
 /// Its arrow alone measures 20pt. With the parent's title cut to its
 /// 24-character maximum it measured 215pt for an ordinary title; 265pt leaves
@@ -156,42 +188,44 @@ pub(crate) fn header_extra_width_for(
 }
 /// The header's pane commands, for the pane it heads.
 fn pane_menu(panes: crate::shell::PaneControls) -> impl IntoElement {
-    use crate::panes::{ClosePane, SplitDown, SplitRight, ZoomPane};
     Button::new("pane-menu")
         .debug_selector(|| "pane-menu".into())
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .ghost()
         .small()
         .compact()
         .icon(IconName::Columns2)
         .tooltip(crate::tr!("panes.menu"))
-        .dropdown_menu(move |menu, _, _| {
-            let (zoom, zoom_icon) = if panes.zoomed {
-                (crate::tr!("panes.unzoom"), IconName::Minimize2)
-            } else {
-                (crate::tr!("panes.zoom"), IconName::Maximize2)
-            };
-            menu.menu_with_icon_and_enable(
-                crate::tr!("panes.split_right").into_owned(),
-                IconName::Columns2,
-                Box::new(SplitRight),
-                panes.split_right,
-            )
-            .menu_with_icon_and_enable(
-                crate::tr!("panes.split_down").into_owned(),
-                IconName::Rows2,
-                Box::new(SplitDown),
-                panes.split_down,
-            )
-            .separator()
-            .menu_with_icon_and_enable(zoom.into_owned(), zoom_icon, Box::new(ZoomPane), panes.zoom)
-            .menu_with_icon_and_enable(
-                crate::tr!("panes.close").into_owned(),
-                IconName::Close,
-                Box::new(ClosePane),
-                panes.close,
-            )
-        })
+        .dropdown_menu(move |menu, _, _| pane_items(menu, panes))
+}
+
+/// The pane commands `panes` allows, as menu rows.
+fn pane_items(menu: PopupMenu, panes: crate::shell::PaneControls) -> PopupMenu {
+    use crate::panes::{ClosePane, SplitDown, SplitRight, ZoomPane};
+    let (zoom, zoom_icon) = if panes.zoomed {
+        (crate::tr!("panes.unzoom"), IconName::Minimize2)
+    } else {
+        (crate::tr!("panes.zoom"), IconName::Maximize2)
+    };
+    menu.menu_with_icon_and_enable(
+        crate::tr!("panes.split_right").into_owned(),
+        IconName::Columns2,
+        Box::new(SplitRight),
+        panes.split_right,
+    )
+    .menu_with_icon_and_enable(
+        crate::tr!("panes.split_down").into_owned(),
+        IconName::Rows2,
+        Box::new(SplitDown),
+        panes.split_down,
+    )
+    .separator()
+    .menu_with_icon_and_enable(zoom.into_owned(), zoom_icon, Box::new(ZoomPane), panes.zoom)
+    .menu_with_icon_and_enable(
+        crate::tr!("panes.close").into_owned(),
+        IconName::Close,
+        Box::new(ClosePane),
+        panes.close,
+    )
 }
 
 /// Vertical rhythm between turns. Turns are separated by space and typographic
@@ -2943,25 +2977,25 @@ impl ChatView {
             true,
         );
         let labelled = width - labelled_extra >= HEADER_LABELS_MIN_WIDTH;
+        let compact_extra = header_extra_width_for(
+            self.workspace_store.read(cx),
+            self.session_id.as_deref(),
+            under_traffic_lights,
+            window.is_fullscreen(),
+            false,
+        ) + if hosts_caption {
+            window_caption::RIGHT_PANEL_CAPTION_WIDTH
+        } else {
+            0.
+        };
+        let overflow = width - compact_extra < HEADER_COMPACT_MIN_WIDTH;
         let traffic_lights = window_caption::traffic_light_inset(window);
         let base = crate::material::bar("chat-header", crate::material::Bar::Strip, false, cx)
             .when(under_traffic_lights && traffic_lights > px(0.), |this| {
                 this.pl(traffic_lights)
             })
             .when(hosts_caption, |this| this.pr_0())
-            .min_w(px(HEADER_COMPACT_MIN_WIDTH
-                + header_extra_width_for(
-                    self.workspace_store.read(cx),
-                    self.session_id.as_deref(),
-                    under_traffic_lights,
-                    window.is_fullscreen(),
-                    false,
-                )
-                + if hosts_caption {
-                    window_caption::RIGHT_PANEL_CAPTION_WIDTH
-                } else {
-                    0.
-                }));
+            .min_w(px(HEADER_OVERFLOW_MIN_WIDTH + compact_extra));
 
         // The sidebar toggle: the header's first control, immediately left of
         // the title. It lives here rather than in the sidebar because a
@@ -3106,12 +3140,14 @@ impl ChatView {
                             .context_menu(title_menu),
                     )
                     .when_some(
-                        self.active_pull_requests(cx).and_then(|links| {
-                            Some((
-                                crate::pull_requests::numbers(&links, cx)?,
-                                crate::pull_requests::badge_label(&links, cx)?,
-                            ))
-                        }),
+                        self.active_pull_requests(cx)
+                            .filter(|_| !overflow)
+                            .and_then(|links| {
+                                Some((
+                                    crate::pull_requests::numbers(&links, cx)?,
+                                    crate::pull_requests::badge_label(&links, cx)?,
+                                ))
+                            }),
                         |header, (numbers, label)| {
                             // Every number shows until the numbers reach half the
                             // title's stretch; past that they clip, so the title
@@ -3134,17 +3170,44 @@ impl ChatView {
                                             .tooltip(crate::tr!("pull_requests.toggle"))
                                             .aria_label(label)
                                             .child(numbers)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.workspace_store.update(cx, |store, cx| {
-                                                    store.toggle_pull_requests_panel(cx)
-                                                })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.on_toggle_panel(
+                                                    &TogglePanel::PullRequests,
+                                                    window,
+                                                    cx,
+                                                )
                                             })),
                                     ),
                             )
                         },
                     ),
             )
-            .when(show_actions, |this| {
+            .when(show_actions && overflow, |this| {
+                this.children(self.render_git_button(false, cx)).child(
+                    self.render_header_overflow(
+                        HeaderPanels {
+                            terminal: terminal_open,
+                            plan: plan_showing,
+                            agents: agents_cue.map(|_| agents_showing),
+                            preview: self
+                                .workspace_store
+                                .read(cx)
+                                .offers_preview()
+                                .then_some(preview_showing),
+                            diff: diff_showing,
+                            pull_requests: self
+                                .active_pull_requests(cx)
+                                .and_then(|links| crate::pull_requests::badge_label(&links, cx))
+                                .map(|_| right_panel_open && right_tab == RightTab::PullRequests),
+                        },
+                        agents_cue.flatten(),
+                        cwd.clone(),
+                        window,
+                        cx,
+                    ),
+                )
+            })
+            .when(show_actions && !overflow, |this| {
                 this.children(self.render_git_button(labelled, cx))
                     .children(
                         cwd.clone()
@@ -3166,12 +3229,8 @@ impl ChatView {
                                     .icon(IconName::PanelBottom)
                                     .selected(terminal_open)
                                     .tooltip(crate::tr!("chat.toggle_terminal"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let session_id =
-                                            this.session_id.clone().unwrap_or_default();
-                                        this.workspace_store.update(cx, |store, cx| {
-                                            store.toggle_terminal_panel_for(session_id, cx)
-                                        })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.on_toggle_panel(&TogglePanel::Terminal, window, cx)
                                     })),
                             )
                             .child(
@@ -3185,9 +3244,8 @@ impl ChatView {
                                     .icon(IconName::Map)
                                     .selected(plan_showing)
                                     .tooltip(crate::tr!("chat.toggle_tasks"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store
-                                            .update(cx, |store, cx| store.toggle_plan_panel(cx));
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.on_toggle_panel(&TogglePanel::Plan, window, cx)
                                     })),
                             )
                             .when_some(agents_cue, |row, cue| {
@@ -3206,10 +3264,12 @@ impl ChatView {
                                                 .icon(IconName::Bot)
                                                 .selected(agents_showing)
                                                 .tooltip(crate::tr!("agents.toggle"))
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.workspace_store.update(cx, |store, cx| {
-                                                        store.toggle_agents_panel(cx)
-                                                    });
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.on_toggle_panel(
+                                                        &TogglePanel::Agents,
+                                                        window,
+                                                        cx,
+                                                    )
                                                 })),
                                         )
                                         .when_some(cue, |toggle, color| {
@@ -3238,10 +3298,8 @@ impl ChatView {
                                         .icon(IconName::Globe)
                                         .selected(preview_showing)
                                         .tooltip(crate::tr!("chat.toggle_preview"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.workspace_store.update(cx, |store, cx| {
-                                                store.toggle_preview_panel(cx)
-                                            });
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.on_toggle_panel(&TogglePanel::Preview, window, cx)
                                         })),
                                 )
                             })
@@ -3257,9 +3315,8 @@ impl ChatView {
                                     .icon(IconName::PanelRight)
                                     .selected(diff_showing)
                                     .tooltip(crate::tr!("chat.toggle_diff"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store
-                                            .update(cx, |store, cx| store.toggle_diff_panel(cx));
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.on_toggle_panel(&TogglePanel::Diff, window, cx)
                                     })),
                             )
                             .children(
@@ -3282,6 +3339,113 @@ impl ChatView {
             )))
             .child(header)
             .overflow_x_scroll_area()
+            .into_any_element()
+    }
+
+    fn on_toggle_panel(&mut self, panel: &TogglePanel, _: &mut Window, cx: &mut Context<Self>) {
+        let session_id = self.session_id.clone().unwrap_or_default();
+        self.workspace_store.update(cx, |store, cx| match panel {
+            TogglePanel::Terminal => store.toggle_terminal_panel_for(session_id, cx),
+            TogglePanel::Plan => store.toggle_plan_panel(cx),
+            TogglePanel::Agents => store.toggle_agents_panel(cx),
+            TogglePanel::Preview => store.toggle_preview_panel(cx),
+            TogglePanel::Diff => store.toggle_diff_panel(cx),
+            TogglePanel::PullRequests => store.toggle_pull_requests_panel(cx),
+        });
+    }
+
+    /// The overflow header's one button: a menu of the panel toggles, each
+    /// checked while its panel shows, then the Open button's choices and the
+    /// pane commands. The agents' cue rides on the button.
+    fn render_header_overflow(
+        &self,
+        panels: HeaderPanels,
+        agents_cue: Option<gpui::Hsla>,
+        cwd: Option<PathBuf>,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
+        use crate::widgets::menu::{CopyText, OpenPathInZed, RevealPath};
+        let panes = crate::shell::pane_controls(self.session_id.as_deref(), window, cx);
+        let cwd = cwd.map(|cwd| cwd.to_string_lossy().into_owned());
+        // The panels every thread has come first, so their rows keep their
+        // places.
+        let rows = [
+            (
+                "chat.toggle_terminal",
+                Some(panels.terminal),
+                TogglePanel::Terminal,
+            ),
+            ("chat.toggle_tasks", Some(panels.plan), TogglePanel::Plan),
+            ("chat.toggle_diff", Some(panels.diff), TogglePanel::Diff),
+            ("agents.toggle", panels.agents, TogglePanel::Agents),
+            ("chat.toggle_preview", panels.preview, TogglePanel::Preview),
+            (
+                "pull_requests.toggle",
+                panels.pull_requests,
+                TogglePanel::PullRequests,
+            ),
+        ];
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                Button::new("header-overflow")
+                    .debug_selector(|| "header-overflow".into())
+                    .ghost()
+                    .small()
+                    .compact()
+                    .icon(IconName::Ellipsis)
+                    .tooltip(crate::tr!("chat.header_more"))
+                    .dropdown_menu(move |menu, _, _| {
+                        let menu =
+                            rows.iter()
+                                .fold(menu, |menu, (key, checked, panel)| match checked {
+                                    Some(checked) => menu.menu_with_check(
+                                        crate::tr!(*key).into_owned(),
+                                        *checked,
+                                        Box::new(*panel),
+                                    ),
+                                    None => menu,
+                                });
+                        let menu = match &cwd {
+                            Some(cwd) => menu
+                                .separator()
+                                .menu_with_icon(
+                                    crate::tr!("chat.open_zed").into_owned(),
+                                    IconName::ExternalLink,
+                                    Box::new(OpenPathInZed(cwd.clone())),
+                                )
+                                .menu_with_icon(
+                                    crate::tr!("chat.reveal_in_file_manager").into_owned(),
+                                    IconName::FolderOpen,
+                                    Box::new(RevealPath(cwd.clone())),
+                                )
+                                .menu_with_icon(
+                                    crate::tr!("chat.copy_path").into_owned(),
+                                    IconName::Copy,
+                                    Box::new(CopyText(cwd.clone())),
+                                ),
+                            None => menu,
+                        };
+                        match panes {
+                            Some(panes) => pane_items(menu.separator(), panes),
+                            None => menu,
+                        }
+                    }),
+            )
+            .when_some(agents_cue, |button, color| {
+                button.child(
+                    div()
+                        .absolute()
+                        .top(px(3.))
+                        .right(px(3.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(color)
+                        .debug_selector(|| "agents-cue".into()),
+                )
+            })
             .into_any_element()
     }
 
@@ -4032,7 +4196,8 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::on_link_dialog))
             .on_action(cx.listener(Self::on_move_thread_dialog))
             .on_action(cx.listener(Self::on_revoke_self_settle))
-            .on_action(cx.listener(Self::on_show_agent_tools));
+            .on_action(cx.listener(Self::on_show_agent_tools))
+            .on_action(cx.listener(Self::on_toggle_panel));
 
         if self
             .workspace_store
