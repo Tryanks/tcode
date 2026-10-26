@@ -45,7 +45,8 @@
 //!   `allow_foreground_fallback` (default off) lets only `type_text` and
 //!   `keypress` retry through foreground activation; pointer actions never do.
 //!   `show_agent_cursor` (default on) drives the action overlay in
-//!   `backend::macos::overlay`, visible only while the target is frontmost.
+//!   `backend::macos::overlay`, visible only while no other application
+//!   window covers the action point on the target window.
 //! - macOS needs Accessibility (`AXIsProcessTrusted`) and, for screenshots,
 //!   Screen Recording (`CGPreflightScreenCaptureAccess`); `permissions`
 //!   checks and requests them, and Screen Recording grants that need a

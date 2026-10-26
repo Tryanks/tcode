@@ -1,16 +1,19 @@
 mod cursor;
 mod ffi;
 mod geometry;
+mod motion;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::Mutex;
+use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::{Duration, Instant};
 
 use cursor::CursorUi;
 
 use self::ffi::{class, dispatch_main, send_id, send_void};
 use self::geometry::is_finite_point;
+use self::motion::{Effect, Point, Waypoint};
 
 static SUBMISSIONS: Mutex<Submissions> = Mutex::new(Submissions {
     enabled: false,
@@ -91,15 +94,14 @@ struct QueuedCommand {
     publication: Publication,
 }
 
-const ACTION_LIFETIME: Duration = Duration::from_secs(1);
+// Long enough for the cursor to rest between the agent's steps instead of
+// blinking out, short enough that it retires soon after the agent stops.
+const ACTION_LIFETIME: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayActionKind {
     Click,
-    Scroll,
-    Drag,
-    Keyboard,
-    Move,
+    Point,
 }
 
 pub(crate) fn set_enabled(on: bool) {
@@ -124,44 +126,95 @@ pub(crate) fn begin_action(
         .then(|| submissions.reserve(feedback, Instant::now()))
 }
 
-pub(crate) fn show_action(
-    publication: Publication,
-    pid: u32,
-    window_id: u32,
-    kind: OverlayActionKind,
-    point: (f64, f64),
-) {
-    if is_finite_point(point) {
-        enqueue(QueuedCommand {
-            publication,
-            command: UiCommand::ShowAction {
-                pid,
-                window_id,
-                kind,
-                point,
-            },
-        });
+/// Released once the cursor has reached an action's point, or at once when
+/// nothing will be drawn there, so input is delivered where the user just saw
+/// the cursor arrive.
+pub(crate) struct CursorArrival(Option<Receiver<()>>);
+
+// Bounds the wait if the main queue is stalled; the cursor's longest planned
+// path is well inside it.
+const MAX_ARRIVAL_WAIT: Duration = Duration::from_secs(2);
+
+impl CursorArrival {
+    pub(crate) fn none() -> Self {
+        Self(None)
+    }
+
+    pub(crate) fn wait(self) {
+        if let Some(arrival) = self.0 {
+            let _ = arrival.recv_timeout(MAX_ARRIVAL_WAIT);
+        }
     }
 }
 
-pub(crate) fn show_drag(
+fn awaited(waypoint: &mut Waypoint, paced: bool) -> CursorArrival {
+    if !paced {
+        return CursorArrival::none();
+    }
+    let (reached, arrival) = sync_channel(1);
+    waypoint.reached = Some(reached);
+    CursorArrival(Some(arrival))
+}
+
+/// An action without a point renews the cursor where it already is.
+pub(crate) fn show_action(
     publication: Publication,
-    pid: u32,
     window_id: u32,
-    from: (f64, f64),
-    to: (f64, f64),
-) {
-    if is_finite_point(from) && is_finite_point(to) {
+    kind: OverlayActionKind,
+    point: Option<Point>,
+    paced: bool,
+) -> CursorArrival {
+    let Some(point) = point else {
         enqueue(QueuedCommand {
             publication,
-            command: UiCommand::ShowDrag {
-                pid,
+            command: UiCommand::Show {
                 window_id,
-                from,
-                to,
+                point: None,
+                waypoints: Vec::new(),
             },
         });
+        return CursorArrival::none();
+    };
+    if !is_finite_point(point) {
+        return CursorArrival::none();
     }
+    let effect = (kind == OverlayActionKind::Click).then_some(Effect::Click);
+    let mut waypoint = Waypoint::new(point, effect);
+    let arrival = awaited(&mut waypoint, paced);
+    enqueue(QueuedCommand {
+        publication,
+        command: UiCommand::Show {
+            window_id,
+            point: Some(point),
+            waypoints: vec![waypoint],
+        },
+    });
+    arrival
+}
+
+/// The returned arrival is the drag's start: the drag itself is delivered
+/// while the cursor travels it.
+pub(crate) fn show_drag(
+    publication: Publication,
+    window_id: u32,
+    from: Point,
+    to: Point,
+    paced: bool,
+) -> CursorArrival {
+    if !is_finite_point(from) || !is_finite_point(to) {
+        return CursorArrival::none();
+    }
+    let mut start = Waypoint::new(from, Some(Effect::Press));
+    let arrival = awaited(&mut start, paced);
+    enqueue(QueuedCommand {
+        publication,
+        command: UiCommand::Show {
+            window_id,
+            point: Some(to),
+            waypoints: vec![start, Waypoint::new(to, Some(Effect::Release))],
+        },
+    });
+    arrival
 }
 
 pub(crate) fn clear(owner: Option<u64>, action: Option<u64>) {
@@ -172,17 +225,10 @@ pub(crate) fn clear(owner: Option<u64>, action: Option<u64>) {
 }
 
 enum UiCommand {
-    ShowAction {
-        pid: u32,
+    Show {
         window_id: u32,
-        kind: OverlayActionKind,
-        point: (f64, f64),
-    },
-    ShowDrag {
-        pid: u32,
-        window_id: u32,
-        from: (f64, f64),
-        to: (f64, f64),
+        point: Option<Point>,
+        waypoints: Vec<Waypoint>,
     },
     Clear,
 }
@@ -191,105 +237,87 @@ struct OverlayState {
     cursor: Option<CursorUi>,
     target: Option<Target>,
     poll_armed: bool,
+    frame_armed: bool,
 }
 
 #[derive(Clone, Debug)]
 struct Target {
-    pid: u32,
     window_id: u32,
+    point: Option<Point>,
     publication: Publication,
 }
 
 impl OverlayState {
-    fn show_action(&mut self, target: Target, kind: OverlayActionKind, point: (f64, f64)) {
-        if !ffi::window_exists(target.window_id) {
-            self.clear();
-            return;
-        }
-        self.set_target(target.clone());
-        let Some(display) = ffi::display_frame_for_ax_point(point) else {
+    fn show(&mut self, target: Target, mut waypoints: Vec<Waypoint>, now: Instant) {
+        let point = target.point.or_else(|| {
+            self.target
+                .as_ref()
+                .filter(|current| current.window_id == target.window_id)
+                .and_then(|current| current.point)
+        });
+        let Some(shows_point) = ffi::window_shows_point(target.window_id, point) else {
+            self.clear(now);
             return;
         };
-        if self.cursor.is_none() {
+        self.set_target(Target { point, ..target });
+        if !shows_point {
+            // Nothing is drawn there, so the action need not wait for it.
+            waypoints
+                .iter_mut()
+                .for_each(|waypoint| waypoint.reached = None);
+        }
+        if self.cursor.is_none() && !waypoints.is_empty() {
             self.cursor = CursorUi::new();
         }
         if let Some(cursor) = self.cursor.as_mut() {
-            cursor.show(kind, point, display, is_target_frontmost(target.pid));
+            cursor.push(now, waypoints);
+            cursor.set_shown(shows_point);
         }
-    }
-
-    fn show_drag(&mut self, target: Target, from: (f64, f64), to: (f64, f64)) {
-        if !ffi::window_exists(target.window_id) {
-            self.clear();
-            return;
-        }
-        self.set_target(target.clone());
-        let Some(from_display) = ffi::display_frame_for_ax_point(from) else {
-            return;
-        };
-        let to_display = ffi::display_frame_for_ax_point(to).unwrap_or(from_display);
-        if self.cursor.is_none() {
-            self.cursor = CursorUi::new();
-        }
-        if let Some(cursor) = self.cursor.as_mut() {
-            cursor.show_drag(
-                from,
-                to,
-                from_display,
-                to_display,
-                is_target_frontmost(target.pid),
-            );
-        }
+        self.arm_frame();
     }
 
     fn set_target(&mut self, target: Target) {
         self.target = Some(target);
-        if !self.poll_armed
-            && ffi::dispatch_main_after(FOREGROUND_POLL_INTERVAL_NS, poll_foreground)
-        {
+        if !self.poll_armed && ffi::dispatch_main_after(TARGET_POLL_INTERVAL_NS, poll_target) {
             self.poll_armed = true;
         }
     }
 
-    fn refresh_visibility(&mut self, now: Instant, is_frontmost: bool, target_exists: bool) {
+    /// `shows_point` is `None` once the target window has left the screen.
+    fn refresh_visibility(&mut self, now: Instant, shows_point: Option<bool>) {
         let Some(target) = self.target.as_ref() else {
             return;
         };
-        if !target.publication.is_current(now) || !target_exists {
-            self.clear();
+        let Some(shows_point) = shows_point.filter(|_| target.publication.is_current(now)) else {
+            self.clear(now);
             return;
-        }
+        };
         if let Some(cursor) = self.cursor.as_mut() {
-            cursor.set_visible(is_frontmost);
+            cursor.set_shown(shows_point);
         }
+        self.arm_frame();
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self, now: Instant) {
         if let Some(cursor) = self.cursor.as_mut() {
-            cursor.hide();
+            cursor.hide(now);
         }
         self.target = None;
+        self.arm_frame();
+    }
+
+    fn arm_frame(&mut self) {
+        if self.cursor.is_some()
+            && !self.frame_armed
+            && ffi::dispatch_main_after(FRAME_INTERVAL_NS, advance_frame)
+        {
+            self.frame_armed = true;
+        }
     }
 }
 
-const FOREGROUND_POLL_INTERVAL_NS: i64 = 200_000_000;
-
-fn is_target_frontmost(pid: u32) -> bool {
-    super::ax::frontmost_application_pid() == Some(pid)
-}
-
-fn target_process_exists(pid: u32) -> bool {
-    i32::try_from(pid).ok().is_some_and(|pid| {
-        class(c"NSRunningApplication").is_some_and(|application| {
-            ffi::send_id_i32(
-                application,
-                c"runningApplicationWithProcessIdentifier:",
-                pid,
-            )
-            .is_some()
-        })
-    })
-}
+const TARGET_POLL_INTERVAL_NS: i64 = 200_000_000;
+const FRAME_INTERVAL_NS: i64 = 16_666_667;
 
 // This thread-local is intentionally read only by callbacks submitted to the
 // process main queue. Objective-C window and layer pointers therefore never
@@ -300,6 +328,7 @@ thread_local! {
             cursor: None,
             target: None,
             poll_armed: false,
+            frame_armed: false,
         })
     };
 }
@@ -334,36 +363,22 @@ unsafe extern "C" fn run_command(context: *mut c_void) {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
+        let now = Instant::now();
         match command.command {
-            UiCommand::ShowAction {
-                pid,
+            UiCommand::Show {
                 window_id,
-                kind,
                 point,
-            } => state.show_action(
+                waypoints,
+            } => state.show(
                 Target {
-                    pid,
                     window_id,
+                    point,
                     publication: command.publication.clone(),
                 },
-                kind,
-                point,
+                waypoints,
+                now,
             ),
-            UiCommand::ShowDrag {
-                pid,
-                window_id,
-                from,
-                to,
-            } => state.show_drag(
-                Target {
-                    pid,
-                    window_id,
-                    publication: command.publication.clone(),
-                },
-                from,
-                to,
-            ),
-            UiCommand::Clear => state.clear(),
+            UiCommand::Clear => state.clear(now),
         }
     });
     if let Some(pool) = pool {
@@ -372,28 +387,46 @@ unsafe extern "C" fn run_command(context: *mut c_void) {
 }
 
 // SAFETY: libdispatch calls this with the null context supplied when the poll is armed.
-unsafe extern "C" fn poll_foreground(_context: *mut c_void) {
+unsafe extern "C" fn poll_target(_context: *mut c_void) {
     let pool = class(c"NSAutoreleasePool").and_then(|pool| send_id(pool, c"new"));
     let _ = MAIN_STATE.try_with(|state| {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
         state.poll_armed = false;
+        let now = Instant::now();
         if SUBMISSIONS.lock().unwrap().enabled
             && let Some(target) = state.target.clone()
         {
-            state.refresh_visibility(
-                Instant::now(),
-                is_target_frontmost(target.pid),
-                target_process_exists(target.pid) && ffi::window_exists(target.window_id),
-            );
+            state.refresh_visibility(now, ffi::window_shows_point(target.window_id, target.point));
             if state.target.is_some()
-                && ffi::dispatch_main_after(FOREGROUND_POLL_INTERVAL_NS, poll_foreground)
+                && ffi::dispatch_main_after(TARGET_POLL_INTERVAL_NS, poll_target)
             {
                 state.poll_armed = true;
             }
         } else {
-            state.clear();
+            state.clear(now);
+        }
+    });
+    if let Some(pool) = pool {
+        let _ = send_void(pool, c"drain");
+    }
+}
+
+// SAFETY: libdispatch calls this with the null context supplied when a frame is armed.
+unsafe extern "C" fn advance_frame(_context: *mut c_void) {
+    let pool = class(c"NSAutoreleasePool").and_then(|pool| send_id(pool, c"new"));
+    let _ = MAIN_STATE.try_with(|state| {
+        let Ok(mut state) = state.try_borrow_mut() else {
+            return;
+        };
+        state.frame_armed = false;
+        let animating = state
+            .cursor
+            .as_mut()
+            .is_some_and(|cursor| cursor.advance(Instant::now()));
+        if animating {
+            state.arm_frame();
         }
     });
     if let Some(pool) = pool {
@@ -411,17 +444,22 @@ pub(crate) fn verify_native() {
         cursor: None,
         target: None,
         poll_armed: true,
+        frame_armed: false,
     };
     let target = Target {
-        pid: std::process::id(),
         window_id: closed_window,
+        point: Some((300.0, 200.0)),
         publication: Publication {
             revision: 1,
             expires_at: Instant::now() + ACTION_LIFETIME,
             feedback: None,
         },
     };
-    state.show_action(target, OverlayActionKind::Move, (300.0, 200.0));
+    state.show(
+        target,
+        vec![Waypoint::new((300.0, 200.0), None)],
+        Instant::now(),
+    );
     assert!(
         state.target.is_none() && state.cursor.is_none(),
         "a queued action reaching a closed native target must not recreate a marker"
@@ -440,11 +478,10 @@ mod tests {
     fn action(publication: Publication) -> QueuedCommand {
         QueuedCommand {
             publication,
-            command: UiCommand::ShowAction {
-                pid: 42,
+            command: UiCommand::Show {
                 window_id: 7,
-                kind: OverlayActionKind::Click,
-                point: (10.0, 20.0),
+                point: Some((10.0, 20.0)),
+                waypoints: Vec::new(),
             },
         }
     }
@@ -457,29 +494,31 @@ mod tests {
     }
     fn target(publication: Publication) -> Target {
         Target {
-            pid: 42,
             window_id: 7,
+            point: Some((10.0, 20.0)),
             publication,
         }
     }
 
     #[test]
-    fn inactive_action_retires_target_before_foreground_refresh() {
+    fn inactive_action_retires_target_before_visibility_refresh() {
         let now = Instant::now();
         let mut state = OverlayState {
             cursor: None,
             target: None,
             poll_armed: true,
+            frame_armed: false,
         };
         state.set_target(target(submissions().reserve(None, now)));
-        state.refresh_visibility(now, true, true);
+        state.refresh_visibility(now, Some(true));
         assert!(state.target.is_some());
-        state.refresh_visibility(now + Duration::from_secs(2), false, true);
+        let expired = now + ACTION_LIFETIME + Duration::from_secs(1);
+        state.refresh_visibility(expired, Some(false));
         assert!(
             state.target.is_none(),
-            "idle feedback must not reappear on foreground refresh"
+            "idle feedback must not reappear on visibility refresh"
         );
-        state.refresh_visibility(now + Duration::from_secs(3), true, true);
+        state.refresh_visibility(expired + Duration::from_secs(1), Some(true));
         assert!(state.target.is_none());
     }
 
@@ -490,18 +529,19 @@ mod tests {
             cursor: None,
             target: None,
             poll_armed: true,
+            frame_armed: false,
         };
         let mut submissions = submissions();
         state.set_target(target(submissions.reserve(None, now)));
         state.set_target(target(
             submissions.reserve(None, now + Duration::from_millis(500)),
         ));
-        state.refresh_visibility(now + ACTION_LIFETIME, false, true);
+        state.refresh_visibility(now + ACTION_LIFETIME, Some(false));
         assert!(
             state.target.is_some(),
-            "backgrounding does not retire a live action"
+            "a covered target does not retire a live action"
         );
-        state.refresh_visibility(now + ACTION_LIFETIME, true, false);
+        state.refresh_visibility(now + ACTION_LIFETIME, None);
         assert!(
             state.target.is_none(),
             "closed window retires feedback while its app stays open"
