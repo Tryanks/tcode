@@ -165,7 +165,8 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let label = if worktree_mode || has_worktree {
+        let worktree_selected = worktree_mode || has_worktree;
+        let label = if worktree_selected {
             crate::tr!("composer.new_worktree")
         } else {
             crate::tr!("composer.local_checkout")
@@ -236,7 +237,7 @@ impl Composer {
                     .child(
                         workspace_row(
                             crate::tr!("composer.local_checkout").into_owned().into(),
-                            false,
+                            !worktree_selected,
                             cx,
                         )
                         .id("workspace-local")
@@ -250,7 +251,7 @@ impl Composer {
                     .child(
                         workspace_row(
                             crate::tr!("composer.new_worktree").into_owned().into(),
-                            false,
+                            worktree_selected,
                             cx,
                         )
                         .id("workspace-worktree")
