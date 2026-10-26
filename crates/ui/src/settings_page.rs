@@ -1399,7 +1399,7 @@ impl SettingsPage {
             Section::ProjectThreadRules => v_flex().children(self.project_rules_editor.clone()),
             Section::SourceControl => self.render_source_control(cx),
             Section::Providers => self.render_providers(window, cx),
-            Section::Usage => self.render_usage(cx),
+            Section::Usage => self.render_usage(window, cx),
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
             Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
@@ -1413,8 +1413,21 @@ impl SettingsPage {
             Section::Group => v_flex().child(self.remote.group.clone()),
             #[cfg(feature = "remote-hosting")]
             Section::Traverse => v_flex().child(self.remote.traverse.clone()),
-            Section::Archived => self.render_archived(cx),
+            Section::Archived => self.render_archived(window, cx),
             Section::Maintenance => self.render_maintenance(cx),
+        };
+        // The rail swaps sections in place, so a newly chosen section fades in;
+        // compact sections arrive through the shell's navigation stack.
+        let column = if self.window_state.read(cx).compact {
+            column
+        } else {
+            let entering = crate::motion::appear(
+                (gpui::ElementId::from(self.section.id()), "section"),
+                true,
+                window,
+                cx,
+            );
+            v_flex().opacity(entering.progress).child(column)
         };
         let scroll = if self.section == Section::ProjectThreadRules {
             &self.project_rules_scroll
@@ -1763,16 +1776,24 @@ impl SettingsPage {
                     .text_caption(cx)
                     .child(crate::tr!("settings.providers_section")),
             );
-        if let Some(checked_at) = checked_at {
+        let checked = checked_at.map(|checked_at| {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
+            crate::tr!("providers.checked", when = ago).into_owned()
+        });
+        if let Some(checked) = crate::motion::shown("providers-checked", checked, window, cx) {
             header = header.child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!("providers.checked", when = ago).into_owned()),
+                checked.fade(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(checked.value.clone()),
+                ),
             );
         }
-        if self.store.read(cx).tcode_update_status().update_available {
-            header = header.child(self.render_tcode_update_popover(cx));
+        let update_available = self.store.read(cx).tcode_update_status().update_available;
+        if let Some(update) =
+            crate::motion::shown("tcode-update", update_available.then_some(()), window, cx)
+        {
+            header = header.child(update.fade(self.render_tcode_update_popover(cx)));
         }
         header = header.child(
             Button::new("add-acp-agent")
@@ -1784,17 +1805,25 @@ impl SettingsPage {
                     this.open_acp_dialog(window, cx);
                 })),
         );
-        if !automatic.is_empty() {
+        if let Some(update_all) = crate::motion::shown(
+            "update-all-providers",
+            (!automatic.is_empty()).then(|| automatic.clone()),
+            window,
+            cx,
+        ) {
+            let automatic = update_all.value.clone();
             header = header.child(
-                Button::new("update-all-providers")
-                    .outline()
-                    .xsmall()
-                    .loading(run.is_some())
-                    .label(crate::tr!("providers.update_all"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.store
-                            .update(cx, |store, _cx| store.update_providers(automatic.clone()));
-                    })),
+                update_all.fade(
+                    Button::new("update-all-providers")
+                        .outline()
+                        .xsmall()
+                        .loading(run.is_some())
+                        .label(crate::tr!("providers.update_all"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.store
+                                .update(cx, |store, _cx| store.update_providers(automatic.clone()));
+                        })),
+                ),
             );
         }
         header = header.child(
@@ -1842,30 +1871,33 @@ impl SettingsPage {
             .collect();
 
         let mut section = v_flex().w_full().gap_3().child(header);
-        if let Some(run) = run {
+        if let Some(shown) = crate::motion::shown("provider-update-run", run, window, cx) {
+            let run = &shown.value;
             section = section.child(
-                v_flex()
-                    .w_full()
-                    .gap_2()
-                    .px(px(crate::material::CARD_INSET))
-                    .child(
-                        div().text_secondary(compact, cx).child(
-                            crate::tr!(
-                                "providers.update_progress",
-                                provider = run
-                                    .current
-                                    .map(|provider| provider.display_name())
-                                    .unwrap_or_default(),
-                                completed = run.completed,
-                                total = run.total
-                            )
-                            .into_owned(),
+                shown.fold(
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .px(px(crate::material::CARD_INSET))
+                        .child(
+                            div().text_secondary(compact, cx).child(
+                                crate::tr!(
+                                    "providers.update_progress",
+                                    provider = run
+                                        .current
+                                        .map(|provider| provider.display_name())
+                                        .unwrap_or_default(),
+                                    completed = run.completed,
+                                    total = run.total
+                                )
+                                .into_owned(),
+                            ),
+                        )
+                        .child(
+                            crate::widgets::progress::Progress::new("provider-update-progress")
+                                .value(100. * run.completed as f32 / run.total.max(1) as f32),
                         ),
-                    )
-                    .child(
-                        crate::widgets::progress::Progress::new("provider-update-progress")
-                            .value(100. * run.completed as f32 / run.total.max(1) as f32),
-                    ),
+                ),
             );
         }
         section = section.child(crate::material::grouped(provider_rows, cx));
@@ -1885,7 +1917,7 @@ impl SettingsPage {
 
     /// Show the rate-limit windows each enabled Codex / Claude Code profile
     /// reports; missing windows are not synthesized.
-    fn render_usage(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let store = self.store.read(cx);
         let profiles: Vec<_> = store
             .enabled_profiles()
@@ -1918,12 +1950,17 @@ impl SettingsPage {
                 .text_caption(cx)
                 .child(crate::tr!("usage.section")),
         );
-        if let Some(updated_at) = updated_at {
+        let updated = updated_at.map(|updated_at| {
             let ago = humanize_ago(now_secs().saturating_sub(updated_at));
+            crate::tr!("usage.updated", when = ago).into_owned()
+        });
+        if let Some(updated) = crate::motion::shown("usage-updated", updated, window, cx) {
             header = header.child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!("usage.updated", when = ago).into_owned()),
+                updated.fade(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(updated.value.clone()),
+                ),
             );
         }
         header = header.child(
@@ -1940,51 +1977,101 @@ impl SettingsPage {
         );
 
         let mut section = v_flex().w_full().gap_3().child(header);
-        if rows.is_empty() {
-            section = section.child(crate::material::grouped(
+        if let Some(none) = crate::motion::shown(
+            "usage-no-profiles",
+            rows.is_empty().then_some(()),
+            window,
+            cx,
+        ) {
+            section = section.child(none.fade(crate::material::grouped(
                 vec![self.usage_note_row(crate::tr!("usage.no_profiles").into_owned(), None, cx)],
                 cx,
-            ));
+            )));
         }
         for (profile_id, name, kind, usage, checking) in rows {
-            let mut card_rows = vec![self.usage_card_header(
-                &name,
-                kind,
+            let card_id =
+                gpui::ElementId::from(SharedString::from(format!("usage-card-{profile_id}")));
+            let plan = crate::motion::shown(
+                (card_id.clone(), "plan"),
                 usage.as_ref().and_then(|u| u.plan.clone()),
+                window,
                 cx,
-            )];
-            match &usage {
-                Some(usage) if usage.error.is_some() || !usage.windows.is_empty() => {
-                    if let Some(error) = usage.error.clone() {
-                        card_rows.push(self.usage_note_row(
-                            crate::tr!("usage.unavailable").into_owned(),
-                            Some(error),
+            );
+            let header = self.usage_card_header(&name, kind, plan, cx);
+            let reported = usage
+                .as_ref()
+                .filter(|usage| usage.error.is_some() || !usage.windows.is_empty());
+            let error = crate::motion::shown(
+                (card_id.clone(), "error"),
+                reported.and_then(|usage| usage.error.clone()),
+                window,
+                cx,
+            );
+            let hairline =
+                |cx: &App| crate::material::row_hairline(px(crate::material::CARD_INSET), cx);
+            let slot = match reported {
+                Some(_) => "windows",
+                None if checking => "checking",
+                None => "no-data",
+            };
+            let body = crate::motion::cross_fade(
+                (card_id.clone(), "body"),
+                slot,
+                window,
+                cx,
+                |slot, _, cx| {
+                    let slot = *slot;
+                    let rows = match slot {
+                        "windows" => {
+                            let mut rows = Vec::new();
+                            rows.push(match error.as_ref() {
+                                Some(error) => error.fold(div().child(hairline(cx)).child(
+                                    self.usage_note_row(
+                                        crate::tr!("usage.unavailable").into_owned(),
+                                        Some(error.value.clone()),
+                                        cx,
+                                    ),
+                                )),
+                                None => div().into_any_element(),
+                            });
+                            let now = now_secs();
+                            rows.extend(reported.into_iter().flat_map(|usage| {
+                                usage
+                                    .windows
+                                    .iter()
+                                    .map(|window| self.usage_window_row(window, now, cx))
+                                    .collect::<Vec<_>>()
+                            }));
+                            rows
+                        }
+                        "checking" => vec![self.usage_note_row(
+                            crate::tr!("usage.checking").into_owned(),
+                            None,
                             cx,
-                        ));
+                        )],
+                        _ => vec![self.usage_note_row(
+                            crate::tr!("usage.no_data").into_owned(),
+                            None,
+                            cx,
+                        )],
+                    };
+                    // The error fold draws its own hairline, so it can fold
+                    // away with it.
+                    let mut body = v_flex().w_full();
+                    for (index, row) in rows.into_iter().enumerate() {
+                        body = body
+                            .when(index > 0 || slot != "windows", |body| {
+                                body.child(hairline(cx))
+                            })
+                            .child(row);
                     }
-                    let now = now_secs();
-                    card_rows.extend(
-                        usage
-                            .windows
-                            .iter()
-                            .map(|window| self.usage_window_row(window, now, cx)),
-                    );
-                }
-                _ if checking => card_rows.push(self.usage_note_row(
-                    crate::tr!("usage.checking").into_owned(),
-                    None,
-                    cx,
-                )),
-                _ => card_rows.push(self.usage_note_row(
-                    crate::tr!("usage.no_data").into_owned(),
-                    None,
-                    cx,
-                )),
-            }
+                    body.into_any_element()
+                },
+            );
             section = section.child(
                 div()
-                    .id(SharedString::from(format!("usage-card-{profile_id}")))
-                    .child(crate::material::grouped(card_rows, cx)),
+                    .id(card_id)
+                    .child(crate::material::grouped(vec![header, body], cx)),
             );
         }
         section
@@ -1994,7 +2081,7 @@ impl SettingsPage {
         &self,
         name: &str,
         kind: agent::ProviderKind,
-        plan: Option<String>,
+        plan: Option<crate::motion::Shown<String>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -2004,12 +2091,12 @@ impl SettingsPage {
             .child(crate::provider_card::provider_glyph(kind))
             .child(div().flex_1().child(name.to_owned()))
             .when_some(plan, |row, plan| {
-                row.child(crate::material::semantic_chip(
-                    crate::usage::plan_label(&plan),
+                row.child(plan.fade(crate::material::semantic_chip(
+                    crate::usage::plan_label(&plan.value),
                     cx.theme().muted,
                     muted,
                     cx,
-                ))
+                )))
             })
             .into_any_element()
     }
@@ -2073,29 +2160,53 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Archived sessions grouped by project with restore and permanent-delete actions.
-    fn render_archived(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let full = self.store.read(cx).scope().is_full();
+    /// Archived sessions: loading, the empty state and the list cross-fade
+    /// into one another.
+    fn render_archived(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let groups = self.store.read(cx).archived_groups();
-        if groups.is_empty() {
-            let loading = self.store.read(cx).archived_loading();
-            return v_flex()
-                .gap(crate::material::section_gap(cx))
-                .child(crate::material::group_caption(
-                    crate::tr!("settings.archived_section"),
-                    cx,
-                ))
-                .child(if loading {
-                    crate::material::empty_row(crate::tr!("settings.archived_loading"), cx)
-                } else {
-                    crate::material::empty_state(
-                        Icon::new(Section::Archived.icon()),
-                        crate::tr!("settings.archived_empty"),
-                        crate::tr!("settings.archived_empty_desc"),
+        let slot = if !groups.is_empty() {
+            "list"
+        } else if self.store.read(cx).archived_loading() {
+            "loading"
+        } else {
+            "empty"
+        };
+        let mut groups = Some(groups).filter(|groups| !groups.is_empty());
+        let body = crate::motion::cross_fade("archived-body", slot, window, cx, |slot, _, cx| {
+            match *slot {
+                "list" => match groups.take() {
+                    Some(groups) => self.render_archived_list(groups, cx).into_any_element(),
+                    // A list leaving for the empty state has no rows left.
+                    None => div().into_any_element(),
+                },
+                slot => v_flex()
+                    .gap(crate::material::section_gap(cx))
+                    .child(crate::material::group_caption(
+                        crate::tr!("settings.archived_section"),
                         cx,
-                    )
-                });
-        }
+                    ))
+                    .child(if slot == "loading" {
+                        crate::material::empty_row(crate::tr!("settings.archived_loading"), cx)
+                    } else {
+                        crate::material::empty_state(
+                            Icon::new(Section::Archived.icon()),
+                            crate::tr!("settings.archived_empty"),
+                            crate::tr!("settings.archived_empty_desc"),
+                            cx,
+                        )
+                    })
+                    .into_any_element(),
+            }
+        });
+        v_flex().child(body)
+    }
+
+    fn render_archived_list(
+        &mut self,
+        groups: Vec<tcode_core::project::ProjectGroup>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let full = self.store.read(cx).scope().is_full();
 
         let flat: Vec<(SharedString, SessionMeta)> = groups
             .into_iter()

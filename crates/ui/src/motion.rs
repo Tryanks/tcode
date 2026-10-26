@@ -1,3 +1,5 @@
+use std::borrow::BorrowMut;
+
 use gpui::{
     AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, Stateful, Styled as _, Window, div, prelude::FluentBuilder as _, px,
@@ -139,27 +141,29 @@ struct Swap<T> {
 /// Content that changes to another of its states — a status, a QR for a new
 /// link — cross-fading from the one it showed. Each state is drawn under
 /// its own slot, which it keeps while it fades out on top of the next.
-pub(crate) fn cross_fade<T: Clone + PartialEq + 'static>(
+/// `cx` is the caller's own context, so a view's `build` can make listeners.
+pub(crate) fn cross_fade<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
     id: impl Into<ElementId>,
     value: T,
     window: &mut Window,
-    cx: &mut App,
-    build: impl Fn(&T, &mut Window, &mut App) -> AnyElement,
+    cx: &mut C,
+    mut build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
 ) -> AnyElement {
     let id = id.into();
-    let state = window.use_keyed_state(child_id(&id, "cross-fade"), cx, |_, _| Swap {
+    let app: &mut App = cx.borrow_mut();
+    let state = window.use_keyed_state(child_id(&id, "cross-fade"), app, |_, _| Swap {
         current: value.clone(),
         generation: 0,
         previous: None,
     });
-    if state.read(cx).current != value {
-        state.update(cx, |swap, _| {
+    if state.read(app).current != value {
+        state.update(app, |swap, _| {
             let current = std::mem::replace(&mut swap.current, value.clone());
             swap.previous = Some((current, swap.generation));
             swap.generation += 1;
         });
     }
-    let swap = state.read(cx).clone();
+    let swap = state.read(app).clone();
     let slot = |generation: u64| {
         ElementId::NamedChild(
             std::sync::Arc::new(id.clone()),
@@ -170,9 +174,9 @@ pub(crate) fn cross_fade<T: Clone + PartialEq + 'static>(
         Some(_) => {
             let sample = gpui_base::motion::Presence::new(slot(swap.generation), true)
                 .transition(settle())
-                .sample(window, cx);
+                .sample(window, app);
             if sample.phase == PresencePhase::Present {
-                state.update(cx, |swap, _| swap.previous = None);
+                state.update(app, |swap, _| swap.previous = None);
                 1.
             } else {
                 sample.progress
@@ -200,6 +204,9 @@ pub(crate) fn cross_fade<T: Clone + PartialEq + 'static>(
                     .absolute()
                     .top_0()
                     .left_0()
+                    // As wide as the frame at least, so a state that fills its
+                    // row keeps filling it while it leaves.
+                    .min_w_full()
                     .opacity(1. - progress)
                     .child(previous)
                     .child(div().absolute().inset_0().occlude()),
