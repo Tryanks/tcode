@@ -667,10 +667,12 @@ impl CommandPalette {
             }
             Action::Pane(action) => {
                 self.close(cx);
+                crate::shell::focus_focused_pane(window, cx);
                 window.dispatch_action(action(), cx);
             }
             Action::Layout(layout) => {
                 self.close(cx);
+                crate::shell::focus_focused_pane(window, cx);
                 window.dispatch_action(Box::new(layout), cx);
             }
             Action::OpenThread { session_id, turn } => {
