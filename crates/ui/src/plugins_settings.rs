@@ -1015,55 +1015,75 @@ impl PluginsSettingsPanel {
             self.list.reset(matches.len());
             self.listed = Some((profile_id.to_string(), listed));
         }
-        let body = if !matches.is_empty() {
-            let catalog = Rc::new(catalog);
-            let profile_id = profile_id.to_string();
-            crate::scroll::page_viewport(
-                "plugins-available-bounce",
-                &self.list,
-                list(
-                    self.list.clone(),
-                    cx.processor(move |this, ix: usize, window, cx| {
-                        let index = matches[ix];
-                        let row = this.available_row(
-                            &profile_id,
-                            &catalog,
-                            index,
-                            &catalog.entries[index],
-                            window,
-                            cx,
-                        );
-                        v_flex()
-                            .w_full()
-                            .child(row)
-                            .when(ix + 1 != matches.len(), |col| {
-                                col.child(material::row_hairline(px(material::CARD_INSET), cx))
-                            })
-                            .into_any_element()
-                    }),
+        // Listing cross-fades to what it found; which of those shows follows
+        // the search keystrokes and does not.
+        let listing = matches.is_empty() && catalog.loading && none_available;
+        let state = crate::motion::CrossFade::new(
+            SharedString::from(format!("plugins-available-{profile_id}")),
+            usize::from(!listing),
+            2,
+            window,
+            cx,
+        )
+        .fill();
+        let mut layers = Vec::new();
+        if state.shows(0) {
+            layers.push((
+                0,
+                self.note_row(
+                    crate::tr!("providers.plugins.listing").into_owned(),
+                    cx.theme().muted_foreground,
+                    cx,
+                ),
+            ));
+        }
+        let results = state.shows(1).then(|| {
+            if !matches.is_empty() {
+                let catalog = Rc::new(catalog);
+                let profile_id = profile_id.to_string();
+                crate::scroll::page_viewport(
+                    "plugins-available-bounce",
+                    &self.list,
+                    list(
+                        self.list.clone(),
+                        cx.processor(move |this, ix: usize, window, cx| {
+                            let index = matches[ix];
+                            let row = this.available_row(
+                                &profile_id,
+                                &catalog,
+                                index,
+                                &catalog.entries[index],
+                                window,
+                                cx,
+                            );
+                            v_flex()
+                                .w_full()
+                                .child(row)
+                                .when(ix + 1 != matches.len(), |col| {
+                                    col.child(material::row_hairline(px(material::CARD_INSET), cx))
+                                })
+                                .into_any_element()
+                        }),
+                    )
+                    .size_full(),
                 )
-                .size_full(),
-            )
-            .into_any_element()
-        } else if catalog.loading && none_available {
-            self.note_row(
-                crate::tr!("providers.plugins.listing").into_owned(),
-                cx.theme().muted_foreground,
-                cx,
-            )
-        } else if none_available {
-            self.note_row(
-                crate::tr!("providers.plugins.no_available").into_owned(),
-                cx.theme().muted_foreground,
-                cx,
-            )
-        } else {
-            self.note_row(
-                crate::tr!("providers.plugins.no_matches").into_owned(),
-                cx.theme().muted_foreground,
-                cx,
-            )
-        };
+                .into_any_element()
+            } else if none_available {
+                self.note_row(
+                    crate::tr!("providers.plugins.no_available").into_owned(),
+                    cx.theme().muted_foreground,
+                    cx,
+                )
+            } else {
+                self.note_row(
+                    crate::tr!("providers.plugins.no_matches").into_owned(),
+                    cx.theme().muted_foreground,
+                    cx,
+                )
+            }
+        });
+        layers.extend(results.map(|results| (1, results)));
+        let body = state.render(layers).size_full();
         v_flex()
             .w_full()
             .gap_2()
