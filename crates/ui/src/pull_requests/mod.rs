@@ -1005,17 +1005,16 @@ impl PullRequestsPanel {
         let detail = detail.join(" · ");
         let title_text = title.clone();
         // The first sync cross-fades the synced line over the placeholder line before it.
-        let line_two = std::cell::RefCell::new(Some(line_two));
+        let mut synced = Some(line_two);
         let line_two = crate::motion::cross_fade(
             (row_key.clone(), "line"),
             placeholder.clone(),
             window,
             cx,
             |shown, _, _| match shown {
-                _ if *shown == placeholder => line_two
-                    .borrow_mut()
-                    .take()
-                    .unwrap_or_else(|| div().into_any_element()),
+                _ if *shown == placeholder => {
+                    synced.take().unwrap_or_else(|| div().into_any_element())
+                }
                 Some(lead) => div()
                     .min_w_0()
                     .overflow_hidden()
