@@ -73,8 +73,9 @@ impl FeedbackRun {
     pub(crate) fn is_current(&self) -> bool {
         self.ticket.is_current()
     }
-    /// Successful actions retain only their bounded visual tail. Cancellation,
-    /// failure and a dropped request clear their own current marker immediately.
+    /// A finished run, whether or not its actions worked, keeps the cursor for
+    /// its bounded idle tail. Cancellation and a dropped request clear their
+    /// own current marker immediately.
     pub(crate) fn complete(&mut self) {
         self.completed = true;
     }

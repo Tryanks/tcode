@@ -126,15 +126,23 @@ pub fn perform_action(
     root: &RootInfo,
     request: &ActionRequest,
 ) -> Result<ActionResult, BackendError> {
-    perform_action_with_feedback(root, request, None)
+    perform_action_with_feedback(root, request, None, false)
 }
 
+/// `paced` delivers the input only once the agent cursor has reached its point.
 pub(crate) fn perform_action_with_feedback(
     root: &RootInfo,
     request: &ActionRequest,
     feedback: Option<&crate::feedback::FeedbackRun>,
+    paced: bool,
 ) -> Result<ActionResult, BackendError> {
-    reflect_overlay(root, request, feedback);
+    reflect_overlay(root, request, feedback, paced).wait();
+    if feedback.is_some_and(|run| !run.is_current()) {
+        return Ok(ActionResult::didnt(
+            "computer-use action cancelled",
+            Delivery::None,
+        ));
+    }
     match request.kind {
         ActionKind::Press => {
             let target = target(root, request)?;
@@ -440,9 +448,10 @@ fn reflect_overlay(
     root: &RootInfo,
     request: &ActionRequest,
     feedback: Option<&crate::feedback::FeedbackRun>,
-) {
+    paced: bool,
+) -> overlay::CursorArrival {
     let Some(publication) = overlay::begin_action(feedback.map(|run| run.ticket())) else {
-        return;
+        return overlay::CursorArrival::none();
     };
     use overlay::OverlayActionKind as K;
     match request.kind {
@@ -452,31 +461,31 @@ fn reflect_overlay(
             {
                 overlay::show_drag(
                     publication,
-                    root.pid,
                     root.window_id,
                     (first[0], first[1]),
                     (last[0], last[1]),
-                );
+                    paced,
+                )
+            } else {
+                overlay::CursorArrival::none()
             }
         }
         ActionKind::TypeText | ActionKind::SetText | ActionKind::Keypress => {
-            // Untargeted typing/key chords are valid backend actions. Their
-            // feedback belongs to the current root, not the previous pointer.
-            let point = action_point(root, request)
-                .ok()
-                .or_else(|| root.frame.has_area().then(|| root.frame.center()));
-            if let Some(point) = point {
-                overlay::show_action(publication, root.pid, root.window_id, K::Keyboard, point);
-            }
+            // Untargeted typing and key chords are valid backend actions; they
+            // keep the cursor where the previous action on this window left it.
+            let point = action_point(root, request).ok();
+            overlay::show_action(publication, root.window_id, K::Point, point, paced)
         }
         other => {
             let kind = match other {
-                ActionKind::Scroll => K::Scroll,
-                ActionKind::MoveMouse => K::Move,
+                ActionKind::Scroll | ActionKind::MoveMouse => K::Point,
                 _ => K::Click,
             };
-            if let Ok(point) = action_point(root, request) {
-                overlay::show_action(publication, root.pid, root.window_id, kind, point);
+            match action_point(root, request) {
+                Ok(point) => {
+                    overlay::show_action(publication, root.window_id, kind, Some(point), paced)
+                }
+                Err(_) => overlay::CursorArrival::none(),
             }
         }
     }
