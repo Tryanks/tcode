@@ -1,14 +1,18 @@
 //! Pinning and arranging threads. Rows of the desktop threads view drag within
 //! and between the Pinned, Active and Settled sections; the phone's Arrange
 //! threads page drags by handle; Move up / Move down write the same keys
-//! without a drag. Rows of the project view do none of this.
+//! without a drag. Rows of the project view, and every row in member scope,
+//! are not arranged; on the desktop they still drag, onto the chat column's
+//! panes.
 //!
 //! gpui-base has no sortable-list primitive (its dock drag is specific to tab
 //! groups), so the drag composes GPUI's `on_drag`, `on_drag_move` and
-//! `on_drop`, and GPUI does not cancel a drag on Escape by itself.
+//! `on_drop`, and GPUI does not cancel a drag on Escape by itself. The payload
+//! is the dock's host-owned `AnyDrag`, the only kind its panes accept.
 
 use super::*;
 use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, WeakEntity, deferred};
+use gpui_base::dock::AnyDrag;
 use tcode_core::thread_sort::{order_key_between, plan_reorder, thread_section};
 
 /// A `semantic_chip`'s height: one `xs` line and its 1pt insets.
@@ -16,9 +20,13 @@ const BOUNDARY_LABEL_HEIGHT: f32 = 18.;
 const EMPTY_TARGET_HEIGHT: f32 = 36.;
 const ARRANGE_HANDLE_SIZE: f32 = 44.;
 
-/// The drag payload; the sidebar keeps the drag's state in [`ThreadDrag`].
+/// The drag payload, carried as an `AnyDrag`; the sidebar keeps the drag's
+/// state in [`ThreadDrag`].
+#[derive(Clone)]
 pub(super) struct DraggedThread {
     session_id: String,
+    /// Whether the drag can move the row within the list.
+    arranges: bool,
     from: ThreadSection,
     scope: Option<String>,
     title: SharedString,
@@ -26,8 +34,16 @@ pub(super) struct DraggedThread {
     compact: bool,
 }
 
+/// The thread `item` carries, when a threads list row started it.
+pub(crate) fn thread_carried(item: &AnyDrag) -> Option<&str> {
+    item.value()
+        .downcast_ref::<DraggedThread>()
+        .map(|dragged| dragged.session_id.as_str())
+}
+
 pub(super) struct ThreadDrag {
     pub(super) session_id: String,
+    arranges: bool,
     from: ThreadSection,
     /// The project the drag stays inside; `None` is every project.
     scope: Option<String>,
@@ -38,6 +54,8 @@ pub(super) struct ThreadDrag {
     /// which gap indexes count.
     others: ThreadSections<String>,
     over: Option<ThreadSection>,
+    /// Where the drag began, which it returns to once it leaves the list.
+    home: (Option<(ThreadSection, usize)>, Option<ThreadSection>),
     can_settle: bool,
     width: Pixels,
     auto_scroll: gpui_base::AutoScroll,
@@ -248,8 +266,8 @@ impl SessionsSidebar {
         }
     }
 
-    /// The payload a row starts a drag with, or `None` where rows do not drag:
-    /// in member scope and while the row is being renamed.
+    /// The payload a row starts a drag with, or `None` while the row is
+    /// being renamed.
     pub(super) fn dragged_thread(
         &self,
         meta: &SessionMeta,
@@ -257,10 +275,9 @@ impl SessionsSidebar {
         cx: &App,
     ) -> Option<DraggedThread> {
         let store = self.store.read(cx);
-        let draggable =
-            store.scope().is_full() && state.renaming.is_none() && !self.in_project_view(cx);
-        draggable.then(|| DraggedThread {
+        state.renaming.is_none().then(|| DraggedThread {
             session_id: meta.id.clone(),
+            arranges: store.scope().is_full() && !self.in_project_view(cx),
             from: thread_section(meta),
             scope: self.list_scope(cx),
             title: meta.title.clone().into(),
@@ -278,9 +295,14 @@ impl SessionsSidebar {
         cx: &Context<Self>,
     ) -> E {
         let sidebar = cx.entity().downgrade();
-        element.on_drag(dragged, move |dragged, _, _, cx| {
-            Self::begin_drag(sidebar.clone(), dragged, cx)
+        element.on_drag(AnyDrag::new(dragged.clone()), move |_, _, _, cx| {
+            Self::begin_drag(sidebar.clone(), &dragged, cx)
         })
+    }
+
+    /// The thread a drag in progress carries.
+    pub(crate) fn dragged_session(&self) -> Option<&str> {
+        self.drag.as_ref().map(|drag| drag.session_id.as_str())
     }
 
     fn begin_drag(
@@ -302,7 +324,7 @@ impl SessionsSidebar {
         };
         let _ = sidebar.update(cx, |this, cx| {
             let sections = this.scoped_sections(dragged.scope.as_deref(), cx);
-            let gap = (dragged.from != ThreadSection::Settled)
+            let gap = (dragged.arranges && dragged.from != ThreadSection::Settled)
                 .then(|| {
                     sections
                         .section(dragged.from)
@@ -320,8 +342,10 @@ impl SessionsSidebar {
                     .map(|(meta, _)| meta.id.clone())
                     .collect()
             };
+            let over = dragged.arranges.then_some(dragged.from);
             this.drag = Some(ThreadDrag {
                 session_id: dragged.session_id.clone(),
+                arranges: dragged.arranges,
                 from: dragged.from,
                 scope: dragged.scope.clone(),
                 gap,
@@ -330,7 +354,8 @@ impl SessionsSidebar {
                     active: others(ThreadSection::Active),
                     settled: vec![],
                 },
-                over: Some(dragged.from),
+                over,
+                home: (gap, over),
                 can_settle: dragged.can_settle,
                 width: px(240.),
                 auto_scroll: Default::default(),
@@ -374,8 +399,8 @@ impl SessionsSidebar {
         inset: f32,
         cx: &Context<Self>,
     ) -> gpui::Div {
-        element.on_drag_move::<DraggedThread>(cx.listener(
-            move |this, event: &DragMoveEvent<DraggedThread>, _, cx| {
+        element.on_drag_move::<AnyDrag>(cx.listener(
+            move |this, event: &DragMoveEvent<AnyDrag>, _, cx| {
                 if event.bounds.contains(&event.event.position) {
                     let lower = event.event.position.y > event.bounds.center().y;
                     let width = event.bounds.size.width - px(inset * 2.);
@@ -393,7 +418,7 @@ impl SessionsSidebar {
         width: Pixels,
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = self.drag.as_ref() else {
+        let Some(drag) = self.drag.as_ref().filter(|drag| drag.arranges) else {
             return;
         };
         let (mut gap, mut over) = (drag.gap, drag.over);
@@ -442,10 +467,28 @@ impl SessionsSidebar {
         }
     }
 
+    /// A drag carried out of the list, toward the chat column's panes, puts
+    /// the row back where it began until it returns.
+    pub(super) fn drag_left_list(
+        &mut self,
+        event: &DragMoveEvent<AnyDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        if event.bounds.contains(&event.event.position) || (drag.gap, drag.over) == drag.home {
+            return;
+        }
+        (drag.gap, drag.over) = drag.home;
+        self.compact_model_dirty = true;
+        cx.notify();
+    }
+
     /// Scroll the list under a drag held near its top or bottom edge.
     pub(super) fn drag_auto_scroll(
         &mut self,
-        event: &DragMoveEvent<DraggedThread>,
+        event: &DragMoveEvent<AnyDrag>,
         cx: &mut Context<Self>,
     ) {
         let Some(drag) = self.drag.as_mut() else {
@@ -973,14 +1016,12 @@ impl SessionsSidebar {
                     .id("arrange-thread-list")
                     .flex_1()
                     .min_h_0()
-                    .on_drop(cx.listener(|this, _: &DraggedThread, window, cx| {
-                        this.drop_thread(window, cx)
+                    .on_drop(
+                        cx.listener(|this, _: &AnyDrag, window, cx| this.drop_thread(window, cx)),
+                    )
+                    .on_drag_move(cx.listener(|this, event: &DragMoveEvent<AnyDrag>, _, cx| {
+                        this.drag_auto_scroll(event, cx)
                     }))
-                    .on_drag_move(cx.listener(
-                        |this, event: &DragMoveEvent<DraggedThread>, _, cx| {
-                            this.drag_auto_scroll(event, cx)
-                        },
-                    ))
                     .child(
                         list(
                             self.arrange_list_state.clone(),
@@ -1149,7 +1190,10 @@ impl SessionsSidebar {
                 .size(px(20.))
                 .text_color(cx.theme().muted_foreground),
         );
-        let handle = match self.dragged_thread(meta, &state, cx) {
+        let handle = match self
+            .dragged_thread(meta, &state, cx)
+            .filter(|dragged| dragged.arranges)
+        {
             Some(dragged) => Self::drag_source(handle, dragged, cx),
             None => handle,
         };
