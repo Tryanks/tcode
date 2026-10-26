@@ -131,22 +131,21 @@ impl HeldHistory {
 }
 
 impl WorkspaceStore {
-    fn selected_history(&self) -> Option<&HeldHistory> {
-        self.threads
-            .get(self.selected_session_id.as_ref()?)?
-            .history
-            .as_ref()
+    fn focused_history(&self) -> Option<&HeldHistory> {
+        self.focused_thread()?.history.as_ref()
     }
 
     pub(crate) fn history_available(&self) -> bool {
-        self.selected_history().is_some_and(|held| held.from > 0)
+        self.focused_history().is_some_and(|held| held.from > 0)
     }
 
     pub(crate) fn history_loading(&self) -> bool {
-        self.history_task.is_some() && self.history_error.is_none()
+        self.focused_thread()
+            .is_some_and(|thread| thread.history_task.is_some() && thread.history_error.is_none())
     }
+
     pub(crate) fn history_error(&self) -> Option<&str> {
-        self.history_error.as_deref()
+        self.focused_thread()?.history_error.as_deref()
     }
 
     /// Chat tests that run frame callbacks would otherwise request a page from
@@ -154,16 +153,20 @@ impl WorkspaceStore {
     /// does not control. A failed page holds prefetch until its retry cooldown.
     #[cfg(test)]
     pub(crate) fn suppress_history_prefetch_for_test(&mut self) {
-        self.history_error = Some("prefetch suppressed".into());
+        if let Some(thread) = self.focused_thread_mut() {
+            thread.history_error = Some("prefetch suppressed".into());
+        }
     }
 
     pub(super) fn load_pending_chat_history(&mut self, cx: &mut Context<Self>) {
-        if self.history_error.is_none()
-            && self.pending_chat_turn.as_ref().is_some_and(|(id, turn)| {
-                self.selected_session_id.as_ref() == Some(id) && *turn < self.session_turn_offset
-            })
-        {
-            self.load_earlier_messages(cx);
+        let Some((session_id, turn)) = self.pending_chat_turn.clone() else {
+            return;
+        };
+        let wanted = self.threads.get(&session_id).is_some_and(|thread| {
+            thread.open && thread.history_error.is_none() && turn < thread.turn_offset
+        });
+        if wanted {
+            self.load_history_pages(&session_id, false, cx);
         }
     }
 
@@ -174,28 +177,39 @@ impl WorkspaceStore {
         if self.session_loading() || !screens.is_finite() {
             return false;
         }
-        let records = self.selected_history().map_or(0, |held| held.records.len());
-        self.history_logged_records != Some(records)
-            || self.wants_history_page(screens)
-            || self.history_trim_changes(following_tail)
+        let Some((session_id, thread)) = self
+            .focused_session_id
+            .as_ref()
+            .and_then(|id| Some((id, self.threads.get(id)?)))
+        else {
+            return false;
+        };
+        let records = thread.history.as_ref().map_or(0, |held| held.records.len());
+        thread.history_logged_records != Some(records)
+            || self.wants_history_page(session_id, screens)
+            || Self::history_trim_changes(thread, following_tail)
     }
 
-    fn wants_history_page(&self, screens: f32) -> bool {
+    fn wants_history_page(&self, session_id: &str, screens: f32) -> bool {
         screens < HISTORY_WINDOW_SCREENS
-            && self.history_error.is_none()
-            && self.history_page_loadable()
+            && self
+                .threads
+                .get(session_id)
+                .is_some_and(|thread| thread.history_error.is_none())
+            && self.history_page_loadable(session_id)
     }
 
     /// Whether the trim of pages above the tail is to be scheduled or
     /// cancelled.
-    fn history_trim_changes(&self, following_tail: bool) -> bool {
+    fn history_trim_changes(thread: &ThreadReplica, following_tail: bool) -> bool {
         if following_tail {
-            self.history_trim.is_none()
-                && self
-                    .selected_history()
+            thread.history_trim.is_none()
+                && thread
+                    .history
+                    .as_ref()
                     .is_some_and(HeldHistory::holds_pages_above_tail)
         } else {
-            self.history_trim.is_some()
+            thread.history_trim.is_some()
         }
     }
 
@@ -210,33 +224,46 @@ impl WorkspaceStore {
         if self.session_loading() || !screens.is_finite() {
             return;
         }
-        let records = self.selected_history().map_or(0, |held| held.records.len());
-        if self.history_logged_records != Some(records) {
+        let Some(session_id) = self.focused_session_id.clone() else {
+            return;
+        };
+        let wants_page = self.wants_history_page(&session_id, screens);
+        let Some(thread) = self.threads.get_mut(&session_id) else {
+            return;
+        };
+        let records = thread.history.as_ref().map_or(0, |held| held.records.len());
+        if thread.history_logged_records != Some(records) {
             log::debug!(
-                "history-window session={:?} records_loaded={} screens_covered={:.2} pages_fetched={}",
-                self.selected_session_id,
+                "history-window session={session_id:?} records_loaded={} screens_covered={:.2} pages_fetched={}",
                 records,
                 screens.max(0.),
-                self.history_pages_fetched
+                thread.history_pages_fetched
             );
-            self.history_logged_records = Some(records);
+            thread.history_logged_records = Some(records);
         }
-        if self.wants_history_page(screens) {
-            self.load_history_pages(following_tail, cx);
+        if wants_page {
+            self.load_history_pages(&session_id, following_tail, cx);
         }
-        if !self.history_trim_changes(following_tail) {
+        let Some(thread) = self.threads.get_mut(&session_id) else {
+            return;
+        };
+        if !Self::history_trim_changes(thread, following_tail) {
             return;
         }
         if !following_tail {
-            self.history_trim = None;
+            thread.history_trim = None;
         } else {
-            let generation = self.selection_generation;
-            self.history_trim = Some(cx.spawn(async move |this, cx| {
+            let generation = thread.generation;
+            thread.history_trim = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(HISTORY_TRIM_DELAY).await;
                 let _ = this.update(cx, |store, cx| {
-                    if store.selection_generation == generation {
-                        store.history_trim = None;
-                        store.drop_selected_pages_above_tail();
+                    let open = store
+                        .threads
+                        .get_mut(&session_id)
+                        .filter(|thread| thread.generation == generation);
+                    if let Some(thread) = open {
+                        thread.history_trim = None;
+                        store.drop_pages_above_tail(&session_id);
                         cx.notify();
                     }
                 });
@@ -246,58 +273,60 @@ impl WorkspaceStore {
 
     /// The rows the dropped pages rendered are above the reader, who follows
     /// the tail, and the list removes them without moving what is on screen.
-    fn drop_selected_pages_above_tail(&mut self) {
-        // A page in flight continues the cursor it was asked from; the next
-        // report from the tail schedules the drop again.
-        if self.history_task.is_some() || self.session_catching_up {
-            return;
-        }
-        let Some(session_id) = self.selected_session_id.clone() else {
+    fn drop_pages_above_tail(&mut self, session_id: &str) {
+        let Some(thread) = self.threads.get_mut(session_id) else {
             return;
         };
-        let Some(held) = self
-            .threads
-            .get_mut(&session_id)
-            .and_then(|thread| thread.history.as_mut())
-        else {
+        // A page in flight continues the cursor it was asked from; the next
+        // window replaces whatever is held.
+        if thread.history_task.is_some() || thread.catching_up {
+            return;
+        }
+        let Some(held) = thread.history.as_mut() else {
             return;
         };
         if !held.drop_pages_above_tail() {
             return;
         }
-        let previous_turns = self
-            .session_replica
+        let previous_turns = thread
+            .timeline
             .as_ref()
-            .map_or(0, |(_, timeline)| timeline.turns.len());
-        let mut timeline = self.fold_held_records(&session_id);
-        self.session_turn_offset += previous_turns.saturating_sub(timeline.turns.len());
-        self.settle_running_turn(&mut timeline);
-        self.session_replica = Some((session_id, timeline));
+            .map_or(0, |timeline| timeline.turns.len());
+        let mut timeline = thread.fold_held_records();
+        thread.turn_offset += previous_turns.saturating_sub(timeline.turns.len());
+        thread.settle_running_turn(&mut timeline);
+        thread.timeline = Some(timeline);
     }
 
+    #[cfg(test)]
     pub(crate) fn load_earlier_messages(&mut self, cx: &mut Context<Self>) {
-        self.load_history_pages(false, cx);
+        if let Some(session_id) = self.focused_session_id.clone() {
+            self.load_history_pages(&session_id, false, cx);
+        }
     }
 
-    fn history_page_loadable(&self) -> bool {
-        self.history_task.is_none()
-            && self.history_available()
-            && !self.session_loading()
-            && self.baseline_topics.contains(&Topic::SessionEvents {
-                session_id: self.selected_session_id.clone().expect("selected history"),
-            })
+    fn history_page_loadable(&self, session_id: &str) -> bool {
+        self.threads.get(session_id).is_some_and(|thread| {
+            thread.history_task.is_none()
+                && thread.history.as_ref().is_some_and(|held| held.from > 0)
+                && thread.timeline.is_some()
+                && thread.status.is_some()
+        }) && self.baseline_topics.contains(&Topic::SessionEvents {
+            session_id: session_id.to_owned(),
+        })
     }
 
-    fn load_history_pages(&mut self, tail: bool, cx: &mut Context<Self>) {
-        if !self.history_page_loadable() {
+    fn load_history_pages(&mut self, session_id: &str, tail: bool, cx: &mut Context<Self>) {
+        if !self.history_page_loadable(session_id) {
             return;
         }
-        let session_id = self.selected_session_id.clone().expect("selected history");
-        let before = self.selected_history().expect("selected history").from;
-        let generation = self.selection_generation;
         let host = self.host.clone();
-        self.history_error = None;
-        self.history_task = Some(cx.spawn(async move |this, cx| {
+        let thread = self.threads.get_mut(session_id).expect("loadable thread");
+        let before = thread.history.as_ref().expect("loadable history").from;
+        let generation = thread.generation;
+        thread.history_error = None;
+        let session_id = session_id.to_owned();
+        thread.history_task = Some(cx.spawn(async move |this, cx| {
             let result = host
                 .query(Query::SessionHistoryPage {
                     session_id: session_id.clone(),
@@ -306,44 +335,47 @@ impl WorkspaceStore {
                 })
                 .await;
             let failed = this.update(cx, |store, cx| {
-                if store.selection_generation != generation {
+                let Some(thread) = store
+                    .threads
+                    .get_mut(&session_id)
+                    .filter(|thread| thread.generation == generation)
+                else {
                     return false;
-                }
+                };
                 match result {
                     Ok(QueryResponse::SessionHistoryPage {
                         records, from, end, ..
                     }) if from < before
                             && end == before
-                            && store.selected_history().map(|held| held.from) == Some(before) =>
+                            && thread.history.as_ref().map(|held| held.from) == Some(before) =>
                     {
-                        store.history_pages_fetched += 1;
-                        let previous_turns = store
-                            .session_replica
+                        thread.history_pages_fetched += 1;
+                        let previous_turns = thread
+                            .timeline
                             .as_ref()
-                            .map_or(0, |(_, timeline)| timeline.turns.len());
-                        store
-                            .threads
-                            .get_mut(&session_id)
-                            .and_then(|thread| thread.history.as_mut())
+                            .map_or(0, |timeline| timeline.turns.len());
+                        thread
+                            .history
+                            .as_mut()
                             .expect("held window checked above")
                             .prepend(records, from, tail);
-                        let mut timeline = store.fold_held_records(&session_id);
-                        store.session_turn_offset = store
-                            .session_turn_offset
+                        let mut timeline = thread.fold_held_records();
+                        thread.turn_offset = thread
+                            .turn_offset
                             .saturating_sub(timeline.turns.len().saturating_sub(previous_turns));
-                        store.settle_running_turn(&mut timeline);
-                        store.session_replica = Some((session_id, timeline));
+                        thread.settle_running_turn(&mut timeline);
+                        thread.timeline = Some(timeline);
                     }
                     Err(error) => {
                         log::warn!("Earlier history page failed for {session_id} before {before}: {error:?}");
-                        store.history_error = Some(error.message);
+                        thread.history_error = Some(error.message);
                     }
                     _ => {
                         log::warn!("Invalid earlier history page response for {session_id} before {before}");
-                        store.history_error = Some("Invalid history page response".into());
+                        thread.history_error = Some("Invalid history page response".into());
                     }
                 }
-                let failed = store.history_error.is_some();
+                let failed = thread.history_error.is_some();
                 cx.notify();
                 failed
             }).unwrap_or(false);
@@ -355,14 +387,19 @@ impl WorkspaceStore {
                 std::time::Duration::from_millis(250)
             }).await;
             let _ = this.update(cx, |store, cx| {
-                if store.selection_generation == generation {
-                    store.history_task = None;
-                    if failed {
-                        store.history_error = None;
-                    }
-                    store.load_pending_chat_history(cx);
-                    cx.notify();
+                let Some(thread) = store
+                    .threads
+                    .get_mut(&session_id)
+                    .filter(|thread| thread.generation == generation)
+                else {
+                    return;
+                };
+                thread.history_task = None;
+                if failed {
+                    thread.history_error = None;
                 }
+                store.load_pending_chat_history(cx);
+                cx.notify();
             });
         }));
         cx.notify();

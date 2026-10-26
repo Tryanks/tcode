@@ -708,23 +708,6 @@ fn main() {
                         {
                             store.update(cx, |store, _| store.select_session(id));
                         }
-                        for _ in 0..100 {
-                            if cx.update(|cx| {
-                                shell.read(cx).store().is_some_and(|store| {
-                                    store.read(cx).active_session_id().is_some()
-                                })
-                            }) {
-                                break;
-                            }
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(10))
-                                .await;
-                        }
-                        if let Some(store) = cx.update(|cx| shell.read(cx).store()) {
-                            store.update(cx, |store, _cx| {
-                                store.sync_active_conversation_ui();
-                            });
-                        }
                     }
                 })
                 .detach();

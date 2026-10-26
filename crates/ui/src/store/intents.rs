@@ -447,121 +447,118 @@ impl WorkspaceStore {
         self.dispatch(Command::MarkSessionUnread { session_id });
         self.local_settings_changed(cx);
     }
+    /// Leave the focused thread: nothing is focused, and the thread closes
+    /// unless another surface still shows it.
     pub(crate) fn leave_session(&mut self) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
-        self.history_task = None;
-        self.history_trim = None;
-        self.history_error = None;
-        self.history_pages_fetched = 0;
-        self.history_logged_records = None;
-        self.session_turn_offset = 0;
-        self.session_catching_up = false;
-        self.clear_terminal_topics();
-        self.clear_command_outputs();
-        if let Some(session_id) = self.selected_session_id.take() {
-            if let Some(thread) = self.threads.get_mut(&session_id) {
-                thread.left_at = self.selection_generation;
-                // The thread reopens at its tail.
-                if let Some(held) = &mut thread.history {
-                    held.drop_pages_above_tail();
-                }
-            }
-            self.release_left_threads();
-            for topic in [
-                tcode_protocol::Topic::SessionEvents {
-                    session_id: session_id.clone(),
-                },
-                tcode_protocol::Topic::SessionStatus {
-                    session_id: session_id.clone(),
-                },
-                tcode_protocol::Topic::SessionPlan {
-                    session_id: session_id.clone(),
-                },
-                tcode_protocol::Topic::GitStatus { session_id },
-            ] {
-                let _ = self.host.unsubscribe(tcode_protocol::Subscription {
-                    known_index: None,
-                    topic,
-                    after: None,
-                });
-            }
+        if let Some(session_id) = self.focused_session_id.take() {
+            self.close_thread(&session_id);
         }
-        self.session_status_replica = None;
-        self.session_replica = None;
-        self.read_acknowledged = None;
-        self.active_destination = None;
-        self.git_status_replica = Default::default();
     }
 
-    /// Keep the replicas of the [`KEPT_THREADS`] threads left most recently.
-    fn release_left_threads(&mut self) {
-        if self.threads.len() <= KEPT_THREADS {
-            return;
+    /// Stop showing a thread: its topics are unsubscribed and its paging
+    /// state forgotten, while its replicas stay for a while so reopening it
+    /// fetches only what it missed.
+    fn close_thread(&mut self, session_id: &str) {
+        self.clear_command_outputs(session_id);
+        if let Some(thread) = self.threads.get_mut(session_id) {
+            thread.open = false;
+            thread.generation = thread.generation.wrapping_add(1);
+            thread.left_at = self.selection_generation;
+            thread.reset_paging();
+            thread.timeline = None;
+            thread.read_acknowledged = None;
+            thread.destination = None;
+            // The thread reopens at its tail.
+            if let Some(held) = &mut thread.history {
+                held.drop_pages_above_tail();
+            }
         }
+        self.release_left_threads();
+        for topic in [
+            tcode_protocol::Topic::SessionEvents {
+                session_id: session_id.to_owned(),
+            },
+            tcode_protocol::Topic::SessionStatus {
+                session_id: session_id.to_owned(),
+            },
+            tcode_protocol::Topic::SessionPlan {
+                session_id: session_id.to_owned(),
+            },
+            tcode_protocol::Topic::GitStatus {
+                session_id: session_id.to_owned(),
+            },
+        ] {
+            let _ = self.host.unsubscribe(tcode_protocol::Subscription {
+                known_index: None,
+                topic,
+                after: None,
+            });
+        }
+        self.sync_terminal_topics();
+    }
+
+    /// Keep the replicas of the [`KEPT_THREADS`] threads left most recently,
+    /// besides the open ones.
+    fn release_left_threads(&mut self) {
         let mut left: Vec<(u64, String)> = self
             .threads
             .iter()
+            .filter(|(_, thread)| !thread.open)
             .map(|(id, thread)| (thread.left_at, id.clone()))
             .collect();
+        if left.len() <= KEPT_THREADS {
+            return;
+        }
         left.sort_unstable_by(|a, b| b.cmp(a));
         for (_, id) in &left[KEPT_THREADS..] {
             self.threads.remove(id);
         }
     }
 
-    pub fn select_session(&mut self, session_id: String) {
-        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
-        self.draft_fallback_pending = false;
-        if self.selected_session_id.as_ref() == Some(&session_id) {
-            return;
-        }
-        let project_id = self
-            .index_replica
-            .0
-            .iter()
-            .find(|meta| meta.id == session_id)
-            .and_then(|meta| meta.project_id.clone());
-        self.remember_project(project_id);
-        self.leave_session();
-        self.selected_session_id = Some(session_id.clone());
+    /// Show a thread: subscribe its topics and fold what the client already
+    /// holds of it, so a kept thread shows its last window at once.
+    fn open_thread(&mut self, session_id: &str) {
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionStatus {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             });
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionPlan {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             });
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionEvents {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             });
-        let thread = self.threads.entry(session_id.clone()).or_default();
-        self.session_status_replica = thread.status.clone();
-        self.git_status_replica = thread.git.clone().unwrap_or_default();
+        let thread = self.threads.entry(session_id.to_owned()).or_default();
+        if !thread.open {
+            thread.open = true;
+            thread.generation = thread.generation.wrapping_add(1);
+        }
+        thread.reset_paging();
+        thread.timeline = None;
         let after = thread.history.as_ref().map(|held| held.end);
-        let total_turns = thread.total_turns;
-        if let Some(total_turns) = total_turns.filter(|_| after.is_some()) {
-            let mut timeline = self.fold_held_records(&session_id);
-            self.session_turn_offset = total_turns.saturating_sub(timeline.turns.len());
-            self.settle_running_turn(&mut timeline);
-            self.session_replica = Some((session_id.clone(), timeline));
+        if let Some(total_turns) = thread.total_turns.filter(|_| after.is_some()) {
+            thread.refold(total_turns);
         }
         if !self.baseline_topics.contains(&tcode_protocol::Topic::Scope) {
             return;
         }
         for topic in [
             tcode_protocol::Topic::SessionStatus {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             },
             tcode_protocol::Topic::SessionPlan {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             },
             tcode_protocol::Topic::GitStatus {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             },
-            tcode_protocol::Topic::SessionEvents { session_id },
+            tcode_protocol::Topic::SessionEvents {
+                session_id: session_id.to_owned(),
+            },
         ] {
             let _ = self.host.subscribe(tcode_protocol::Subscription {
                 known_index: None,
@@ -574,7 +571,25 @@ impl WorkspaceStore {
             });
         }
         self.sync_terminal_topics();
-        self.sync_active_conversation_ui();
+        self.sync_conversation_ui(session_id);
+    }
+
+    pub fn select_session(&mut self, session_id: String) {
+        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
+        self.draft_fallback_pending = false;
+        if self.focused_session_id.as_ref() == Some(&session_id) {
+            return;
+        }
+        let project_id = self
+            .index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .and_then(|meta| meta.project_id.clone());
+        self.remember_project(project_id);
+        self.leave_session();
+        self.focused_session_id = Some(session_id.clone());
+        self.open_thread(&session_id);
     }
     pub fn select_session_at_turn(&mut self, session_id: String, turn: usize) {
         self.anchor_turn_task = None;
@@ -917,8 +932,7 @@ impl WorkspaceStore {
     }
     pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
         let closes_drawer = self
-            .session_status_replica
-            .as_ref()
+            .focused_status()
             .is_some_and(|status| status.terminals.len() <= 1);
         if closes_drawer && let Some(ui) = self.active_conversation_ui_mut() {
             ui.terminal_open = false;
