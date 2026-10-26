@@ -221,7 +221,15 @@ impl Render for ThreadPanel {
         const CHAT: usize = 1;
         let bounds = self.bounds.clone();
         // A pane beside others waits for a thread rather than offering the
-        // empty workspace's way to start one.
+        // empty workspace's way to start one. The swap cross-fades when the
+        // binding changes inside a layout that holds; when a neighbour comes
+        // or goes it lands with the dock re-parenting the group and snaps
+        // (see `ThreadPanes`). A pane whose thread closes is rebound before
+        // the fade, so the leaving layer is this chat already showing the
+        // empty workspace: GPUI cannot draw an element tree from an earlier
+        // frame, and the store frees a closed thread's timeline in
+        // `close_thread` before the shell hears of it, so a chat kept bound
+        // to it would draw its loading skeleton instead.
         let waiting = self.among_others && self.session_id.is_none();
         let content = crate::motion::CrossFade::new(
             "pane-content",
@@ -280,6 +288,17 @@ pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window
 /// A pane opens, closes, zooms and resizes without motion: gpui-base's dock
 /// lays its groups out with no layout transition and unmounts a closed group
 /// at once, so neither a pane's size nor its leaving can be animated here.
+///
+/// The dock also re-parents a group whenever the tree around it changes: a
+/// lone group sits in the area's frame, a split puts it under
+/// `("dock-split", node)`, a merge or a close lifts it back out, and zoom
+/// draws it straight into the frame. Element state is keyed by the full id
+/// path from the window root, so every pane that moves in the tree starts
+/// over: its focus ring and its waiting-hint cross-fade snap to their
+/// targets in the frame of a split, a close or a zoom (they glide only while
+/// the layout holds still), and its chat loses its handle-less stateful
+/// scrolls, such as the header's `chat-header-scroll`, and any other keyed
+/// state under it.
 pub(crate) struct ThreadPanes {
     lands: DropLands,
 }
@@ -327,7 +346,8 @@ impl TabGroupRenderer for ThreadTabs {
         cx: &mut App,
     ) -> AnyElement {
         // Always sampled, so the ring glides in and out as the keyboard moves
-        // between panes, a neighbour comes or goes, or the pane zooms.
+        // between panes that stay where they are. A split, a close or a zoom
+        // re-parents the group and the ring snaps (see `ThreadPanes`).
         let focused = group.is_closable()
             && group
                 .active_panel()
@@ -365,17 +385,26 @@ impl TabGroupRenderer for ThreadTabs {
     /// The pane a dragged thread would open as, or the pane it would replace.
     /// `DropIndicator` names no group, so the shell finds the pane by the
     /// bounds the drag hovers.
+    ///
+    /// Over a spot where the drop cannot land the placeholder fades out where
+    /// it last could, and fades back in when the drag returns; within one
+    /// pane it springs between the edges and the middle. Moving to another
+    /// pane it neither travels nor fades: each tab group draws its own
+    /// indicator under its own element path (gpui-base's `TabGroup::render`)
+    /// and the dock has no area-level one, so the old pane's is gone and the
+    /// new one's starts at rest. Base also stops calling this hook once the
+    /// drag leaves the group, lands or is cancelled, so there is nothing left
+    /// to draw an exit with, and an entry fade alone would be enter-only.
     fn render_drop_indicator(
         &self,
         indicator: DropIndicator,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        if !(self.lands)(indicator.bounds(), indicator.placement(), window, cx) {
-            return None;
-        }
-        let to = indicator.to();
         let id = "pane-drop-placeholder";
+        let lands = (self.lands)(indicator.bounds(), indicator.placement(), window, cx);
+        let shown = crate::motion::shown(id, lands.then(|| indicator.to()), window, cx)?;
+        let to = shown.value;
         let spring = |channel, target, window: &mut Window, cx: &mut App| -> Pixels {
             gpui_base::motion::spring((id, channel), target, crate::motion::FOLLOW, window, cx)
         };
@@ -385,6 +414,9 @@ impl TabGroupRenderer for ThreadTabs {
         let height = spring("height", to.size().height, window, cx);
         let inset = cx.theme().tokens.spacing.sm;
         let accent = cx.theme().primary;
+        // The opacity is set here rather than through `Shown::fade`, whose
+        // relative frame would become the absolute placeholder's containing
+        // block, and whose shield would take the drop from the group beneath.
         Some(
             div()
                 .debug_selector(|| "pane-drop-indicator".into())
@@ -393,6 +425,7 @@ impl TabGroupRenderer for ThreadTabs {
                 .top(top + inset)
                 .w((width - inset * 2.).max(px(0.)))
                 .h((height - inset * 2.).max(px(0.)))
+                .opacity(shown.progress())
                 .rounded(crate::material::radius_card(cx))
                 .border_1()
                 .border_color(accent.opacity(0.5))
@@ -478,6 +511,9 @@ fn column_edges(edges: WindowEdges, ix: usize, count: usize) -> WindowEdges {
 
 /// The pane nearest `from` on `direction`'s side among those beside it
 /// across that axis. `None` for a direction that is not a side.
+///
+/// Local because gpui-base's dock has no keyboard navigation between groups
+/// (see `AppShell::focus_pane`).
 pub(crate) fn neighbour(
     from: Bounds<Pixels>,
     panes: &[Bounds<Pixels>],
