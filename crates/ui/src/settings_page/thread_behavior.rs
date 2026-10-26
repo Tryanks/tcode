@@ -196,7 +196,8 @@ impl SettingsPage {
             cx,
             WorkspaceStore::set_abort_on_model_fallback,
         )];
-        if settings.abort_on_model_fallback {
+        // The review rows apply only while a fallback aborts, and fold with it.
+        {
             let advisor_reset = crate::settings_rows::reset_action(
                 "reset-fallback-review-advisor",
                 settings.fallback_review_advisor,
@@ -204,7 +205,7 @@ impl SettingsPage {
                     this.dispatch_settings(|store| store.set_fallback_review_advisor(false), cx)
                 }),
             );
-            rows.push(self.toggle_row(
+            let advisor = self.toggle_row(
                 "fallback-review-advisor",
                 crate::tr!("settings.fallback_review_advisor.title"),
                 crate::tr!("settings.fallback_review_advisor.description"),
@@ -212,8 +213,17 @@ impl SettingsPage {
                 advisor_reset,
                 cx,
                 WorkspaceStore::set_fallback_review_advisor,
-            ));
-            rows.push(self.fallback_review_model_row(cx));
+            );
+            let model = self.fallback_review_model_row(cx);
+            rows.push(
+                crate::widgets::Collapsible::new(
+                    "fallback-review-fold",
+                    settings.abort_on_model_fallback,
+                )
+                .w_full()
+                .content(v_flex().w_full().child(advisor).child(model))
+                .into_any_element(),
+            );
         }
         let resume_on_limit_reset_reset = crate::settings_rows::reset_action(
             "reset-resume-on-limit-reset",
@@ -254,8 +264,14 @@ impl SettingsPage {
             cx,
             |store, checked| store.set_auto_settle_after_days(checked.then_some(3.)),
         )];
-        if settings.auto_settle_after_days.is_some() {
-            rows.push(
+        // The days apply only while auto-settle is on, and fold with it.
+        rows.push(
+            crate::widgets::Collapsible::new(
+                "auto-settle-days-fold",
+                settings.auto_settle_after_days.is_some(),
+            )
+            .w_full()
+            .content(
                 crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
                     .child(crate::settings_rows::row_labels(
                         crate::tr!("settings.auto_settle.days"),
@@ -267,10 +283,10 @@ impl SettingsPage {
                     .child(
                         crate::widgets::input::NumberInput::new(&self.auto_settle_input.state)
                             .accessibility_label(crate::tr!("settings.auto_settle.days")),
-                    )
-                    .into_any_element(),
-            );
-        }
+                    ),
+            )
+            .into_any_element(),
+        );
         let merge_reset = crate::settings_rows::reset_action(
             "reset-auto-settle-on-merge",
             settings.auto_settle_on_merge,
@@ -629,20 +645,30 @@ impl Render for ProjectRulesEditor {
                 days_index,
                 |editor, value| editor.draft.auto_settle_after_days = value,
                 compact,
+                window,
                 cx,
             ));
-        if matches!(self.draft.auto_settle_after_days, Some(Some(_))) {
-            content = content
-                .child(
-                    div()
-                        .text_caption(cx)
-                        .child(crate::tr!("settings.auto_settle.days")),
-                )
-                .child(
-                    crate::widgets::input::NumberInput::new(&self.days)
-                        .accessibility_label(crate::tr!("settings.auto_settle.days")),
-                );
-        }
+        content = content.child(
+            crate::widgets::Collapsible::new(
+                "project-auto-settle-days-fold",
+                matches!(self.draft.auto_settle_after_days, Some(Some(_))),
+            )
+            .w_full()
+            .content(
+                v_flex()
+                    .w_full()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_caption(cx)
+                            .child(crate::tr!("settings.auto_settle.days")),
+                    )
+                    .child(
+                        crate::widgets::input::NumberInput::new(&self.days)
+                            .accessibility_label(crate::tr!("settings.auto_settle.days")),
+                    ),
+            ),
+        );
         content = content
             .child(
                 div()
@@ -655,6 +681,7 @@ impl Render for ProjectRulesEditor {
                 merge_index,
                 |editor, value| editor.draft.auto_settle_on_merge = value,
                 compact,
+                window,
                 cx,
             ));
         if compact {
@@ -688,6 +715,7 @@ fn rule_selector<T: Clone + 'static>(
     selected: usize,
     pick: fn(&mut ProjectRulesEditor, T),
     compact: bool,
+    window: &mut Window,
     cx: &mut Context<ProjectRulesEditor>,
 ) -> AnyElement {
     let editor = cx.entity();
@@ -698,6 +726,14 @@ fn rule_selector<T: Clone + 'static>(
             .map(|(index, (value, label))| {
                 let checked = index == selected;
                 let editor = editor.clone();
+                // The mark fades from the last choice to the new one.
+                let mark = gpui_base::motion::transition(
+                    SharedString::from(format!("{id}-check-{index}")),
+                    if checked { 1. } else { 0. },
+                    gpui_base::motion::Transition::new(crate::edge_back::SETTLE),
+                    window,
+                    cx,
+                );
                 crate::material::accessible_clickable(
                     crate::material::group_row(cx),
                     (SharedString::from(format!("{id}-choice")), index),
@@ -710,8 +746,12 @@ fn rule_selector<T: Clone + 'static>(
                 .hover(|row| row.bg(cx.theme().list_hover))
                 .text_body(true, cx)
                 .child(div().flex_1().child(label))
-                .when(checked, |row| {
-                    row.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
+                .when(mark > 0., |row| {
+                    row.child(
+                        Icon::new(IconName::Check)
+                            .text_color(cx.theme().primary)
+                            .opacity(mark),
+                    )
                 })
                 .on_click(move |_, _, cx| {
                     editor.update(cx, |editor, cx| {
