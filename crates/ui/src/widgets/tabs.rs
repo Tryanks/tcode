@@ -16,12 +16,14 @@ use crate::{
     },
 };
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, InteractiveElement, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _,
-    StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Stateful,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, canvas, div, point,
+    prelude::FluentBuilder, px,
 };
+use gpui_base::motion::{Interpolate as _, Transition, transition};
 use gpui_base::{StyledExt as _, Tab, Tabs};
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
@@ -236,8 +238,168 @@ fn segment_height(compact: bool) -> f32 {
     if compact { TOUCH_TARGET } else { 28. }
 }
 
+/// Where the underline mark starts and ends inside its tab: inside the tab's
+/// padding, or under the label alone when a trailing control follows it.
+fn underline_inset(m: &Metrics, compact: bool, icon_only: bool, trailing: bool) -> (f32, f32) {
+    if icon_only {
+        (6., 6.)
+    } else if trailing {
+        (m.pad, if compact { 8. } else { 4. })
+    } else {
+        (m.pad, m.pad)
+    }
+}
+
+/// A selection mark (the underline, the segment pill) drawn once for the
+/// whole bar, so it can glide from one item to the next.
+///
+/// The bar learns where its items are only after they are laid out, so each
+/// frame measures them and the next frame draws from that measurement. Until
+/// every item has been measured the selected item draws its own mark.
+pub(crate) struct Glide {
+    /// Item bounds relative to the list, from the last frame.
+    geometry: Entity<Vec<Bounds<Pixels>>>,
+    /// This frame's measurements, in window coordinates.
+    measured: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
+    /// The selected index, gliding.
+    at: Option<f32>,
+    drawn: bool,
+}
+
+impl Glide {
+    pub(crate) fn new(
+        id: &ElementId,
+        count: usize,
+        selected: Option<usize>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let geometry =
+            window.use_keyed_state((id.clone(), "glide-geometry"), cx, |_, _| Vec::new());
+        let at = selected.map(|ix| {
+            transition(
+                (id.clone(), "glide"),
+                ix as f32,
+                Transition::new(crate::edge_back::SETTLE),
+                window,
+                cx,
+            )
+        });
+        let drawn = at.is_some() && count > 0 && geometry.read(cx).len() == count;
+        Self {
+            geometry,
+            measured: Rc::new(RefCell::new(vec![None; count])),
+            at,
+            drawn,
+        }
+    }
+
+    /// Whether the bar draws the mark this frame.
+    pub(crate) fn drawn(&self) -> bool {
+        self.drawn
+    }
+
+    /// The mark's bounds relative to the list: `mark` places it inside the
+    /// item at an index, and the result lies between the two items the
+    /// gliding index falls between.
+    fn span(
+        &self,
+        cx: &App,
+        mark: impl Fn(usize, Bounds<Pixels>) -> Bounds<Pixels>,
+    ) -> Option<Bounds<Pixels>> {
+        let at = self.at.filter(|_| self.drawn)?;
+        let items = self.geometry.read(cx);
+        let at = at.clamp(0., items.len().checked_sub(1)? as f32);
+        let (lo, hi) = (at.floor() as usize, at.ceil() as usize);
+        Some(mark(lo, items[lo]).interpolate(&mark(hi, items[hi]), at - lo as f32))
+    }
+
+    /// Records where item `ix` lands this frame. `el` must be positioned.
+    pub(crate) fn measure<E: ParentElement>(&self, ix: usize, el: E) -> E {
+        let measured = self.measured.clone();
+        el.child(pinned_canvas(move |bounds| {
+            if let Some(slot) = measured.borrow_mut().get_mut(ix) {
+                *slot = Some(bounds);
+            }
+        }))
+    }
+
+    /// Turns this frame's measurements into the next frame's geometry. Goes
+    /// on the list holding the items, after them, so it runs once they have
+    /// all been measured. `list` must be positioned.
+    pub(crate) fn observe<E: ParentElement>(&self, list: E) -> E {
+        let (measured, geometry) = (self.measured.clone(), self.geometry.clone());
+        list.child(pinned_canvas_cx(move |list, cx| {
+            let items: Option<Vec<_>> = measured
+                .borrow()
+                .iter()
+                .map(|item| item.map(|item| Bounds::new(item.origin - list.origin, item.size)))
+                .collect();
+            let Some(items) = items else { return };
+            geometry.update(cx, |geometry, cx| {
+                if *geometry != items {
+                    *geometry = items;
+                    cx.notify();
+                }
+            });
+        }))
+    }
+
+    /// The segment pill under the selected segment, for the list's first
+    /// child so the segments paint over it. `dim` matches a disabled
+    /// selected segment.
+    pub(crate) fn pill(&self, dim: bool, cx: &App) -> Option<AnyElement> {
+        let span = self.span(cx, |_, item| item)?;
+        let pill = div()
+            .absolute()
+            .left(span.left())
+            .top(span.top())
+            .w(span.size.width)
+            .h(span.size.height)
+            .rounded(segment_radius(cx))
+            .bg(raised_segment(cx))
+            .shadow_xs()
+            .when(dim, |this| this.opacity(0.5));
+        Some(pill.into_any_element())
+    }
+}
+
+/// A canvas covering its parent's padding box that reports the parent's
+/// bounds at prepaint. `gpui_base::ElementExt::on_prepaint` leaves its canvas
+/// at the static position, which a padded parent offsets by its padding.
+fn pinned_canvas(on_bounds: impl FnOnce(Bounds<Pixels>) + 'static) -> impl IntoElement {
+    pinned_canvas_cx(move |bounds, _| on_bounds(bounds))
+}
+
+fn pinned_canvas_cx(
+    on_bounds: impl FnOnce(Bounds<Pixels>, &mut App) + 'static,
+) -> impl IntoElement {
+    canvas(move |bounds, _, cx| on_bounds(bounds, cx), |_, _, _, _| {})
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+}
+
+/// A selected label's colour, gliding with the selection.
+pub(crate) fn label_color(
+    id: &ElementId,
+    channel: &'static str,
+    target: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> Hsla {
+    transition(
+        (id.clone(), channel),
+        target,
+        Transition::new(crate::edge_back::SETTLE),
+        window,
+        cx,
+    )
+}
+
 impl RenderOnce for TabBar {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self {
             id,
             form,
@@ -251,22 +413,64 @@ impl RenderOnce for TabBar {
         } = self;
         let m = metrics(form, compact);
         let count = items.len();
-        let tabs = items.into_iter().enumerate().map(|(ix, item)| {
-            render_item(
-                item,
-                ix,
-                count,
-                form,
-                compact,
-                icon_only,
-                label_max_w,
-                &m,
-                cx,
-            )
-        });
+        let selected = items.iter().position(|item| item.selected);
+        let insets: Vec<_> = items
+            .iter()
+            .map(|item| underline_inset(&m, compact, icon_only, item.trailing.is_some()))
+            .collect();
+        let glide = (form != Form::Rail).then(|| Glide::new(&id, count, selected, window, cx));
+        let tabs: Vec<_> = items
+            .into_iter()
+            .enumerate()
+            .map(|(ix, item)| {
+                render_item(
+                    item,
+                    ix,
+                    count,
+                    form,
+                    compact,
+                    icon_only,
+                    label_max_w,
+                    &m,
+                    glide.as_ref(),
+                    window,
+                    cx,
+                )
+            })
+            .collect();
+        let pill = glide
+            .as_ref()
+            .filter(|_| form == Form::Segmented)
+            .and_then(|glide| glide.pill(false, cx));
+        let underline = glide
+            .as_ref()
+            .filter(|_| form == Form::Underline)
+            .and_then(|glide| {
+                glide.span(cx, |ix, tab| {
+                    let (start, end) = insets[ix];
+                    Bounds::from_corners(
+                        point(tab.left() + px(start), tab.top()),
+                        point(tab.right() - px(end), tab.bottom()),
+                    )
+                })
+            })
+            .map(|span| {
+                // Bottom-aligned with the bar's hairline, which it covers.
+                div()
+                    .absolute()
+                    .left(span.left())
+                    .w(span.size.width)
+                    .bottom_0()
+                    .h(px(INDICATOR))
+                    .rounded(px(INDICATOR / 2.))
+                    .bg(cx.theme().foreground)
+            });
         let list = Tabs::new(id.clone())
             .when_some(aria_label, |this, label| this.aria_label(label))
-            .children(tabs);
+            .children(pill)
+            .children(tabs)
+            .children(underline)
+            .when_some(glide.as_ref(), |list, glide| glide.observe(list.relative()));
         match form {
             Form::Underline => {
                 let list = list
@@ -330,7 +534,9 @@ fn render_item(
     icon_only: bool,
     label_max_w: Option<Pixels>,
     m: &Metrics,
-    cx: &App,
+    glide: Option<&Glide>,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let TabItem {
         id,
@@ -342,6 +548,19 @@ fn render_item(
         on_click,
         context_menu,
     } = item;
+    // A rail reads as a list: its labels are body text, its icons muted.
+    let (fg, icon_fg) = {
+        let theme = cx.theme();
+        match form {
+            _ if selected => (theme.foreground, theme.foreground),
+            Form::Rail => (theme.foreground, theme.muted_foreground),
+            _ => (theme.muted_foreground, theme.muted_foreground),
+        }
+    };
+    let fg = label_color(&id, "fg", fg, window, cx);
+    let icon_fg = label_color(&id, "icon-fg", icon_fg, window, cx);
+    // The selected item draws its own mark only until the bar can.
+    let mark = selected && !glide.is_some_and(Glide::drawn);
     let theme = cx.theme();
     let ring = focus_ring(cx);
     let accessible = match tally {
@@ -349,12 +568,6 @@ fn render_item(
             .into_owned()
             .into(),
         None => label.clone(),
-    };
-    // A rail reads as a list: its labels are body text, its icons muted.
-    let (fg, icon_fg) = match form {
-        _ if selected => (theme.foreground, theme.foreground),
-        Form::Rail => (theme.foreground, theme.muted_foreground),
-        _ => (theme.muted_foreground, theme.muted_foreground),
     };
     let trailing = trailing.filter(|_| !icon_only);
     let gap = px(if compact { 8. } else { 6. });
@@ -405,7 +618,11 @@ fn render_item(
         });
     let Some(trailing) = trailing else {
         let tab = tab.text_color(fg);
-        let tab = surface(tab, form, selected, compact, icon_only, false, m, cx);
+        let tab = surface(tab, form, selected, mark, compact, icon_only, false, m, cx);
+        let tab = match glide {
+            Some(glide) => glide.measure(ix, tab),
+            None => tab,
+        };
         return match context_menu {
             Some(builder) => tab
                 .context_menu(move |menu, window, cx| builder(menu, window, cx))
@@ -426,7 +643,11 @@ fn render_item(
                 }),
         )
         .child(div().flex_none().flex().items_center().child(trailing));
-    let row = surface(row, form, selected, compact, icon_only, true, m, cx);
+    let row = surface(row, form, selected, mark, compact, icon_only, true, m, cx);
+    let row = match glide {
+        Some(glide) => glide.measure(ix, row),
+        None => row,
+    };
     match context_menu {
         Some(builder) => row
             .context_menu(move |menu, window, cx| builder(menu, window, cx))
@@ -436,12 +657,14 @@ fn render_item(
 }
 
 /// The visible surface of one tab: the tab itself, or the row holding the tab
-/// and its trailing control.
+/// and its trailing control. `mark` draws the selection mark on it, for a bar
+/// that cannot yet draw its gliding one.
 #[allow(clippy::too_many_arguments)]
 fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
     el: E,
     form: Form,
     selected: bool,
+    mark: bool,
     compact: bool,
     icon_only: bool,
     trailing: bool,
@@ -450,11 +673,7 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
 ) -> E {
     let theme = cx.theme();
     let foreground = theme.foreground;
-    let end = if trailing {
-        if compact { 8. } else { 4. }
-    } else {
-        m.pad
-    };
+    let (start, end) = underline_inset(m, compact, icon_only, trailing);
     let el = el
         .relative()
         .flex()
@@ -477,21 +696,20 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
                 if icon_only {
                     this.min_w(px(m.item)).justify_center()
                 } else {
-                    this.pl(px(m.pad)).pr(px(end))
+                    this.pl(px(start)).pr(px(end))
                 }
             })
             .map(|this| {
                 if form == Form::Segmented {
-                    return segment(this, selected, true, compact, cx);
+                    return segment(this, selected, mark, true, compact, cx);
                 }
                 this.h(px(m.item))
                     .rounded(surface_radius(form, cx))
                     .when(!selected, |this| {
                         this.hover(move |style| style.bg(theme.muted).text_color(foreground))
                     })
-                    .when(selected, |this| {
+                    .when(mark, |this| {
                         // Bottom-aligned with the bar's hairline, which it covers.
-                        let (start, end) = if icon_only { (6., 6.) } else { (m.pad, end) };
                         this.child(
                             div()
                                 .absolute()
@@ -554,34 +772,41 @@ pub(crate) fn segmented_track(
         )
 }
 
-/// One segment's surface: transparent at rest, a raised pill when selected.
-/// `interactive` is false for a segment that cannot be chosen.
-pub(crate) fn segment<E: Styled + InteractiveElement + FluentBuilder>(
-    el: E,
-    selected: bool,
-    interactive: bool,
-    compact: bool,
-    cx: &App,
-) -> E {
+/// The selected segment's pill.
+fn raised_segment(cx: &App) -> Hsla {
     let theme = cx.theme();
     // The popover surface is the lightest plane in the light theme but
     // matches the track in the dark one, where the pill is lifted with the
     // foreground instead.
-    let raised = if theme.mode.is_dark() {
+    if theme.mode.is_dark() {
         theme.foreground.opacity(0.12)
     } else {
         theme.popover
-    };
+    }
+}
+
+/// One segment's surface: transparent at rest. `pill` raises it itself, for
+/// a track that cannot yet draw its gliding [`Glide::pill`]. `interactive` is
+/// false for a segment that cannot be chosen.
+pub(crate) fn segment<E: Styled + InteractiveElement + FluentBuilder>(
+    el: E,
+    selected: bool,
+    pill: bool,
+    interactive: bool,
+    compact: bool,
+    cx: &App,
+) -> E {
+    let raised = raised_segment(cx);
+    let theme = cx.theme();
     let (muted, foreground) = (theme.muted, theme.foreground);
-    el.h(px(segment_height(compact)))
+    el.relative()
+        .h(px(segment_height(compact)))
         .flex_grow(1.)
         .flex_basis(px(0.))
         .flex_shrink_0()
         .justify_center()
         .rounded(segment_radius(cx))
-        .when(selected, |this| {
-            this.bg(raised).text_color(foreground).shadow_xs()
-        })
+        .when(pill, |this| this.bg(raised).shadow_xs())
         .when(!selected && interactive, |this| {
             this.hover(move |style| style.bg(muted).text_color(foreground))
         })
