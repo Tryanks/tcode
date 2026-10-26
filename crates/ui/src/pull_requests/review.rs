@@ -586,10 +586,28 @@ impl PullRequestView {
     }
 
     /// The bar under the Files toolbar while a review is pending.
-    pub(super) fn review_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let draft = self.draft(cx)?;
+    pub(super) fn review_bar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let compact = self.compact(cx);
-        let count = draft.comments.len();
+        let number = self
+            .current
+            .as_ref()
+            .map(|(_, key)| key.number)
+            .unwrap_or_default();
+        let id = |part: &str| SharedString::from(format!("pr-review-bar-{number}-{part}"));
+        let draft = self.draft(cx);
+        let shown = draft.as_ref().map(|draft| {
+            let count = draft.comments.len();
+            let stale = self.stale_head(draft).is_some();
+            (count, stale)
+        });
+        // The bar grows open under the toolbar with the first pending comment and folds when the
+        // review is submitted or discarded, holding what it said while it goes.
+        let kept = crate::motion::shown(id("shown"), shown, window, cx)?;
+        let (count, stale) = kept.value;
         let summary = if count == 1 {
             crate::tr!("pull_requests.review.bar_one").into_owned()
         } else if count == 0 {
@@ -597,58 +615,56 @@ impl PullRequestView {
         } else {
             crate::tr!("pull_requests.review.bar", count = count.to_string()).into_owned()
         };
-        let stale = self.stale_head(&draft).is_some();
+        let summary =
+            crate::motion::cross_fade(id("summary"), summary, window, cx, |summary, _, _| {
+                crate::widgets::fade_text(summary.clone()).into_any_element()
+            });
+        let stale = crate::motion::shown(id("stale"), stale.then_some(()), window, cx);
         let finish = Button::new("pr-review-finish")
             .primary()
             .xsmall()
             .label(crate::tr!("pull_requests.review.finish"))
             .on_click(cx.listener(|this, _, window, cx| this.open_review(window, cx)));
-        Some(
-            material::bar_divider_below(
-                material::bar("pr-review-bar", material::Bar::Toolbar, compact, cx),
-                cx,
-            )
-            .aria_label(
-                crate::tr!("pull_requests.review.bar_label", count = count.to_string())
-                    .into_owned(),
-            )
-            .items_center()
-            .bg(cx.theme().muted)
-            .text_secondary(compact, cx)
-            .text_color(cx.theme().foreground)
-            .child(Icon::new(IconName::MessageSquare).text_color(cx.theme().muted_foreground))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(crate::widgets::fade_text(summary)),
-            )
-            .when(stale, |bar| {
-                bar.child(
+        let bar = material::bar_divider_below(
+            material::bar("pr-review-bar", material::Bar::Toolbar, compact, cx),
+            cx,
+        )
+        .aria_label(
+            crate::tr!("pull_requests.review.bar_label", count = count.to_string()).into_owned(),
+        )
+        .items_center()
+        .bg(cx.theme().muted)
+        .text_secondary(compact, cx)
+        .text_color(cx.theme().foreground)
+        .child(Icon::new(IconName::MessageSquare).text_color(cx.theme().muted_foreground))
+        .child(div().min_w_0().overflow_hidden().child(summary))
+        .when_some(stale, |bar, stale| {
+            bar.child(
+                stale.fade(
                     h_flex()
-                        .flex_none()
                         .gap_1()
                         .items_center()
                         .text_color(cx.theme().warning)
                         .child(Icon::new(IconName::TriangleAlert))
                         .child(crate::tr!("pull_requests.review.head_changed")),
-                )
-            })
-            .child(div().flex_1())
-            .when(!compact, |bar| {
-                bar.child(
-                    Button::new("pr-review-discard")
-                        .ghost()
-                        .xsmall()
-                        .label(crate::tr!("pull_requests.review.discard"))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.confirm_discard(window, cx)),
-                        ),
-                )
-            })
-            .child(self.review_popover(Some(finish), cx))
-            .into_any_element(),
-        )
+                ),
+            )
+        })
+        .child(div().flex_1())
+        .when(!compact && !kept.leaving(), |bar| {
+            bar.child(
+                Button::new("pr-review-discard")
+                    .ghost()
+                    .xsmall()
+                    .label(crate::tr!("pull_requests.review.discard"))
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm_discard(window, cx))),
+            )
+        })
+        // The leaving bar has no review to finish: the sheet is the entry's again.
+        .when(!kept.leaving(), |bar| {
+            bar.child(self.review_popover(Some(finish), cx))
+        });
+        Some(kept.fold(bar))
     }
 
     /// The Review sheet around its trigger: anchored on a desktop, a bottom sheet on a phone.
