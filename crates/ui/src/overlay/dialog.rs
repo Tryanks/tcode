@@ -2,8 +2,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, ClickEvent, FocusHandle, InteractiveElement as _, IntoElement, ParentElement,
-    Pixels, RenderOnce, SharedString, StyleRefinement, Styled, WeakFocusHandle, Window, anchored,
-    deferred, div, point, prelude::FluentBuilder as _, px,
+    Pixels, RenderOnce, SharedString, StyleRefinement, Styled, WeakFocusHandle, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::motion::PresenceSample;
 
@@ -40,6 +40,9 @@ pub(crate) struct ActiveDialog {
     /// motion.
     pub id: usize,
     pub closing: bool,
+    /// The open dialogs below this one when it opened, fixed so its offset
+    /// and element ids hold while dialogs beneath it leave.
+    pub layer: usize,
     pub focus_handle: FocusHandle,
     pub previous_focus_handle: Option<WeakFocusHandle>,
     pub builder: DialogBuilder,
@@ -276,7 +279,6 @@ pub struct Dialog {
     focus_handle: FocusHandle,
     layer: usize,
     topmost: bool,
-    key: usize,
     presence: Option<PresenceSample>,
 }
 
@@ -300,7 +302,6 @@ impl Dialog {
             focus_handle: cx.focus_handle(),
             layer: 0,
             topmost: true,
-            key: 0,
             presence: None,
         }
     }
@@ -398,10 +399,8 @@ impl Dialog {
         self.focus_handle = focus;
         self
     }
-    /// The open/close motion the overlay host sampled for this dialog,
-    /// whose `key` is unique to this opening.
-    pub(crate) fn presence(mut self, key: usize, presence: PresenceSample) -> Self {
-        self.key = key;
+    /// The open/close motion the overlay host sampled for this dialog.
+    pub(crate) fn presence(mut self, presence: PresenceSample) -> Self {
         self.presence = Some(presence);
         self
     }
@@ -445,6 +444,7 @@ impl RenderOnce for Dialog {
             .when(self.overlay, |el| {
                 el.bg(crate::material::scrim(progress, cx))
             })
+            .when(exiting, |el| el.occlude())
             .on_scroll(|_, _, cx| cx.stop_propagation());
         let popup = div()
             .id(("tcode-dialog", self.layer))
@@ -499,39 +499,27 @@ impl RenderOnce for Dialog {
                         ),
                 )
             });
-        if exiting {
-            // A leaving dialog is outside the base host so it neither traps
-            // focus nor answers Escape or a backdrop press; the shield on
-            // top keeps its controls and what lies beneath from the pointer.
-            return deferred(
-                anchored().position(point(px(0.), px(0.))).child(
-                    div()
-                        .id(("tcode-dialog-exit", self.key))
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .w(viewport.width)
-                        .h(viewport.height)
-                        .child(backdrop)
-                        .child(popup)
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .occlude()
-                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
-                        ),
-                ),
+        // A leaving dialog keeps the open one's element tree, so its scroll
+        // and input state hold through the exit. It is inert by the base's
+        // own switches: not topmost, no Escape, no backdrop press. Focus has
+        // already gone back to the opener, so its focus trap confines nothing;
+        // the occluding scrim and the shield over the card keep the pointer
+        // from its controls, from focusing it, and from what lies beneath.
+        let popup = popup.when(exiting, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
             )
-            .with_priority(10 + self.layer)
-            .into_any_element();
-        }
+        });
         self.base.render(
             self.layer,
-            self.topmost,
+            self.topmost && !exiting,
             self.focus_handle,
-            self.keyboard,
-            self.overlay_closable,
+            self.keyboard && !exiting,
+            self.overlay_closable && !exiting,
             backdrop,
             popup,
             self.button_props.on_ok,
