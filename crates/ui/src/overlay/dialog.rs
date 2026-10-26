@@ -2,12 +2,14 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, ClickEvent, FocusHandle, InteractiveElement as _, IntoElement, ParentElement,
-    Pixels, RenderOnce, SharedString, StyleRefinement, Styled, WeakFocusHandle, Window, div,
-    prelude::FluentBuilder as _, px,
+    Pixels, RenderOnce, SharedString, StyleRefinement, Styled, WeakFocusHandle, Window, anchored,
+    deferred, div, point, prelude::FluentBuilder as _, px,
 };
+use gpui_base::motion::PresenceSample;
 
 use crate::{
     icon::IconName,
+    motion::{self, PresencePhase},
     sizing::Sizable as _,
     theme::ActiveTheme as _,
     typography::TextRole as _,
@@ -34,6 +36,10 @@ type Closed = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type ContentBuilder = Rc<dyn Fn(DialogContent, &mut Window, &mut App) -> DialogContent>;
 
 pub(crate) struct ActiveDialog {
+    /// Unique per opening: a dialog opened again is a new one with its own
+    /// motion.
+    pub id: usize,
+    pub closing: bool,
     pub focus_handle: FocusHandle,
     pub previous_focus_handle: Option<WeakFocusHandle>,
     pub builder: DialogBuilder,
@@ -270,6 +276,8 @@ pub struct Dialog {
     focus_handle: FocusHandle,
     layer: usize,
     topmost: bool,
+    key: usize,
+    presence: Option<PresenceSample>,
 }
 
 impl Dialog {
@@ -292,6 +300,8 @@ impl Dialog {
             focus_handle: cx.focus_handle(),
             layer: 0,
             topmost: true,
+            key: 0,
+            presence: None,
         }
     }
     fn alert(cx: &mut App) -> Self {
@@ -388,6 +398,13 @@ impl Dialog {
         self.focus_handle = focus;
         self
     }
+    /// The open/close motion the overlay host sampled for this dialog,
+    /// whose `key` is unique to this opening.
+    pub(crate) fn presence(mut self, key: usize, presence: PresenceSample) -> Self {
+        self.key = key;
+        self.presence = Some(presence);
+        self
+    }
 }
 
 impl ParentElement for Dialog {
@@ -413,6 +430,10 @@ impl RenderOnce for Dialog {
         let width = crate::sizing::fit_viewport(f32::from(self.width), viewport.width);
         let x = viewport.width / 2. - width / 2.;
         let inset = cx.theme().tokens.spacing.lg;
+        let progress = self.presence.map_or(1., |presence| presence.progress);
+        let exiting = self
+            .presence
+            .is_some_and(|presence| presence.phase == PresencePhase::Exiting);
         let y = viewport.height / 10. + inset * self.layer as f32;
         let content = self
             .content
@@ -421,7 +442,9 @@ impl RenderOnce for Dialog {
         let backdrop = div()
             .absolute()
             .size_full()
-            .when(self.overlay, |el| el.bg(crate::material::scrim(1., cx)))
+            .when(self.overlay, |el| {
+                el.bg(crate::material::scrim(progress, cx))
+            })
             .on_scroll(|_, _, cx| cx.stop_propagation());
         let popup = div()
             .id(("tcode-dialog", self.layer))
@@ -431,7 +454,7 @@ impl RenderOnce for Dialog {
                     return el.inset_0().overflow_hidden();
                 }
                 el.left(x)
-                    .top(y)
+                    .top(y + motion::lift(progress))
                     .w(width)
                     .when_some(self.max_width, |el, width| el.max_w(width))
                     .max_h(viewport.height - y - inset)
@@ -447,6 +470,7 @@ impl RenderOnce for Dialog {
                     .shadow_xl()
             })
             .occlude()
+            .opacity(progress)
             .refine_style(&self.style)
             .when_some(self.title, |el, title| {
                 // `pr_8` keeps a long title clear of the close button.
@@ -475,6 +499,33 @@ impl RenderOnce for Dialog {
                         ),
                 )
             });
+        if exiting {
+            // A leaving dialog is outside the base host so it neither traps
+            // focus nor answers Escape or a backdrop press; the shield on
+            // top keeps its controls and what lies beneath from the pointer.
+            return deferred(
+                anchored().position(point(px(0.), px(0.))).child(
+                    div()
+                        .id(("tcode-dialog-exit", self.key))
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w(viewport.width)
+                        .h(viewport.height)
+                        .child(backdrop)
+                        .child(popup)
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .occlude()
+                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+                        ),
+                ),
+            )
+            .with_priority(10 + self.layer)
+            .into_any_element();
+        }
         self.base.render(
             self.layer,
             self.topmost,
