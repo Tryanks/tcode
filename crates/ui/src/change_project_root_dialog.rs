@@ -314,14 +314,14 @@ impl Render for ChangeProjectRootDialog {
                     ),
             )
             .children(
-                crate::motion::transient(
+                crate::motion::shown(
                     "change-project-root-working",
                     self.busy.then_some(()),
                     window,
                     cx,
                 )
-                .map(|((), slot)| {
-                    slot.wrap(
+                .map(|working| {
+                    working.fold(
                         div()
                             .text_secondary(false, cx)
                             .child(crate::tr!("sidebar.change_project_root_working")),
@@ -329,20 +329,15 @@ impl Render for ChangeProjectRootDialog {
                 }),
             )
             .children(
-                crate::motion::transient(
-                    "change-project-root-error",
-                    self.error.clone(),
-                    window,
-                    cx,
-                )
-                .map(|(error, slot)| {
-                    slot.wrap(
-                        div()
-                            .text_secondary(false, cx)
-                            .text_color(cx.theme().danger)
-                            .child(error),
-                    )
-                }),
+                crate::motion::shown("change-project-root-error", self.error.clone(), window, cx)
+                    .map(|error| {
+                        error.fold(
+                            div()
+                                .text_secondary(false, cx)
+                                .text_color(cx.theme().danger)
+                                .child(error.value.clone()),
+                        )
+                    }),
             )
     }
 }

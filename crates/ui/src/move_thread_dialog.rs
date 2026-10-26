@@ -120,7 +120,7 @@ impl Render for MoveThreadDialog {
                 } else {
                     cx.theme().list_active.opacity(0.)
                 },
-                gpui_base::motion::Transition::new(crate::edge_back::SETTLE),
+                crate::motion::settle(),
                 window,
                 cx,
             );
@@ -171,13 +171,13 @@ impl Render for MoveThreadDialog {
                     .child(crate::tr!("sidebar.move_thread_confirm")),
             )
             .children(
-                crate::motion::transient("move-thread-error", self.error.clone(), window, cx).map(
-                    |(error, slot)| {
-                        slot.wrap(
+                crate::motion::shown("move-thread-error", self.error.clone(), window, cx).map(
+                    |error| {
+                        error.fold(
                             div()
                                 .text_secondary(false, cx)
                                 .text_color(cx.theme().danger)
-                                .child(error),
+                                .child(error.value.clone()),
                         )
                     },
                 ),

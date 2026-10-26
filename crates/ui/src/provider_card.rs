@@ -27,7 +27,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui::{Styled as _, rgb};
-use gpui_base::motion::{Transition, transition};
+use gpui_base::motion::transition;
 use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
@@ -185,13 +185,13 @@ impl ProviderCard {
         crate::material::group_row(cx)
             .child(body)
             .children(
-                crate::motion::transient(
+                crate::motion::shown(
                     "update-available-slot",
                     update_available.then_some(()),
                     window,
                     cx,
                 )
-                .map(|((), slot)| slot.wrap(self.render_update_popover(cx))),
+                .map(|update| update.fade(self.render_update_popover(cx))),
             )
             .child(
                 Button::new("configure-profile")
@@ -247,7 +247,7 @@ impl ProviderCard {
             ),
             StatusDot::Amber => (cx.theme().muted, muted),
         };
-        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let settle = crate::motion::settle;
         let status_bg = transition(("provider-status", "bg"), status_bg, settle(), window, cx);
         let status_fg = transition(("provider-status", "fg"), status_fg, settle(), window, cx);
         let (lead, email) = match &summary.email {
@@ -263,46 +263,50 @@ impl ProviderCard {
             },
             None => (summary.headline.clone(), None),
         };
-        let text = crate::motion::swap(
+        let revealed = self.email_revealed;
+        let card = cx.entity().downgrade();
+        let text = crate::motion::cross_fade(
             "provider-status-text",
             (lead, email, summary.detail.clone()),
             window,
             cx,
+            move |(lead, email, detail), _, _| {
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(lead.clone())
+                    .when_some(email.clone(), |line, (email, suffix)| {
+                        let shown = if revealed {
+                            email
+                        } else {
+                            redact_email(&email)
+                        };
+                        let card = card.clone();
+                        line.child(
+                            Button::new("reveal-email")
+                                .text()
+                                .xsmall()
+                                .label(shown)
+                                .tooltip(if revealed {
+                                    crate::tr!("providers.hide_email")
+                                } else {
+                                    crate::tr!("providers.reveal_email")
+                                })
+                                .on_click(move |_, _, cx| {
+                                    _ = card.update(cx, |this, cx| {
+                                        this.email_revealed = !this.email_revealed;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(div().child(suffix))
+                    })
+                    .when(!detail.is_empty(), |line| {
+                        line.child(div().child(format!("· {detail}")))
+                    })
+                    .into_any_element()
+            },
         );
-        let revealed = self.email_revealed;
-        let text = text.render(|(lead, email, detail)| {
-            h_flex()
-                .items_center()
-                .gap_1()
-                .child(lead)
-                .when_some(email, |line, (email, suffix)| {
-                    let shown = if revealed {
-                        email
-                    } else {
-                        redact_email(&email)
-                    };
-                    line.child(
-                        Button::new("reveal-email")
-                            .text()
-                            .xsmall()
-                            .label(shown)
-                            .tooltip(if revealed {
-                                crate::tr!("providers.hide_email")
-                            } else {
-                                crate::tr!("providers.reveal_email")
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.email_revealed = !this.email_revealed;
-                                cx.notify();
-                            })),
-                    )
-                    .child(div().child(suffix))
-                })
-                .when(!detail.is_empty(), |line| {
-                    line.child(div().child(format!("· {detail}")))
-                })
-                .into_any_element()
-        });
         let line = crate::material::chip_surface(status_bg, status_fg, cx)
             .overflow_hidden()
             .child(text);

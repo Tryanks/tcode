@@ -211,7 +211,6 @@ pub(crate) fn cross_fade<T: Clone + PartialEq + 'static>(
 /// A hover fill that glides over `SETTLE`: the fill to paint now, and the
 /// handler for the element's `on_hover` that moves it. Pressing has no
 /// fill and stays immediate.
-#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
 pub(crate) fn hover_fill(
     id: impl Into<ElementId>,
     hover: gpui::Hsla,
@@ -242,71 +241,14 @@ pub(crate) fn hover_fill(
     (fill, on_hover)
 }
 
-/// An inline element that comes and goes with `value`: mounted while its
-/// [`appear`] sample should render, it keeps showing the last value it had
-/// while it leaves. `None` once it is gone.
-pub(crate) fn transient<T: Clone + PartialEq + 'static>(
-    id: impl Into<ElementId>,
-    value: Option<T>,
-    window: &mut Window,
-    cx: &mut App,
-) -> Option<(T, Transient)> {
-    let id = id.into();
-    let sample = appear(id.clone(), value.is_some(), window, cx);
-    let value = retain((id.clone(), "retained"), value, window, cx)?;
-    sample
-        .should_render()
-        .then_some((value, Transient { id, sample }))
-}
-
-/// The present-or-leaving state of a [`transient`] element.
-pub(crate) struct Transient {
-    id: ElementId,
-    sample: PresenceSample,
-}
-
-impl Transient {
-    /// `child` faded and lifted at the sample's progress; a shield takes the
-    /// pointer while it leaves.
-    pub(crate) fn wrap(self, child: impl IntoElement) -> Stateful<Div> {
-        let progress = self.sample.progress;
-        div()
-            .id(self.id)
-            .relative()
-            .top(lift(progress))
-            .opacity(progress)
-            .child(child)
-            .when(self.sample.phase == PresencePhase::Exiting, |el| {
-                el.child(shield())
-            })
-    }
-}
-
-/// `value`, or while it is `None` the last `Some` it had, so content that
-/// leaves can still be drawn from it.
-pub(crate) fn retain<T: Clone + PartialEq + 'static>(
-    id: impl Into<ElementId>,
-    value: Option<T>,
-    window: &mut Window,
-    cx: &mut App,
-) -> Option<T> {
-    let kept = window.use_keyed_state(id, cx, |_, _| None::<T>);
-    match value {
-        Some(value) => {
-            if kept.read(cx).as_ref() != Some(&value) {
-                kept.update(cx, |kept, _| *kept = Some(value.clone()));
-            }
-            Some(value)
-        }
-        None => kept.read(cx).clone(),
-    }
-}
-
 /// Mutually exclusive states of one region (loading, loaded, failed) that
 /// cross-fade: each state draws in its own layer, so its element tree holds
 /// while it fades. The current layer is laid out; a leaving one is drawn
 /// under it from the top, inert. With [`CrossFade::fill`] every layer fills
-/// the region, which then needs a definite size.
+/// the region, which then needs a definite size. Unlike [`cross_fade`],
+/// which gives each new value a fresh slot, a state keeps its layer however
+/// its content changes, so a list's scroll or a page's inputs hold; and only
+/// the layers on screen are built.
 pub(crate) struct CrossFade {
     id: ElementId,
     current: usize,
@@ -385,59 +327,6 @@ impl CrossFade {
                     .child(content)
                     .when(leaving, |el| el.child(shield()))
             }))
-    }
-}
-
-/// Content that follows `value` and cross-fades when it changes: a status
-/// line, a chip's label. Two layers take turns, the leaving one keeping the
-/// value it was drawn from.
-pub(crate) fn swap<T: Clone + PartialEq + 'static>(
-    id: impl Into<ElementId>,
-    value: T,
-    window: &mut Window,
-    cx: &mut App,
-) -> SwapLayers<T> {
-    let id = id.into();
-    let slots = window.use_keyed_state((id.clone(), "slots"), cx, |_, _| SwapSlots {
-        values: [Some(value.clone()), None],
-        current: 0,
-    });
-    if slots.read(cx).values[slots.read(cx).current].as_ref() != Some(&value) {
-        slots.update(cx, |slots, _| {
-            slots.current ^= 1;
-            slots.values[slots.current] = Some(value);
-        });
-    }
-    let SwapSlots { values, current } = slots.read(cx).clone();
-    SwapLayers {
-        fade: CrossFade::new(id, current, 2, window, cx),
-        values,
-    }
-}
-
-#[derive(Clone)]
-struct SwapSlots<T> {
-    values: [Option<T>; 2],
-    current: usize,
-}
-
-/// The two layers of a [`swap`].
-pub(crate) struct SwapLayers<T> {
-    fade: CrossFade,
-    values: [Option<T>; 2],
-}
-
-impl<T> SwapLayers<T> {
-    pub(crate) fn render(self, mut build: impl FnMut(T) -> AnyElement) -> Stateful<Div> {
-        let fade = self.fade;
-        let layers = self
-            .values
-            .into_iter()
-            .enumerate()
-            .filter(|(layer, _)| fade.shows(*layer))
-            .filter_map(|(layer, value)| Some((layer, build(value?))))
-            .collect::<Vec<_>>();
-        fade.render(layers)
     }
 }
 
