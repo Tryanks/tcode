@@ -287,6 +287,29 @@ pub(crate) fn pane_controls(
     })
 }
 
+/// Give the keyboard to the focused pane, as a click in it does: its
+/// composer takes the caret. A pane command raised from outside the panes
+/// then acts on that pane and leaves the keyboard there.
+pub(crate) fn focus_focused_pane(window: &mut Window, cx: &mut App) {
+    let Some(shell) = current_shell(cx) else {
+        return;
+    };
+    let shell = shell.read(cx);
+    if shell.compact(cx) {
+        return;
+    }
+    let Some(handle) = shell
+        .attachment
+        .as_ref()
+        .map(|attachment| attachment.focused_pane.focus_handle(cx))
+    else {
+        return;
+    };
+    if !handle.contains_focused(window, cx) {
+        window.focus(&handle, cx);
+    }
+}
+
 /// The layouts the palette offers now: those the column has room for.
 pub(crate) fn pane_layouts(window: &Window, cx: &App) -> Vec<PaneLayout> {
     let Some(shell) = current_shell(cx) else {
@@ -436,12 +459,15 @@ const RIGHT_PANEL_WIDTH: f32 = 560.;
 /// The panel's narrowest: the icon tabs and the panel's own controls fit in
 /// 320pt, beside the window's caption buttons where the panel's strip holds them.
 const RIGHT_PANEL_MIN_WIDTH: f32 = 320. + window_caption::RIGHT_PANEL_CAPTION_WIDTH;
-/// A pane never gets narrower than this beside the right panel, plus whatever
-/// its header holds beyond the plain one (`header_extra_width_for`); panes side
-/// by side add up ([`AppShell::chat_min_width`]). Where the chat column's
-/// minimum and the panel's do not both fit beside the sidebar, the panel
-/// floats over the chat instead.
+/// A pane alone in the chat column never gets narrower than this beside the
+/// right panel, plus whatever its header holds beyond the plain one
+/// (`header_extra_width_for`), so its header keeps the tiers it has without
+/// panes. Where the chat column's minimum and the panel's do not both fit
+/// beside the sidebar, the panel floats over the chat instead.
 const CHAT_MIN_WIDTH: f32 = crate::chat::HEADER_COMPACT_MIN_WIDTH;
+/// A pane among others may narrow to its header's overflow tier; panes side
+/// by side add up ([`AppShell::chat_min_width`]).
+const PANE_MIN_WIDTH: f32 = crate::chat::HEADER_OVERFLOW_MIN_WIDTH;
 const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
@@ -1492,7 +1518,7 @@ impl AppShell {
     }
 
     /// The narrowest the chat column can be: its panes' headers at their
-    /// compact widths, side by side. Base's dock gives every pane the same
+    /// narrowest, side by side, and never narrower than a pane alone. Base's dock gives every pane the same
     /// `resizable_panel` range and has no per-panel minimum, so a pane's own
     /// handle can still drag it below its header; this only keeps the right
     /// panel from squeezing the column.
@@ -1544,9 +1570,14 @@ impl AppShell {
             return CHAT_MIN_WIDTH;
         };
         let store = attachment.link.store.read(cx);
+        let floor = if tree.panels().nth(1).is_some() {
+            PANE_MIN_WIDTH
+        } else {
+            CHAT_MIN_WIDTH
+        };
         let pane_min = |panel: PanelId, edges: crate::chat::WindowEdges| {
             let session_id = session_of(panel);
-            CHAT_MIN_WIDTH
+            floor
                 + crate::chat::header_extra_width_for(
                     store,
                     session_id.as_deref(),
@@ -1642,6 +1673,7 @@ impl AppShell {
                     .filter(|meta| {
                         meta.parent_session_id.as_deref() == Some(parent)
                             && meta.archived_at.is_none()
+                            && !meta.is_settled()
                     })
                     .collect();
                 agents.sort_by_key(|meta| std::cmp::Reverse(meta.created_at));
@@ -6315,14 +6347,9 @@ mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
     }
 
-    /// Choose `layout` from the palette by its label, in whatever language
-    /// the host's settings left the window in.
-    fn apply_from_palette(
-        shell: &Entity<AppShell>,
-        layout: PaneLayout,
-        cx: &mut VisualTestContext,
-    ) {
-        let label = layout.label();
+    /// Choose the palette's action `label`, in whatever language the host's
+    /// settings left the window in.
+    fn choose_from_palette(shell: &Entity<AppShell>, label: &str, cx: &mut VisualTestContext) {
         shell
             .read_with(cx, |shell, _| shell.window_state())
             .update(cx, |state, cx| state.open_palette(cx));
@@ -6334,29 +6361,87 @@ mod tests {
     }
 
     /// Two columns from one pane keep its thread on the left and leave the
-    /// right waiting; a single pane from two keeps the focused thread and
-    /// closes the other.
+    /// right waiting; a pane command from the palette hands the keyboard back
+    /// to the focused pane's composer, under the focus ring; a single pane
+    /// from two keeps the focused thread and closes the other.
     #[gpui::test]
     fn a_layout_fills_its_panes_from_the_focused_one(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount_panes(cx);
-        apply_from_palette(&shell, PaneLayout::Columns, cx);
+        let (shell, host, cx) = mount_panes(cx);
+        choose_from_palette(&shell, &PaneLayout::Columns.label(), cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert!(cx.debug_bounds("waiting-pane").is_some());
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
 
         cx.simulate_keystrokes("secondary-alt-right secondary-2");
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
         draw(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-2".into())]
         );
-        apply_from_palette(&shell, PaneLayout::Single, cx);
+        for command in [crate::tr!("panes.zoom"), crate::tr!("panes.unzoom")] {
+            choose_from_palette(&shell, &command, cx);
+            assert_eq!(keyboard_pane(&shell, cx), Some(1), "{command}");
+        }
+        assert!(cx.debug_bounds("focused-pane").is_some());
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").panes(cx)[1]
+                .read(cx)
+                .chat()
+                .read(cx)
+                .composer()
+                .read(cx)
+                .input_focus_handle(cx)
+        });
+        cx.update(|window, _| assert!(composer.is_focused(window), "the caret is back"));
+
+        choose_from_palette(&shell, &PaneLayout::Single.label(), cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
             assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
             assert!(!store.is_thread_open("thread-1"));
         });
+    }
+
+    /// A thread's agents spread beside it newest first, stacked on the
+    /// right; one that has settled stays out.
+    #[gpui::test]
+    fn spreading_agents_leaves_settled_ones_out(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("panes_index sends a snapshot");
+        };
+        for (id, created_at, settled_at) in [
+            ("agent-old", 1, None),
+            ("agent-new", 2, None),
+            ("agent-settled", 3, Some(4)),
+        ] {
+            let mut agent = index.sessions[1].clone();
+            agent.id = id.into();
+            agent.title = id.into();
+            agent.parent_session_id = Some("thread-1".into());
+            agent.created_at = created_at;
+            agent.settled_at = settled_at;
+            index.sessions.push(agent);
+        }
+        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+        await_restore_update(&shell, cx, |store| {
+            store.thread_meta("agent-settled").is_some()
+        });
+        draw(cx);
+
+        choose_from_palette(&shell, &PaneLayout::SpreadAgents.label(), cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [
+                Some("thread-1".into()),
+                Some("agent-new".into()),
+                Some("agent-old".into())
+            ]
+        );
     }
 
     /// Splitting a thread puts a draft beside it, in the thread's place in
@@ -6394,7 +6479,7 @@ mod tests {
             store.read_with(cx, |store, _| store.active_session_id()),
             Some("thread-1".into())
         );
-        let docks = SIDEBAR_WIDTH + 2. * CHAT_MIN_WIDTH + RIGHT_PANEL_MIN_WIDTH;
+        let docks = SIDEBAR_WIDTH + 2. * PANE_MIN_WIDTH + RIGHT_PANEL_MIN_WIDTH;
         for (width, docked) in [(docks + 20., true), (docks - 20., false)] {
             resize(cx, width);
             draw(cx);
@@ -6448,12 +6533,44 @@ mod tests {
         });
     }
 
-    /// A split the window has no room for is refused; stacking still fits.
+    /// Two columns fit beside the sidebar of a 1200pt window, each header
+    /// whole. A split the window has no room for is refused; stacking still
+    /// fits.
     #[gpui::test]
     fn a_split_without_room_is_refused(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
-        resize(cx, SIDEBAR_WIDTH + 2. * CHAT_MIN_WIDTH - 10.);
+        resize(cx, 1200.);
+        draw(cx);
+        let _ = sent(&host);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into())]
+        );
+        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
+            let panes = shell.attachment.as_ref().expect("attached").panes(cx);
+            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+        });
+        for pane in &panes {
+            assert!(pane.size.width >= px(PANE_MIN_WIDTH), "{pane:?}");
+        }
+        let overflow = cx
+            .debug_bounds("header-overflow")
+            .expect("the narrow header's one menu");
+        assert!(
+            overflow.right() <= panes[1].right(),
+            "the right pane's header ends at {:?}, past its pane at {:?}",
+            overflow.right(),
+            panes[1].right()
+        );
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+
+        resize(cx, SIDEBAR_WIDTH + 2. * PANE_MIN_WIDTH - 10.);
         let _ = sent(&host);
 
         cx.simulate_keystrokes("secondary-d");
@@ -9338,7 +9455,8 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_crowded_thread(cx);
         let store = store_of(&shell, cx);
-        resize(cx, 720.);
+        // Narrower than the header at its narrowest.
+        resize(cx, SIDEBAR_WIDTH + PANE_MIN_WIDTH);
         draw(cx);
         draw(cx);
         let header = cx.debug_bounds("chat-header-scroll").unwrap();
@@ -9348,12 +9466,17 @@ mod tests {
             ..Default::default()
         });
         draw(cx);
-        let toggle = cx.debug_bounds("diff-panel").unwrap();
+        let toggle = cx.debug_bounds("header-overflow").unwrap();
         assert!(
             toggle.left() >= header.left() && toggle.right() <= header.right(),
-            "the last panel toggle must scroll into view"
+            "the last panel control must scroll into view"
         );
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        draw(cx);
+        draw(cx);
+        // Terminal, tasks, then the diff.
+        let diff = cx.debug_bounds("menu-item-2").expect("the diff's row");
+        cx.simulate_click(diff.center(), gpui::Modifiers::default());
         draw_until(&shell, cx, &host, "diff-body", None);
         assert!(store.read_with(cx, |store, _| store.panel_state().right_panel_open));
     }

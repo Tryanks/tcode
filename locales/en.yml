@@ -70,6 +70,7 @@ chat:
   toggle_diff: "Toggle diff panel"
   toggle_tasks: "Toggle task panel"
   toggle_preview: "Toggle preview browser"
+  header_more: "More"
   open: "Open"
   reveal_in_file_manager: "Reveal in file manager"
   copy_path: "Copy path"
