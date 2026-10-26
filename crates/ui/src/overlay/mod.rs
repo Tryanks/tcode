@@ -114,13 +114,16 @@ impl Overlays {
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(dialog) = self.dialogs.iter_mut().rev().find(|dialog| !dialog.closing) {
             dialog.closing = true;
-            if dialog.focus_handle.contains_focused(window, cx)
-                && let Some(previous) = dialog
+            // A leaving dialog is still rendered, so focus must not stay in it.
+            if dialog.focus_handle.contains_focused(window, cx) {
+                match dialog
                     .previous_focus_handle
                     .as_ref()
                     .and_then(|focus| focus.upgrade())
-            {
-                previous.focus(window, cx);
+                {
+                    Some(previous) => previous.focus(window, cx),
+                    None => window.blur(cx),
+                }
             }
             cx.notify();
         }
@@ -133,11 +136,17 @@ impl Overlays {
             .find(|dialog| !dialog.closing)
             .and_then(|dialog| dialog.previous_focus_handle.clone())
             .and_then(|focus| focus.upgrade());
+        let focused = self
+            .dialogs
+            .iter()
+            .any(|dialog| dialog.focus_handle.contains_focused(window, cx));
         for dialog in &mut self.dialogs {
             dialog.closing = true;
         }
-        if let Some(previous) = previous {
-            previous.focus(window, cx);
+        match previous {
+            Some(previous) => previous.focus(window, cx),
+            None if focused => window.blur(cx),
+            None => {}
         }
         cx.notify();
     }
@@ -183,23 +192,20 @@ impl Render for Overlays {
             keep
         });
         let topmost = self.dialogs.iter().rposition(|active| !active.closing);
-        // A dialog's layer counts the open dialogs below it, so one opened as
-        // another leaves keeps its offset when the leaving one is dropped.
-        let mut open_below = 0;
         let dialogs = self
             .dialogs
             .iter()
             .zip(presences)
             .enumerate()
             .map(|(index, (active, presence))| {
-                let dialog = (active.builder)(Dialog::new(cx), window, cx)
-                    .layer(open_below, topmost == Some(index))
-                    .focus_handle(active.focus_handle.clone())
-                    .presence(active.id, presence);
-                if !active.closing {
-                    open_below += 1;
-                }
-                dialog
+                // Layers repeat while a dialog leaves under a new one; the
+                // slot keeps each opening's element ids its own.
+                div().id(("tcode-dialog-slot", active.id)).child(
+                    (active.builder)(Dialog::new(cx), window, cx)
+                        .layer(active.layer, topmost == Some(index))
+                        .focus_handle(active.focus_handle.clone())
+                        .presence(presence),
+                )
             })
             .collect::<Vec<_>>();
 
@@ -287,9 +293,11 @@ impl OverlayExt for Window {
             focus_handle.focus(window, cx);
             let id = host.next_dialog_id;
             host.next_dialog_id += 1;
+            let layer = host.open_dialogs();
             host.dialogs.push(ActiveDialog {
                 id,
                 closing: false,
+                layer,
                 focus_handle,
                 previous_focus_handle,
                 builder: Rc::new(build),
@@ -684,13 +692,23 @@ mod tests {
             let clicks = clicks.clone();
             window.open_dialog(cx, move |dialog, _, _| {
                 let clicks = clicks.clone();
-                dialog.child(
-                    div()
-                        .id("probe")
-                        .debug_selector(|| "dialog-probe".into())
-                        .size_10()
-                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
-                )
+                dialog
+                    .child(
+                        div()
+                            .id("probe")
+                            .debug_selector(|| "dialog-probe".into())
+                            .size_10()
+                            .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                    )
+                    .child(
+                        div()
+                            .id("dialog-scroller")
+                            .debug_selector(|| "dialog-scroller".into())
+                            .h(px(100.))
+                            .overflow_y_scroll()
+                            .child(div().h(px(400.)))
+                            .child(div().debug_selector(|| "dialog-row".into()).h(px(20.))),
+                    )
             });
         });
         draw(cx);
@@ -699,6 +717,19 @@ mod tests {
         let probe = cx.debug_bounds("dialog-probe").expect("open dialog");
         cx.simulate_click(probe.center(), Default::default());
         assert_eq!(clicks.get(), 1, "an open dialog takes clicks");
+        let scroller = cx.debug_bounds("dialog-scroller").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroller.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-300.))),
+            ..Default::default()
+        });
+        draw(cx);
+        let row_offset = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("dialog-row").unwrap().top()
+                - cx.debug_bounds("dialog-scroller").unwrap().top()
+        };
+        let scrolled = row_offset(cx);
+        assert!(scrolled < px(400.), "the body scrolled: {scrolled:?}");
 
         cx.update(|window, cx| window.close_dialog(cx));
         assert!(!cx.update(|window, cx| dialog_open(window, cx)));
@@ -708,9 +739,20 @@ mod tests {
             1,
             "a closed dialog stays mounted while it leaves"
         );
+        assert_eq!(
+            row_offset(cx),
+            scrolled,
+            "a leaving dialog keeps its scroll offset"
+        );
         let leaving = cx.debug_bounds("dialog-probe").expect("leaving dialog");
         cx.simulate_click(leaving.center(), Default::default());
         assert_eq!(clicks.get(), 1, "a leaving dialog takes no clicks");
+        let focus =
+            overlays(&root, cx).read_with(cx, |host, _| host.dialogs[0].focus_handle.clone());
+        assert!(
+            !cx.update(|window, cx| focus.contains_focused(window, cx)),
+            "a press on a leaving dialog does not focus it"
+        );
 
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
