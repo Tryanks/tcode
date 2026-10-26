@@ -177,6 +177,8 @@ struct ShellAttachment {
     chat: Entity<ChatView>,
     /// The wide layout's chat column; its one pane shows `chat`.
     thread_panes: Entity<DockArea>,
+    /// The pane in `thread_panes`.
+    thread_pane: Entity<ThreadPanel>,
     diff: Entity<DiffPanel>,
     preview: Entity<PreviewPanel>,
     settings_page: Entity<SettingsPage>,
@@ -753,6 +755,7 @@ impl AppShell {
             cx.new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx));
         let subscriptions = vec![
             cx.observe_in(&store, window, move |this, store, window, cx| {
+                this.bind_pane_to_focus(cx);
                 this.stamp_connected(cx);
                 let selected = store.read(cx).active_session_id();
                 if let Some(attachment) = &mut this.attachment
@@ -836,6 +839,7 @@ impl AppShell {
         self.attachment = Some(ShellAttachment {
             chat,
             thread_panes,
+            thread_pane: thread_panel,
             diff: cx.new(|cx| DiffPanel::new(store.clone(), self.window_state.clone(), cx)),
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
@@ -880,6 +884,20 @@ impl AppShell {
                 .update(cx, |state, cx| state.open_thread(cx));
         }
         cx.notify();
+    }
+
+    /// The pane shows the focused thread, and so does the compact layout's
+    /// conversation, which is the pane's.
+    fn bind_pane_to_focus(&self, cx: &mut App) {
+        let Some(attachment) = &self.attachment else {
+            return;
+        };
+        let focused = attachment.link.store.read(cx).active_session_id();
+        if attachment.thread_pane.read(cx).session_id(cx) != focused.as_deref() {
+            attachment
+                .thread_pane
+                .update(cx, |pane, cx| pane.set_session(focused, cx));
+        }
     }
 
     /// Record on the saved record when this window actually reached the host,
@@ -1072,6 +1090,7 @@ impl AppShell {
             self.window_state
                 .update(cx, |state, cx| state.leave_route_for_chat(cx));
         }
+        self.bind_pane_to_focus(cx);
         if let Some(attachment) = &self.attachment {
             attachment
                 .chat
@@ -3219,6 +3238,8 @@ impl Render for AppShell {
         // The window may have been resized without a bounds notification (a
         // first frame, or an inset change that narrowed the content box).
         self.sync_layout(window, cx);
+        // A selection made without notifying the store reaches the pane here.
+        self.bind_pane_to_focus(cx);
         if let Some(attachment) = &self.attachment {
             let title = attachment.link.store.read(cx).shell_window_title();
             if title != self.window_title {

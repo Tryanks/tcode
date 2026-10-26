@@ -107,9 +107,9 @@ pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 532.;
 const PARENT_LINK_COMPACT_WIDTH: f32 = 28.;
 const PARENT_LINK_LABELLED_WIDTH: f32 = 273.;
 
-/// The thread the active one was reached from: its id and title.
-fn parent_session(store: &WorkspaceStore) -> Option<(String, String)> {
-    let active = store.active_session_id()?;
+/// The thread `session_id`'s was reached from: its id and title.
+fn parent_session(store: &WorkspaceStore, session_id: Option<&str>) -> Option<(String, String)> {
+    let active = session_id?;
     let sessions = store.sidebar_sessions();
     let parent_id = sessions
         .iter()
@@ -133,16 +133,34 @@ fn traffic_light_clearance(sidebar_collapsed: bool, fullscreen: bool) -> f32 {
     }
 }
 
-/// How much wider than the plain header the active thread's header is, with
-/// its split buttons labelled or not: the padding that clears the macOS
-/// traffic lights, and the parent link.
+/// [`header_extra_width_for`] the focused thread.
 pub(crate) fn header_extra_width(
     store: &WorkspaceStore,
     sidebar_collapsed: bool,
     fullscreen: bool,
     labelled: bool,
 ) -> f32 {
-    let parent_link = match (parent_session(store), labelled) {
+    let focused = store.active_session_id();
+    header_extra_width_for(
+        store,
+        focused.as_deref(),
+        sidebar_collapsed,
+        fullscreen,
+        labelled,
+    )
+}
+
+/// How much wider than the plain header `session_id`'s header is, with
+/// its split buttons labelled or not: the padding that clears the macOS
+/// traffic lights, and the parent link.
+fn header_extra_width_for(
+    store: &WorkspaceStore,
+    session_id: Option<&str>,
+    sidebar_collapsed: bool,
+    fullscreen: bool,
+    labelled: bool,
+) -> f32 {
+    let parent_link = match (parent_session(store, session_id), labelled) {
         (None, _) => 0.,
         (Some(_), true) => PARENT_LINK_LABELLED_WIDTH,
         (Some(_), false) => PARENT_LINK_COMPACT_WIDTH,
@@ -423,6 +441,8 @@ enum FullOutput {
 
 pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
+    /// The thread this view shows and acts on.
+    session_id: Option<String>,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -690,6 +710,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Self {
         let compact = window_state.read(cx).compact;
+        let session_id = workspace_store.read(cx).active_session_id();
         let composer = cx.new(|cx| {
             if compact {
                 Composer::new_with_layout(workspace_store.clone(), true, window, cx)
@@ -727,7 +748,10 @@ impl ChatView {
                 // Desktop can type immediately after opening the terminal.
                 // On software-keyboard devices this also runs during restore,
                 // so wait for a tap on the grid before raising the keyboard.
-                let open = store.read(cx).panel_state().terminal_open;
+                let open = store
+                    .read(cx)
+                    .panel_state_for(this.session_id.as_deref())
+                    .terminal_open;
                 if open && !this.terminal_was_open {
                     let drawer = this.terminal_drawer.clone();
                     window.defer(cx, move |window, cx| {
@@ -750,11 +774,15 @@ impl ChatView {
         });
         let agents =
             cx.new(|cx| crate::agents_panel::AgentsPanel::for_sheet(workspace_store.clone(), cx));
-        let terminal_was_open = workspace_store.read(cx).panel_state().terminal_open;
+        let terminal_was_open = workspace_store
+            .read(cx)
+            .panel_state_for(session_id.as_deref())
+            .terminal_open;
 
         let mut this = Self {
             pull_requests,
             workspace_store,
+            session_id,
             window_state,
             composer,
             terminal_drawer,
@@ -796,12 +824,32 @@ impl ChatView {
         this
     }
 
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    /// Show `session_id`'s thread, or none; the next sync finds the thread
+    /// changed.
+    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        if self.session_id == session_id {
+            return;
+        }
+        self.composer.update(cx, |composer, cx| {
+            composer.set_session(session_id.clone(), cx)
+        });
+        self.terminal_drawer
+            .update(cx, |drawer, cx| drawer.set_session(session_id.clone(), cx));
+        self.session_id = session_id;
+        self.timeline_stale = true;
+        cx.notify();
+    }
+
     /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
         self.timeline_stale = false;
         // ListState owns follow intent: user scrolling pauses Tail until the
         // bottom is reached again. Content updates must not override that pause.
-        let session_key = self.workspace_store.read(cx).active_session_id();
+        let session_key = self.session_id.clone();
         let session_changed = session_key != self.session_key;
         if session_changed {
             self.expanded.clear();
@@ -813,7 +861,11 @@ impl ChatView {
             .awaiting_session_snapshot(session_key.as_deref());
         let continuity = if session_changed {
             TimelineContinuity::NewSession
-        } else if self.workspace_store.read(cx).history_available() {
+        } else if self
+            .workspace_store
+            .read(cx)
+            .history_available_for(self.session_id.as_deref())
+        {
             TimelineContinuity::PartialFirstTurn
         } else {
             TimelineContinuity::Complete
@@ -821,7 +873,7 @@ impl ChatView {
         let (list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
-            .with_active_timeline(|timeline| {
+            .with_timeline_for(self.session_id.as_deref(), |timeline| {
                 let list_sync = self.turn_index_cache.sync(
                     &mut self.rows,
                     &timeline.turns,
@@ -985,14 +1037,14 @@ impl ChatView {
         let scheduled_limit_resume = {
             let store = self.workspace_store.read(cx);
             let deadlines: HashSet<u64> = store
-                .composer_state()
+                .composer_state_for(self.session_id.as_deref())
                 .queue
                 .into_iter()
                 .flat_map(|queue| queue.messages)
                 .filter_map(|message| message.fire_at_unix_secs)
                 .collect();
             store
-                .with_active_timeline(|timeline| {
+                .with_timeline_for(self.session_id.as_deref(), |timeline| {
                     timeline
                         .turn_retry
                         .as_ref()
@@ -1028,13 +1080,17 @@ impl ChatView {
         one_shot_row_target: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        let running = self.workspace_store.read(cx).composer_state().turn_running;
+        let running = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref())
+            .turn_running;
         let row_count = self.rows.len();
         let resident_ids = self.md_states.keys().cloned().collect();
         let (texts, decisions) = self
             .workspace_store
             .read(cx)
-            .with_active_timeline(|timeline| {
+            .with_timeline_for(self.session_id.as_deref(), |timeline| {
                 let scope = ResidencyScope::new(
                     row_count,
                     self.markdown_visible_rows.clone(),
@@ -1117,7 +1173,7 @@ impl ChatView {
         let places = self
             .workspace_store
             .read(cx)
-            .with_active_timeline(|timeline| {
+            .with_timeline_for(self.session_id.as_deref(), |timeline| {
                 timeline
                     .entries
                     .iter()
@@ -1139,7 +1195,7 @@ impl ChatView {
     fn markdown_row(&self, id: &str, cx: &App) -> Option<usize> {
         self.workspace_store
             .read(cx)
-            .with_active_timeline(|timeline| {
+            .with_timeline_for(self.session_id.as_deref(), |timeline| {
                 timeline
                     .entries
                     .iter()
@@ -1231,7 +1287,7 @@ impl ChatView {
         let row = self
             .workspace_store
             .read(cx)
-            .with_active_timeline(|timeline| {
+            .with_timeline_for(self.session_id.as_deref(), |timeline| {
                 let entries = &timeline.entries;
                 let start = entries.partition_point(|entry| entry.turn < turn);
                 let index = start
@@ -1578,7 +1634,7 @@ impl ChatView {
                             let resets_at = *resets_at;
                             let store = self.workspace_store.read(cx);
                             let queued: Vec<_> = store
-                                .composer_state()
+                                .composer_state_for(self.session_id.as_deref())
                                 .queue
                                 .into_iter()
                                 .flat_map(|queue| queue.messages)
@@ -1589,7 +1645,7 @@ impl ChatView {
                                 .map(|message| message.id);
                             let queue_empty = queued.is_empty();
                             let ends_thread = store
-                                .with_active_timeline(|timeline| {
+                                .with_timeline_for(self.session_id.as_deref(), |timeline| {
                                     !timeline.turn_running && index + 1 == timeline.turns.len()
                                 })
                                 .unwrap_or(false);
@@ -1606,16 +1662,22 @@ impl ChatView {
                                 } => Some(components::error_card::LimitResume::Scheduled {
                                     remaining_secs,
                                     on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
-                                        this.workspace_store
-                                            .update(cx, |store, _| store.drop_queued(id));
+                                        let session_id =
+                                            this.session_id.clone().unwrap_or_default();
+                                        this.workspace_store.update(cx, |store, _| {
+                                            store.drop_queued_for(session_id, id)
+                                        });
                                     })),
                                 }),
                                 LimitResumeAction::Schedule => {
                                     Some(components::error_card::LimitResume::Offer {
                                         on_schedule: Box::new(cx.listener(
                                             move |this, _, _, cx| {
+                                                let session_id =
+                                                    this.session_id.clone().unwrap_or_default();
                                                 this.workspace_store.update(cx, |store, _| {
-                                                    store.schedule_turn(
+                                                    store.schedule_turn_for(
+                                                        session_id,
                                                         tcode_core::session::RESUME_PROMPT
                                                             .to_string(),
                                                         vec![],
@@ -1630,8 +1692,11 @@ impl ChatView {
                                     Some(components::error_card::LimitResume::Continue {
                                         on_continue: Box::new(cx.listener(
                                             move |this, _, _, cx| {
+                                                let session_id =
+                                                    this.session_id.clone().unwrap_or_default();
                                                 this.workspace_store.update(cx, |store, _| {
-                                                    store.send_turn(
+                                                    store.send_turn_for(
+                                                        session_id,
                                                         tcode_core::session::RESUME_PROMPT
                                                             .to_string(),
                                                         vec![],
@@ -1649,7 +1714,7 @@ impl ChatView {
                     let retry = self
                         .workspace_store
                         .read(cx)
-                        .with_active_timeline(|timeline| {
+                        .with_timeline_for(self.session_id.as_deref(), |timeline| {
                             timeline
                                 .turn_retry
                                 .as_ref()
@@ -1677,12 +1742,15 @@ impl ChatView {
                                     .retry_at
                                     .map(|at| at.saturating_sub(now_secs())),
                                 on_retry: Box::new(cx.listener(move |this, _, _, cx| {
-                                    this.workspace_store
-                                        .update(cx, |store, _| store.retry_turn(turn_id.clone()));
+                                    let session_id = this.session_id.clone().unwrap_or_default();
+                                    this.workspace_store.update(cx, |store, _| {
+                                        store.retry_turn_for(session_id, turn_id.clone())
+                                    });
                                 })),
                                 on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
+                                    let session_id = this.session_id.clone().unwrap_or_default();
                                     this.workspace_store
-                                        .update(cx, |store, _| store.interrupt());
+                                        .update(cx, |store, _| store.interrupt_for(session_id));
                                 })),
                             }
                         })
@@ -1713,7 +1781,10 @@ impl ChatView {
         // Changed-file evidence is the turn's settled summary: while the turn
         // still runs, the live per-file rows inside the work log carry this
         // information, so the section appears only once the turn finishes.
-        let (changes, completeness) = self.workspace_store.read(cx).chat_turn_changes(index);
+        let (changes, completeness) = self
+            .workspace_store
+            .read(cx)
+            .chat_turn_changes_for(self.session_id.as_deref(), index);
         if !turn.running && !changes.is_empty() {
             let more_key = format!("changed-files-more-{index}");
             let show_all = self.expanded.contains(&more_key);
@@ -1749,7 +1820,10 @@ impl ChatView {
         // The turn's liveness, bare after everything it produced: no fold can
         // reach it, so collapsing the last disclosure never hides that we work.
         if turn.running {
-            let requested_model = self.workspace_store.read(cx).chat_requested_model();
+            let requested_model = self
+                .workspace_store
+                .read(cx)
+                .chat_requested_model_for(self.session_id.as_deref());
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
                     .map(str::to_owned);
@@ -1765,7 +1839,10 @@ impl ChatView {
                     )),
             );
         } else if let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts)) {
-            let requested_model = self.workspace_store.read(cx).chat_requested_model();
+            let requested_model = self
+                .workspace_store
+                .read(cx)
+                .chat_requested_model_for(self.session_id.as_deref());
             column = column.child(components::indicator::finished_turn_time(
                 ts,
                 turn,
@@ -1791,8 +1868,10 @@ impl ChatView {
 
     fn on_rewind_turn(&mut self, action: &RewindTurn, _: &mut Window, cx: &mut Context<Self>) {
         let RewindTurn { turn, mode } = *action;
-        self.workspace_store
-            .update(cx, |store, _cx| store.rewind_turn(turn, mode));
+        let session_id = self.session_id.clone().unwrap_or_default();
+        self.workspace_store.update(cx, |store, _cx| {
+            store.rewind_turn_for(session_id, turn, mode)
+        });
     }
 
     fn open_diff(&mut self, turn: usize, path: Option<String>, cx: &mut Context<Self>) {
@@ -1836,28 +1915,43 @@ impl ChatView {
         let visible = user_visible_text(text, context_len);
         let rewind_menu = steering
             .is_none()
-            .then(|| self.workspace_store.read(cx).chat_native_rewind_state(turn))
+            .then(|| {
+                self.workspace_store
+                    .read(cx)
+                    .chat_native_rewind_state_for(self.session_id.as_deref(), turn)
+            })
             .flatten()
             .filter(|(available, _)| *available)
             .map(|(_, disabled)| components::bubble::RewindMenu {
                 turn,
                 disabled,
-                conversation_available: self.workspace_store.read(cx).absolute_turn(turn) > 0,
+                conversation_available: self
+                    .workspace_store
+                    .read(cx)
+                    .absolute_turn_for(self.session_id.as_deref(), turn)
+                    > 0,
             });
         let rewind = steering
             .is_none()
             .then(|| {
                 let rewind_handler = |mode| {
-                    let workspace_store = self.workspace_store.clone();
-                    Arc::new(cx.listener(move |_, _, _, cx| {
-                        workspace_store.update(cx, |store, _cx| store.rewind_turn(turn, mode));
+                    Arc::new(cx.listener(move |this, _, _, cx| {
+                        let session_id = this.session_id.clone().unwrap_or_default();
+                        this.workspace_store.update(cx, |store, _cx| {
+                            store.rewind_turn_for(session_id, turn, mode)
+                        });
                     })) as components::bubble::SharedClickHandler
                 };
                 components::bubble::native_rewind_button(
                     turn,
-                    self.workspace_store.read(cx).absolute_turn(turn) > 0,
+                    self.workspace_store
+                        .read(cx)
+                        .absolute_turn_for(self.session_id.as_deref(), turn)
+                        > 0,
                     (
-                        self.workspace_store.read(cx).chat_native_rewind_state(turn),
+                        self.workspace_store
+                            .read(cx)
+                            .chat_native_rewind_state_for(self.session_id.as_deref(), turn),
                         self.window_state.read(cx).compact,
                     ),
                     components::bubble::RewindHandlers {
@@ -1920,7 +2014,11 @@ impl ChatView {
             cx,
         );
 
-        let bubble = if let Some(author) = self.workspace_store.read(cx).message_byline(entry_id) {
+        let bubble = if let Some(author) = self
+            .workspace_store
+            .read(cx)
+            .message_byline_for(self.session_id.as_deref(), entry_id)
+        {
             // Inset by the bubble's own padding, so the name lines up with the
             // message text rather than the bubble's rounded corner.
             v_flex()
@@ -2282,19 +2380,25 @@ impl ChatView {
                     command, output, ..
                 }) => {
                     let panel_id = entry.id.clone();
+                    let session_id = self.session_id.clone();
                     let on_cols_change = cx.listener(move |_this, cols: &u16, window, cx| {
                         // Fires from `on_prepaint`, in the middle of laying the
                         // list out. Subscribe once the frame is done.
                         let cols = *cols;
                         let panel_id = panel_id.clone();
+                        let session_id = session_id.clone();
                         cx.defer_in(window, move |this, _window, cx| {
                             this.workspace_store.update(cx, |store, _| {
-                                store.watch_command_output(&panel_id, cols);
+                                store.watch_command_output_for(
+                                    session_id.as_deref(),
+                                    &panel_id,
+                                    cols,
+                                );
                             });
                         });
                     });
                     let store = self.workspace_store.read(cx);
-                    let replica = store.command_output(&entry.id);
+                    let replica = store.command_output_for(self.session_id.as_deref(), &entry.id);
                     let screen = components::command_panel::OutputScreen {
                         watched: replica.and_then(|replica| replica.watched()),
                         frame: replica.and_then(|replica| replica.frame()),
@@ -2350,7 +2454,9 @@ impl ChatView {
         let full_bytes = self
             .workspace_store
             .read(cx)
-            .with_active_timeline(|timeline| timeline.elided_outputs.get(item_id).copied())??;
+            .with_timeline_for(self.session_id.as_deref(), |timeline| {
+                timeline.elided_outputs.get(item_id).copied()
+            })??;
         let load = || -> components::subagent::ClickHandler {
             let item_id = item_id.to_owned();
             Box::new(cx.listener(move |this, _, _, cx| {
@@ -2410,7 +2516,7 @@ impl ChatView {
         if !changes.unmounted.is_empty() {
             self.workspace_store.update(cx, |store, _| {
                 for id in &changes.unmounted {
-                    store.unwatch_command_output(id);
+                    store.unwatch_command_output_for(self.session_id.as_deref(), id);
                 }
             });
         }
@@ -2515,7 +2621,8 @@ impl ChatView {
     /// The way back from an agent to the thread it was reached from. Unlabelled,
     /// it is its arrow, named by its tooltip and its accessibility label.
     fn parent_link(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (parent_id, title) = parent_session(self.workspace_store.read(cx))?;
+        let (parent_id, title) =
+            parent_session(self.workspace_store.read(cx), self.session_id.as_deref())?;
         let name: SharedString = crate::tr!("agents.back_to_parent", title = title)
             .into_owned()
             .into();
@@ -2548,7 +2655,7 @@ impl ChatView {
     }
 
     fn compose_subagent_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
-        let active_id = self.workspace_store.read(cx).active_session_id();
+        let active_id = self.session_id.clone();
         let mirror_id = active_id.as_deref().and_then(|active_id| {
             self.workspace_store
                 .read(cx)
@@ -2580,7 +2687,7 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_id) = self.workspace_store.read(cx).active_session_id() else {
+        let Some(session_id) = self.session_id.clone() else {
             return;
         };
         let task = self.workspace_store.update(cx, |store, cx| {
@@ -2628,9 +2735,8 @@ impl ChatView {
         &self,
         cx: &App,
     ) -> Option<Vec<tcode_core::pull_request::ThreadPullRequestLink>> {
-        let store = self.workspace_store.read(cx);
-        let id = store.active_session_id()?;
-        Some(store.pull_requests(&id).to_vec())
+        let id = self.session_id.as_deref()?;
+        Some(self.workspace_store.read(cx).pull_requests(id).to_vec())
     }
 
     /// The pull request page a phone pushes over the thread.
@@ -2668,7 +2774,7 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.workspace_store.read(cx).active_session_id() {
+        if let Some(id) = self.session_id.clone() {
             crate::pull_requests::open_link_dialog(self.workspace_store.clone(), id, window, cx);
         }
     }
@@ -2679,7 +2785,7 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.workspace_store.read(cx).active_session_id() {
+        if let Some(id) = self.session_id.clone() {
             crate::move_thread_dialog::open(self.workspace_store.clone(), id, window, cx);
         }
     }
@@ -2690,7 +2796,7 @@ impl ChatView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.workspace_store.read(cx).active_session_id() {
+        if let Some(id) = self.session_id.clone() {
             self.workspace_store
                 .update(cx, |store, _| store.revoke_self_settle(id));
         }
@@ -2758,8 +2864,9 @@ impl ChatView {
             right_panel_open,
             right_tab,
         );
-        let labelled_extra = header_extra_width(
+        let labelled_extra = header_extra_width_for(
             self.workspace_store.read(cx),
+            self.session_id.as_deref(),
             collapsed,
             window.is_fullscreen(),
             true,
@@ -2772,8 +2879,9 @@ impl ChatView {
             })
             .when(hosts_caption, |this| this.pr_0())
             .min_w(px(HEADER_COMPACT_MIN_WIDTH
-                + header_extra_width(
+                + header_extra_width_for(
                     self.workspace_store.read(cx),
+                    self.session_id.as_deref(),
                     collapsed,
                     window.is_fullscreen(),
                     false,
@@ -2838,7 +2946,10 @@ impl ChatView {
         // The right-side cluster (Open split-button + panel toggles) shows for
         // any active thread, including a draft.
         let show_actions = is_draft || title.is_some();
-        let panel = self.workspace_store.read(cx).panel_state();
+        let panel = self
+            .workspace_store
+            .read(cx)
+            .panel_state_for(self.session_id.as_deref());
         let right_panel_open = panel.right_panel_open;
         let right_tab = panel.right_tab;
         let plan_showing = right_panel_open && right_tab == RightTab::Plan;
@@ -2849,21 +2960,21 @@ impl ChatView {
         let agent_tools = self
             .workspace_store
             .read(cx)
-            .session_status()
+            .session_status_for(self.session_id.as_deref())
             .is_some_and(|status| status.injected_tools.is_some());
         let self_settles = self
             .workspace_store
             .read(cx)
-            .session_status()
+            .session_status_for(self.session_id.as_deref())
             .and_then(|status| status.control.as_ref())
             .is_some_and(|control| control.self_settle.is_some());
         let movable = !is_draft && {
-            let store = self.workspace_store.read(cx);
-            let active = store.active_session_id();
-            store
+            let active = self.session_id.as_deref();
+            self.workspace_store
+                .read(cx)
                 .sidebar_sessions()
                 .iter()
-                .any(|meta| Some(&meta.id) == active.as_ref() && meta.worktree.is_none())
+                .any(|meta| Some(meta.id.as_str()) == active && meta.worktree.is_none())
         };
         let title_menu = {
             let title = title.clone();
@@ -2985,8 +3096,11 @@ impl ChatView {
                                     .selected(terminal_open)
                                     .tooltip(crate::tr!("chat.toggle_terminal"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store
-                                            .update(cx, |store, cx| store.toggle_terminal_panel(cx))
+                                        let session_id =
+                                            this.session_id.clone().unwrap_or_default();
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.toggle_terminal_panel_for(session_id, cx)
+                                        })
                                     })),
                             )
                             .child(
@@ -3101,7 +3215,10 @@ impl ChatView {
     /// Unlabelled, the main part is its icon, named by its tooltip (or the
     /// disabled hint) and its accessibility label.
     fn render_git_button(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (quick, items) = self.workspace_store.read(cx).chat_git_controls()?;
+        let (quick, items) = self
+            .workspace_store
+            .read(cx)
+            .chat_git_controls_for(self.session_id.as_deref())?;
         let border = cx.theme().border;
 
         let label: SharedString = crate::tr!(git_action_label_key(quick.label))
@@ -3231,8 +3348,9 @@ impl ChatView {
         if action.opens_commit_dialog() {
             self.open_commit_dialog(action, window, cx);
         } else {
+            let session_id = self.session_id.clone().unwrap_or_default();
             self.workspace_store.update(cx, |store, _cx| {
-                store.run_git_action(action, None, None, None)
+                store.run_git_action_for(session_id, action, None, None, None)
             });
         }
     }
@@ -3244,8 +3362,10 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let dialog =
-            cx.new(|cx| CommitDialog::new(self.workspace_store.clone(), action, window, cx));
+        let session_id = self.session_id.clone().unwrap_or_default();
+        let dialog = cx.new(|cx| {
+            CommitDialog::new(self.workspace_store.clone(), session_id, action, window, cx)
+        });
         self.commit_dialog = Some(dialog.clone());
         window.open_dialog(cx, move |dlg, window, cx| {
             let content = dialog.clone();
@@ -3400,7 +3520,7 @@ impl ChatView {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default()
             });
-        let composer = store.composer_state();
+        let composer = store.composer_state_for(self.session_id.as_deref());
         let model = composer
             .active_model
             .as_ref()
@@ -3626,7 +3746,7 @@ fn transcript_selection(
             let chat = chat.read(cx);
             chat.workspace_store
                 .read(cx)
-                .with_active_timeline(|timeline| {
+                .with_timeline_for(chat.session_id.as_deref(), |timeline| {
                     let (start, end) = (*range.start() as usize, *range.end() as usize);
                     timeline
                         .entries
@@ -3771,18 +3891,29 @@ impl Render for ChatView {
             };
             let following_tail = chat.list_state.is_following_tail();
             let store = chat.workspace_store.clone();
-            if store
-                .read(cx)
-                .history_window_changes(screens, following_tail)
-            {
+            let session_id = chat.session_id.clone();
+            if store.read(cx).history_window_changes_for(
+                session_id.as_deref(),
+                screens,
+                following_tail,
+            ) {
                 store.update(cx, |store, cx| {
-                    store.update_history_window(screens, following_tail, cx);
+                    store.update_history_window_for(
+                        session_id.as_deref(),
+                        screens,
+                        following_tail,
+                        cx,
+                    );
                 });
             }
         });
         // A screen's height: the window's, which this render already knows.
         // The list's own height is only measured by this frame's layout.
-        let placeholder = if self.workspace_store.read(cx).history_available() {
+        let placeholder = if self
+            .workspace_store
+            .read(cx)
+            .history_available_for(self.session_id.as_deref())
+        {
             window.viewport_size().height
         } else {
             px(0.)
@@ -3801,7 +3932,10 @@ impl Render for ChatView {
             }
             self.history_placeholder_height = placeholder;
         }
-        let active = self.workspace_store.read(cx).chat_active_session();
+        let active = self
+            .workspace_store
+            .read(cx)
+            .chat_active_session_for(self.session_id.as_deref());
 
         let compact = self.window_state.read(cx).compact;
         // The composer follows the layout in place. Rebuilding it here would
@@ -3825,14 +3959,18 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::on_revoke_self_settle))
             .on_action(cx.listener(Self::on_show_agent_tools));
 
-        if self.workspace_store.read(cx).chat_loading() {
+        if self
+            .workspace_store
+            .read(cx)
+            .chat_loading_for(self.session_id.as_deref())
+        {
             return root.child(
                 v_flex()
                     .size_full()
                     .when_some(
                         self.workspace_store
                             .read(cx)
-                            .history_error()
+                            .history_error_for(self.session_id.as_deref())
                             .map(str::to_owned),
                         |container, error| container.child(div().px_4().child(error)),
                     )
@@ -3851,9 +3989,9 @@ impl Render for ChatView {
         let title = if is_draft { None } else { Some(title) };
         let agents = {
             let store = self.workspace_store.read(cx);
-            store
-                .active_session_id()
-                .map(|id| crate::agents_panel::Agents::of(store, &id))
+            self.session_id
+                .as_deref()
+                .map(|id| crate::agents_panel::Agents::of(store, id))
                 .filter(|agents| !agents.is_empty())
         };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), agents.as_ref(), cx);
@@ -3872,7 +4010,10 @@ impl Render for ChatView {
             }
             self.phone_strip_height = phone_strip_height;
         }
-        let panel = self.workspace_store.read(cx).panel_state();
+        let panel = self
+            .workspace_store
+            .read(cx)
+            .panel_state_for(self.session_id.as_deref());
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let terminal_height = panel.terminal_height;
 
@@ -3886,7 +4027,9 @@ impl Render for ChatView {
         let (last_user_id, last_assistant_id) = self
             .workspace_store
             .read(cx)
-            .with_active_timeline(|timeline| latest_message_ids(&timeline.entries))
+            .with_timeline_for(self.session_id.as_deref(), |timeline| {
+                latest_message_ids(&timeline.entries)
+            })
             .unwrap_or_default();
 
         let item_count = self.rows.len();
@@ -3906,10 +4049,9 @@ impl Render for ChatView {
                     RowPart::WorkLogHeader { run } => run.clone(),
                     _ => row.entry_range.clone(),
                 };
-                let Some((turn, own, trailer)) = this
-                    .workspace_store
-                    .read(cx)
-                    .with_active_timeline(|timeline| {
+                let Some((turn, own, trailer)) = this.workspace_store.read(cx).with_timeline_for(
+                    this.session_id.as_deref(),
+                    |timeline| {
                         let entries = &timeline.entries;
                         let trailer = if row.last_in_turn {
                             let start = entries.partition_point(|entry| entry.turn < row.turn);
@@ -3927,8 +4069,8 @@ impl Render for ChatView {
                                 .unwrap_or_default(),
                             trailer,
                         )
-                    })
-                else {
+                    },
+                ) else {
                     return div().into_any_element();
                 };
                 let rendered = this.render_row(
@@ -3996,7 +4138,9 @@ impl Render for ChatView {
                                     .flex_col()
                                     .justify_end()
                                     .when(
-                                        this.workspace_store.read(cx).history_loading(),
+                                        this.workspace_store
+                                            .read(cx)
+                                            .history_loading_for(this.session_id.as_deref()),
                                         |space| {
                                             space.child(
                                                 div()
@@ -5345,14 +5489,14 @@ mod tests {
         let watched = |cx: &mut VisualTestContext| {
             store.read_with(cx, |store, _| {
                 store
-                    .command_output("run")
+                    .command_output_for(store.active_session_id().as_deref(), "run")
                     .and_then(|output| output.watched())
             })
         };
         let frame = |cx: &mut VisualTestContext| {
             store.read_with(cx, |store, _| {
                 store
-                    .command_output("run")
+                    .command_output_for(store.active_session_id().as_deref(), "run")
                     .and_then(|output| output.frame().cloned())
             })
         };
@@ -8245,7 +8389,11 @@ This begins after the hard break."#;
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         driver.wait_until(cx, &workspace_store, "Git status", |cx| {
-            workspace_store.read_with(cx, |store, _| store.chat_git_controls().is_some())
+            workspace_store.read_with(cx, |store, _| {
+                store
+                    .chat_git_controls_for(store.active_session_id().as_deref())
+                    .is_some()
+            })
         });
         let window_state = cx.new(|_| WindowState::new(false));
         let link = driver.link.clone();
