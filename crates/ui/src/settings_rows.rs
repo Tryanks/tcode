@@ -278,12 +278,8 @@ impl RenderOnce for ToggleRow {
         let row_focus = focus.clone();
         let key_toggle = on_toggle.clone();
         let has_accessory = accessory.is_some();
-        let error = crate::motion::shown(
-            SharedString::from(format!("{id}-error")),
-            error,
-            window,
-            cx,
-        );
+        let error =
+            crate::motion::shown(SharedString::from(format!("{id}-error")), error, window, cx);
         let selector = id.clone();
         crate::material::accessible_clickable(
             crate::material::group_row(cx),
