@@ -1509,6 +1509,9 @@ impl AppShell {
     /// Spatial moves go to the nearest pane painted on that side; Next and
     /// Previous follow the layout's order and wrap. A zoomed pane is the only
     /// one on screen, so nothing moves.
+    ///
+    /// Written here because gpui-base's dock has no keyboard navigation
+    /// between groups; it goes once the dock offers one.
     fn focus_pane(&mut self, direction: FocusPane, window: &mut Window, cx: &mut Context<Self>) {
         if self.compact(cx) {
             return;
@@ -6633,6 +6636,26 @@ mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
 
         resize(cx, SIDEBAR_WIDTH + 2. * PANE_MIN_WIDTH - 10.);
+        draw(cx);
+        // A thread carried from the pane's middle, where it would land, to
+        // its right edge, which has no room: the placeholder fades out rather
+        // than vanishing, and the drop there does nothing.
+        let pane = only_pane(&shell, cx);
+        drag_row("sidebar-thread-thread-2", pane.center(), cx);
+        assert!(cx.debug_bounds("pane-drop-indicator").is_some());
+        let edge = gpui::point(pane.right() - px(20.), pane.center().y);
+        cx.simulate_mouse_move(edge, Some(MouseButton::Left), gpui::Modifiers::default());
+        draw(cx);
+        assert!(
+            cx.debug_bounds("pane-drop-indicator").is_some(),
+            "fading out"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert!(cx.debug_bounds("pane-drop-indicator").is_none());
+        cx.simulate_mouse_up(edge, MouseButton::Left, gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         let _ = sent(&host);
 
         cx.simulate_keystrokes("secondary-d");
