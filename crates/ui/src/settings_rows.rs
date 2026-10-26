@@ -96,7 +96,7 @@ pub fn external_link(id: impl Into<SharedString>, label: SharedString, url: Stri
 pub fn row_labels(
     title: impl Into<SharedString>,
     description: Option<SharedString>,
-    reset: Option<AnyElement>,
+    reset: impl Into<Option<AnyElement>>,
     compact: bool,
     cx: &App,
 ) -> gpui::Div {
@@ -108,41 +108,67 @@ pub fn row_labels(
             h_flex()
                 .min_w_0()
                 .items_center()
-                .gap_1()
                 // A long title wraps rather than running under the control.
                 .child(div().min_w_0().text_body(compact, cx).child(title.into()))
-                .children(reset),
+                .children(reset.into()),
         )
         .children(description.map(|desc| div().text_secondary(compact, cx).child(desc)))
 }
 
-/// The per-item "restore default" button: icon-only, ghost, and rendered
-/// only while `overridden` — a row showing its factory value has nothing to
-/// restore, so the affordance would just be noise.
+/// The per-item "restore default" button: icon-only, ghost, and shown only
+/// while `overridden` — a row showing its factory value has nothing to
+/// restore, so the affordance would just be noise. It fades in when a value
+/// is changed and out when it is restored.
 pub fn reset_action(
     id: impl Into<gpui::ElementId>,
     overridden: bool,
     on_reset: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> Option<AnyElement> {
-    if !overridden {
-        return None;
+) -> AnyElement {
+    ResetAction {
+        id: id.into(),
+        overridden,
+        on_reset: Rc::new(on_reset),
     }
-    let label = crate::tr!("settings.reset_item").into_owned();
-    Some(
-        Button::new(id)
-            .ghost()
-            .xsmall()
-            .icon(IconName::Undo)
-            .tooltip(label.clone())
-            .aria_label(label)
-            .on_click(move |event, window, cx| {
-                // Toggle rows are clickable as a whole; a click that lands
-                // on this button must not also flip the switch.
-                cx.stop_propagation();
-                on_reset(event, window, cx);
-            })
-            .into_any_element(),
-    )
+    .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct ResetAction {
+    id: gpui::ElementId,
+    overridden: bool,
+    on_reset: crate::widgets::button::ClickHandler,
+}
+
+impl RenderOnce for ResetAction {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Some(shown) = crate::motion::shown(
+            (self.id.clone(), "reset"),
+            self.overridden.then_some(()),
+            window,
+            cx,
+        ) else {
+            return div().into_any_element();
+        };
+        let label = crate::tr!("settings.reset_item").into_owned();
+        let on_reset = self.on_reset;
+        // Its own leading room, so a row with nothing to restore keeps none.
+        shown.fade(
+            div().pl_1().child(
+                Button::new(self.id)
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Undo)
+                    .tooltip(label.clone())
+                    .aria_label(label)
+                    .on_click(move |event, window, cx| {
+                        // Toggle rows are clickable as a whole; a click that
+                        // lands on this button must not also flip the switch.
+                        cx.stop_propagation();
+                        on_reset(event, window, cx);
+                    }),
+            ),
+        )
+    }
 }
 
 /// A row whose control can squeeze its label: stacked on a compact window.
@@ -208,8 +234,8 @@ impl ToggleRow {
         self
     }
 
-    pub fn reset(mut self, reset: Option<AnyElement>) -> Self {
-        self.reset = reset;
+    pub fn reset(mut self, reset: impl Into<Option<AnyElement>>) -> Self {
+        self.reset = reset.into();
         self
     }
 
@@ -252,6 +278,12 @@ impl RenderOnce for ToggleRow {
         let row_focus = focus.clone();
         let key_toggle = on_toggle.clone();
         let has_accessory = accessory.is_some();
+        let error = crate::motion::shown(
+            SharedString::from(format!("{id}-error")),
+            error,
+            window,
+            cx,
+        );
         let selector = id.clone();
         crate::material::accessible_clickable(
             crate::material::group_row(cx),
@@ -294,10 +326,12 @@ impl RenderOnce for ToggleRow {
         .child(
             row_labels(title, description, reset, compact, cx)
                 .children(error.map(|error| {
-                    div()
-                        .text_secondary(compact, cx)
-                        .text_color(cx.theme().danger_foreground)
-                        .child(error)
+                    error.fold(
+                        div()
+                            .text_secondary(compact, cx)
+                            .text_color(cx.theme().danger_foreground)
+                            .child(error.value.clone()),
+                    )
                 }))
                 // An accessory takes the room the labels leave.
                 .when(has_accessory, |labels| labels.flex_none()),
@@ -344,7 +378,7 @@ pub fn select_row<T: Clone + 'static>(
     description: SharedString,
     selected_label: SharedString,
     options: Vec<SelectRowOption<T>>,
-    reset: Option<AnyElement>,
+    reset: impl Into<Option<AnyElement>>,
     compact: bool,
     on_select: impl Fn(T, &mut Window, &mut App) + 'static,
     cx: &App,

@@ -339,14 +339,13 @@ impl OrchestrateSettingsPanel {
     fn row_title(
         &self,
         title: impl Into<gpui::SharedString>,
-        reset: Option<AnyElement>,
+        reset: AnyElement,
         cx: &App,
     ) -> AnyElement {
         h_flex()
             .items_center()
-            .gap_1()
             .child(div().text_body(false, cx).child(title.into()))
-            .children(reset)
+            .child(reset)
             .into_any_element()
     }
 
