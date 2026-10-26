@@ -1084,7 +1084,7 @@ impl AppShell {
             window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx);
             return true;
         }
-        if self.window_state.read(cx).palette_open {
+        if self.window_state.read(cx).palette_shown() {
             self.window_state
                 .update(cx, |state, cx| state.close_palette(cx));
             return true;
@@ -4933,7 +4933,7 @@ mod tests {
             }
             shell.read_with(cx, |shell, cx| {
                 let state = shell.window_state.read(cx);
-                assert!(!state.palette_open, "choosing a project closes the chooser");
+                assert!(!state.palette_shown(), "choosing a project closes the chooser");
                 if compact {
                     assert_eq!(
                         state.history().last(),
@@ -5366,7 +5366,7 @@ mod tests {
                 click_count: 1,
                 ..Default::default()
             });
-            assert!(!state.read_with(cx, |state, _| state.palette_open));
+            assert!(!state.read_with(cx, |state, _| state.palette_shown()));
             assert_eq!(
                 state.read_with(cx, |state, _| state.history().to_vec()),
                 history
@@ -5409,7 +5409,7 @@ mod tests {
             cx.update(|window, cx| {
                 shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
             });
-            assert!(!state.read_with(cx, |state, _| state.palette_open));
+            assert!(!state.read_with(cx, |state, _| state.palette_shown()));
             state.update(cx, |state, cx| state.open_thread(cx));
             cx.executor().advance_clock(Duration::from_millis(250));
             draw(cx);
@@ -6510,7 +6510,7 @@ mod tests {
         window_state.update(cx, |state, cx| state.open_palette(cx));
         assert!(back(cx), "back closes the overlay");
         shell.read_with(cx, |shell, cx| {
-            assert!(!shell.window_state.read(cx).palette_open);
+            assert!(!shell.window_state.read(cx).palette_shown());
             assert_eq!(
                 shell.destination(cx),
                 Destination::Thread,
