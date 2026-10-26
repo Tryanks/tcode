@@ -476,7 +476,7 @@ computer_use:
     description: "If background delivery can't start, retry keyboard input by briefly focusing the target window. Off by default; pointer actions never fall back to the foreground."
   show_agent_cursor:
     title: "Show agent cursor"
-    description: "Display a floating cursor and window highlight showing where the agent is acting. The real pointer is never moved."
+    description: "Show a cursor that glides to each point the agent acts on in the target window. The real pointer is never moved."
   permissions_section: "SYSTEM PERMISSIONS"
   unsupported: "Computer use is only available on macOS."
 browser:

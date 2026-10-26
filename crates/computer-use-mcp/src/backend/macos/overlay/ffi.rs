@@ -111,15 +111,6 @@ pub(super) fn send_id_id(receiver: Id, name: &CStr, value: Id) -> Option<Id> {
     (!result.is_null()).then_some(result)
 }
 
-pub(super) fn send_id_i32(receiver: Id, name: &CStr, value: i32) -> Option<Id> {
-    let selector = selector(name)?;
-    if !can_send(receiver, selector) {
-        return None;
-    }
-    let result = invoke!(Id, receiver, selector, i32 => value);
-    (!result.is_null()).then_some(result)
-}
-
 pub(super) fn send_id_rect(receiver: Id, name: &CStr, rect: CGRect) -> Option<Id> {
     let selector = selector(name)?;
     if !can_send(receiver, selector) {
@@ -149,30 +140,6 @@ pub(super) fn send_id_window_init(
         usize => style,
         usize => backing,
         i8 => i8::from(defer),
-    );
-    (!value.is_null()).then_some(value)
-}
-
-pub(super) fn send_id_color(
-    receiver: Id,
-    name: &CStr,
-    red: f64,
-    green: f64,
-    blue: f64,
-    alpha: f64,
-) -> Option<Id> {
-    let selector = selector(name)?;
-    if !can_send(receiver, selector) {
-        return None;
-    }
-    let value = invoke!(
-        Id,
-        receiver,
-        selector,
-        f64 => red,
-        f64 => green,
-        f64 => blue,
-        f64 => alpha,
     );
     (!value.is_null()).then_some(value)
 }
@@ -373,28 +340,118 @@ pub(super) fn status_window_level() -> isize {
     unsafe { CGWindowLevelForKey(STATUS_WINDOW_LEVEL_KEY) as isize }
 }
 
-pub(super) fn window_exists(window_id: u32) -> bool {
-    use core_foundation::base::TCFType;
+/// `None` when the window is not on screen. Otherwise whether the frontmost
+/// window under `point`, among the window and those in front of it, belongs to
+/// the window's application, so its own menus and popovers count as showing
+/// the point. Other applications' layers from the Dock upward (menu bar,
+/// status items, this overlay, system shields) never count as cover.
+pub(super) fn window_shows_point(window_id: u32, point: Option<(f64, f64)>) -> Option<bool> {
+    use core_foundation::base::{CFGetTypeID, CFTypeRef, TCFType};
     use core_foundation::boolean::CFBoolean;
-    use core_foundation::dictionary::{CFDictionaryGetValue, CFDictionaryRef};
+    use core_foundation::dictionary::{
+        CFDictionaryGetTypeID, CFDictionaryGetValue, CFDictionaryRef,
+    };
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::{CFString, CFStringRef};
     use core_graphics::window::{
-        copy_window_info, kCGWindowIsOnscreen, kCGWindowListOptionIncludingWindow,
+        copy_window_info, kCGWindowAlpha, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer,
+        kCGWindowListOptionIncludingWindow, kCGWindowListOptionOnScreenAboveWindow,
+        kCGWindowNumber, kCGWindowOwnerPID,
+    };
+    const DOCK_WINDOW_LAYER: f64 = 20.0;
+    // SAFETY: these are immutable CFString constants exported by CoreGraphics.
+    let (bounds_key, number_key, onscreen_key, layer_key, alpha_key, owner_key) = unsafe {
+        (
+            kCGWindowBounds,
+            kCGWindowNumber,
+            kCGWindowIsOnscreen,
+            kCGWindowLayer,
+            kCGWindowAlpha,
+            kCGWindowOwnerPID,
+        )
     };
 
-    let Some(windows) = copy_window_info(kCGWindowListOptionIncludingWindow, window_id) else {
+    // SAFETY (all helpers): CGWindowListCopyWindowInfo returns an array of
+    // dictionaries, and each borrowed value stays owned by that array for this
+    // call; values are type-checked before they are wrapped.
+    let value = |dictionary: CFDictionaryRef, key: CFStringRef| {
+        let value = unsafe { CFDictionaryGetValue(dictionary, key.cast()) } as CFTypeRef;
+        (!value.is_null()).then_some(value)
+    };
+    let number = |dictionary: CFDictionaryRef, key: CFStringRef| {
+        value(dictionary, key)
+            .filter(|value| unsafe { CFGetTypeID(*value) } == CFNumber::type_id())
+            .and_then(|value| unsafe { CFNumber::wrap_under_get_rule(value.cast()) }.to_f64())
+    };
+    let bounds = |dictionary: CFDictionaryRef| {
+        let bounds = value(dictionary, bounds_key)
+            .filter(|value| unsafe { CFGetTypeID(*value) == CFDictionaryGetTypeID() })?
+            as CFDictionaryRef;
+        let field = |name: &str| number(bounds, CFString::new(name).as_concrete_TypeRef());
+        Some(Frame {
+            x: field("X")?,
+            y: field("Y")?,
+            w: field("Width")?,
+            h: field("Height")?,
+        })
+    };
+    let contains = |frame: Frame, (x, y): (f64, f64)| {
+        x >= frame.x && x < frame.x + frame.w && y >= frame.y && y < frame.y + frame.h
+    };
+
+    let list = copy_window_info(
+        kCGWindowListOptionOnScreenAboveWindow | kCGWindowListOptionIncludingWindow,
+        window_id,
+    )?;
+    let windows: Vec<CFDictionaryRef> = list
+        .iter()
+        .map(|window| *window as CFDictionaryRef)
+        .collect();
+    let target = windows
+        .iter()
+        .copied()
+        .find(|dictionary| number(*dictionary, number_key) == Some(f64::from(window_id)))?;
+    let onscreen = value(target, onscreen_key).is_some_and(|value| unsafe {
+        CFGetTypeID(value) == CFBoolean::type_id()
+            && bool::from(CFBoolean::wrap_under_get_rule(value.cast()))
+    });
+    if !onscreen {
+        return None;
+    }
+    let Some(point) = point else {
+        return Some(false);
+    };
+    let owner = number(target, owner_key);
+    // The list runs front to back, ending with the window itself.
+    let frontmost_under_point = windows.iter().copied().find(|dictionary| {
+        let own = number(*dictionary, owner_key) == owner;
+        let layer = number(*dictionary, layer_key).unwrap_or(0.0);
+        let alpha = number(*dictionary, alpha_key).unwrap_or(1.0);
+        (own || (0.0..DOCK_WINDOW_LAYER).contains(&layer))
+            && alpha > 0.0
+            && bounds(*dictionary).is_some_and(|frame| contains(frame, point))
+    });
+    Some(frontmost_under_point.is_some_and(|dictionary| number(dictionary, owner_key) == owner))
+}
+
+pub(super) fn send_id_f64(receiver: Id, name: &CStr, value: f64) -> Option<Id> {
+    let selector = selector(name)?;
+    if !can_send(receiver, selector) {
+        return None;
+    }
+    let result = invoke!(Id, receiver, selector, f64 => value);
+    (!result.is_null()).then_some(result)
+}
+
+pub(super) fn send_void_id_id(receiver: Id, name: &CStr, first: Id, second: Id) -> bool {
+    let Some(selector) = selector(name) else {
         return false;
     };
-    windows.iter().any(|window| {
-        // SAFETY: CGWindowListCopyWindowInfo returns an array of dictionaries;
-        // the borrowed Boolean remains owned by that array throughout the query.
-        unsafe {
-            let dictionary = *window as CFDictionaryRef;
-            let value = CFDictionaryGetValue(dictionary, kCGWindowIsOnscreen.cast());
-            !value.is_null()
-                && core_foundation::base::CFGetTypeID(value) == CFBoolean::type_id()
-                && bool::from(CFBoolean::wrap_under_get_rule(value.cast()))
-        }
-    })
+    if !can_send(receiver, selector) {
+        return false;
+    }
+    invoke!((), receiver, selector, Id => first, Id => second);
+    true
 }
 
 pub(super) fn send_void_rect_bool(receiver: Id, name: &CStr, value: CGRect, display: bool) -> bool {
@@ -417,4 +474,9 @@ pub(super) fn native_panel_state(window: Id) -> (CGRect, bool, bool, u32) {
     let passthrough = invoke!(i8, window, selector(c"ignoresMouseEvents").unwrap()) != 0;
     let number = invoke!(isize, window, selector(c"windowNumber").unwrap()) as u32;
     (frame, visible, passthrough, number)
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+pub(super) fn layer_position(layer: Id) -> CGPoint {
+    invoke!(CGPoint, layer, selector(c"position").unwrap())
 }

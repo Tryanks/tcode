@@ -154,6 +154,9 @@ struct ActUiParams {
     /// Optional postcondition used to verify the transaction outcome.
     #[serde(default)]
     expect: Option<UiCondition>,
+    /// Deliver each action at once instead of after the on-screen agent cursor, which shows the user where the agent acts, reaches its point. Set only when the input's timing matters more than showing it.
+    #[serde(default)]
+    immediate: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -415,6 +418,7 @@ impl ComputerUseTools {
                     &previous.root,
                     &request,
                     &feedback,
+                    !params.immediate,
                 )
                 .unwrap_or_else(|error| ActionResult::didnt(error.to_string(), Delivery::None)),
                 Err(error) => ActionResult::didnt(error, Delivery::None),
@@ -498,7 +502,7 @@ impl ComputerUseTools {
         }
         text.push_str("\n\n");
         text.push_str(&successor.harness_annotation);
-        if stopped_at.is_none() && !expectation_failed && feedback.is_current() {
+        if feedback.is_current() {
             feedback.complete();
         }
         bounded_success(Some(&successor.state_id), text, Vec::new())

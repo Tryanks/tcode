@@ -264,18 +264,20 @@ pub(crate) fn clear_feedback(owner: Option<u64>, action: Option<u64>) {
 #[cfg(target_os = "windows")]
 pub use windows::{observe, perform_action};
 
+/// `paced` delivers the input only once the agent cursor has reached its point.
 pub(crate) fn perform_action_with_feedback(
     root: &RootInfo,
     request: &ActionRequest,
     feedback: &crate::feedback::FeedbackRun,
+    paced: bool,
 ) -> Result<ActionResult, BackendError> {
     #[cfg(target_os = "macos")]
     {
-        macos::perform_action_with_feedback(root, request, Some(feedback))
+        macos::perform_action_with_feedback(root, request, Some(feedback), paced)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = feedback;
+        let _ = (feedback, paced);
         perform_action(root, request)
     }
 }
