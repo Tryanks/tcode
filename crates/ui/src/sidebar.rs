@@ -45,7 +45,9 @@ use crate::window_state::{Destination, Route, WindowState};
 
 mod arrange;
 mod swipe;
-use arrange::{DraggedThread, DropZone, ThreadDrag};
+pub(crate) use arrange::thread_carried;
+use arrange::{DropZone, ThreadDrag};
+use gpui_base::dock::AnyDrag;
 
 /// The provider mark behind a thread row: its provider's glyph at this alpha,
 /// sized to the row height minus this vertical inset so it sits inside the row.
@@ -2740,16 +2742,22 @@ impl SessionsSidebar {
             move || format!("sidebar-thread-{id}")
         })
         .cursor_pointer()
-        .on_click(cx.listener(move |this, _, _, cx| {
-            let session_id = session_id.clone();
-            this.compact_model_dirty = true;
-            this.store.update(cx, |store, cx| {
-                store.select_session(session_id.clone(), cx);
-            });
-            this.window_state
-                .update(cx, |state, cx| state.open_thread(cx));
-            cx.notify();
-        }));
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                let session_id = session_id.clone();
+                if event.modifiers().alt && !this.compact(cx) {
+                    window.dispatch_action(Box::new(crate::panes::OpenInNewPane(session_id)), cx);
+                    return;
+                }
+                this.compact_model_dirty = true;
+                this.store.update(cx, |store, cx| {
+                    store.select_session(session_id.clone(), cx);
+                });
+                this.window_state
+                    .update(cx, |state, cx| state.open_thread(cx));
+                cx.notify();
+            }),
+        );
         let row = Self::track_hover(row, &state.row_key, cx);
         let row = match self
             .dragged_thread(meta, state, cx)
@@ -3018,14 +3026,24 @@ impl SessionsSidebar {
         let auto_settle_enabled = state.auto_settle_enabled;
         let follow_up = meta.follow_up.is_some();
         let parked = meta.parked_at.is_some();
-        row.context_menu(move |menu, _window, cx| {
+        row.context_menu(move |menu, window, cx| {
             let id = session_id.clone();
             // Move up / Move down stay within the section the list shows.
             let moves = sidebar
                 .upgrade()
                 .filter(|_| !settled && scope.is_full())
                 .and_then(|sidebar| sidebar.read(cx).move_bounds(&id, cx));
-            menu.menu(
+            let open_beside = crate::shell::pane_controls(None, window, cx)
+                .map(|panes| panes.split_right || crate::shell::shown_in_pane(&id, cx));
+            menu.when_some(open_beside, |menu, enabled| {
+                menu.menu_with_enable(
+                    crate::tr!("panes.open_beside").into_owned(),
+                    Box::new(crate::panes::OpenInNewPane(id.clone())),
+                    enabled,
+                )
+                .separator()
+            })
+            .menu(
                 crate::tr!("sidebar.ctx_rename").into_owned(),
                 Box::new(ThreadRename(id.clone())),
             )
@@ -4923,11 +4941,12 @@ impl Render for SessionsSidebar {
                             .flex_1()
                             .min_h_0()
                             .relative()
-                            .on_drop(cx.listener(|this, _: &DraggedThread, window, cx| {
+                            .on_drop(cx.listener(|this, _: &AnyDrag, window, cx| {
                                 this.drop_thread(window, cx)
                             }))
                             .on_drag_move(cx.listener(
-                                |this, event: &gpui::DragMoveEvent<DraggedThread>, _, cx| {
+                                |this, event: &gpui::DragMoveEvent<AnyDrag>, _, cx| {
+                                    this.drag_left_list(event, cx);
                                     this.drag_auto_scroll(event, cx)
                                 },
                             ))

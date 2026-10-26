@@ -1,3 +1,4 @@
+use crate::icon::{Icon, IconName};
 use crate::material::semantic_chip;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -25,9 +26,12 @@ fn model_chip(model: &Option<String>, effort: &Option<String>) -> Option<String>
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
+/// `shown` marks a row whose thread a pane already shows, where opening it
+/// only moves the focus there.
 pub(crate) fn subagent_row(
     entry: &TimelineEntry,
     on_open: Option<ClickHandler>,
+    shown: bool,
     cx: &App,
 ) -> AnyElement {
     let EntryContent::Item(ItemContent::Subagent {
@@ -121,6 +125,21 @@ pub(crate) fn subagent_row(
         );
 
     if let Some(on_open) = on_open {
+        let shown_label = SharedString::from(crate::tr!("panes.shown_beside").into_owned());
+        let row = row.when(shown, |row| {
+            row.bg(cx.theme().accent).child(
+                div()
+                    .id(SharedString::from(format!("subagent-shown-{}", entry.id)))
+                    .debug_selector(|| "subagent-shown".into())
+                    .flex_none()
+                    .role(Role::Status)
+                    .aria_label(shown_label.clone())
+                    .tooltip(move |window, cx| {
+                        crate::widgets::tooltip::Tooltip::new(shown_label.clone()).build(window, cx)
+                    })
+                    .child(Icon::new(IconName::Check).text_color(muted)),
+            )
+        });
         crate::material::accessible_clickable(
             row,
             SharedString::from(format!("subagent-row-{}", entry.id)),
@@ -128,6 +147,10 @@ pub(crate) fn subagent_row(
             row_label,
             cx,
         )
+        .debug_selector({
+            let id = entry.id.clone();
+            move || format!("subagent-row-{id}")
+        })
         .cursor_pointer()
         .hover(|row| row.bg(cx.theme().accent))
         .on_click(on_open)
