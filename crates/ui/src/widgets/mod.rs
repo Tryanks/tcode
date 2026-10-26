@@ -21,7 +21,7 @@ pub mod tooltip;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
 pub use checkbox::Checkbox;
-pub use collapsible::Collapsible;
+pub use collapsible::{Chevron, Collapsible};
 pub use fade_text::{FadeText, fade_text};
 pub use input::{Input, Textarea};
 pub use kbd::Kbd;

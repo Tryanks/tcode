@@ -52,6 +52,33 @@ fn page_bounds(total: usize, page: usize, per_page: usize) -> (usize, usize, usi
     (page, start, start.saturating_add(per_page).min(total))
 }
 
+/// The Advanced disclosure's button, its chevron turning with the fold.
+#[derive(IntoElement)]
+struct AdvancedToggle {
+    expanded: bool,
+    on_click: crate::widgets::button::ClickHandler,
+}
+
+impl gpui::RenderOnce for AdvancedToggle {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let on_click = self.on_click;
+        Button::new("settings-advanced-toggle")
+            .text()
+            .xsmall()
+            .text_caption(cx)
+            .icon(crate::widgets::Chevron::icon(
+                "settings-advanced-toggle",
+                self.expanded,
+                window,
+                cx,
+            ))
+            .label(crate::tr!("settings.advanced"))
+            .aria_expanded(self.expanded)
+            .debug_selector(|| "settings-advanced-toggle".into())
+            .on_click(move |event, window, cx| on_click(event, window, cx))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     General,
@@ -1027,30 +1054,18 @@ impl SettingsPage {
     /// compact section list: the same caption style as a group's, plus the
     /// chevron that opens it.
     fn advanced_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let expanded = self.advanced_expanded();
         let spacing = &cx.theme().tokens.spacing;
         div()
             .pl(px(crate::material::CARD_INSET))
             .pt(spacing.sm)
             .pb(spacing.sm)
-            .child(
-                Button::new("settings-advanced-toggle")
-                    .text()
-                    .xsmall()
-                    .text_caption(cx)
-                    .icon(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .label(crate::tr!("settings.advanced"))
-                    .aria_expanded(expanded)
-                    .debug_selector(|| "settings-advanced-toggle".into())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.advanced_expanded = Some(!this.advanced_expanded());
-                        cx.notify();
-                    })),
-            )
+            .child(AdvancedToggle {
+                expanded: self.advanced_expanded(),
+                on_click: Rc::new(cx.listener(|this, _, _, cx| {
+                    this.advanced_expanded = Some(!this.advanced_expanded());
+                    cx.notify();
+                })),
+            })
             .into_any_element()
     }
 
@@ -1126,9 +1141,13 @@ impl SettingsPage {
                 .items(plain),
             );
             if sections.iter().any(|section| section.advanced()) {
-                tabs = tabs.child(self.advanced_toggle(cx));
-                if self.advanced_expanded() {
-                    tabs = tabs.child(
+                tabs = tabs.child(self.advanced_toggle(cx)).child(
+                    crate::widgets::Collapsible::new(
+                        "settings-advanced-tabs-fold",
+                        self.advanced_expanded(),
+                    )
+                    .w_full()
+                    .content(
                         TabBar::new("settings-advanced-tabs")
                             .rail()
                             .aria_label(crate::tr!("settings.advanced"))
@@ -1139,8 +1158,8 @@ impl SettingsPage {
                                     .map(|section| self.nav_item(section, cx))
                                     .collect::<Vec<_>>(),
                             ),
-                    );
-                }
+                    ),
+                );
             }
         }
         v_flex()
@@ -1205,11 +1224,14 @@ impl SettingsPage {
                 card = card.child(crate::material::grouped(plain, cx));
             }
             if !advanced.is_empty() {
-                card = card
-                    .child(self.advanced_toggle(cx))
-                    .when(advanced_expanded, |card| {
-                        card.child(crate::material::grouped(advanced, cx))
-                    });
+                card = card.child(self.advanced_toggle(cx)).child(
+                    crate::widgets::Collapsible::new(
+                        "settings-advanced-list-fold",
+                        advanced_expanded,
+                    )
+                    .w_full()
+                    .content(crate::material::grouped(advanced, cx)),
+                );
             }
             column = column.child(card);
         }
