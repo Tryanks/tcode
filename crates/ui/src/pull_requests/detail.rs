@@ -122,6 +122,8 @@ pub(super) struct Replies {
 
 pub(super) struct ConversationView {
     pub(super) list: ListState,
+    /// The rows `list` was last brought to.
+    pub(super) rows: Vec<super::conversation::Item>,
     /// By comment id, with the account its conversation was read as.
     pub(super) markdown:
         std::cell::RefCell<HashMap<String, (String, Entity<crate::markdown::MarkdownState>)>>,
@@ -134,6 +136,7 @@ impl Default for ConversationView {
     fn default() -> Self {
         Self {
             list: ListState::new(0, ListAlignment::Top, px(200.)),
+            rows: Vec::new(),
             markdown: Default::default(),
             replies: HashMap::new(),
             expanded: HashSet::new(),
@@ -2433,6 +2436,77 @@ mod tests {
             );
         });
         assert!(reads(&requests).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_reread_with_a_new_comment_keeps_the_readers_place(cx: &mut TestAppContext) {
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        let with_comments = |count: usize| {
+            let mut conversation = conversation();
+            conversation.comments = (0..count)
+                .map(|index| PullRequestComment {
+                    id: format!("C_{index}"),
+                    body: format!("Comment {index}"),
+                    created_at: format!("2026-10-02T00:00:{index:02}Z"),
+                    ..conversation.description.clone()
+                })
+                .collect();
+            PullRequestReadResponse::Conversation(Box::new(conversation))
+        };
+        let later = now() + 3600;
+        for (id, read) in reads(&requests) {
+            match read {
+                // Lands as its expiry passes, so the view reads it again at once.
+                PullRequestRead::Conversation => answer(&incoming, id, with_comments(40), now()),
+                PullRequestRead::Files { cursor: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..1, None)),
+                    later,
+                ),
+                read => answer_other(&incoming, id, read, later),
+            }
+        }
+        view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
+        settle(cx);
+        view.update(cx, |view, cx| {
+            view.page()
+                .unwrap()
+                .conversation_view
+                .list
+                .scroll_by(px(1500.));
+            cx.notify();
+        });
+        settle(cx);
+        let top = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                view.page()
+                    .unwrap()
+                    .conversation_view
+                    .list
+                    .logical_scroll_top()
+            })
+        };
+        let before = top(cx);
+        assert!(before.item_ix > 0, "the reader scrolled into the comments");
+        let reread = reads(&requests)
+            .into_iter()
+            .find(|(_, read)| *read == PullRequestRead::Conversation)
+            .expect("an expired conversation is read again");
+        answer(&incoming, reread.0, with_comments(41), later);
+        settle(cx);
+        let after = top(cx);
+        assert_eq!(
+            (after.item_ix, after.offset_in_item),
+            (before.item_ix, before.offset_in_item),
+            "a new comment below keeps the row and offset the reader was at"
+        );
     }
 
     /// The meta block has a Labels row where the host has labels: on one without them

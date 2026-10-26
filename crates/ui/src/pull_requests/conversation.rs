@@ -54,7 +54,7 @@ pub(super) enum CommentMenu {
 
 /// One row of the conversation list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Item {
+pub(super) enum Item {
     Notice,
     Meta,
     Description,
@@ -120,6 +120,16 @@ fn reaction_chip(id: SharedString, label: String, own: bool, cx: &App) -> Button
         .text_token(&cx.theme().tokens.typography.xs)
 }
 
+impl super::detail::ConversationView {
+    /// Splices only the rows that changed, so a re-read keeps the reader where they were.
+    fn sync_rows(&mut self, items: Vec<Item>) {
+        if self.rows != items {
+            crate::diff::list::reconcile_rows(&self.list, &self.rows, &items);
+            self.rows = items;
+        }
+    }
+}
+
 impl PullRequestView {
     fn items(&self, cx: &App) -> Vec<Item> {
         let Some(conversation) = self.page().and_then(|page| page.conversation.data.as_ref())
@@ -171,13 +181,12 @@ impl PullRequestView {
     }
 
     pub(super) fn scroll_conversation_to_end(&mut self, cx: &mut Context<Self>) {
-        let count = self.items(cx).len();
+        let items = self.items(cx);
+        let count = items.len();
         if let Some(page) = self.page_mut()
             && count > 0
         {
-            if page.conversation_view.list.item_count() != count {
-                page.conversation_view.list.reset(count);
-            }
+            page.conversation_view.sync_rows(items);
             page.conversation_view.list.scroll_to(gpui::ListOffset {
                 item_ix: count - 1,
                 offset_in_item: px(0.),
@@ -361,9 +370,7 @@ impl PullRequestView {
         });
         page.conversation_view.expanded.insert(id.to_owned());
         if let Some(position) = position {
-            if page.conversation_view.list.item_count() != items.len() {
-                page.conversation_view.list.reset(items.len());
-            }
+            page.conversation_view.sync_rows(items);
             page.conversation_view.list.scroll_to(gpui::ListOffset {
                 item_ix: position,
                 offset_in_item: px(0.),
@@ -1712,14 +1719,12 @@ impl PullRequestView {
                 )
                 .into_any_element();
         }
-        let count = self.items(cx).len();
-        let Some(page) = self.page() else {
+        let items = self.items(cx);
+        let Some(page) = self.page_mut() else {
             return div().into_any_element();
         };
+        page.conversation_view.sync_rows(items);
         let state = page.conversation_view.list.clone();
-        if state.item_count() != count {
-            state.reset(count);
-        }
         let view = cx.entity();
         div()
             .id("pr-conversation")
