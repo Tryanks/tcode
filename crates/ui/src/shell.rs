@@ -310,6 +310,30 @@ pub(crate) fn focus_focused_pane(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// Give the keyboard to the composer of the pane holding it, as a row of a
+/// pane header's menu leaves it: off the menu's button, as a pane command
+/// from the palette leaves it. Focus a row sent out of the panes stays there.
+pub(crate) fn focus_pane_composer(window: &mut Window, cx: &mut App) {
+    let Some(shell) = current_shell(cx) else {
+        return;
+    };
+    let shell = shell.read(cx);
+    if shell.compact(cx) {
+        return;
+    }
+    let Some(chat) = shell.attachment.as_ref().and_then(|attachment| {
+        let pane = attachment
+            .panes(cx)
+            .into_iter()
+            .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))?;
+        let pane = pane.read(cx);
+        pane.session_id().is_some().then(|| pane.chat())
+    }) else {
+        return;
+    };
+    chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
+}
+
 /// The layouts the palette offers now: those the column has room for.
 pub(crate) fn pane_layouts(window: &Window, cx: &App) -> Vec<PaneLayout> {
     let Some(shell) = current_shell(cx) else {
@@ -6405,6 +6429,38 @@ mod tests {
         });
     }
 
+    /// A row of a pane header's menu leaves the keyboard in that pane's
+    /// composer, as a pane command from the palette does, not on the menu's
+    /// button.
+    #[gpui::test]
+    fn a_pane_menu_row_hands_the_keyboard_to_the_composer(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        let button = cx.debug_bounds("pane-menu").expect("the pane menu");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        draw(cx);
+        let pane = keyboard_pane(&shell, cx).expect("the menu's pane has the keyboard");
+        // Split right, split down, a separator, then zoom.
+        let zoom = cx.debug_bounds("menu-item-3").expect("the zoom row");
+        cx.simulate_click(zoom.center(), gpui::Modifiers::default());
+        draw(cx);
+        let (zoomed, composer) = shell.read_with(cx, |shell, cx| {
+            let attachment = shell.attachment.as_ref().expect("attached");
+            let composer = attachment.panes(cx)[pane]
+                .read(cx)
+                .chat()
+                .read(cx)
+                .composer()
+                .read(cx)
+                .input_focus_handle(cx);
+            (attachment.thread_panes.read(cx).is_zoomed(), composer)
+        });
+        assert!(zoomed, "the row ran");
+        assert_eq!(keyboard_pane(&shell, cx), Some(pane));
+        cx.update(|window, _| assert!(composer.is_focused(window), "the caret is back"));
+    }
+
     /// A thread's agents spread beside it newest first, stacked on the
     /// right; one that has settled stays out.
     #[gpui::test]
@@ -6461,6 +6517,12 @@ mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert!(cx.debug_bounds("waiting-pane").is_some());
         answer_draft(&shell, &host, "draft-1", cx);
+        // The hint fades out under the draft's chat, which has the keyboard
+        // from the start of the fade.
+        assert!(cx.debug_bounds("waiting-pane").is_some());
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
         assert!(cx.debug_bounds("waiting-pane").is_none());
         assert_eq!(
             pane_threads(&shell, cx),

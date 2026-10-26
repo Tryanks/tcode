@@ -195,7 +195,39 @@ fn pane_menu(panes: crate::shell::PaneControls) -> impl IntoElement {
         .compact()
         .icon(IconName::Columns2)
         .tooltip(crate::tr!("panes.menu"))
-        .dropdown_menu(move |menu, _, _| pane_items(menu, panes))
+        .dropdown_menu(move |menu, _, _| {
+            pane_items(menu, panes).after_choose(crate::shell::focus_pane_composer)
+        })
+}
+
+/// The agents' cue on the button that shows the Agents panel: it fades in
+/// while an agent runs or waits to be settled, and changes colour between the
+/// two.
+fn agents_cue_dot(
+    cue: Option<gpui::Hsla>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let shown = crate::motion::shown("agents-cue", cue, window, cx)?;
+    let color = gpui_base::motion::transition(
+        "agents-cue-color",
+        shown.value,
+        crate::motion::settle(),
+        window,
+        cx,
+    );
+    Some(
+        div()
+            .absolute()
+            .top(px(3.))
+            .right(px(3.))
+            .size(px(6.))
+            .rounded_full()
+            .bg(color)
+            .opacity(shown.progress())
+            .debug_selector(|| "agents-cue".into())
+            .into_any_element(),
+    )
 }
 
 /// The pane commands `panes` allows, as menu rows.
@@ -2990,6 +3022,8 @@ impl ChatView {
         };
         let overflow = width - compact_extra < HEADER_COMPACT_MIN_WIDTH;
         let traffic_lights = window_caption::traffic_light_inset(window);
+        // One cue for either tier, so a tier change leaves it as it was.
+        let mut cue = agents_cue_dot(agents_cue.flatten(), window, cx);
         let base = crate::material::bar("chat-header", crate::material::Bar::Strip, false, cx)
             .when(under_traffic_lights && traffic_lights > px(0.), |this| {
                 this.pl(traffic_lights)
@@ -3200,7 +3234,7 @@ impl ChatView {
                                 .and_then(|links| crate::pull_requests::badge_label(&links, cx))
                                 .map(|_| right_panel_open && right_tab == RightTab::PullRequests),
                         },
-                        agents_cue.flatten(),
+                        cue.take(),
                         cwd.clone(),
                         window,
                         cx,
@@ -3248,7 +3282,7 @@ impl ChatView {
                                         this.on_toggle_panel(&TogglePanel::Plan, window, cx)
                                     })),
                             )
-                            .when_some(agents_cue, |row, cue| {
+                            .when(agents_cue.is_some(), |row| {
                                 row.child(
                                     div()
                                         .relative()
@@ -3272,18 +3306,7 @@ impl ChatView {
                                                     )
                                                 })),
                                         )
-                                        .when_some(cue, |toggle, color| {
-                                            toggle.child(
-                                                div()
-                                                    .absolute()
-                                                    .top(px(3.))
-                                                    .right(px(3.))
-                                                    .size(px(6.))
-                                                    .rounded_full()
-                                                    .bg(color)
-                                                    .debug_selector(|| "agents-cue".into()),
-                                            )
-                                        }),
+                                        .children(cue.take()),
                                 )
                             })
                             .when(self.workspace_store.read(cx).offers_preview(), |row| {
@@ -3360,7 +3383,7 @@ impl ChatView {
     fn render_header_overflow(
         &self,
         panels: HeaderPanels,
-        agents_cue: Option<gpui::Hsla>,
+        agents_cue: Option<AnyElement>,
         cwd: Option<PathBuf>,
         window: &Window,
         cx: &App,
@@ -3432,20 +3455,10 @@ impl ChatView {
                             Some(panes) => pane_items(menu.separator(), panes),
                             None => menu,
                         }
+                        .after_choose(crate::shell::focus_pane_composer)
                     }),
             )
-            .when_some(agents_cue, |button, color| {
-                button.child(
-                    div()
-                        .absolute()
-                        .top(px(3.))
-                        .right(px(3.))
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(color)
-                        .debug_selector(|| "agents-cue".into()),
-                )
-            })
+            .children(agents_cue)
             .into_any_element()
     }
 

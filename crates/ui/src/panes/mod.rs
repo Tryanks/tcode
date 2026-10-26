@@ -216,11 +216,40 @@ impl Focusable for ThreadPanel {
 }
 
 impl Render for ThreadPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        const WAITING: usize = 0;
+        const CHAT: usize = 1;
         let bounds = self.bounds.clone();
         // A pane beside others waits for a thread rather than offering the
         // empty workspace's way to start one.
         let waiting = self.among_others && self.session_id.is_none();
+        let content = crate::motion::CrossFade::new(
+            "pane-content",
+            if waiting { WAITING } else { CHAT },
+            2,
+            window,
+            cx,
+        )
+        .fill();
+        let mut layers = Vec::new();
+        if content.shows(WAITING) {
+            layers.push((
+                WAITING,
+                v_flex()
+                    .debug_selector(|| "waiting-pane".into())
+                    .size_full()
+                    .child(crate::material::empty_state(
+                        Icon::new(IconName::Columns2),
+                        crate::tr!("panes.waiting"),
+                        "",
+                        cx,
+                    ))
+                    .into_any_element(),
+            ));
+        }
+        if content.shows(CHAT) {
+            layers.push((CHAT, self.chat.clone().into_any_element()));
+        }
         div()
             .size_full()
             .on_prepaint(move |painted, _, _| bounds.set(painted))
@@ -228,23 +257,7 @@ impl Render for ThreadPanel {
             .on_action(cx.listener(|this, _: &SplitDown, window, cx| this.claim(window, cx)))
             .on_action(cx.listener(|this, _: &ClosePane, window, cx| this.claim(window, cx)))
             .on_action(cx.listener(|this, _: &ZoomPane, window, cx| this.claim(window, cx)))
-            .map(|pane| {
-                if waiting {
-                    pane.child(
-                        v_flex()
-                            .debug_selector(|| "waiting-pane".into())
-                            .size_full()
-                            .child(crate::material::empty_state(
-                                Icon::new(IconName::Columns2),
-                                crate::tr!("panes.waiting"),
-                                "",
-                                cx,
-                            )),
-                    )
-                } else {
-                    pane.child(self.chat.clone())
-                }
-            })
+            .child(content.render(layers).size_full())
     }
 }
 
@@ -263,6 +276,10 @@ impl Panel for ThreadPanel {
 pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window, &App) -> bool>;
 
 /// The panes' appearance: the area is the chat column's reading surface.
+///
+/// A pane opens, closes, zooms and resizes without motion: gpui-base's dock
+/// lays its groups out with no layout transition and unmounts a closed group
+/// at once, so neither a pane's size nor its leaving can be animated here.
 pub(crate) struct ThreadPanes {
     lands: DropLands,
 }
@@ -288,11 +305,6 @@ impl DockAreaRenderer for ThreadPanes {
     }
 }
 
-/// A placeholder travels between the drops it would land in; a quarter
-/// pixel from rest is rest.
-const DROP_SPRING: gpui_base::motion::Spring =
-    gpui_base::motion::Spring::new(crate::edge_back::SETTLE).with_epsilon(0.25);
-
 /// A pane's thread wears its own header, so the group draws no tab bar.
 struct ThreadTabs {
     lands: DropLands,
@@ -314,23 +326,37 @@ impl TabGroupRenderer for ThreadTabs {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        if !group.is_closable() {
-            return panel.into_any_element();
-        }
-        let focused = group
-            .active_panel()
-            .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx));
+        // Always sampled, so the ring glides in and out as the keyboard moves
+        // between panes, a neighbour comes or goes, or the pane zooms.
+        let focused = group.is_closable()
+            && group
+                .active_panel()
+                .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx));
+        let ring = crate::material::focus_ring(cx);
+        let color = gpui_base::motion::transition(
+            gpui::ElementId::NamedInteger("pane-focus-ring".into(), panel.entity_id().as_u64()),
+            if focused {
+                ring.color
+            } else {
+                ring.color.opacity(0.)
+            },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
         div()
             .relative()
             .size_full()
             .child(panel)
-            .when(focused, |this| {
+            .when(color.a > 0., |this| {
                 this.child(
                     div()
-                        .debug_selector(|| "focused-pane".into())
+                        .when(focused, |ring| {
+                            ring.debug_selector(|| "focused-pane".into())
+                        })
                         .absolute()
                         .inset_0()
-                        .shadow(vec![crate::material::focus_ring(cx)]),
+                        .shadow(vec![gpui::BoxShadow { color, ..ring }]),
                 )
             })
             .into_any_element()
@@ -351,7 +377,7 @@ impl TabGroupRenderer for ThreadTabs {
         let to = indicator.to();
         let id = "pane-drop-placeholder";
         let spring = |channel, target, window: &mut Window, cx: &mut App| -> Pixels {
-            gpui_base::motion::spring((id, channel), target, DROP_SPRING, window, cx)
+            gpui_base::motion::spring((id, channel), target, crate::motion::FOLLOW, window, cx)
         };
         let left = spring("left", to.origin().x, window, cx);
         let top = spring("top", to.origin().y, window, cx);
