@@ -836,6 +836,39 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_dismissed_toast_leaves_inert_then_unmounts(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| window.push_notification(Notification::error("Failed"), cx));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+
+        cx.update(|window, cx| window.clear_notifications(cx));
+        draw(cx);
+        let leaving = cx
+            .debug_bounds("compact-toast")
+            .expect("a leaving toast stays mounted for its exit");
+        cx.simulate_click(leaving.center(), gpui::Modifiers::default());
+        draw(cx);
+        cx.update(|window, cx| {
+            assert!(
+                !dialog_open(window, cx),
+                "tapping a leaving error does not open its details"
+            )
+        });
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert!(cx.debug_bounds("compact-toast").is_none());
+    }
+
+    #[gpui::test]
     fn compact_notification_timeouts(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
@@ -851,6 +884,8 @@ mod tests {
         draw(cx);
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(3));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert!(cx.debug_bounds("compact-toast").is_none());
         cx.update(|window, cx| {
@@ -870,6 +905,8 @@ mod tests {
         assert!(cx.debug_bounds("compact-toast").is_some());
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(2));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert!(cx.debug_bounds("compact-toast").is_none());
     }
