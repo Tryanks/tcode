@@ -752,44 +752,71 @@ impl SessionsSidebar {
         section: ThreadSection,
         empty: bool,
         scope: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Some(drag) = self.drag.as_ref().filter(|drag| drag.scope == scope) else {
-            return div().into_any_element();
-        };
-        let targeted = drag.target(scope.as_deref()) == Some(section);
-        let color = if targeted {
-            cx.theme().primary
-        } else {
-            cx.theme().sidebar_foreground
-        };
+        let drag = self.drag.as_ref().filter(|drag| drag.scope == scope);
+        let targeted = drag.map(|drag| drag.target(scope.as_deref()) == Some(section));
+        let id = SharedString::from(format!("drag-boundary-{section:?}"));
+        // The seam's label fades in as a drag starts and out as it ends, and
+        // lights up while the drag targets its section.
+        let shown = crate::motion::shown(id.clone(), targeted.filter(|_| !empty), window, cx);
+        let lit = transition(
+            (id, "lit"),
+            if targeted == Some(true) { 1. } else { 0. },
+            settle(),
+            window,
+            cx,
+        );
+        if targeted.is_none() || !empty {
+            let Some(shown) = shown else {
+                return div().into_any_element();
+            };
+            return self.render_seam_label(section, lit, shown, cx);
+        }
+        let color = gpui_base::animation::Lerp::lerp(
+            &cx.theme().sidebar_foreground,
+            &cx.theme().primary,
+            lit,
+        );
         let label = match section {
             ThreadSection::Pinned => crate::tr!("sidebar.pinned"),
             _ => crate::tr!("sidebar.active"),
         };
-        if empty {
-            let target = div().w_full().py_1().child(
-                h_flex()
-                    .h(px(EMPTY_TARGET_HEIGHT - 8.))
-                    .px_2()
-                    .items_center()
-                    .rounded(crate::material::radius_chip(cx))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(cx.theme().primary)
-                    .text_caption(cx)
-                    .text_color(color)
-                    .child(label),
-            );
-            return self
-                .drop_zone(target, DropZone::Start(section), scope, 0., cx)
-                .into_any_element();
-        }
-        let rule = if targeted {
-            cx.theme().primary.opacity(0.5)
-        } else {
-            cx.theme().border
+        let target = div().w_full().py_1().child(
+            h_flex()
+                .h(px(EMPTY_TARGET_HEIGHT - 8.))
+                .px_2()
+                .items_center()
+                .rounded(crate::material::radius_chip(cx))
+                .border_1()
+                .border_dashed()
+                .border_color(cx.theme().primary)
+                .text_caption(cx)
+                .text_color(color)
+                .child(label),
+        );
+        self.drop_zone(target, DropZone::Start(section), scope, 0., cx)
+            .into_any_element()
+    }
+
+    /// The label on the seam at the start of a non-empty section, lit as far
+    /// as `lit` toward the drag-target colour.
+    fn render_seam_label(
+        &self,
+        section: ThreadSection,
+        lit: f32,
+        shown: crate::motion::Shown<bool>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let label = match section {
+            ThreadSection::Pinned => crate::tr!("sidebar.pinned"),
+            _ => crate::tr!("sidebar.active"),
         };
+        let theme = cx.theme();
+        let rule =
+            gpui_base::animation::Lerp::lerp(&theme.border, &theme.primary.opacity(0.5), lit);
+        let text = gpui_base::animation::Lerp::lerp(&theme.muted_foreground, &theme.primary, lit);
         // Deferred so the label paints after the rows on both sides of the
         // seam, centered on the seam rather than on a row's title line. The
         // sidebar background is transparent, so the hairline stops at the pill
@@ -799,26 +826,23 @@ impl SessionsSidebar {
             .w_full()
             .h_0()
             .child(deferred(
-                h_flex()
+                div()
                     .absolute()
                     .top(px(-BOUNDARY_LABEL_HEIGHT / 2.))
                     .left_0()
                     .right_0()
-                    .h(px(BOUNDARY_LABEL_HEIGHT))
-                    .gap_1()
-                    .items_center()
-                    .child(div().flex_none().w_2().h(px(1.)).bg(rule))
-                    .child(crate::material::semantic_chip(
-                        label,
-                        cx.theme().muted,
-                        if targeted {
-                            cx.theme().primary
-                        } else {
-                            cx.theme().muted_foreground
-                        },
-                        cx,
-                    ))
-                    .child(div().flex_1().h(px(1.)).bg(rule)),
+                    .child(
+                        shown.fade(
+                            h_flex()
+                                .w_full()
+                                .h(px(BOUNDARY_LABEL_HEIGHT))
+                                .gap_1()
+                                .items_center()
+                                .child(div().flex_none().w_2().h(px(1.)).bg(rule))
+                                .child(crate::material::semantic_chip(label, theme.muted, text, cx))
+                                .child(div().flex_1().h(px(1.)).bg(rule)),
+                        ),
+                    ),
             ))
             .into_any_element()
     }
@@ -844,7 +868,7 @@ impl SessionsSidebar {
 
     pub(crate) fn render_arrange(
         &mut self,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         self.clear_finished_drag(cx);
@@ -882,17 +906,30 @@ impl SessionsSidebar {
                 .iter()
                 .map(|meta| ArrangeRow::Thread(Box::new((*meta).clone()))),
         );
+        let open = self.arrange_settled_expanded;
+        let settled_fold = transition(
+            ("arrange-settled", "fold"),
+            if open { 1. } else { 0. },
+            settle(),
+            window,
+            cx,
+        );
+        let mut folds = vec![1.; rows.len()];
         if !sections.settled.is_empty() {
             rows.push(ArrangeRow::Settled(sections.settled.len()));
-            if self.arrange_settled_expanded {
-                rows.extend(
-                    sections
-                        .settled
-                        .iter()
-                        .map(|meta| ArrangeRow::Thread(Box::new((*meta).clone()))),
-                );
+            folds.push(1.);
+            if open || settled_fold > 0. {
+                let count = sections.settled.len();
+                for (index, meta) in sections.settled.iter().enumerate() {
+                    let factor = fold_factor(settled_fold, index, count);
+                    if factor >= 0. {
+                        rows.push(ArrangeRow::Thread(Box::new((*meta).clone())));
+                        folds.push(factor);
+                    }
+                }
             }
         }
+        self.arrange_settled_fold = settled_fold;
         let keys: Vec<String> = rows.iter().map(ArrangeRow::key).collect();
         if keys != self.arrange_row_keys {
             replace_list_rows(
@@ -910,6 +947,7 @@ impl SessionsSidebar {
             .map(|project| (project.id, project.name))
             .collect();
         let rows = Rc::new(rows);
+        let width = self.arrange_list_state.viewport_bounds().size.width;
         v_flex()
             .size_full()
             .child(
@@ -946,8 +984,11 @@ impl SessionsSidebar {
                     .child(
                         list(
                             self.arrange_list_state.clone(),
-                            cx.processor(move |this, index: usize, _, cx| {
-                                this.render_arrange_row(&rows[index], &projects, cx)
+                            cx.processor(move |this, index: usize, window, cx| {
+                                let factor = folds.get(index).copied().unwrap_or(1.);
+                                this.fold_row(factor, width, window, cx, |this, window, cx| {
+                                    this.render_arrange_row(&rows[index], &projects, window, cx)
+                                })
                             }),
                         )
                         .size_full(),
@@ -960,6 +1001,7 @@ impl SessionsSidebar {
         &self,
         row: &ArrangeRow,
         projects: &HashMap<String, String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let scope = self.arrange_scope.clone();
@@ -967,12 +1009,22 @@ impl SessionsSidebar {
             .drag
             .as_ref()
             .and_then(|drag| drag.target(scope.as_deref()));
-        let caption_color = |section| {
-            if target == Some(section) {
-                cx.theme().primary
-            } else {
-                cx.theme().muted_foreground
-            }
+        // A caption lights up as a drag takes its section as the target.
+        let mut caption_color = |section: ThreadSection| {
+            transition(
+                (
+                    SharedString::from(format!("arrange-caption-{section:?}")),
+                    "color",
+                ),
+                if target == Some(section) {
+                    cx.theme().primary
+                } else {
+                    cx.theme().muted_foreground
+                },
+                settle(),
+                window,
+                cx,
+            )
         };
         match row {
             ArrangeRow::Caption(section, count) => {
@@ -980,8 +1032,9 @@ impl SessionsSidebar {
                     ThreadSection::Pinned => crate::tr!("sidebar.pinned_count", count = count),
                     _ => crate::tr!("sidebar.active_count", count = count),
                 };
+                let color = caption_color(*section);
                 let caption = crate::material::list_caption(label.into_owned().into(), true, cx)
-                    .text_color(caption_color(*section));
+                    .text_color(color);
                 self.drop_zone(caption, DropZone::Start(*section), scope, 0., cx)
                     .into_any_element()
             }
@@ -996,6 +1049,7 @@ impl SessionsSidebar {
                 .into_any_element(),
             ArrangeRow::Settled(count) => {
                 let expanded = self.arrange_settled_expanded;
+                let color = caption_color(ThreadSection::Settled);
                 // The compact sidebar's settled disclosure, at a touch
                 // section bar's height and inset.
                 let header = crate::material::accessible_clickable(
@@ -1013,16 +1067,13 @@ impl SessionsSidebar {
                 .px(px(COMPACT_PAGE_INSET))
                 .items_center()
                 .text_caption(cx)
-                .text_color(caption_color(ThreadSection::Settled))
+                .text_color(color)
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.arrange_settled_expanded = !this.arrange_settled_expanded;
                     cx.notify();
                 }))
-                .child(
-                    collapse_chevron(!expanded, cx)
-                        .text_color(caption_color(ThreadSection::Settled)),
-                )
+                .child(collapse_chevron(self.arrange_settled_fold, cx).text_color(color))
                 .child(crate::tr!("sidebar.settled_count", count = count));
                 self.drop_zone(
                     div().w_full().child(header),
