@@ -244,7 +244,12 @@ impl TraversePanel {
         cx.notify();
     }
 
-    fn render_rows(&mut self, compact: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_rows(
+        &mut self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let field = |compact: bool| {
             div()
                 .when(compact, |field| field.flex_1().min_w_0())
@@ -269,9 +274,13 @@ impl TraversePanel {
             let status = key
                 .filter(|_| hosting)
                 .and_then(|key| statuses.iter().find(|status| status.source == key));
-            let chip = source
-                .enabled
-                .then(|| status_chip(index, status, source.expanded, cx));
+            let chip = crate::motion::shown(
+                ("remote-traverse-chip", index),
+                source.enabled.then_some(()),
+                window,
+                cx,
+            )
+            .map(|shown| shown.fade(status_chip(index, status, source.expanded, window, cx)));
             let detail = status.filter(|_| source.enabled).map(|status| {
                 div()
                     .w_full()
@@ -283,7 +292,7 @@ impl TraversePanel {
                             source.expanded,
                         )
                         .w_full()
-                        .content(status_detail(status, cx)),
+                        .content(status_detail(index, status, window, cx)),
                     )
             });
             let switch_id = SharedString::from(format!("remote-traverse-{index}"));
@@ -474,14 +483,32 @@ fn status_chip(
     index: usize,
     status: Option<&TraverseSourceStatus>,
     expanded: bool,
+    window: &mut Window,
     cx: &mut Context<TraversePanel>,
 ) -> AnyElement {
     let (label, tone) = chip_style(status.map(|status| status.manifest.state), cx);
-    let chip =
-        crate::material::semantic_chip(label.clone(), tone.opacity(0.15), tone, cx).flex_none();
+    // A new state cross-fades from the chip that showed the last one.
+    let chip = crate::motion::cross_fade(
+        ("remote-traverse-state", index),
+        (label.clone(), tone),
+        window,
+        cx,
+        |(label, tone), _, cx| {
+            crate::material::semantic_chip(label.clone(), tone.opacity(0.15), *tone, cx)
+                .flex_none()
+                .into_any_element()
+        },
+    );
     if status.is_none() {
-        return chip.into_any_element();
+        return chip;
     }
+    let turned = gpui_base::motion::transition(
+        ("remote-traverse-chevron", index.to_string()),
+        if expanded { 1. } else { 0. },
+        crate::motion::settle(),
+        window,
+        cx,
+    );
     crate::material::accessible_clickable(
         h_flex(),
         SharedString::from(format!("remote-traverse-status-{index}")),
@@ -497,11 +524,7 @@ fn status_chip(
     .cursor_pointer()
     .text_color(cx.theme().muted_foreground)
     .child(chip)
-    .child(Icon::new(if expanded {
-        IconName::ChevronUp
-    } else {
-        IconName::ChevronDown
-    }))
+    .child(Icon::new(IconName::ChevronDown).rotate(gpui::radians(std::f32::consts::PI * turned)))
     .on_click(cx.listener(move |this, _, _, cx| {
         // The official source's row is its switch; expanding the status
         // must not also flip it.
@@ -521,10 +544,18 @@ fn relay_name(relay: &TraverseRelayStatus) -> String {
 }
 
 /// Every relay with its latency, and every lookup with its last check.
-fn status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement {
+fn status_detail(
+    index: usize,
+    status: &TraverseSourceStatus,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
-    let heading = |text: SharedString| {
+    let id = move |part: &str, key: &str| {
+        SharedString::from(format!("remote-traverse-{index}-{part}-{key}"))
+    };
+    let heading = |text: SharedString, cx: &App| {
         div()
             .pt(cx.theme().tokens.spacing.xs)
             .text_caption(cx)
@@ -544,7 +575,23 @@ fn status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement {
             )
             .child(value)
     };
-    let error = |text: &str| div().w_full().text_color(danger).child(text.to_owned());
+    // A failure folds in under its line when a poll reports one, and out
+    // once one clears it. It rides with its line and carries its own gap,
+    // so it takes that gap with it.
+    let gap = cx.theme().tokens.spacing.sm;
+    let error = |id: SharedString, text: Option<&str>, window: &mut Window, cx: &mut App| {
+        crate::motion::shown(id, text.map(str::to_owned), window, cx).map(|shown| {
+            shown.fold(
+                div()
+                    .w_full()
+                    .pt(gap)
+                    .text_color(danger)
+                    .child(shown.value.clone()),
+            )
+        })
+    };
+    let with_error =
+        |line: gpui::Div, error: Option<AnyElement>| v_flex().w_full().child(line).children(error);
     let manifest = &status.manifest;
     let mut manifest_value = vec![manifest_word(manifest.state).to_string()];
     if let Some(fetched) = manifest.fetched_unix {
@@ -556,23 +603,32 @@ fn status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement {
             .into_owned(),
         );
     }
+    let manifest_error = error(
+        id("manifest", "error"),
+        manifest.error.as_deref(),
+        window,
+        cx,
+    );
     let mut column = crate::material::card(cx)
         .w_full()
         .text_token(&cx.theme().tokens.typography.xs)
-        .child(line(
-            crate::tr!("remote.traverse.status.manifest").into_owned(),
-            div()
-                .flex_none()
-                .text_color(muted)
-                .child(manifest_value.join(" · "))
-                .into_any_element(),
-        ))
-        .children(manifest.error.as_deref().map(error));
+        .child(with_error(
+            line(
+                crate::tr!("remote.traverse.status.manifest").into_owned(),
+                div()
+                    .flex_none()
+                    .text_color(muted)
+                    .child(manifest_value.join(" · "))
+                    .into_any_element(),
+            ),
+            manifest_error,
+        ));
     if !status.relays.is_empty() {
         column = column.child(heading(
             crate::tr!("remote.traverse.status.relays_title")
                 .into_owned()
                 .into(),
+            cx,
         ));
     }
     for relay in &status.relays {
@@ -580,31 +636,38 @@ fn status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement {
             Some(ms) => crate::tr!("remote.traverse.status.latency", ms = ms),
             None => crate::tr!("remote.traverse.status.unmeasured"),
         };
-        column = column
-            .child(line(
+        let home =
+            crate::motion::shown(id("home", &relay.url), relay.home.then_some(()), window, cx).map(
+                |shown| {
+                    shown.fade(crate::material::semantic_chip(
+                        crate::tr!("remote.traverse.status.home").into_owned(),
+                        cx.theme().success.opacity(0.15),
+                        cx.theme().success,
+                        cx,
+                    ))
+                },
+            );
+        let relay_error = error(id("relay", &relay.url), relay.error.as_deref(), window, cx);
+        column = column.child(with_error(
+            line(
                 relay_name(relay),
                 h_flex()
                     .flex_none()
                     .gap_2()
                     .items_center()
-                    .when(relay.home, |value| {
-                        value.child(crate::material::semantic_chip(
-                            crate::tr!("remote.traverse.status.home").into_owned(),
-                            cx.theme().success.opacity(0.15),
-                            cx.theme().success,
-                            cx,
-                        ))
-                    })
+                    .children(home)
                     .child(div().text_color(muted).child(latency.into_owned()))
                     .into_any_element(),
-            ))
-            .children(relay.error.as_deref().map(error));
+            ),
+            relay_error,
+        ));
     }
     if !status.lookups.is_empty() {
         column = column.child(heading(
             crate::tr!("remote.traverse.status.lookups_title")
                 .into_owned()
                 .into(),
+            cx,
         ));
     }
     for lookup in &status.lookups {
@@ -617,16 +680,26 @@ fn status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement {
             TraverseLookupState::Pending => (crate::tr!("remote.traverse.status.pending"), muted),
             TraverseLookupState::Failed => (crate::tr!("remote.traverse.status.failed"), danger),
         };
-        column = column
-            .child(line(
-                name,
+        let value = crate::motion::cross_fade(
+            id("lookup", &lookup.url),
+            (SharedString::from(value.into_owned()), color),
+            window,
+            cx,
+            |(value, color), _, _| {
                 div()
                     .flex_none()
-                    .text_color(color)
-                    .child(value.into_owned())
-                    .into_any_element(),
-            ))
-            .children(lookup.error.as_deref().map(error));
+                    .text_color(*color)
+                    .child(value.clone())
+                    .into_any_element()
+            },
+        );
+        let lookup_error = error(
+            id("lookup-error", &lookup.url),
+            lookup.error.as_deref(),
+            window,
+            cx,
+        );
+        column = column.child(with_error(line(name, value), lookup_error));
     }
     column.into_any_element()
 }
@@ -634,7 +707,7 @@ fn status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement {
 impl Render for TraversePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
-        let rows = self.render_rows(compact, cx);
+        let rows = self.render_rows(compact, window, cx);
         v_flex()
             .w_full()
             .min_w_0()
