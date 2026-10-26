@@ -18,7 +18,7 @@ use gpui::{
     IntoElement, ListAlignment, ListState, ParentElement as _, Render, ScrollHandle, SharedString,
     Styled as _, Subscription, Window, div, list, point, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{Collapsible, ScrollableMask, Scrollbar, h_flex, v_flex};
+use gpui_base::{ScrollableMask, Scrollbar, h_flex, v_flex};
 use tcode_core::settings::{PluginManagementSettings, ResolvedProfile};
 use tcode_protocol::{
     PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginStaleReason,
@@ -33,11 +33,11 @@ use crate::sizing::Sizable as _;
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
-use crate::widgets::Spinner;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::switch::Switch;
 use crate::widgets::tabs::{TabBar, TabItem};
+use crate::widgets::{Collapsible, Spinner};
 use crate::window_state::WindowState;
 
 const SCOPES: [PluginScope; 5] = [
@@ -845,9 +845,8 @@ impl PluginsSettingsPanel {
                     .child(verbatim(error.clone(), cx))
             }))
             .child(
-                Collapsible::new()
+                Collapsible::new("plugin-details", expanded)
                     .w_full()
-                    .open(expanded)
                     .content(details(entry, cx)),
             )
             .into_any_element()

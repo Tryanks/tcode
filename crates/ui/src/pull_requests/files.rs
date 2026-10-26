@@ -617,7 +617,7 @@ impl PullRequestView {
                     })),
                 )
                 .child(
-                    gpui_base::Collapsible::new().open(open).content(
+                    crate::widgets::Collapsible::new("pr-off-diff-body", open).content(
                         v_flex()
                             .id("pr-off-diff-rows")
                             .max_h(px(240.))

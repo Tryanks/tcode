@@ -1531,7 +1531,9 @@ impl PullRequestsPanel {
                 div()
                     .id("pr-agent-tools-scroll")
                     .when(fill, |list| list.flex_1().min_h_0())
-                    .child(gpui_base::Collapsible::new().open(open).content(body))
+                    .child(
+                        crate::widgets::Collapsible::new("pr-agent-tools-body", open).content(body),
+                    )
                     .overflow_y_scroll_area(),
             )
             .into_any_element()
