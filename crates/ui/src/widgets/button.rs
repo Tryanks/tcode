@@ -92,7 +92,7 @@ pub struct Button {
     press_then: Option<super::popover::SheetToggle>,
 }
 
-type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+pub(crate) type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 /// Height of a [`Button::chip`].
 const CHIP_HEIGHT: f32 = 28.;

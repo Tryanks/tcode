@@ -2596,7 +2596,7 @@ impl SettingsPage {
         title: impl Into<SharedString>,
         desc: impl Into<SharedString>,
         checked: bool,
-        reset: Option<AnyElement>,
+        reset: impl Into<Option<AnyElement>>,
         cx: &mut Context<Self>,
         intent: fn(&mut WorkspaceStore, bool),
     ) -> AnyElement {
