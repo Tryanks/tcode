@@ -108,6 +108,38 @@ fn reaction_emoji(content: PullRequestReactionContent) -> &'static str {
     }
 }
 
+/// The field that stands where a thread's reply editor opens.
+fn reply_field(cx: &App) -> gpui::Div {
+    div()
+        .h(px(material::input_height(false)))
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded(material::radius_input(cx))
+        .border_1()
+        .border_color(cx.theme().input)
+        .bg(cx.theme().background)
+        .text_body(false, cx)
+        .text_color(cx.theme().muted_foreground)
+        .child(crate::tr!("pull_requests.compose.reply_row"))
+}
+
+/// A comment's body and its editor fade in as one replaces the other.
+fn fade_on_edit(comment: &str, editing: bool, body: AnyElement) -> AnyElement {
+    let id = SharedString::from(format!("pr-comment-editing-{comment}"));
+    let body = std::cell::RefCell::new(Some(body));
+    crate::motion::Sampled::new(move |window, cx| {
+        crate::motion::cross_fade(id, editing, window, cx, |shown, _, _| {
+            match body.borrow_mut().take().filter(|_| *shown == editing) {
+                Some(body) => body,
+                // What it replaced has gone with its state; only the new one fades in.
+                None => div().into_any_element(),
+            }
+        })
+    })
+    .into_any_element()
+}
+
 /// A reaction chip; the account's own reactions show selected.
 fn reaction_chip(id: SharedString, label: String, own: bool, cx: &App) -> Button {
     Button::new(id)
@@ -420,7 +452,7 @@ impl PullRequestView {
                   -> Option<AnyElement> {
                 let state = pull_request_media_state(&session, &key, &account, url, window, cx);
                 let host_name = super::host_name(store.read(cx), &key.host);
-                media_stand_in(state, url, title, &host_name, cx)
+                settle_media(url, media_stand_in(state, url, title, &host_name, cx))
             },
         );
         Some(ImageResolver { source, pending })
@@ -835,7 +867,18 @@ impl PullRequestView {
                         gpui::Toggled::False
                     })
                     .child(reaction_emoji(reaction.content))
-                    .child(reaction.count.to_string());
+                    .child({
+                        let id = SharedString::from(format!(
+                            "pr-reaction-count-{}-{:?}",
+                            comment.id, reaction.content
+                        ));
+                        let count = reaction.count.to_string();
+                        crate::motion::Sampled::new(move |window, cx| {
+                            crate::motion::cross_fade(id, count, window, cx, |count, _, _| {
+                                div().child(count.clone()).into_any_element()
+                            })
+                        })
+                    });
                     if interactive {
                         let (id, content) = (comment.id.clone(), reaction.content);
                         chip.on_click(cx.listener(move |this, _, window, cx| {
@@ -979,10 +1022,11 @@ impl PullRequestView {
         } else {
             Slot::Edit(comment.id.clone())
         };
-        let body = self
-            .editing_body(&slot, cx)
-            .or_else(|| self.body(comment, true, cx));
+        let editing = self.editing_body(&slot, cx);
+        let is_editing = editing.is_some();
+        let body = editing.or_else(|| self.body(comment, true, cx));
         let empty_description = description && body.is_none();
+        let body = body.map(|body| fade_on_edit(&comment.id, is_editing, body));
         v_flex()
             .w_full()
             .min_w_0()
@@ -1095,13 +1139,20 @@ impl PullRequestView {
         let id = thread.id.clone();
         let thread_for_files = thread.clone();
         let current = thread.anchor.is_some() && !thread.outdated;
-        let chip = |label: &'static str, cx: &App| {
-            material::semantic_chip(
+        let chip = |label: &'static str, shown: bool, cx: &App| {
+            let chip = material::semantic_chip(
                 crate::tr!(label).into_owned(),
                 cx.theme().secondary,
                 muted,
                 cx,
-            )
+            );
+            let id = SharedString::from(format!("pr-thread-{}-{inline}-{label}", thread.id));
+            crate::motion::Sampled::new(move |window, cx| {
+                match crate::motion::shown(id, shown.then_some(()), window, cx) {
+                    Some(kept) => kept.fade(chip),
+                    None => div().absolute().into_any_element(),
+                }
+            })
         };
         let head = material::card_header_row(cx)
             .text_secondary(compact, cx)
@@ -1123,12 +1174,16 @@ impl PullRequestView {
                 )
             })
             .when(inline, |head| head.children(lines.clone()))
-            .when(thread.outdated, |head| {
-                head.child(chip("pull_requests.conversation.outdated", cx))
-            })
-            .when(thread.resolved, |head| {
-                head.child(chip("pull_requests.conversation.resolved", cx))
-            })
+            .child(chip(
+                "pull_requests.conversation.outdated",
+                thread.outdated,
+                cx,
+            ))
+            .child(chip(
+                "pull_requests.conversation.resolved",
+                thread.resolved,
+                cx,
+            ))
             .child(
                 crate::tr!(
                     if count == 1 {
@@ -1190,17 +1245,29 @@ impl PullRequestView {
             .when(collapsed, |card| card.pb_0())
             .relative()
             .font_family(cx.theme().font_family.clone())
-            .child(
-                // The thread's accent rail; no token names an accent edge's width or inset.
-                div()
-                    .absolute()
-                    .left(px(0.))
-                    .top(px(6.))
-                    .bottom(px(6.))
-                    .w(px(2.))
-                    .rounded_full()
-                    .bg(rail),
-            )
+            .child({
+                // Resolving a thread mutes its rail where it stands.
+                let rail_id = SharedString::from(format!("pr-thread-rail-{}-{inline}", thread.id));
+                crate::motion::Sampled::new(move |window, cx| {
+                    let rail = gpui_base::motion::transition(
+                        rail_id,
+                        rail,
+                        crate::motion::settle(),
+                        window,
+                        cx,
+                    );
+                    // The thread's accent rail; no token names an accent edge's width or inset.
+                    div()
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(6.))
+                        .bottom(px(6.))
+                        .w(px(2.))
+                        .rounded_full()
+                        .bg(rail)
+                        .into_any_element()
+                })
+            })
             .child(head);
         if collapsed {
             if !inline && self.can_resolve(thread) && self.writable(cx) {
@@ -1254,10 +1321,13 @@ impl PullRequestView {
                 },
                 cx,
             );
-            let body = (!inline)
+            let editing = (!inline)
                 .then(|| self.editing_body(&Slot::Edit(comment.id.clone()), cx))
-                .flatten()
-                .or_else(|| self.body(&comment, inline, cx));
+                .flatten();
+            let is_editing = editing.is_some();
+            let body = editing
+                .or_else(|| self.body(&comment, inline, cx))
+                .map(|body| fade_on_edit(&comment.id, is_editing, body));
             card = card.child(
                 v_flex()
                     .px(px(material::CARD_INSET))
@@ -1278,6 +1348,7 @@ impl PullRequestView {
             + replies.map_or(0, |replies| replies.comments.len() as u64);
         if after.is_some() {
             let remaining = thread.total_comments.saturating_sub(read);
+            let failed_id = SharedString::from(format!("pr-thread-replies-failed-{}", thread.id));
             let thread = thread.clone();
             card = card.child(
                 div().px(px(material::CARD_INSET)).child(
@@ -1302,18 +1373,26 @@ impl PullRequestView {
                         ),
                 ),
             );
-            if let Some(error) = replies.and_then(|replies| replies.error.clone()) {
-                card = card.child(
-                    div()
-                        .px(px(material::CARD_INSET))
-                        .text_secondary(compact, cx)
-                        .text_color(cx.theme().warning)
-                        .child(
-                            crate::tr!("pull_requests.conversation.replies_failed", reason = error)
-                                .into_owned(),
+            let error = replies.and_then(|replies| replies.error.clone());
+            let note = div()
+                .px(px(material::CARD_INSET))
+                .text_secondary(compact, cx)
+                .text_color(cx.theme().warning);
+            card = card.child(crate::motion::Sampled::new(move |window, cx| {
+                match crate::motion::shown(failed_id, error, window, cx) {
+                    Some(kept) => kept.fold(
+                        note.child(
+                            crate::tr!(
+                                "pull_requests.conversation.replies_failed",
+                                reason = kept.value.clone()
+                            )
+                            .into_owned(),
                         ),
-                );
-            }
+                    ),
+                    // Out of flow, so an absent note takes no gap in the card.
+                    None => div().absolute().into_any_element(),
+                }
+            }));
         } else if read < thread.total_comments {
             card = card.child(
                 div()
@@ -1405,23 +1484,14 @@ impl PullRequestView {
                     cx,
                 )
             } else {
-                match self.editor_element(&cx.entity(), &slot, spec.clone(), cx) {
+                let editor = self.editor_element(&cx.entity(), &slot, spec.clone(), cx);
+                let editing = editor.is_some();
+                let reply = match editor {
                     Some(editor) => editor,
-                    None => div()
+                    // A field placeholder that becomes an editor on click, not a button.
+                    None => reply_field(cx)
                         .id(SharedString::from(format!("pr-reply-row-{}", thread.id)))
-                        // A field placeholder that becomes an editor on click, not a button.
-                        .h(px(material::input_height(false)))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .rounded(material::radius_input(cx))
-                        .border_1()
-                        .border_color(cx.theme().input)
-                        .bg(cx.theme().background)
-                        .text_body(false, cx)
-                        .text_color(cx.theme().muted_foreground)
                         .cursor_text()
-                        .child(crate::tr!("pull_requests.compose.reply_row"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_editor(
                                 reply_slot.clone(),
@@ -1436,7 +1506,22 @@ impl PullRequestView {
                             }
                         }))
                         .into_any_element(),
-                }
+                };
+                // The editor cross-fades over the field that stood for it.
+                let id = SharedString::from(format!("pr-reply-editing-{}", thread.id));
+                let reply = std::cell::RefCell::new(Some(reply));
+                crate::motion::Sampled::new(move |window, cx| {
+                    crate::motion::cross_fade(id, editing, window, cx, |shown, _, cx| {
+                        match reply.borrow_mut().take().filter(|_| *shown == editing) {
+                            Some(reply) => reply,
+                            None if !*shown => {
+                                div().w_full().child(reply_field(cx)).into_any_element()
+                            }
+                            None => div().into_any_element(),
+                        }
+                    })
+                })
+                .into_any_element()
             }
         });
         let resolve = self
@@ -1652,6 +1737,14 @@ impl PullRequestView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let loading = self.page().is_some_and(|page| {
+            page.conversation.data.is_none() && page.conversation.error.is_none()
+        });
+        let body = self.conversation_body(window, cx);
+        self.settle_body("conversation", loading, body, window, cx)
+    }
+
+    fn conversation_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // The desktop composer is always open at the end of the list.
         if !self.compact(cx)
             && !self.read_only(cx)
@@ -1766,14 +1859,52 @@ impl PullRequestView {
     }
 }
 
-/// What stands in for host media until it can be drawn.
+/// A stand-in that cross-fades from the loading one: an unavailable, too large or external
+/// card replacing the box that held the media's place.
+fn settle_media(url: &str, stand_in: Option<(bool, AnyElement)>) -> Option<AnyElement> {
+    let (loading, stand_in) = stand_in?;
+    let id = SharedString::from(format!("pr-media-{url}"));
+    Some(
+        crate::motion::Sampled::new(move |window, cx| {
+            let stand_in = std::cell::RefCell::new(Some(stand_in));
+            crate::motion::cross_fade(id, loading, window, cx, |shown, _, cx| {
+                match stand_in.borrow_mut().take().filter(|_| *shown == loading) {
+                    Some(stand_in) => stand_in,
+                    None if *shown => loading_media(cx).into_any_element(),
+                    None => div().into_any_element(),
+                }
+            })
+        })
+        .into_any_element(),
+    )
+}
+
+/// The box that holds an image's place while it loads; its size is unknown until then.
+fn loading_media(cx: &App) -> gpui::Div {
+    div()
+        .w_full()
+        .h(px(180.))
+        .max_h(px(240.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(material::radius_card(cx))
+        .bg(cx.theme().muted)
+        .child(
+            Icon::new(IconName::Image)
+                .size(px(20.))
+                .text_color(cx.theme().muted_foreground),
+        )
+}
+
+/// What stands in for host media until it can be drawn, and whether it is the loading one.
 fn media_stand_in(
     state: MediaState,
     url: &str,
     title: &str,
     host_name: &str,
     cx: &App,
-) -> Option<AnyElement> {
+) -> Option<(bool, AnyElement)> {
     // Alt text may run over lines; these rows truncate on one.
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     let title = title.as_str();
@@ -1814,32 +1945,26 @@ fn media_stand_in(
     };
     match state {
         MediaState::Ready => None,
-        MediaState::Loading => Some(
-            // Holds an image's place while it loads; its size is unknown until then.
-            div()
-                .w_full()
-                .h(px(180.))
-                .max_h(px(240.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(material::radius_card(cx))
-                .bg(cx.theme().muted)
-                .child(Icon::new(IconName::Image).size(px(20.)).text_color(muted))
-                .into_any_element(),
-        ),
-        MediaState::Unavailable => Some(unavailable(
-            crate::tr!("pull_requests.media.unavailable").into_owned(),
-            cx,
+        MediaState::Loading => Some((true, loading_media(cx).into_any_element())),
+        MediaState::Unavailable => Some((
+            false,
+            unavailable(
+                crate::tr!("pull_requests.media.unavailable").into_owned(),
+                cx,
+            ),
         )),
-        MediaState::TooLarge => Some(unavailable(
-            crate::tr!(
-                "pull_requests.media.too_large",
-                size =
-                    crate::thread_export::format_size(tcode_protocol::MAX_PULL_REQUEST_MEDIA_BYTES)
-            )
-            .into_owned(),
-            cx,
+        MediaState::TooLarge => Some((
+            false,
+            unavailable(
+                crate::tr!(
+                    "pull_requests.media.too_large",
+                    size = crate::thread_export::format_size(
+                        tcode_protocol::MAX_PULL_REQUEST_MEDIA_BYTES
+                    )
+                )
+                .into_owned(),
+                cx,
+            ),
         )),
         MediaState::External(mime) => {
             let audio = mime.starts_with("audio/");
@@ -1859,7 +1984,8 @@ fn media_stand_in(
             } else {
                 title.to_owned()
             };
-            Some(
+            Some((
+                false,
                 material::card_secondary(cx)
                     .flex_row()
                     .w_full()
@@ -1892,7 +2018,7 @@ fn media_stand_in(
                             }),
                     )
                     .into_any_element(),
-            )
+            ))
         }
     }
 }

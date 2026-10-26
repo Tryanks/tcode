@@ -875,23 +875,24 @@ impl PullRequestView {
                         .disabled(submitting)
                         .aria_label(spec.aria),
                 )
-                .when(conflict, |editor| {
-                    editor.child(
-                        div()
-                            .text_secondary(compact, cx)
-                            .text_color(cx.theme().warning)
-                            .child(crate::tr!(
-                                "pull_requests.compose.edit_conflict",
-                                host_name = this.host_name(cx)
-                            )),
-                    )
-                })
-                .children(notice.map(|notice| {
-                    div()
-                        .text_secondary(compact, cx)
-                        .text_color(cx.theme().warning)
-                        .child(notice)
-                }))
+                .child(warning(
+                    format!("pr-editor-conflict-{slot:?}"),
+                    conflict.then(|| {
+                        crate::tr!(
+                            "pull_requests.compose.edit_conflict",
+                            host_name = this.host_name(cx)
+                        )
+                        .into_owned()
+                    }),
+                    compact,
+                    cx,
+                ))
+                .child(warning(
+                    format!("pr-editor-notice-{slot:?}"),
+                    notice.map(|notice| notice.to_string()),
+                    compact,
+                    cx,
+                ))
                 .child(
                     h_flex()
                         .justify_end()
@@ -1019,4 +1020,19 @@ pub(super) struct EditorSpec {
     pub(super) submit: SharedString,
     pub(super) aria: SharedString,
     pub(super) cancel: bool,
+}
+
+/// A warning under an editor, fading in when it arises and out when it clears.
+fn warning(id: String, text: Option<String>, compact: bool, cx: &App) -> AnyElement {
+    let line = div()
+        .text_secondary(compact, cx)
+        .text_color(cx.theme().warning);
+    crate::motion::Sampled::new(move |window, cx| {
+        match crate::motion::shown(SharedString::from(id), text, window, cx) {
+            Some(kept) => kept.fold(line.child(kept.value.clone())),
+            // Out of flow, so an absent warning takes no gap in the editor.
+            None => div().absolute().into_any_element(),
+        }
+    })
+    .into_any_element()
 }
