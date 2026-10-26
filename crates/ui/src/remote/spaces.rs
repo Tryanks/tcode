@@ -790,7 +790,7 @@ fn open_shared(
         let title = quoted("spaces.shared.title", &space.name);
         dialog
             .title(title)
-            .content(move |content, _, cx| {
+            .content(move |content, window, cx| {
                 content.child(link_block(
                     &space,
                     accepting,
@@ -798,6 +798,7 @@ fn open_shared(
                     true,
                     None,
                     compact,
+                    window,
                     cx,
                 ))
             })
@@ -845,7 +846,9 @@ type Regenerate = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// A space's link: its QR beside `description`, with Copy where `copy` and
 /// Regenerate where `regenerate` is given — or, without a link, why not,
-/// with Regenerate when that is what brings it back.
+/// with Regenerate when that is what brings it back. Losing or regaining the
+/// link folds one into the other.
+#[allow(clippy::too_many_arguments)]
 fn link_block(
     space: &SpaceInfo,
     accepting: bool,
@@ -853,7 +856,8 @@ fn link_block(
     copy: bool,
     regenerate: Option<Regenerate>,
     compact: bool,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let regenerate_button = |regenerate: Regenerate| {
         Button::new(SharedString::from(format!("space-regenerate-{}", space.id)))
@@ -861,60 +865,95 @@ fn link_block(
             .label(crate::tr!("spaces.link.regenerate"))
             .on_click(move |_, window, cx| regenerate(window, cx))
     };
-    let Some(link) = space.link.clone() else {
-        let reason = link_unavailable(space, accepting).unwrap_or_default();
-        return h_flex()
-            .w_full()
-            .gap_3()
-            .items_center()
+    let id = |part: &str| SharedString::from(format!("space-link-{part}-{}", space.id));
+    let reason = crate::motion::shown(
+        id("reason"),
+        space
+            .link
+            .is_none()
+            .then(|| link_unavailable(space, accepting).unwrap_or_default()),
+        window,
+        cx,
+    )
+    .map(|shown| {
+        let color = gpui_base::motion::transition(
+            id("reason-color"),
+            if space.link_dead {
+                cx.theme().danger_foreground
+            } else {
+                cx.theme().muted_foreground
+            },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        let fix = crate::motion::shown(
+            id("fix"),
+            regenerate
+                .clone()
+                .filter(|_| space.link_dead && space.link.is_none())
+                .map(|_| ()),
+            window,
+            cx,
+        )
+        .zip(regenerate.clone())
+        .map(|(fix, regenerate)| fix.fade(regenerate_button(regenerate).primary()));
+        shown.fold(
+            h_flex()
+                .w_full()
+                .gap_3()
+                .items_center()
+                .flex_wrap()
+                .child(
+                    div()
+                        .flex_1()
+                        // The narrowest the reason gets before the button
+                        // wraps under it: a layout breakpoint.
+                        .min_w(px(160.))
+                        .text_secondary(compact, cx)
+                        .text_color(color)
+                        .child(shown.value.clone()),
+                )
+                .children(fix),
+        )
+    });
+    let qr = crate::motion::shown(id("qr"), space.link.clone(), window, cx).map(|shown| {
+        let link = shown.value.clone();
+        let has_actions = copy || regenerate.is_some();
+        let actions = h_flex()
+            .gap_2()
             .flex_wrap()
-            .child(
-                div()
-                    .flex_1()
-                    // The narrowest the reason gets before the button wraps
-                    // under it: a layout breakpoint.
-                    .min_w(px(160.))
-                    .text_secondary(compact, cx)
-                    .text_color(if space.link_dead {
-                        cx.theme().danger_foreground
-                    } else {
-                        cx.theme().muted_foreground
-                    })
-                    .child(reason),
-            )
-            .when_some(regenerate.filter(|_| space.link_dead), |row, regenerate| {
-                row.child(regenerate_button(regenerate).primary())
+            .when(copy, |actions| {
+                actions.child(
+                    Button::new(SharedString::from(format!("space-copy-{}", space.id)))
+                        .ghost()
+                        .outline()
+                        .compact()
+                        .label(crate::tr!("spaces.link.copy"))
+                        .on_click({
+                            let link = link.clone();
+                            move |_, window, cx| copy_link(link.clone(), window, cx)
+                        }),
+                )
             })
-            .into_any_element();
-    };
-    let has_actions = copy || regenerate.is_some();
-    let actions = h_flex()
-        .gap_2()
-        .flex_wrap()
-        .when(copy, |actions| {
-            actions.child(
-                Button::new(SharedString::from(format!("space-copy-{}", space.id)))
-                    .ghost()
-                    .outline()
-                    .compact()
-                    .label(crate::tr!("spaces.link.copy"))
-                    .on_click({
-                        let link = link.clone();
-                        move |_, window, cx| copy_link(link.clone(), window, cx)
-                    }),
-            )
-        })
-        .when_some(regenerate, |actions, regenerate| {
-            actions.child(regenerate_button(regenerate).ghost().outline())
-        });
-    let text = v_flex()
-        .flex_1()
-        .min_w_0()
-        .gap_3()
-        .child(div().text_secondary(compact, cx).child(description))
-        .when(has_actions, |text| text.child(actions));
-    super::qr::beside_qr(text, &link, compact, cx)
-        .debug_selector(|| "space-link".into())
+            .when_some(regenerate.clone(), |actions, regenerate| {
+                actions.child(regenerate_button(regenerate).ghost().outline())
+            });
+        let text = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_3()
+            .child(div().text_secondary(compact, cx).child(description))
+            .when(has_actions, |text| text.child(actions));
+        shown.fold(
+            super::qr::beside_qr(id("qr-code"), text, &link, compact, window, cx)
+                .debug_selector(|| "space-link".into()),
+        )
+    });
+    v_flex()
+        .w_full()
+        .children(reason)
+        .children(qr)
         .into_any_element()
 }
 
@@ -1024,6 +1063,7 @@ mod section {
             &self,
             space: &SpaceInfo,
             compact: bool,
+            window: &mut Window,
             cx: &mut Context<Self>,
         ) -> AnyElement {
             let id = space.id.clone();
@@ -1042,6 +1082,41 @@ mod section {
             } else {
                 None
             };
+            let status = crate::motion::shown(
+                SharedString::from(format!("space-status-{id}")),
+                status
+                    .as_ref()
+                    .map(|(label, _, _)| SharedString::from(label.to_string())),
+                window,
+                cx,
+            )
+            .map(|shown| {
+                let (bg, fg) = status
+                    .map(|(_, bg, fg)| (bg, fg))
+                    .unwrap_or((cx.theme().muted, cx.theme().muted_foreground));
+                let glide = |channel: &'static str, color, window: &mut Window, cx: &mut App| {
+                    gpui_base::motion::transition(
+                        (SharedString::from(format!("space-status-{id}")), channel),
+                        color,
+                        crate::motion::settle(),
+                        window,
+                        cx,
+                    )
+                };
+                let (bg, fg) = (glide("bg", bg, window, cx), glide("fg", fg, window, cx));
+                shown.fade(crate::material::semantic_chip(
+                    shown.value.clone(),
+                    bg,
+                    fg,
+                    cx,
+                ))
+            });
+            let (fill, on_hover) = crate::motion::hover_fill(
+                SharedString::from(format!("space-row-{id}")),
+                cx.theme().list_hover,
+                window,
+                cx,
+            );
             crate::material::accessible_clickable(
                 group_row(cx),
                 SharedString::from(format!("space-row-{id}")),
@@ -1054,7 +1129,8 @@ mod section {
                 move || format!("space-row-{id}")
             })
             .cursor_pointer()
-            .hover(|style| style.bg(cx.theme().list_hover))
+            .bg(fill)
+            .on_hover(on_hover)
             .on_click(cx.listener(move |section, _, window, cx| {
                 section.open(id.clone(), window, cx);
             }))
@@ -1071,9 +1147,7 @@ mod section {
                     )
                     .child(div().text_secondary(compact, cx).child(summary(space))),
             )
-            .children(
-                status.map(|(label, bg, fg)| crate::material::semantic_chip(label, bg, fg, cx)),
-            )
+            .children(status)
             .child(Icon::new(IconName::ChevronRight).text_color(cx.theme().muted_foreground))
             .into_any_element()
         }
@@ -1099,7 +1173,7 @@ mod section {
             let list = spaces.read(cx).spaces().to_vec();
             let mut rows = list
                 .iter()
-                .map(|space| self.space_row(space, compact, cx))
+                .map(|space| self.space_row(space, compact, window, cx))
                 .collect::<Vec<_>>();
             rows.push(
                 group_row(cx)
@@ -1176,6 +1250,7 @@ mod section {
             space: &SpaceInfo,
             accepting: bool,
             compact: bool,
+            window: &mut Window,
             cx: &mut Context<Self>,
         ) -> AnyElement {
             let id = space.id.clone();
@@ -1188,16 +1263,18 @@ mod section {
                     report("spaces.failed", task, window, cx);
                 }
             });
+            let link = link_block(
+                space,
+                accepting,
+                quoted("spaces.link.description", &space.name),
+                true,
+                Some(regenerate),
+                compact,
+                window,
+                cx,
+            );
             crate::material::section(None, cx)
-                .child(link_block(
-                    space,
-                    accepting,
-                    quoted("spaces.link.description", &space.name),
-                    true,
-                    Some(regenerate),
-                    compact,
-                    cx,
-                ))
+                .child(link)
                 .child(crate::material::group(cx).child(ToggleRow::new(
                     SharedString::from(format!("space-link-enabled-{id}")),
                     crate::tr!("spaces.link.enabled"),
@@ -1333,14 +1410,37 @@ mod section {
             space: &SpaceInfo,
             others: &[(String, String)],
             compact: bool,
+            window: &mut Window,
             cx: &mut Context<Self>,
         ) -> AnyElement {
             let mut rows = Vec::new();
             for member in &space.members {
-                let status_color = match &member.path {
-                    Some(_) => cx.theme().success,
-                    None => cx.theme().muted_foreground,
-                };
+                let status_color = gpui_base::motion::transition(
+                    (
+                        SharedString::from(format!("member-status-{}", member.id)),
+                        "color",
+                    ),
+                    match &member.path {
+                        Some(_) => cx.theme().success,
+                        None => cx.theme().muted_foreground,
+                    },
+                    crate::motion::settle(),
+                    window,
+                    cx,
+                );
+                let path = crate::motion::cross_fade(
+                    SharedString::from(format!("member-path-{}", member.id)),
+                    super::super::path_label(member.path.as_ref()),
+                    window,
+                    cx,
+                    move |label, _, cx| {
+                        div()
+                            .text_secondary(compact, cx)
+                            .text_color(status_color)
+                            .child(label.clone())
+                            .into_any_element()
+                    },
+                );
                 let move_to = (!others.is_empty()).then(|| {
                     let device_id = member.id.clone();
                     let others = others.to_vec();
@@ -1371,9 +1471,7 @@ mod section {
                         div()
                             .flex_none()
                             .when(compact, |status| status.flex_1())
-                            .text_secondary(compact, cx)
-                            .text_color(status_color)
-                            .child(super::super::path_label(member.path.as_ref())),
+                            .child(path),
                     )
                     .children(move_to)
                     .child(
@@ -1457,9 +1555,9 @@ mod section {
                         .w_full()
                         .gap(crate::material::section_gap(cx))
                         .debug_selector(|| "space-detail".into())
-                        .child(self.link_section(&space, accepting, compact, cx))
+                        .child(self.link_section(&space, accepting, compact, window, cx))
                         .child(self.projects_section(&space, projects.as_deref(), compact, cx))
-                        .child(self.members_section(&space, &others, compact, cx)),
+                        .child(self.members_section(&space, &others, compact, window, cx)),
                 )
                 .into_any_element()
         }
@@ -1703,6 +1801,7 @@ mod machines {
         open_qr: Option<&str>,
         toggle_qr: fn(&mut V, String, &mut Context<V>),
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<V>,
     ) -> Option<AnyElement> {
         let model = spaces.read(cx);
@@ -1720,6 +1819,19 @@ mod machines {
                 Some(reason) if space.link_dead => (reason, cx.theme().danger_foreground),
                 Some(reason) => (reason, cx.theme().muted_foreground),
             };
+            let status = crate::motion::cross_fade(
+                SharedString::from(format!("machine-space-status-{id}")),
+                (status, color),
+                window,
+                cx,
+                move |(status, color), _, cx| {
+                    div()
+                        .text_secondary(compact, cx)
+                        .text_color(*color)
+                        .child(status.clone())
+                        .into_any_element()
+                },
+            );
             let mut controls = h_flex().flex_none().gap_2().items_center();
             if let Some(link) = space.link.clone() {
                 let toggle_id = id.clone();
@@ -1791,17 +1903,17 @@ mod machines {
                                 .overflow_hidden()
                                 .child(crate::widgets::fade_text(space.name.clone())),
                         )
-                        .child(
-                            div()
-                                .text_secondary(compact, cx)
-                                .text_color(color)
-                                .child(status),
-                        ),
+                        .child(status),
                 )
                 .child(controls);
-            let mut row = v_flex().w_full().child(line);
-            if open {
-                row = row.child(
+            let qr = crate::motion::shown(
+                SharedString::from(format!("machine-space-qr-{id}")),
+                open.then_some(()),
+                window,
+                cx,
+            )
+            .map(|shown| {
+                shown.fold(
                     div()
                         .px(px(crate::material::CARD_INSET))
                         .pb(px(crate::material::CARD_INSET))
@@ -1812,11 +1924,18 @@ mod machines {
                             false,
                             None,
                             compact,
+                            window,
                             cx,
                         )),
-                );
-            }
-            rows.push(row.into_any_element());
+                )
+            });
+            rows.push(
+                v_flex()
+                    .w_full()
+                    .child(line)
+                    .children(qr)
+                    .into_any_element(),
+            );
         }
         Some(
             crate::settings_rows::settings_group(crate::tr!("spaces.machines.section"), rows, cx)

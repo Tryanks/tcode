@@ -42,7 +42,8 @@ pub(super) fn invitation_card(
     group: Option<&str>,
     compact: bool,
     on_new: NewInvitation,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let copied = link.to_owned();
     let text = v_flex()
@@ -79,7 +80,7 @@ pub(super) fn invitation_card(
                 )
                 .child(new_invitation_button(on_new).ghost().outline()),
         );
-    beside_qr(text, link, compact, cx)
+    beside_qr("remote-invitation-qr", text, link, compact, window, cx)
         .p(px(crate::material::CARD_INSET))
         .debug_selector(|| "remote-invitation".into())
         .into_any_element()
@@ -151,6 +152,7 @@ impl AccessSection {
         &mut self,
         spaces: &Entity<Spaces>,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let model = spaces.read(cx);
@@ -166,25 +168,46 @@ impl AccessSection {
             }
         });
         self.sync_ticker(invitation.is_some(), cx);
-        let row = match invitation {
-            Some((link, remaining)) => {
-                invitation_card(&link, remaining, group.as_deref(), compact, on_new, cx)
-            }
-            None => expired_invitation_row(compact, on_new, cx),
-        };
-        settings_group(crate::tr!("remote.invite.title"), vec![row], cx).into_any_element()
+        let expired = invitation.is_none().then_some(());
+        let live = crate::motion::shown(
+            "remote-invitation-live",
+            invitation.map(|(link, remaining)| (link, remaining, group)),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let (link, remaining, group) = &shown.value;
+            shown.fold(invitation_card(
+                link,
+                *remaining,
+                group.as_deref(),
+                compact,
+                on_new.clone(),
+                window,
+                cx,
+            ))
+        });
+        let expired = crate::motion::shown("remote-invitation-expired", expired, window, cx)
+            .map(|shown| shown.fold(expired_invitation_row(compact, on_new, cx)));
+        settings_group(
+            crate::tr!("remote.invite.title"),
+            live.into_iter().chain(expired).collect(),
+            cx,
+        )
+        .into_any_element()
     }
 
     fn devices(
         &self,
         spaces: &Entity<Spaces>,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let model = spaces.read(cx);
+        let (known, devices) = (model.spaces().to_vec(), model.devices().to_vec());
         let space_name = |space_id: &str| {
-            model
-                .spaces()
+            known
                 .iter()
                 .find(|space| space.id == space_id)
                 .map(|space| space.name.clone())
@@ -194,7 +217,7 @@ impl AccessSection {
         // under a UUID and never is one.
         let group = model.group().map(|group| group.name.clone());
         let mut rows = Vec::new();
-        for device in model.devices() {
+        for device in &devices {
             let space = match &device.access {
                 DeviceAccess::Space { space_id } => space_name(space_id),
                 DeviceAccess::Full => None,
@@ -203,10 +226,32 @@ impl AccessSection {
                 device.access == DeviceAccess::Full
                     && tcode_client::pairing::valid_host_id(&device.id)
             });
-            let status_color = match &device.path {
-                Some(_) => cx.theme().success,
-                None => cx.theme().muted_foreground,
-            };
+            let status_color = gpui_base::motion::transition(
+                (
+                    SharedString::from(format!("device-status-{}", device.id)),
+                    "color",
+                ),
+                match &device.path {
+                    Some(_) => cx.theme().success,
+                    None => cx.theme().muted_foreground,
+                },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            let path = crate::motion::cross_fade(
+                SharedString::from(format!("device-path-{}", device.id)),
+                super::path_label(device.path.as_ref()),
+                window,
+                cx,
+                move |label, _, cx| {
+                    div()
+                        .text_secondary(compact, cx)
+                        .text_color(status_color)
+                        .child(label.clone())
+                        .into_any_element()
+                },
+            );
             let spaces = spaces.clone();
             let id = device.id.clone();
             let name = device.name.clone();
@@ -238,12 +283,7 @@ impl AccessSection {
                             .gap_3()
                             .items_center()
                             .when(compact, |controls| controls.w_full().justify_between())
-                            .child(
-                                div()
-                                    .text_secondary(compact, cx)
-                                    .text_color(status_color)
-                                    .child(super::path_label(device.path.as_ref())),
-                            )
+                            .child(path)
                             .child(
                                 Button::new(SharedString::from(format!("revoke-{}", device.id)))
                                     .ghost()
@@ -289,18 +329,23 @@ impl gpui::Render for AccessSection {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let spaces = (self.resolve)(&self.store, cx);
         self.observer.watch(spaces.as_ref(), cx);
-        let Some(spaces) = spaces.filter(|spaces| spaces.read(cx).loaded()) else {
+        let loaded = spaces.filter(|spaces| spaces.read(cx).loaded());
+        // The section folds in at the machine's first answer, and out with
+        // the machine it last showed once there is none to manage: hosting
+        // stopped, or the attachment lost the scope.
+        let Some(shown) = crate::motion::shown("remote-access", loaded, window, cx) else {
             self.sync_ticker(false, cx);
             return div().into_any_element();
         };
+        let spaces = shown.value.clone();
         let accepting = spaces.read(cx).accepting();
-        let mut column = v_flex()
-            .w_full()
-            .gap(crate::material::section_gap(cx))
-            .debug_selector(|| "remote-access".into());
+        let gap = crate::material::section_gap(cx);
+        // Spacing rides inside each part, so a part that folds away takes
+        // its gap with it.
+        let mut column = v_flex().w_full().debug_selector(|| "remote-access".into());
         if self.pairing_switch {
             let switch = spaces.clone();
-            column = column.child(settings_group(
+            column = column.child(div().pb(gap).child(settings_group(
                 crate::tr!("remote.host.section"),
                 vec![
                     ToggleRow::new(
@@ -318,15 +363,27 @@ impl gpui::Render for AccessSection {
                     .into_any_element(),
                 ],
                 cx,
-            ));
+            )));
         }
-        if accepting {
-            column = column.child(self.invitation(&spaces, compact, cx));
-        } else {
+        if !accepting {
             self.sync_ticker(false, cx);
         }
-        column
-            .child(self.devices(&spaces, compact, cx))
-            .into_any_element()
+        let invitation = crate::motion::shown(
+            "remote-invitation-group",
+            accepting.then_some(()),
+            window,
+            cx,
+        )
+        .map(|fold| {
+            fold.fold(
+                div()
+                    .pb(gap)
+                    .child(self.invitation(&spaces, compact, window, cx)),
+            )
+        });
+        column = column
+            .children(invitation)
+            .child(self.devices(&spaces, compact, window, cx));
+        shown.fold(column)
     }
 }
