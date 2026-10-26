@@ -7,6 +7,7 @@ use gpui::{
     RenderOnce, StyleRefinement, Styled, Window, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_base::StyledExt as _;
+use gpui_base::motion::{Transition, transition};
 use gpui_base::{ProgressIndicator, ProgressTrack};
 use std::time::Duration;
 
@@ -55,7 +56,7 @@ impl Styled for Progress {
     }
 }
 impl RenderOnce for Progress {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let color = self.color.unwrap_or(cx.theme().primary);
         let height = match self.size {
             Size::XSmall => px(4.),
@@ -65,6 +66,14 @@ impl RenderOnce for Progress {
             Size::Size(v) => v,
         };
         let value = self.value;
+        let shown = transition(
+            (self.id.clone(), "value"),
+            value,
+            Transition::new(crate::edge_back::SETTLE),
+            window,
+            cx,
+        );
+        let reduce_motion = cx.reduce_motion();
         gpui_base::Progress::new(self.id)
             .value(value)
             .indeterminate(self.loading)
@@ -89,7 +98,13 @@ impl RenderOnce for Progress {
                     .rounded(height / 2.)
                     .bg(color)
                     .map(|this| {
-                        if self.loading {
+                        if self.loading && reduce_motion {
+                            // A still segment in the middle of the track says
+                            // "working" without the sweep.
+                            this.left(relative(0.35))
+                                .w(relative(0.3))
+                                .into_any_element()
+                        } else if self.loading {
                             this.with_animation(
                                 "progress-loading",
                                 Animation::new(Duration::from_secs(1)).repeat(),
@@ -97,7 +112,7 @@ impl RenderOnce for Progress {
                             )
                             .into_any_element()
                         } else {
-                            this.w(relative(value / 100.)).into_any_element()
+                            this.w(relative(shown / 100.)).into_any_element()
                         }
                     }),
             )
