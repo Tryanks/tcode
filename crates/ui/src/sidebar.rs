@@ -24,6 +24,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription,
     Window, div, list, prelude::FluentBuilder as _, px,
 };
+use gpui_base::motion::transition;
+use crate::motion::settle;
 use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::settlement::AgentDelivery;
@@ -73,6 +75,27 @@ const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(fal
 /// rest is rest.
 const FLAT_REORDER_SPRING: gpui_base::motion::Spring =
     gpui_base::motion::Spring::new(crate::edge_back::SETTLE).with_epsilon(0.25);
+
+/// A status shown beside other row content: it fades in and out in place,
+/// and a change from one value to another cross-fades.
+fn faded_status<T: Clone + PartialEq + 'static>(
+    id: impl Into<SharedString>,
+    value: Option<T>,
+    window: &mut Window,
+    cx: &mut App,
+    build: impl Fn(&T, &mut Window, &mut App) -> gpui::AnyElement,
+) -> Option<gpui::AnyElement> {
+    let id: SharedString = id.into();
+    let shown = crate::motion::shown(id.clone(), value, window, cx)?;
+    let content = crate::motion::cross_fade(
+        (gpui::ElementId::from(id), "swap"),
+        shown.value.clone(),
+        window,
+        cx,
+        build,
+    );
+    Some(shown.fade(content))
+}
 
 /// A sidebar label that owns the remaining row width, on one line.
 fn sidebar_label(text: impl Into<SharedString>) -> gpui::Div {
@@ -541,6 +564,9 @@ pub struct SessionsSidebar {
     settled_scope: Option<(SidebarLayout, Option<String>)>,
     /// The thread currently being renamed inline, if any.
     renaming: Option<RenameState>,
+    /// The row or project header under the pointer, by its hover group; its
+    /// hover controls fade in from this one value rather than a state per row.
+    hovered_row: Option<SharedString>,
     flat_list_state: ListState,
     /// The row keys `flat_list_state` was last spliced for.
     flat_row_keys: Vec<(&'static str, String)>,
@@ -745,6 +771,40 @@ impl SessionsSidebar {
     fn compact(&self, cx: &gpui::App) -> bool {
         self.window_state.read(cx).compact
     }
+
+    /// How far `group`'s hover controls have faded in.
+    fn hover_progress(&self, group: &str, window: &mut Window, cx: &mut App) -> f32 {
+        transition(
+            (SharedString::from(group.to_owned()), "hover"),
+            if self.hovered_row.as_deref() == Some(group) {
+                1.
+            } else {
+                0.
+            },
+            settle(),
+            window,
+            cx,
+        )
+    }
+
+    /// Track the pointer over `group`'s row for [`Self::hover_progress`].
+    fn track_hover(
+        row: gpui::Stateful<gpui::Div>,
+        group: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let group = SharedString::from(group.to_owned());
+        row.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            let was = this.hovered_row.as_ref() == Some(&group);
+            if *hovered && !was {
+                this.hovered_row = Some(group.clone());
+                cx.notify();
+            } else if !*hovered && was {
+                this.hovered_row = None;
+                cx.notify();
+            }
+        }))
+    }
     pub fn new(
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
@@ -795,6 +855,7 @@ impl SessionsSidebar {
             project_filter: None,
             settled_scope: None,
             renaming: None,
+            hovered_row: None,
             flat_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             flat_row_keys: Vec::new(),
             grouped_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
@@ -1391,6 +1452,7 @@ impl SessionsSidebar {
         key: &str,
         count: usize,
         scope: Option<&str>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded_settled.contains(key);
@@ -1399,6 +1461,14 @@ impl SessionsSidebar {
             Some(drag) if drag.target(scope) == Some(ThreadSection::Settled) => cx.theme().primary,
             Some(_) => cx.theme().sidebar_foreground,
         };
+        // The caption lights up as a drag takes it as its target.
+        let color = transition(
+            (SharedString::from(format!("settled-{key}")), "color"),
+            color,
+            settle(),
+            window,
+            cx,
+        );
         let key = key.to_string();
         let compact = self.compact(cx);
         let spacing = &cx.theme().tokens.spacing;
@@ -1578,10 +1648,24 @@ impl SessionsSidebar {
     }
 
     /// The mark on a project header shared in at least one space.
-    fn shared_badge(&self, project_id: &str, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let spaces = spaces::for_store(&self.store, cx)?;
-        let names = spaces.read(cx).sharing(project_id);
-        (!names.is_empty()).then(|| spaces::shared_badge(project_id, &names, cx))
+    /// The badge of a project shared in a space; it fades in as the
+    /// project is shared and out as it stops being.
+    fn shared_badge(
+        &self,
+        project_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let names = spaces::for_store(&self.store, cx)
+            .map(|spaces| spaces.read(cx).sharing(project_id))
+            .filter(|names| !names.is_empty());
+        let shown = crate::motion::shown(
+            SharedString::from(format!("shared-badge-{project_id}")),
+            names,
+            window,
+            cx,
+        )?;
+        Some(shown.fade(spaces::shared_badge(project_id, &shown.value, cx)))
     }
 
     fn on_toggle_share(
@@ -1791,11 +1875,16 @@ impl SessionsSidebar {
 
     /// The machine this window is on, as the control that leads to Machines.
     /// Compact has none; Machines is the root its Back returns to.
-    fn render_machine_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_machine_control(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let active = self.window_state.read(cx).route() == Route::Hosts;
         let store = self.store.read(cx);
         let connection_state = store.connection_state();
         let dot = cx.theme().connection_color(&connection_state);
+
         // Local, the control says "This machine" and the tooltip its name;
         // remote, the control names the machine and the tooltip the link.
         let (name, detail): (SharedString, Option<SharedString>) = match store.remote_host_name() {
@@ -1808,6 +1897,13 @@ impl SessionsSidebar {
                 crate::remote::local_machine_name(cx).map(SharedString::from),
             ),
         };
+        let dot = transition(
+            ("sidebar-hosts", "connection"),
+            dot,
+            settle(),
+            window,
+            cx,
+        );
         let tooltip_name = name.clone();
         let control = Button::new("sidebar-hosts")
             .ghost()
@@ -2052,6 +2148,7 @@ impl SessionsSidebar {
         group: &ProjectGroup,
         flags: &HashMap<String, ThreadFlags>,
         collapsed: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let project_id = group.project.id.clone();
@@ -2084,6 +2181,22 @@ impl SessionsSidebar {
             crate::tr!("sidebar.create_thread")
         }
         .into();
+        let hover = self.hover_progress(&group_key, window, cx);
+        // The dot shows while unread or fading out, and gives its slot to
+        // the "+" under the pointer.
+        let unread_dot = crate::motion::shown(
+            SharedString::from(format!("project-unread-{project_id}")),
+            has_unread.then_some(()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fade(
+                div()
+                    .opacity(1. - hover)
+                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().primary)),
+            )
+        });
         let header = selectable_row(
             crate::material::accessible_clickable(
                 h_flex(),
@@ -2107,7 +2220,6 @@ impl SessionsSidebar {
                 }
             }
         })
-        .group(group_key.clone())
         .text_body(false, cx)
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2127,17 +2239,9 @@ impl SessionsSidebar {
                 .font_medium()
                 .text_color(cx.theme().sidebar_foreground),
         )
-        .children(self.shared_badge(&project_id, cx))
-        // Unread dot when any child thread is unread (hidden on hover so
-        // the "+" can take the slot).
-        .when(has_unread, |row| {
-            row.child(
-                div()
-                    .flex_none()
-                    .group_hover(group_key.clone(), |s| s.invisible())
-                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().primary)),
-            )
-        })
+        .children(self.shared_badge(&project_id, window, cx))
+        // Unread dot when any child thread is unread.
+        .children(unread_dot)
         .child(
             Button::new(gpui::SharedString::from(format!("new-thread-{project_id}")))
                 .ghost()
@@ -2146,8 +2250,7 @@ impl SessionsSidebar {
                 .aria_label(new_thread_label.clone())
                 .tooltip(new_thread_label)
                 // Opacity keeps the button a tab stop, as the settle button does.
-                .opacity(0.)
-                .group_hover(group_key.clone(), |button| button.opacity(1.))
+                .opacity(hover)
                 .focus_visible(|button| button.opacity(1.))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
@@ -2164,6 +2267,7 @@ impl SessionsSidebar {
                         .update(cx, |state, cx| state.open_thread(cx));
                 })),
         );
+        let header = Self::track_hover(header, &group_key, cx);
         if quick_chat {
             return header.into_any_element();
         }
@@ -2220,6 +2324,7 @@ impl SessionsSidebar {
         groups: &[ProjectGroup],
         flags: &HashMap<String, ThreadFlags>,
         active_id: Option<&str>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let item = v_flex().w_full().px_2().when(
@@ -2228,10 +2333,16 @@ impl SessionsSidebar {
         );
         match row {
             GroupedListRow::Project { group, collapsed } => item
-                .child(self.render_group_header(&groups[*group], flags, *collapsed, cx))
+                .child(self.render_group_header(&groups[*group], flags, *collapsed, window, cx))
                 .into_any_element(),
             GroupedListRow::Thread(meta) => item
-                .child(self.render_thread(meta, flags, active_id == Some(meta.id.as_str()), cx))
+                .child(self.render_thread(
+                    meta,
+                    flags,
+                    active_id == Some(meta.id.as_str()),
+                    window,
+                    cx,
+                ))
                 .into_any_element(),
             GroupedListRow::ToggleThreads {
                 group,
@@ -2259,7 +2370,13 @@ impl SessionsSidebar {
                 .into_any_element()
             }
             GroupedListRow::Settled { group, count } => item
-                .child(self.render_settled_header(&groups[*group].project.id, *count, None, cx))
+                .child(self.render_settled_header(
+                    &groups[*group].project.id,
+                    *count,
+                    None,
+                    window,
+                    cx,
+                ))
                 .into_any_element(),
             GroupedListRow::SettledMore { group, count } => item
                 .child(self.render_settled_more(&groups[*group].project.id, *count, cx))
@@ -2347,11 +2464,25 @@ impl SessionsSidebar {
         meta: &SessionMeta,
         state: &ThreadRowState,
         is_active: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let session_id = state.session_id.clone();
+        // The selected fill glides from the row left to the row chosen.
+        let active = cx.theme().list_active;
+        let fill = transition(
+            (row_id.clone(), "selected-fill"),
+            if is_active {
+                active
+            } else {
+                active.opacity(0.)
+            },
+            settle(),
+            window,
+            cx,
+        );
         let row = crate::material::accessible_clickable(
-            base,
+            base.bg(fill),
             row_id,
             Role::Button,
             crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
@@ -2363,7 +2494,6 @@ impl SessionsSidebar {
             let id = meta.id.clone();
             move || format!("sidebar-thread-{id}")
         })
-        .group(state.row_key.clone())
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| {
             let session_id = session_id.clone();
@@ -2376,6 +2506,7 @@ impl SessionsSidebar {
                 .update(cx, |state, cx| state.open_thread(cx));
             cx.notify();
         }));
+        let row = Self::track_hover(row, &state.row_key, cx);
         let row = match self
             .dragged_thread(meta, state, cx)
             .filter(|_| !self.compact(cx))
@@ -2413,6 +2544,7 @@ impl SessionsSidebar {
         meta: &SessionMeta,
         state: &ThreadRowState,
         emphasize_unread: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let title = if let Some(input) = &state.renaming {
@@ -2435,14 +2567,27 @@ impl SessionsSidebar {
             .min_w_0()
             .gap(px(6.))
             .child(title)
-            .when(state.title_generating, |row| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .child(Spinner::new().color(cx.theme().muted_foreground)),
-                )
-            })
+            .when_some(
+                Self::fading_spinner(
+                    format!("title-spinner-{}", state.row_key),
+                    state.title_generating,
+                    window,
+                    cx,
+                ),
+                |row, spinner| row.child(spinner),
+            )
             .into_any_element()
+    }
+
+    /// The spinner beside a title while it generates, faded in and out.
+    fn fading_spinner(
+        id: String,
+        spinning: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<gpui::AnyElement> {
+        let shown = crate::motion::shown(id, spinning.then_some(()), window, cx)?;
+        Some(shown.fade(Spinner::new().color(cx.theme().muted_foreground)))
     }
 
     /// A pinned row's pin; on row hover it becomes the Unpin button.
@@ -2464,6 +2609,7 @@ impl SessionsSidebar {
         &self,
         meta: &SessionMeta,
         row_key: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Div> {
         if meta.pinned_at.is_none() || meta.is_settled() {
@@ -2471,6 +2617,7 @@ impl SessionsSidebar {
         }
         let id = meta.id.clone();
         let label = crate::tr!("sidebar.unpin_tooltip");
+        let hover = self.hover_progress(row_key, window, cx);
         Some(
             div()
                 .relative()
@@ -2481,7 +2628,7 @@ impl SessionsSidebar {
                 .justify_center()
                 .child(
                     div()
-                        .group_hover(row_key.to_owned(), |glyph| glyph.invisible())
+                        .opacity(1. - hover)
                         .child(Icon::new(IconName::Pin).text_color(cx.theme().muted_foreground)),
                 )
                 .child(
@@ -2495,8 +2642,7 @@ impl SessionsSidebar {
                         .top_0()
                         .left_0()
                         // Opacity keeps the button a tab stop, as the settle button does.
-                        .opacity(0.)
-                        .group_hover(row_key.to_owned(), |button| button.opacity(1.))
+                        .opacity(hover)
                         .focus_visible(|button| button.opacity(1.))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
@@ -2555,13 +2701,37 @@ impl SessionsSidebar {
         })
     }
 
+    /// The row's status as a dot and its label; a change of status
+    /// cross-fades, and a status that ends fades out in its place.
     fn thread_status_badge(
         state: &ThreadRowState,
         working: bool,
         store: &Entity<WorkspaceStore>,
-        cx: &Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let (color, label, waiting) = Self::thread_status_label(state, working, cx)?;
+        let status = Self::thread_status_label(state, working, cx);
+        let waiting = status.as_ref().is_some_and(|(_, _, waiting)| *waiting);
+        let badge = faded_status(
+            format!("thread-status-{}", state.session_id),
+            status.map(|(color, label, _)| (color, SharedString::from(label))),
+            window,
+            cx,
+            |(color, label), _, cx| {
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().size(px(6.)).rounded_full().bg(*color))
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_secondary(false, cx)
+                            .text_color(*color)
+                            .child(label.clone()),
+                    )
+                    .into_any_element()
+            },
+        )?;
         Some(
             h_flex()
                 .id(SharedString::from(format!(
@@ -2572,16 +2742,7 @@ impl SessionsSidebar {
                     Self::waiting_tooltip(badge, store, &state.session_id, &state.watching)
                 })
                 .flex_none()
-                .items_center()
-                .gap_1()
-                .child(div().size(px(6.)).rounded_full().bg(color))
-                .child(
-                    div()
-                        .whitespace_nowrap()
-                        .text_secondary(false, cx)
-                        .text_color(color)
-                        .child(label),
-                )
+                .child(badge)
                 .when(state.failed && !state.waiting(), |badge| {
                     badge.tooltip(|window, cx| {
                         Tooltip::new(crate::tr!("sidebar.failed_tooltip")).build(window, cx)
@@ -2778,6 +2939,7 @@ impl SessionsSidebar {
         meta: &SessionMeta,
         flags: &HashMap<String, ThreadFlags>,
         is_active: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let working = flags.get(&meta.id).is_some_and(|flags| flags.working);
@@ -2794,6 +2956,7 @@ impl SessionsSidebar {
                 meta,
                 &state,
                 is_active,
+                window,
                 cx,
             )
             .pl(px(THREAD_INDENT))
@@ -2806,23 +2969,24 @@ impl SessionsSidebar {
                 cx,
             ))
             .when_some(
-                Self::thread_status_badge(&state, working, &self.store, cx),
+                Self::thread_status_badge(&state, working, &self.store, window, cx),
                 |row, badge| row.child(badge),
             );
 
         // Row body: rename input, or the (unread dot + worktree glyph + title).
         let row = if state.renaming.is_some() {
-            row.child(self.thread_title_or_input(meta, &state, false, cx))
+            row.child(self.thread_title_or_input(meta, &state, false, window, cx))
         } else {
-            row.when(show_unread, |row| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(cx.theme().primary),
-                )
-            })
+            let unread = crate::motion::shown(
+                SharedString::from(format!("unread-{session_id}")),
+                show_unread.then_some(()),
+                window,
+                cx,
+            )
+            .map(|shown| {
+                shown.fade(div().size(px(6.)).rounded_full().bg(cx.theme().primary))
+            });
+            row.children(unread)
             .when(is_worktree, |row| {
                 row.child(
                     Icon::empty()
@@ -2830,9 +2994,9 @@ impl SessionsSidebar {
                         .text_color(cx.theme().muted_foreground),
                 )
             })
-            .child(self.thread_title_or_input(meta, &state, false, cx))
+            .child(self.thread_title_or_input(meta, &state, false, window, cx))
             .children(Self::follow_up_glyph(meta, cx))
-            .children(self.pin_glyph(meta, &row_key, cx))
+            .children(self.pin_glyph(meta, &row_key, window, cx))
             .when_some(
                 (state.renaming.is_none())
                     .then(|| {
@@ -2852,6 +3016,7 @@ impl SessionsSidebar {
                     &row_key,
                     project_view_timestamp(meta),
                     true,
+                    window,
                     cx,
                 ))
             })
@@ -2867,6 +3032,7 @@ impl SessionsSidebar {
         row_key: &str,
         timestamp: u64,
         action_on_hover: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let session_id = meta.id.clone();
@@ -2882,7 +3048,11 @@ impl SessionsSidebar {
         } else {
             crate::tr!("sidebar.settle_tooltip")
         };
-        let row_key = row_key.to_string();
+        let hover = if action_on_hover {
+            self.hover_progress(row_key, window, cx)
+        } else {
+            0.
+        };
         div()
             .relative()
             .flex_none()
@@ -2894,9 +3064,7 @@ impl SessionsSidebar {
                     .items_center()
                     .whitespace_nowrap()
                     .text_secondary(false, cx)
-                    .when(action_on_hover, |time| {
-                        time.group_hover(row_key.clone(), |time| time.invisible())
-                    })
+                    .opacity(1. - hover)
                     .child(ago),
             )
             .when(action_on_hover, |slot| {
@@ -2922,8 +3090,7 @@ impl SessionsSidebar {
                     // Opacity, not visibility, keeps the button a tab stop so
                     // keyboard focus can reveal it; a click's focus must not
                     // keep it over the time once the row moves.
-                    .opacity(0.)
-                    .group_hover(row_key, |button| button.opacity(1.))
+                    .opacity(hover)
                     .focus_visible(|button| button.opacity(1.))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
@@ -2943,6 +3110,7 @@ impl SessionsSidebar {
         flags: &HashMap<String, ThreadFlags>,
         project_name: Option<String>,
         is_active: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let working = flags.get(&meta.id).is_some_and(|flags| flags.working);
@@ -2961,6 +3129,7 @@ impl SessionsSidebar {
                 meta,
                 &state,
                 is_active,
+                window,
                 cx,
             )
             .debug_selector({
@@ -2979,7 +3148,7 @@ impl SessionsSidebar {
             ));
 
         let row = {
-            let title_or_input = self.thread_title_or_input(meta, &state, true, cx);
+            let title_or_input = self.thread_title_or_input(meta, &state, true, window, cx);
             // Unread wins over the status colour; renaming hides the dot so the
             // input keeps the row's leading width (same as render_thread).
             let dot = (!renaming)
@@ -2989,28 +3158,54 @@ impl SessionsSidebar {
                         .or(status.as_ref().map(|(color, _, _)| *color))
                 })
                 .flatten();
+            let dot = faded_status(
+                format!("flat-dot-{session_id}"),
+                dot,
+                window,
+                cx,
+                |color, _, _| {
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(*color)
+                        .into_any_element()
+                },
+            );
             let line_one = h_flex()
                 .w_full()
                 .min_w_0()
                 .items_center()
                 .gap(px(6.))
-                .when_some(dot, |line, color| {
-                    line.child(div().flex_none().size(px(6.)).rounded_full().bg(color))
-                })
+                .children(dot)
                 .child(title_or_input)
                 .when(!renaming, |line| {
                     line.children(Self::follow_up_glyph(meta, cx))
-                        .children(self.pin_glyph(meta, &row_key, cx))
+                        .children(self.pin_glyph(meta, &row_key, window, cx))
                         .child(self.render_flat_thread_right_slot(
                             meta,
                             &row_key,
                             tcode_core::thread_sort::shown_timestamp(meta),
                             !working,
+                            window,
                             cx,
                         ))
                 });
 
             let has_project = project_name.is_some();
+            let status_waiting = status.as_ref().is_some_and(|(_, _, waiting)| *waiting);
+            let status_line = faded_status(
+                format!("flat-status-{session_id}"),
+                status.map(|(color, label, _)| (SharedString::from(label), color)),
+                window,
+                cx,
+                |(label, color), _, _| {
+                    div()
+                        .whitespace_nowrap()
+                        .text_color(*color)
+                        .child(label.clone())
+                        .into_any_element()
+                },
+            );
             let watching: Vec<u64> = tcode_core::pull_request::watched(&meta.pull_requests)
                 .map(|link| link.key.number)
                 .collect();
@@ -3020,16 +3215,15 @@ impl SessionsSidebar {
                 .items_center()
                 .gap_1()
                 .text_secondary(false, cx)
-                .when_some(status, |line, (color, label, waiting)| {
+                .when_some(status_line, |line, status| {
                     line.child(
                         div()
                             .id(SharedString::from(format!("thread-status-{session_id}")))
                             .flex_none()
-                            .text_color(color)
-                            .when(waiting, |status| {
+                            .when(status_waiting, |status| {
                                 Self::waiting_tooltip(status, &self.store, &session_id, &watching)
                             })
-                            .child(label),
+                            .child(status),
                     )
                 })
                 .when((waiting || working) && has_project, |line| {
@@ -3558,7 +3752,7 @@ impl SessionsSidebar {
     ) -> gpui::AnyElement {
         match row {
             CompactListRow::Settled { key, count } => {
-                self.render_settled_header(key, *count, None, cx)
+                self.render_settled_header(key, *count, None, window, cx)
             }
             CompactListRow::Caption { label, .. } => {
                 crate::material::list_caption(label.clone(), true, cx).into_any_element()
@@ -3568,12 +3762,12 @@ impl SessionsSidebar {
             }
             CompactListRow::Empty { .. } => self.render_active_empty(cx),
             CompactListRow::Project(row) => {
-                self.render_compact_group_header(row, cx).into_any_element()
+                self.render_compact_group_header(row, window, cx).into_any_element()
             }
             CompactListRow::Thread(row) => {
                 let content = v_flex()
                     .w_full()
-                    .child(self.render_compact_thread(row, cx))
+                    .child(self.render_compact_thread(row, window, cx))
                     .when(row.separator, |list| {
                         list.child(crate::material::row_hairline(px(COMPACT_PAGE_INSET), cx))
                     })
@@ -3784,6 +3978,7 @@ impl SessionsSidebar {
     fn render_compact_group_header(
         &self,
         row: &CompactProjectRow,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let project_id = row.project_id.clone();
@@ -3827,7 +4022,7 @@ impl SessionsSidebar {
                 .overflow_hidden()
                 .child(crate::widgets::fade_text(row.name.clone())),
         )
-        .children(self.shared_badge(&row.project_id, cx))
+        .children(self.shared_badge(&row.project_id, window, cx))
         .child(div().flex_none().child(row.count.clone()))
         .child(Icon::new(if collapsed {
             IconName::ChevronRight
@@ -3840,6 +4035,7 @@ impl SessionsSidebar {
     fn render_compact_thread(
         &self,
         cached: &CompactThreadRow,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         #[cfg(test)]
@@ -3858,7 +4054,25 @@ impl SessionsSidebar {
             None
         };
         let session_id = state.session_id.clone();
-        let status = compact_status_line(state, working, cx);
+        let status = faded_status(
+            format!("compact-status-{}", state.session_id),
+            compact_status_line(state, working, cx)
+                .map(|(label, color)| (SharedString::from(label), color)),
+            window,
+            cx,
+            |(label, color), _, cx| {
+                h_flex()
+                    .gap(cx.theme().tokens.spacing.xs)
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_color(*color)
+                            .child(label.clone()),
+                    )
+                    .child("·")
+                    .into_any_element()
+            },
+        );
         let click_id = session_id.clone();
         let renaming = self
             .renaming
@@ -3871,6 +4085,27 @@ impl SessionsSidebar {
             cx,
         );
 
+        let selected =
+            self.store.read(cx).roster_session_id().as_deref() == Some(session_id.as_str());
+        // Rows needing the user carry a 6% semantic wash over the selected
+        // fill; everything else sits on the paper with only hover and pressed
+        // tints. The fill glides between them.
+        let fill = if state.waiting_for_approval {
+            cx.theme().warning.opacity(0.06)
+        } else if state.waiting_for_input {
+            cx.theme().primary.opacity(0.06)
+        } else if selected {
+            cx.theme().list_active
+        } else {
+            cx.theme().list_active.opacity(0.)
+        };
+        let fill = transition(
+            (cached.row_id.clone(), "fill"),
+            fill,
+            settle(),
+            window,
+            cx,
+        );
         let label = crate::pull_requests::badge_label(&meta.pull_requests, cx).map_or_else(
             || cached.label.to_string(),
             |badge| format!("{}, {badge}", cached.label),
@@ -3883,19 +4118,8 @@ impl SessionsSidebar {
             // First child so the row's content paints over the mark.
             .relative()
             .children(mark)
-            .when(
-                self.store.read(cx).roster_session_id().as_deref() == Some(session_id.as_str()),
-                |row| row.bg(cx.theme().list_active).aria_selected(true),
-            )
-            // Rows needing the user carry a 6% semantic wash; everything else sits
-            // on the paper with only hover and pressed tints.
-            .when(state.waiting_for_approval, |row| {
-                row.bg(cx.theme().warning.opacity(0.06))
-            })
-            .when(
-                state.waiting_for_input && !state.waiting_for_approval,
-                |row| row.bg(cx.theme().primary.opacity(0.06)),
-            )
+            .when(selected, |row| row.aria_selected(true))
+            .bg(fill)
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this
                     .renaming
@@ -3916,7 +4140,13 @@ impl SessionsSidebar {
                 this.window_state
                     .update(cx, |state, cx| state.open_thread(cx));
             }))
-            .child(compact_status_glyph(state, working, project.as_ref(), cx))
+            .child(compact_status_glyph(
+                &session_id,
+                CompactGlyph::of(state, working, cx),
+                project.as_ref(),
+                window,
+                cx,
+            ))
             .child(
                 v_flex()
                     .flex_1()
@@ -3952,13 +4182,15 @@ impl SessionsSidebar {
                                         .text_color(cx.theme().muted_foreground),
                                 )
                             })
-                            .when(state.title_generating, |row| {
-                                row.child(
-                                    div()
-                                        .flex_none()
-                                        .child(Spinner::new().color(cx.theme().muted_foreground)),
-                                )
-                            }),
+                            .when_some(
+                                Self::fading_spinner(
+                                    format!("title-spinner-{}", state.row_key),
+                                    state.title_generating,
+                                    window,
+                                    cx,
+                                ),
+                                |row, spinner| row.child(spinner),
+                            ),
                     )
                     .child(
                         h_flex()
@@ -3979,10 +4211,7 @@ impl SessionsSidebar {
                                 )
                                 .child(div().flex_none().child("·"))
                             })
-                            .when_some(status, |line, (label, color)| {
-                                line.child(div().flex_none().text_color(color).child(label))
-                                    .child(div().flex_none().child("·"))
-                            })
+                            .children(status)
                             .when_some(
                                 crate::pull_requests::badge(&meta.pull_requests, 14., cx),
                                 |line, badge| line.child(badge).child("·"),
@@ -3994,76 +4223,95 @@ impl SessionsSidebar {
     }
 }
 
-/// The 20×20 status slot at the head of a compact row. The slot is
-/// always taken so titles line up. Idle ungrouped rows show their project artwork.
+/// What the status slot at the head of a compact row shows.
+#[derive(Clone, Copy, PartialEq)]
+enum CompactGlyph {
+    Approval,
+    Input,
+    Failed,
+    Spinner(gpui::Hsla),
+    Unread,
+    Idle,
+}
+
+impl CompactGlyph {
+    fn of(state: &ThreadRowState, working: bool, cx: &App) -> Self {
+        if state.waiting_for_approval {
+            Self::Approval
+        } else if state.waiting_for_input {
+            Self::Input
+        } else if state.failed {
+            Self::Failed
+        } else if working {
+            Self::Spinner(cx.theme().primary)
+        } else if state.waiting {
+            Self::Spinner(cx.theme().muted_foreground)
+        } else if state.show_unread {
+            Self::Unread
+        } else {
+            Self::Idle
+        }
+    }
+}
+
+/// The 20×20 status slot at the head of a compact row; a change of status
+/// cross-fades. The slot is always taken so titles line up. Idle ungrouped
+/// rows show their project artwork.
 fn compact_status_glyph(
-    state: &ThreadRowState,
-    working: bool,
+    id: &str,
+    glyph: CompactGlyph,
+    project: Option<&tcode_core::project::Project>,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let project = project.cloned();
+    div()
+        .flex_none()
+        .size(px(20.))
+        .child(crate::motion::cross_fade(
+            SharedString::from(format!("compact-glyph-{id}")),
+            glyph,
+            window,
+            cx,
+            move |glyph, _, cx| compact_glyph(*glyph, project.as_ref(), cx).into_any_element(),
+        ))
+        .into_any_element()
+}
+
+fn compact_glyph(
+    glyph: CompactGlyph,
     project: Option<&tcode_core::project::Project>,
     cx: &App,
-) -> gpui::AnyElement {
-    let slot = div().flex_none().size(px(20.)).flex().items_center();
-    if state.waiting_for_approval {
-        return slot
-            .justify_center()
-            .rounded_full()
-            .bg(cx.theme().warning)
-            .child(
-                div()
-                    .text_token(&cx.theme().tokens.typography.xs)
-                    .font_semibold()
-                    .text_color(gpui::white())
-                    .child("!"),
-            )
-            .into_any_element();
+) -> gpui::Div {
+    let slot = div().size(px(20.)).flex().items_center().justify_center();
+    match glyph {
+        CompactGlyph::Approval => slot.rounded_full().bg(cx.theme().warning).child(
+            div()
+                .text_token(&cx.theme().tokens.typography.xs)
+                .font_semibold()
+                .text_color(gpui::white())
+                .child("!"),
+        ),
+        CompactGlyph::Input => slot.rounded_full().bg(cx.theme().primary).child(
+            div()
+                .text_token(&cx.theme().tokens.typography.xs)
+                .font_semibold()
+                .text_color(cx.theme().primary_foreground)
+                .child("?"),
+        ),
+        CompactGlyph::Failed => slot.child(
+            Icon::new(IconName::TriangleAlert)
+                .size(px(16.))
+                .text_color(cx.theme().danger),
+        ),
+        CompactGlyph::Spinner(color) => slot.child(Spinner::new().small().color(color)),
+        CompactGlyph::Unread => slot.child(crate::material::status_dot(cx.theme().primary)),
+        CompactGlyph::Idle => slot
+            .text_color(cx.theme().muted_foreground)
+            .when_some(project, |slot, project| {
+                slot.child(crate::project_icon::artwork(project, 20.))
+            }),
     }
-    if state.waiting_for_input {
-        return slot
-            .justify_center()
-            .rounded_full()
-            .bg(cx.theme().primary)
-            .child(
-                div()
-                    .text_token(&cx.theme().tokens.typography.xs)
-                    .font_semibold()
-                    .text_color(cx.theme().primary_foreground)
-                    .child("?"),
-            )
-            .into_any_element();
-    }
-    if state.failed {
-        return slot
-            .justify_center()
-            .child(
-                Icon::new(IconName::TriangleAlert)
-                    .size(px(16.))
-                    .text_color(cx.theme().danger),
-            )
-            .into_any_element();
-    }
-    if working || state.waiting {
-        let color = if !working && state.waiting {
-            cx.theme().muted_foreground
-        } else {
-            cx.theme().primary
-        };
-        return slot
-            .justify_center()
-            .child(Spinner::new().small().color(color))
-            .into_any_element();
-    }
-    if state.show_unread {
-        return slot
-            .justify_center()
-            .child(crate::material::status_dot(cx.theme().primary))
-            .into_any_element();
-    }
-    slot.justify_center()
-        .text_color(cx.theme().muted_foreground)
-        .when_some(project, |slot, project| {
-            slot.child(crate::project_icon::artwork(project, 20.))
-        })
-        .into_any_element()
 }
 
 /// Status label and color, or `None` for an idle thread that shows only its time.
@@ -4164,13 +4412,14 @@ impl Render for SessionsSidebar {
                     }
                     let thread_list = list(
                         self.grouped_list_state.clone(),
-                        cx.processor(move |this, index: usize, _window, cx| {
+                        cx.processor(move |this, index: usize, window, cx| {
                             this.render_grouped_row(
                                 index,
                                 &rows[index],
                                 &groups,
                                 &flags,
                                 active_id.as_deref(),
+                                window,
                                 cx,
                             )
                         }),
@@ -4327,6 +4576,7 @@ impl Render for SessionsSidebar {
                                         "recent",
                                         settled_count,
                                         scope.as_deref(),
+                                        window,
                                         cx,
                                     );
                                     return this
@@ -4366,6 +4616,7 @@ impl Render for SessionsSidebar {
                                     &flags,
                                     project_name,
                                     is_active,
+                                    window,
                                     cx,
                                 ))
                             };
@@ -4460,7 +4711,7 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_new_space_and_share))
             .child(self.render_app_row(window, cx))
             .child(self.render_search_row(cx))
-            .child(self.render_machine_control(cx))
+            .child(self.render_machine_control(window, cx))
             .child(header)
             .child(if self.store.read(cx).threads_loading() {
                 if self.store.read(cx).pending_sessions().is_empty() {
@@ -4557,6 +4808,14 @@ mod tests {
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
+    }
+
+    /// Draws the frame after whatever a change set moving has come to rest.
+    fn draw_settled(cx: &mut VisualTestContext) {
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        draw(cx);
     }
 
     fn session(id: &str, parent_id: Option<&str>) -> SessionMeta {
@@ -5016,6 +5275,7 @@ mod tests {
                 "mark fits the row height minus the inset"
             );
         }
+        draw_settled(cx);
         let list_active = cx.update(|_, cx| cx.theme().list_active);
         let painted_active = |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>| {
             cx.update(|window, _| {
@@ -5150,7 +5410,7 @@ mod tests {
         );
         send(cx, 3, TouchPhase::Started, b.center());
         send(cx, 3, TouchPhase::Ended, b.center());
-        draw(cx);
+        draw_settled(cx);
         assert_eq!(
             store
                 .read_with(cx, |store, _| store.active_session_id())
@@ -5961,7 +6221,7 @@ mod tests {
 
         store.update(cx, |store, _| store.select_session("child".into()));
         sidebar.update(cx, |_, cx| cx.notify());
-        draw(cx);
+        draw_settled(cx);
         let lead = cx.debug_bounds("compact-row-parent").unwrap();
         let selected = cx.update(|window, cx| {
             window.painted_quads().iter().any(|quad| {
