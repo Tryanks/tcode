@@ -286,11 +286,17 @@ impl SourceControlPanel {
             kind_line.push_str(" · ");
             kind_line.push_str(&crate::tr!("source_control.origin_added"));
         }
-        let header_color = if choice.enabled {
-            theme.foreground
-        } else {
-            theme.muted_foreground
-        };
+        let header_color = gpui_base::motion::transition(
+            SharedString::from(format!("source-control-header-{host}")),
+            if choice.enabled {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            },
+            gpui_base::motion::Transition::new(crate::edge_back::SETTLE),
+            window,
+            cx,
+        );
         let header = h_flex()
             .w_full()
             .gap_3()
@@ -311,16 +317,59 @@ impl SourceControlPanel {
                     .child(div().text_secondary(compact, cx).child(kind_line)),
             )
             .child(switch);
-        let mut row = crate::material::group_row_stacked(cx).child(header);
-        if !choice.enabled {
-            return row
-                .child(
-                    div()
-                        .text_secondary(compact, cx)
-                        .child(crate::tr!("source_control.off", host = host).into_owned()),
-                )
-                .into_any_element();
-        }
+        let spacing = cx.theme().tokens.spacing.sm;
+        // A host switched off folds its editor away to one line saying so.
+        let details = crate::motion::shown(
+            SharedString::from(format!("source-control-details-{host}")),
+            choice.enabled.then_some(()),
+            window,
+            cx,
+        )
+        .map(|_| self.host_details(host, kind, &choice, status, added, compact, window, cx));
+        crate::material::group_row_stacked(cx)
+            .child(header)
+            .child(
+                v_flex()
+                    .w_full()
+                    .child(
+                        crate::widgets::Collapsible::new(
+                            SharedString::from(format!("source-control-details-fold-{host}")),
+                            choice.enabled,
+                        )
+                        .w_full()
+                        .when_some(details, |fold, details| fold.content(details.pt(spacing))),
+                    )
+                    .child(
+                        crate::widgets::Collapsible::new(
+                            SharedString::from(format!("source-control-off-fold-{host}")),
+                            !choice.enabled,
+                        )
+                        .w_full()
+                        .content(
+                            div()
+                                .pt(spacing)
+                                .text_secondary(compact, cx)
+                                .child(crate::tr!("source_control.off", host = host).into_owned()),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// An enabled host's status, notices and credential editor.
+    #[allow(clippy::too_many_arguments)]
+    fn host_details(
+        &mut self,
+        host: &str,
+        kind: HostKind,
+        choice: &HostSettings,
+        status: Option<HostStatus>,
+        added: bool,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut row = v_flex().w_full().gap(cx.theme().tokens.spacing.sm);
         let order = status
             .as_ref()
             .map(|status| {
@@ -333,39 +382,77 @@ impl SourceControlPanel {
             })
             .unwrap_or_default();
         let tooltip = crate::tr!("source_control.order", order = order).into_owned();
-        row = row.child(
-            div()
-                .id(SharedString::from(format!("source-control-source-{host}")))
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .text_secondary(compact, cx)
-                .child(status_line(status.as_ref()))
-                .when(
-                    status
-                        .as_ref()
-                        .is_some_and(|status| status.problem == Some(HostProblem::Unverified)),
-                    |line| {
-                        let selector = format!("source-control-unverified-{host}");
-                        line.child(" · ").child(
+        let unverified = crate::motion::shown(
+            SharedString::from(format!("source-control-unverified-{host}")),
+            status
+                .as_ref()
+                .is_some_and(|status| status.problem == Some(HostProblem::Unverified))
+                .then_some(()),
+            window,
+            cx,
+        );
+        let source_line = div()
+            .id(SharedString::from(format!("source-control-source-{host}")))
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .text_secondary(compact, cx)
+            // Where the credential comes from cross-fades when it changes.
+            .child(crate::motion::cross_fade(
+                SharedString::from(format!("source-control-status-{host}")),
+                status_line(status.as_ref()),
+                window,
+                cx,
+                |line, _, _| line.clone().into_any_element(),
+            ))
+            .when_some(unverified, |line, unverified| {
+                let selector = format!("source-control-unverified-{host}");
+                line.child(
+                    unverified.fade(
+                        h_flex().gap_1().child(" · ").child(
                             div()
                                 .debug_selector(move || selector)
                                 .child(crate::tr!("source_control.unverified").into_owned()),
-                        )
-                    },
+                        ),
+                    ),
                 )
-                .when(!order.is_empty(), |line| {
-                    line.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                }),
+            })
+            .when(!order.is_empty(), |line| {
+                line.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            });
+        // A notice folds in under the status when the host reports a problem
+        // one can act on, and away once it is solved.
+        let notice = crate::motion::shown(
+            SharedString::from(format!("source-control-notice-{host}")),
+            status
+                .as_ref()
+                .and_then(|status| status.problem.clone())
+                .filter(|problem| matches!(problem, HostProblem::NotSignedIn { .. })),
+            window,
+            cx,
         );
-        if let Some(problem) = status.as_ref().and_then(|status| status.problem.as_ref()) {
-            row = row.children(self.notice(host, problem, cx));
-        }
+        let spacing = cx.theme().tokens.spacing.sm;
+        row = row.child(
+            v_flex()
+                .w_full()
+                .child(source_line)
+                .children(notice.and_then(|notice| {
+                    self.notice(host, &notice.value, cx)
+                        .map(|card| notice.fold(div().w_full().pt(spacing).child(card)))
+                })),
+        );
         let accounts = status
             .as_ref()
             .map(|status| status.accounts.clone())
             .unwrap_or_default();
-        if accounts.len() > 1 {
+        let accounts = crate::motion::shown(
+            SharedString::from(format!("source-control-account-{host}")),
+            (accounts.len() > 1).then_some(accounts),
+            window,
+            cx,
+        );
+        if let Some(shown) = accounts {
+            let accounts = shown.value.clone();
             let selected = choice
                 .account
                 .clone()
@@ -373,50 +460,57 @@ impl SourceControlPanel {
             let selected_account = choice.account.clone();
             let menu_host = host.to_owned();
             row = row.child(
-                Button::new(SharedString::from(format!("source-control-account-{host}")))
-                    .ghost()
-                    .outline()
-                    .compact()
-                    .label(selected)
-                    .dropdown_menu(move |mut menu, _, _| {
-                        menu = menu.menu_with_check(
-                            crate::tr!("source_control.active_account").into_owned(),
-                            selected_account.is_none(),
-                            Box::new(ChooseAccount {
-                                host: menu_host.clone(),
-                                kind,
-                                account: None,
-                            }),
-                        );
-                        for account in &accounts {
+                shown.fade(
+                    Button::new(SharedString::from(format!("source-control-account-{host}")))
+                        .ghost()
+                        .outline()
+                        .compact()
+                        .label(selected)
+                        .dropdown_menu(move |mut menu, _, _| {
                             menu = menu.menu_with_check(
-                                account.clone(),
-                                selected_account.as_ref() == Some(account),
+                                crate::tr!("source_control.active_account").into_owned(),
+                                selected_account.is_none(),
                                 Box::new(ChooseAccount {
                                     host: menu_host.clone(),
                                     kind,
-                                    account: Some(account.clone()),
+                                    account: None,
                                 }),
                             );
-                        }
-                        menu
-                    }),
+                            for account in &accounts {
+                                menu = menu.menu_with_check(
+                                    account.clone(),
+                                    selected_account.as_ref() == Some(account),
+                                    Box::new(ChooseAccount {
+                                        host: menu_host.clone(),
+                                        kind,
+                                        account: Some(account.clone()),
+                                    }),
+                                );
+                            }
+                            menu
+                        }),
+                ),
             );
         }
-        if status
-            .as_ref()
-            .is_some_and(|status| status.env_overrides_account)
-        {
+        if let Some(note) = crate::motion::shown(
+            SharedString::from(format!("source-control-env-override-{host}")),
+            status
+                .as_ref()
+                .is_some_and(|status| status.env_overrides_account)
+                .then_some(()),
+            window,
+            cx,
+        ) {
             row = row.child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!("source_control.env_override").into_owned()),
+                note.fade(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("source_control.env_override").into_owned()),
+                ),
             );
         }
         if kind.takes_email() {
-            return row
-                .child(self.email_editor(host, status.as_ref(), window, cx))
-                .into_any_element();
+            return row.child(self.email_editor(host, status.as_ref(), window, cx));
         }
         let token_set = status.as_ref().is_some_and(|status| status.token_set);
         let placeholder = if token_set {
@@ -521,25 +615,34 @@ impl SourceControlPanel {
                 .into_owned()
             });
         let token_url = status.and_then(|status| status.token_url);
-        let help = (scopes.is_some() || token_url.is_some()).then(|| {
-            h_flex()
-                .w_full()
-                .flex_wrap()
-                .gap_1()
-                .items_center()
-                .text_secondary(compact, cx)
-                .children(scopes)
-                .when_some(token_url, |help, url| {
-                    help.child(crate::settings_rows::external_link(
-                        format!("source-control-token-link-{host}"),
-                        crate::tr!("source_control.create_token")
-                            .into_owned()
-                            .into(),
-                        url,
-                    ))
-                })
+        let help = crate::motion::shown(
+            SharedString::from(format!("source-control-help-{host}")),
+            (scopes.is_some() || token_url.is_some()).then_some((scopes, token_url)),
+            window,
+            cx,
+        )
+        .map(|help| {
+            let (scopes, token_url) = help.value.clone();
+            help.fade(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .gap_1()
+                    .items_center()
+                    .text_secondary(compact, cx)
+                    .children(scopes)
+                    .when_some(token_url, |help, url| {
+                        help.child(crate::settings_rows::external_link(
+                            format!("source-control-token-link-{host}"),
+                            crate::tr!("source_control.create_token")
+                                .into_owned()
+                                .into(),
+                            url,
+                        ))
+                    }),
+            )
         });
-        row.child(editor).children(help).into_any_element()
+        row.child(editor).children(help)
     }
 }
 
@@ -634,32 +737,42 @@ impl SourceControlPanel {
                     false,
                 ),
             ]);
-        let (description, link_label, link) = if with_email {
-            (
-                crate::tr!("source_control.bitbucket_api_desc"),
-                crate::tr!("source_control.bitbucket_api_link"),
-                status.and_then(|status| status.token_url.clone()),
-            )
-        } else {
-            (
-                crate::tr!("source_control.bitbucket_access_desc"),
-                crate::tr!("source_control.bitbucket_access_link"),
-                status.and_then(|status| status.access_token_url.clone()),
-            )
-        };
-        let description = v_flex()
-            .w_full()
-            .items_start()
-            .gap_1()
-            .text_secondary(compact, cx)
-            .child(div().w_full().child(description.into_owned()))
-            .when_some(link, |description, url| {
-                description.child(crate::settings_rows::external_link(
-                    format!("source-control-method-link-{host}"),
-                    link_label.into_owned().into(),
-                    url,
-                ))
-            });
+        // The chosen method's description cross-fades with the choice.
+        let description = crate::motion::cross_fade(
+            SharedString::from(format!("source-control-method-desc-{host}")),
+            with_email,
+            window,
+            cx,
+            |&with_email, _, cx| {
+                let (description, link_label, link) = if with_email {
+                    (
+                        crate::tr!("source_control.bitbucket_api_desc"),
+                        crate::tr!("source_control.bitbucket_api_link"),
+                        status.and_then(|status| status.token_url.clone()),
+                    )
+                } else {
+                    (
+                        crate::tr!("source_control.bitbucket_access_desc"),
+                        crate::tr!("source_control.bitbucket_access_link"),
+                        status.and_then(|status| status.access_token_url.clone()),
+                    )
+                };
+                v_flex()
+                    .w_full()
+                    .items_start()
+                    .gap_1()
+                    .text_secondary(compact, cx)
+                    .child(div().w_full().child(description.into_owned()))
+                    .when_some(link, |description, url| {
+                        description.child(crate::settings_rows::external_link(
+                            format!("source-control-method-link-{host}"),
+                            link_label.into_owned().into(),
+                            url,
+                        ))
+                    })
+                    .into_any_element()
+            },
+        );
         let replaces = match (with_email, &saved) {
             (true, Some(CredentialSource::SavedBearer)) => {
                 Some(crate::tr!("source_control.bitbucket_replaces_access"))
@@ -669,6 +782,12 @@ impl SourceControlPanel {
             }
             _ => None,
         };
+        let replaces = crate::motion::shown(
+            SharedString::from(format!("source-control-replaces-{host}")),
+            replaces.map(|replaces| replaces.into_owned()),
+            window,
+            cx,
+        );
         let store = self.store.clone();
         let set_host = host.to_owned();
         let (set_token, set_email) = (token.clone(), email.clone());
@@ -722,14 +841,22 @@ impl SourceControlPanel {
             .w_full()
             .gap_2()
             .child(track)
-            .child(description)
-            .when(with_email, |editor| {
-                editor.child(
-                    div()
-                        .w_full()
-                        .child(Input::new(&email).aria_label(email_label.into_owned())),
-                )
-            })
+            .child(
+                // The email field folds in under the description for an API token.
+                v_flex().w_full().child(description).child(
+                    crate::widgets::Collapsible::new(
+                        SharedString::from(format!("source-control-email-fold-{host}")),
+                        with_email,
+                    )
+                    .w_full()
+                    .content(
+                        div()
+                            .w_full()
+                            .pt_2()
+                            .child(Input::new(&email).aria_label(email_label.into_owned())),
+                    ),
+                ),
+            )
             .child(
                 div().w_full().child(Input::new(&token).aria_label(
                     crate::tr!("source_control.token_label", host = host).into_owned(),
@@ -745,7 +872,9 @@ impl SourceControlPanel {
                             .flex_1()
                             .min_w_0()
                             .text_secondary(compact, cx)
-                            .children(replaces.map(|replaces| replaces.into_owned())),
+                            .children(replaces.map(|replaces| {
+                                replaces.fade(div().child(replaces.value.clone()))
+                            })),
                     )
                     .child(h_flex().gap_2().child(set).child(clear)),
             )
@@ -997,6 +1126,8 @@ impl AddHostDialog {
 impl Render for AddHostDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
+        let error =
+            crate::motion::shown("source-control-add-error", self.error.clone(), window, cx);
         let theme = cx.theme();
         let kind = self.kind;
         let label = |text: SharedString| div().text_caption(cx).child(text);
@@ -1073,7 +1204,7 @@ impl Render for AddHostDialog {
                     .min_h(theme.tokens.typography.xs.line_height)
                     .text_token(&theme.tokens.typography.xs)
                     .text_color(theme.danger)
-                    .children(self.error.clone()),
+                    .children(error.map(|error| error.fade(div().child(error.value.clone())))),
             )
     }
 }
