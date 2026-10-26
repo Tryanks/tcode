@@ -580,7 +580,11 @@ impl PullRequestView {
             .child(
                 div()
                     .relative()
-                    .child(div().opacity(if loading { 1. } else { 1. - spinning }).child(body))
+                    .child(
+                        div()
+                            .opacity(if loading { 1. } else { 1. - spinning })
+                            .child(body),
+                    )
                     .when(!loading && spinning > 0., |slot| {
                         slot.child(
                             loading_line(row_height, compact, cx)
