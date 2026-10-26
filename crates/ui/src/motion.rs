@@ -398,7 +398,9 @@ pub(crate) fn chevron(
 /// An element built when it renders, for a helper that holds only `&App`
 /// and so cannot reach the window a transition samples.
 #[derive(IntoElement)]
-pub(crate) struct Sampled(Box<dyn FnOnce(&mut Window, &mut App) -> AnyElement>);
+pub(crate) struct Sampled(Build);
+
+type Build = Box<dyn FnOnce(&mut Window, &mut App) -> AnyElement>;
 
 impl Sampled {
     pub(crate) fn new(build: impl FnOnce(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
