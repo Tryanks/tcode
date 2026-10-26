@@ -5251,10 +5251,12 @@ mod tests {
         });
         draw(cx);
 
-        // The last row, clear of the undo notice the settle raised.
+        // The last row's lower edge, clear of the undo notice the settle
+        // raised, which is still rising into place.
         let next = cx.debug_bounds("compact-row-swipe-2").unwrap();
-        send(cx, 2, TouchPhase::Started, next.center());
-        send(cx, 2, TouchPhase::Ended, next.center());
+        let tap = gpui::point(next.center().x, next.bottom() - px(8.));
+        send(cx, 2, TouchPhase::Started, tap);
+        send(cx, 2, TouchPhase::Ended, tap);
         draw(cx);
         assert_eq!(
             store
