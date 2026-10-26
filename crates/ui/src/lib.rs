@@ -41,6 +41,7 @@ pub mod overlay;
 /// generations and fixed-origin behavior, reused by every client shell.
 pub mod pairing;
 pub mod palette;
+mod panes;
 mod pasteboard;
 mod plan_panel;
 mod plugins_settings;
