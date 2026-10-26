@@ -449,3 +449,86 @@ fn shield() -> Div {
         .occlude()
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+        StatefulInteractiveElement as _, Styled as _, TestAppContext, VisualTestContext, Window,
+        div, px,
+    };
+
+    use super::CrossFade;
+
+    struct States {
+        current: usize,
+        clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for States {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let fade = CrossFade::new("states", self.current, 2, window, cx);
+            let clicks = self.clicks.clone();
+            let mut layers = Vec::new();
+            if fade.shows(0) {
+                layers.push((
+                    0,
+                    div()
+                        .id("first")
+                        .debug_selector(|| "first".into())
+                        .size(px(40.))
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
+                        .into_any_element(),
+                ));
+            }
+            if fade.shows(1) {
+                layers.push((
+                    1,
+                    div()
+                        .debug_selector(|| "second".into())
+                        .size(px(10.))
+                        .into_any_element(),
+                ));
+            }
+            div().size_full().child(fade.render(layers))
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            _ = window.draw(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn a_leaving_state_stays_drawn_inert_until_its_fade_has_played(cx: &mut TestAppContext) {
+        let clicks = Rc::new(Cell::new(0));
+        let (states, cx) = cx.add_window_view(|_, _| States {
+            current: 0,
+            clicks: clicks.clone(),
+        });
+        draw(cx);
+        let first = cx.debug_bounds("first").expect("current state");
+        cx.simulate_click(first.center(), Default::default());
+        assert_eq!(clicks.get(), 1, "the current state takes clicks");
+
+        states.update(cx, |states, cx| {
+            states.current = 1;
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("second").is_some());
+        let leaving = cx.debug_bounds("first").expect("a leaving state is drawn");
+        cx.simulate_click(leaving.center(), Default::default());
+        assert_eq!(clicks.get(), 1, "a leaving state takes no clicks");
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert!(cx.debug_bounds("first").is_none(), "gone once faded out");
+        assert!(cx.debug_bounds("second").is_some());
+    }
+}
