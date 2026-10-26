@@ -200,17 +200,25 @@ impl GroupSection {
         settings_group(crate::tr!("group.machines.section"), rows, cx).into_any_element()
     }
 
+    /// The devices waiting for this machine, folding in as the first
+    /// arrives and out once the last is admitted; `gap` sets it off from
+    /// the group above.
     fn declined_group(
         &self,
         group: &GroupInfo,
         compact: bool,
+        gap: gpui::Pixels,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if group.declined.is_empty() {
-            return None;
-        }
+        let shown = crate::motion::shown(
+            "group-declined",
+            (!group.declined.is_empty()).then(|| group.declined.clone()),
+            window,
+            cx,
+        )?;
         let mut rows = Vec::new();
-        for device in &group.declined {
+        for device in &shown.value {
             let id = device.id.clone();
             rows.push(
                 row_frame(compact, cx)
@@ -238,20 +246,24 @@ impl GroupSection {
                     .into_any_element(),
             );
         }
-        Some(
-            settings_group(crate::tr!("group.declined.section"), rows, cx)
-                .child(footnote(
-                    crate::tr!("group.declined.description"),
-                    compact,
-                    cx,
-                ))
-                .into_any_element(),
-        )
+        Some(shown.fold(div().pt(gap).child(
+            settings_group(crate::tr!("group.declined.section"), rows, cx).child(footnote(
+                crate::tr!("group.declined.description"),
+                compact,
+                cx,
+            )),
+        )))
     }
 
     /// In a group: its name and size, its machines, the devices waiting for
     /// this machine, and the way out.
-    fn detail(&self, group: &GroupInfo, compact: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn detail(
+        &self,
+        group: &GroupInfo,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let count = if group.machines.len() == 1 {
             crate::tr!("group.summary.machine_one")
         } else {
@@ -270,6 +282,8 @@ impl GroupSection {
             .child(div().flex_none().text_secondary(compact, cx).child(count))
             .into_any_element();
         let leave = group.clone();
+        let (fill, on_hover) =
+            crate::motion::hover_fill("group-leave", cx.theme().list_hover, window, cx);
         let leave_row = crate::material::accessible_clickable(
             group_row(cx),
             "group-leave",
@@ -279,7 +293,8 @@ impl GroupSection {
         )
         .debug_selector(|| "group-leave".into())
         .cursor_pointer()
-        .hover(|style| style.bg(cx.theme().list_hover))
+        .bg(fill)
+        .on_hover(on_hover)
         .text_body(compact, cx)
         .text_color(cx.theme().danger_foreground)
         .child(crate::tr!("group.leave"))
@@ -287,24 +302,29 @@ impl GroupSection {
             section.leave(&leave, window, cx);
         }))
         .into_any_element();
-        let mut groups = vec![
-            settings_group(crate::tr!("group.section"), vec![name], cx)
-                .child(super::footnote_with_docs(
-                    crate::tr!("group.detail_note"),
-                    "machine-groups",
-                    compact,
-                    cx,
-                ))
-                .into_any_element(),
-            self.machines_group(group, compact, cx),
-        ];
-        groups.extend(self.declined_group(group, compact, cx));
-        groups.push(
-            crate::material::group(cx)
-                .child(leave_row)
-                .into_any_element(),
-        );
-        groups
+        // Each part carries the gap above it, so the declined devices fold
+        // away with theirs.
+        let gap = section_gap(cx);
+        v_flex()
+            .w_full()
+            .child(
+                settings_group(crate::tr!("group.section"), vec![name], cx).child(
+                    super::footnote_with_docs(
+                        crate::tr!("group.detail_note"),
+                        "machine-groups",
+                        compact,
+                        cx,
+                    ),
+                ),
+            )
+            .child(div().pt(gap).child(self.machines_group(group, compact, cx)))
+            .children(self.declined_group(group, compact, gap, window, cx))
+            .child(
+                div()
+                    .pt(gap)
+                    .child(crate::material::group(cx).child(leave_row)),
+            )
+            .into_any_element()
     }
 }
 
@@ -313,23 +333,40 @@ impl gpui::Render for GroupSection {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let spaces = self.spaces(cx);
         self.observer.watch(spaces.as_ref(), cx);
-        let body = match spaces.map(|spaces| spaces.read(cx).group().cloned()) {
-            None => vec![
-                settings_group(
+        let state = spaces.map(|spaces| spaces.read(cx).group().cloned());
+        // Creating, joining or leaving a group replaces the whole page: the
+        // state that goes folds into the one that comes.
+        let off = crate::motion::shown("group-off", state.is_none().then_some(()), window, cx).map(
+            |shown| {
+                shown.fold(settings_group(
                     crate::tr!("group.section"),
                     vec![empty_row(crate::tr!("remote.hosting_off"), cx).into_any_element()],
                     cx,
-                )
-                .into_any_element(),
-            ],
-            Some(Some(group)) => self.detail(&group, compact, cx),
-            Some(None) => self.intro(compact, cx),
-        };
+                ))
+            },
+        );
+        let detail = crate::motion::shown("group-detail", state.clone().flatten(), window, cx)
+            .map(|shown| shown.fold(self.detail(&shown.value, compact, window, cx)));
+        let intro = crate::motion::shown(
+            "group-intro",
+            matches!(state, Some(None)).then_some(()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold(
+                v_flex()
+                    .w_full()
+                    .gap(section_gap(cx))
+                    .children(self.intro(compact, cx)),
+            )
+        });
         v_flex()
             .w_full()
-            .gap(section_gap(cx))
             .debug_selector(|| "group-section".into())
-            .children(body)
+            .children(off)
+            .children(detail)
+            .children(intro)
     }
 }
 
