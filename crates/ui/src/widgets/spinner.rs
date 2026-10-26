@@ -3,9 +3,10 @@ use crate::{
     sizing::{Sizable, Size},
 };
 use gpui::{
-    Animation, AnimationExt as _, App, Hsla, IntoElement, ParentElement as _, RenderOnce,
-    Styled as _, Transformation, Window, div, ease_in_out, percentage, prelude::FluentBuilder as _,
+    App, Hsla, IntoElement, ParentElement as _, RenderOnce, Styled as _, Transformation, Window,
+    div, percentage, prelude::FluentBuilder as _,
 };
+use gpui_base::motion::{Easing, IterationCount, Keyframe, Keyframes, Timing, animate_keyframes};
 use std::time::Duration;
 
 /// A rotating loader icon. With no explicit size it takes the current font
@@ -51,18 +52,24 @@ impl Sizable for Spinner {
 }
 
 impl RenderOnce for Spinner {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Reduced motion samples the last frame, a full turn: the glyph rests.
+        let turn = animate_keyframes(
+            "spinner-turn",
+            &Keyframes::try_new([Keyframe::new(0., 0.), Keyframe::new(1., 1.)])
+                .expect("two ordered endpoints"),
+            Timing::new(Duration::from_millis(800))
+                .iterations(IterationCount::Infinite)
+                .ease(Easing::EaseInOut),
+            window,
+            cx,
+        )
+        .value;
         div().child(
             self.icon
                 .when_some(self.size, |icon, size| icon.with_size(size))
                 .when_some(self.color, |icon, color| icon.text_color(color))
-                .with_animation(
-                    "circle",
-                    Animation::new(Duration::from_secs_f64(0.8))
-                        .repeat()
-                        .with_easing(ease_in_out),
-                    |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-                ),
+                .transform(Transformation::rotate(percentage(turn))),
         )
     }
 }
