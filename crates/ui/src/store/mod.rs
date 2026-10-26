@@ -4955,6 +4955,15 @@ pub(crate) mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
+        assert!(
+            cx.debug_bounds("threads-empty").is_some(),
+            "the baseline replaces the skeleton, which fades out over it"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
         assert!(cx.debug_bounds("baseline-loading").is_none());
         assert!(
             cx.debug_bounds("threads-empty").is_some(),
