@@ -47,6 +47,8 @@ pub(super) struct Backend {
     /// cannot install after its owning panel has been dropped.
     _owner: Rc<()>,
     compact_panel_selected: bool,
+    #[cfg(not(target_os = "android"))]
+    _load_errors: gpui::Task<()>,
 }
 
 impl Backend {
@@ -56,10 +58,23 @@ impl Backend {
     ) -> Self {
         let owner = Rc::new(());
         let lifecycle = cx.new(|_| BrowserLifecycle::new(Rc::downgrade(&owner), proxy));
+        #[cfg(not(target_os = "android"))]
+        let load_errors = {
+            let changes = super::load_error::watch();
+            cx.spawn(async move |panel, cx| {
+                while changes.recv().await.is_ok() {
+                    if panel.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+        };
         Self {
             lifecycle,
             _owner: owner,
             compact_panel_selected: false,
+            #[cfg(not(target_os = "android"))]
+            _load_errors: load_errors,
         }
     }
 }
