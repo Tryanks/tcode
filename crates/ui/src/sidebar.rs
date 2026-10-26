@@ -1735,45 +1735,54 @@ impl SessionsSidebar {
     }
 
     fn render_search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Opens the palette but reads as a search field, its text at the
-        // leading edge, so it is a rail row rather than a `Button`, which
-        // centres its content.
+        // Opens the palette, so it is a clickable row drawn as an `Input`'s
+        // frame rather than a field that takes text.
+        let theme = cx.theme();
         div().flex_none().px_2().pb_1().child(
-            selectable_row(
-                crate::material::accessible_clickable(
-                    h_flex(),
-                    "sidebar-search",
-                    Role::Button,
-                    crate::tr!("sidebar.search"),
-                    cx,
-                ),
-                false,
-                false,
+            crate::material::accessible_clickable(
+                h_flex(),
+                "sidebar-search",
+                Role::Button,
+                crate::tr!("sidebar.search"),
                 cx,
             )
-            .text_body(false, cx)
-            .text_color(cx.theme().muted_foreground)
+            .h(px(crate::material::input_height(false)))
+            .px(px(10.))
+            .gap(theme.tokens.spacing.sm)
+            .items_center()
+            .rounded(crate::material::radius_input(cx))
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.input)
+            .text_token(&theme.tokens.typography.sm)
+            .text_color(theme.muted_foreground)
             .cursor_pointer()
             .on_click(cx.listener(|this, _, _, cx| {
                 this.window_state
                     .update(cx, |state, cx| state.open_palette(cx));
             }))
-            .child(Icon::new(IconName::Search))
-            .child(div().flex_1().child(crate::tr!("sidebar.search")))
+            .child(Icon::new(IconName::Search).flex_none())
             .child(
-                crate::widgets::kbd::Kbd::new(gpui::Keystroke {
-                    modifiers: gpui::Modifiers::secondary_key(cx),
-                    key: "k".into(),
-                    key_char: None,
-                })
-                .outline(),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(crate::tr!("sidebar.search"))),
+            )
+            .child(
+                div().flex_none().child(
+                    crate::widgets::kbd::Kbd::new(gpui::Keystroke {
+                        modifiers: gpui::Modifiers::secondary_key(cx),
+                        key: "k".into(),
+                        key_char: None,
+                    })
+                    .appearance(false),
+                ),
             ),
         )
     }
 
-    /// The machine this window is on, as the control that leads to Machines:
-    /// an outlined one-line control at the top of the wide sidebar, the
-    /// height of the search row under it, so it never reads as a caption.
+    /// The machine this window is on, as the control that leads to Machines.
     /// Compact has none; Machines is the root its Back returns to.
     fn render_machine_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.window_state.read(cx).route() == Route::Hosts;
@@ -1795,7 +1804,6 @@ impl SessionsSidebar {
         let tooltip_name = name.clone();
         let control = Button::new("sidebar-hosts")
             .ghost()
-            .outline()
             .selected(active)
             .w_full()
             .aria_label(crate::tr!("hosts.title"))
@@ -4453,8 +4461,8 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_toggle_share))
             .on_action(cx.listener(Self::on_new_space_and_share))
             .child(self.render_app_row(window, cx))
-            .child(self.render_machine_control(cx))
             .child(self.render_search_row(cx))
+            .child(self.render_machine_control(cx))
             .child(header)
             .child(if self.store.read(cx).threads_loading() {
                 if self.store.read(cx).pending_sessions().is_empty() {
