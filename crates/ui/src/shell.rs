@@ -4933,7 +4933,10 @@ mod tests {
             }
             shell.read_with(cx, |shell, cx| {
                 let state = shell.window_state.read(cx);
-                assert!(!state.palette_shown(), "choosing a project closes the chooser");
+                assert!(
+                    !state.palette_shown(),
+                    "choosing a project closes the chooser"
+                );
                 if compact {
                     assert_eq!(
                         state.history().last(),

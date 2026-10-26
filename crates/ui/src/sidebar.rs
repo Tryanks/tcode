@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::material::{Bar, COMPACT_PAGE_INSET, bar, bar_height, empty_row, selectable_row};
+use crate::motion::settle;
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::remote::spaces::{self, ShareTarget, SpacesObserver};
 use crate::scroll::ScrollableElement as _;
@@ -21,11 +22,10 @@ use crate::{
 use gpui::{
     Action, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ListAlignment, ListState, ParentElement as _, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, list, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::motion::transition;
-use crate::motion::settle;
 use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::settlement::AgentDelivery;
@@ -97,6 +97,47 @@ fn faded_status<T: Clone + PartialEq + 'static>(
     Some(shown.fade(content))
 }
 
+/// The disclosures of a sidebar list: a project's rows, a project's rows
+/// past the first few, and a Settled shelf (by its shelf key).
+#[derive(Clone, Copy)]
+enum Fold {
+    Project,
+    More,
+    Shelf,
+}
+
+fn fold_key(fold: Fold, id: &str) -> String {
+    match fold {
+        Fold::Project => format!("project:{id}"),
+        Fold::More => format!("more:{id}"),
+        Fold::Shelf => format!("shelf:{id}"),
+    }
+}
+
+/// The rows of a fold that move; past them a moving fold leaves its rows out
+/// of the list, so a fold of hundreds of rows lays out a screenful.
+const FOLD_ROWS: usize = 12;
+
+/// How far row `index` of a fold's `count` rows shows at the fold's
+/// `progress`: the rows open one after another from the top, and shut from
+/// the bottom. Negative for a row left out while the fold moves.
+fn fold_factor(progress: f32, index: usize, count: usize) -> f32 {
+    let count = count.min(FOLD_ROWS);
+    if index >= count {
+        return if progress >= 1. { 1. } else { -1. };
+    }
+    (progress * count as f32 - index as f32).clamp(0., 1.)
+}
+
+/// A row's factor inside two folds; a row either leaves out stays out.
+fn nested_fold(outer: f32, inner: f32) -> f32 {
+    if outer < 0. || inner < 0. {
+        -1.
+    } else {
+        outer * inner
+    }
+}
+
 /// A sidebar label that owns the remaining row width, on one line.
 fn sidebar_label(text: impl Into<SharedString>) -> gpui::Div {
     div()
@@ -106,15 +147,13 @@ fn sidebar_label(text: impl Into<SharedString>) -> gpui::Div {
         .child(crate::widgets::fade_text(text))
 }
 
-/// Fold indicator for a collapsible section header.
-fn collapse_chevron(collapsed: bool, cx: &Context<SessionsSidebar>) -> Icon {
-    Icon::new(if collapsed {
-        IconName::ChevronRight
-    } else {
-        IconName::ChevronDown
-    })
-    .flex_none()
-    .text_color(cx.theme().muted_foreground)
+/// Fold indicator for a collapsible section header, turned from pointing
+/// right (shut) to down (open) as far as the fold's `progress`.
+fn collapse_chevron(progress: f32, cx: &App) -> Icon {
+    Icon::new(IconName::ChevronRight)
+        .rotate(gpui::radians(std::f32::consts::FRAC_PI_2 * progress))
+        .flex_none()
+        .text_color(cx.theme().muted_foreground)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -535,6 +574,8 @@ impl GroupedListRow {
 #[derive(Clone)]
 struct CompactListModel {
     rows: Vec<CompactListRow>,
+    /// Each row's fold factor, as `SessionsSidebar::fold_row` takes it.
+    folds: Vec<f32>,
     has_projects: bool,
     locale: String,
     minute: u64,
@@ -556,6 +597,7 @@ pub struct SessionsSidebar {
     /// The project the Arrange threads page shows; `None` is every project.
     arrange_scope: Option<String>,
     arrange_settled_expanded: bool,
+    arrange_settled_fold: f32,
     arrange_list_state: ListState,
     arrange_row_keys: Vec<String>,
     last_selected: Option<String>,
@@ -567,6 +609,9 @@ pub struct SessionsSidebar {
     /// The row or project header under the pointer, by its hover group; its
     /// hover controls fade in from this one value rather than a state per row.
     hovered_row: Option<SharedString>,
+    /// How far open each disclosure of the list on screen is this frame, by
+    /// [`fold_key`]: a closing one keeps its rows until it has shut.
+    folds: HashMap<String, f32>,
     flat_list_state: ListState,
     /// The row keys `flat_list_state` was last spliced for.
     flat_row_keys: Vec<(&'static str, String)>,
@@ -644,50 +689,70 @@ impl SessionsSidebar {
     /// The project view lists each project's active threads in the order the
     /// store gives them, then its Settled shelf; Pinned belongs to the threads
     /// view.
-    fn grouped_rows(&self, groups: &[ProjectGroup], store: &WorkspaceStore) -> Vec<GroupedListRow> {
+    fn grouped_rows(
+        &self,
+        groups: &[ProjectGroup],
+        store: &WorkspaceStore,
+    ) -> Vec<(GroupedListRow, f32)> {
         let mut rows = Vec::new();
         for (group, project) in groups.iter().enumerate() {
             let project_id = &project.project.id;
             let collapsed = store.is_project_collapsed(project_id);
-            rows.push(GroupedListRow::Project { group, collapsed });
-            if collapsed {
+            rows.push((GroupedListRow::Project { group, collapsed }, 1.));
+            let project_key = fold_key(Fold::Project, project_id);
+            if !self.fold_shown(&project_key, !collapsed) {
                 continue;
             }
+            let start = rows.len();
             let (active, mut settled) = project_group_threads(&project.sessions);
             let expanded = self.expanded_groups.contains(project_id);
-            let shown = if expanded {
+            let more_key = fold_key(Fold::More, project_id);
+            let shown = if self.fold_shown(&more_key, expanded) {
                 active.len()
             } else {
                 THREADS_COLLAPSED_LIMIT
             };
-            rows.extend(
-                active
-                    .iter()
-                    .take(shown)
-                    .map(|meta| GroupedListRow::Thread(Box::new((*meta).clone()))),
-            );
+            let more = self.fold_progress(&more_key, expanded);
+            let extra = active.len().saturating_sub(THREADS_COLLAPSED_LIMIT);
+            rows.extend(active.iter().take(shown).enumerate().map(|(index, meta)| {
+                let factor = match index.checked_sub(THREADS_COLLAPSED_LIMIT) {
+                    Some(index) => fold_factor(more, index, extra),
+                    None => 1.,
+                };
+                (GroupedListRow::Thread(Box::new((*meta).clone())), factor)
+            }));
             if let Some(label) = thread_list_toggle_label(active.len(), expanded) {
-                rows.push(GroupedListRow::ToggleThreads {
-                    group,
-                    expanded,
-                    label: label.into(),
-                });
+                rows.push((
+                    GroupedListRow::ToggleThreads {
+                        group,
+                        expanded,
+                        label: label.into(),
+                    },
+                    1.,
+                ));
             }
             if !settled.is_empty() {
                 let count = settled.len();
-                rows.push(GroupedListRow::Settled { group, count });
+                rows.push((GroupedListRow::Settled { group, count }, 1.));
                 self.limit_settled_rows(project_id, &mut settled);
                 let hidden = count - settled.len();
-                rows.extend(
-                    settled
-                        .into_iter()
-                        .map(|meta| GroupedListRow::Thread(Box::new(meta.clone()))),
-                );
-                if let Some(count) = self.settled_more_count(project_id, hidden) {
-                    rows.push(GroupedListRow::SettledMore { group, count });
+                let more = self.settled_more_count(project_id, hidden);
+                let (factors, more_factor) =
+                    self.shelf_factors(project_id, &settled, more.is_some());
+                rows.extend(settled.into_iter().zip(factors).map(|(meta, factor)| {
+                    (GroupedListRow::Thread(Box::new(meta.clone())), factor)
+                }));
+                if let Some(count) = more {
+                    rows.push((GroupedListRow::SettledMore { group, count }, more_factor));
                 }
             }
+            let progress = self.fold_progress(&project_key, !collapsed);
+            let count = rows.len() - start;
+            for (index, (_, factor)) in rows[start..].iter_mut().enumerate() {
+                *factor = nested_fold(fold_factor(progress, index, count), *factor);
+            }
         }
+        rows.retain(|(_, factor)| *factor >= 0.);
         rows
     }
 
@@ -724,7 +789,7 @@ impl SessionsSidebar {
                 ids.extend(
                     self.grouped_rows(&store.grouped_sessions(), store)
                         .into_iter()
-                        .filter_map(|row| match row {
+                        .filter_map(|(row, _)| match row {
                             GroupedListRow::Thread(meta) => Some(meta.id),
                             _ => None,
                         }),
@@ -785,6 +850,111 @@ impl SessionsSidebar {
             window,
             cx,
         )
+    }
+
+    /// Whether `key`'s rows are in the list: open, or still shutting.
+    fn fold_shown(&self, key: &str, open: bool) -> bool {
+        open || self.fold_progress(key, open) > 0.
+    }
+
+    fn fold_progress(&self, key: &str, open: bool) -> f32 {
+        self.folds
+            .get(key)
+            .copied()
+            .unwrap_or(if open { 1. } else { 0. })
+    }
+
+    /// Sample every disclosure the list on screen has, so one that opens or
+    /// shuts moves from where it was. Keyed by the list's scope, so a scope
+    /// change that resets them does not animate.
+    fn sample_folds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.compact(cx);
+        let (layout, groups) = {
+            let store = self.store.read(cx);
+            (store.sidebar_layout(), store.grouped_sessions())
+        };
+        let mut targets = Vec::new();
+        match layout {
+            SidebarLayout::Flat => targets.push((
+                fold_key(Fold::Shelf, "recent"),
+                self.expanded_settled.contains("recent"),
+            )),
+            SidebarLayout::Grouped => {
+                let headers = !compact || groups.len() > 1;
+                for group in &groups {
+                    let id = group.project.id.as_str();
+                    let collapsed = self.store.read(cx).is_project_collapsed(id)
+                        && (headers || group.project.quick_chat);
+                    targets.push((fold_key(Fold::Project, id), !collapsed));
+                    targets.push((fold_key(Fold::More, id), self.expanded_groups.contains(id)));
+                    targets.push((
+                        fold_key(Fold::Shelf, id),
+                        self.expanded_settled.contains(id),
+                    ));
+                }
+            }
+        }
+        let scope = format!("{layout:?}-{:?}-{compact}", self.project_filter);
+        let mut folds = HashMap::with_capacity(targets.len());
+        let mut moving = false;
+        for (key, open) in targets {
+            let target = if open { 1. } else { 0. };
+            let progress = transition(
+                SharedString::from(format!("fold-{scope}-{key}")),
+                target,
+                settle(),
+                window,
+                cx,
+            );
+            moving |= progress != target || self.folds.get(&key) != Some(&progress);
+            folds.insert(key, progress);
+        }
+        self.folds = folds;
+        if moving {
+            self.compact_model_dirty = true;
+        }
+    }
+
+    /// A list row inside folds, at `factor` of its height, `width` being the
+    /// list's width as it last laid out: the row is drawn
+    /// whole and clipped, fading with the height it has. Every row of a list
+    /// goes through here, so a row keeps its element tree as its folds move.
+    fn fold_row(
+        &mut self,
+        factor: f32,
+        width: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        render: impl Fn(&mut Self, &mut Window, &mut Context<Self>) -> gpui::AnyElement,
+    ) -> gpui::AnyElement {
+        let row = render(self, window, cx);
+        let item = div().w_full();
+        if factor >= 1. {
+            return item.child(row).into_any_element();
+        }
+        // gpui-base's MotionReveal measures its content as it paints, so a
+        // row the list lays out before painting (one scrolled into view)
+        // would be zero tall for a frame; the row is measured here instead,
+        // only while it moves.
+        let height = if factor > 0. && width > px(0.) {
+            render(self, window, cx)
+                .layout_as_root(
+                    gpui::size(
+                        gpui::AvailableSpace::Definite(width),
+                        gpui::AvailableSpace::MinContent,
+                    ),
+                    window,
+                    cx,
+                )
+                .height
+        } else {
+            px(0.)
+        };
+        item.h(height * factor)
+            .overflow_hidden()
+            .opacity(factor)
+            .child(row)
+            .into_any_element()
     }
 
     /// Track the pointer over `group`'s row for [`Self::hover_progress`].
@@ -849,6 +1019,7 @@ impl SessionsSidebar {
             drag: None,
             arrange_scope: None,
             arrange_settled_expanded: false,
+            arrange_settled_fold: 0.,
             arrange_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             arrange_row_keys: Vec::new(),
             last_selected: None,
@@ -856,6 +1027,7 @@ impl SessionsSidebar {
             settled_scope: None,
             renaming: None,
             hovered_row: None,
+            folds: HashMap::new(),
             flat_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             flat_row_keys: Vec::new(),
             grouped_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
@@ -1361,7 +1533,9 @@ impl SessionsSidebar {
         {
             // The project view's shelf opens; the threads view shows the
             // viewed row under its closed shelf instead.
-            self.expanded_settled.insert(project_id.clone());
+            if self.expanded_settled.insert(project_id.clone()) {
+                self.settled_limits.remove(project_id);
+            }
             if self.store.read(cx).is_project_collapsed(project_id) {
                 self.store.update(cx, |store, cx| {
                     store.toggle_project_collapsed(project_id.clone(), cx)
@@ -1386,7 +1560,8 @@ impl SessionsSidebar {
     }
 
     fn limit_settled_rows(&self, key: &str, rows: &mut Vec<&SessionMeta>) {
-        let limit = if self.expanded_settled.contains(key) {
+        let open = self.expanded_settled.contains(key);
+        let limit = if self.fold_shown(&fold_key(Fold::Shelf, key), open) {
             self.settled_limits.get(key).copied().unwrap_or(10)
         } else {
             0
@@ -1400,8 +1575,34 @@ impl SessionsSidebar {
         });
     }
 
+    /// The fold factor of each row a Settled shelf shows, and of its "Show
+    /// more" row after them. The selected row a shut shelf keeps stays put.
+    fn shelf_factors(&self, key: &str, rows: &[&SessionMeta], more: bool) -> (Vec<f32>, f32) {
+        let open = self.expanded_settled.contains(key);
+        let progress = self.fold_progress(&fold_key(Fold::Shelf, key), open);
+        let selected = self.last_selected.as_deref();
+        let count = rows
+            .iter()
+            .filter(|meta| selected != Some(meta.id.as_str()))
+            .count()
+            + usize::from(more);
+        let mut index = 0;
+        let factors = rows
+            .iter()
+            .map(|meta| {
+                if selected == Some(meta.id.as_str()) {
+                    return 1.;
+                }
+                index += 1;
+                fold_factor(progress, index - 1, count)
+            })
+            .collect();
+        (factors, fold_factor(progress, index, count))
+    }
+
     fn settled_more_count(&self, key: &str, hidden: usize) -> Option<usize> {
-        (self.expanded_settled.contains(key) && hidden > 0).then(|| hidden.min(25))
+        let open = self.expanded_settled.contains(key);
+        (self.fold_shown(&fold_key(Fold::Shelf, key), open) && hidden > 0).then(|| hidden.min(25))
     }
 
     fn render_settled_more(
@@ -1469,6 +1670,7 @@ impl SessionsSidebar {
             window,
             cx,
         );
+        let turned = self.fold_progress(&fold_key(Fold::Shelf, key), expanded);
         let key = key.to_string();
         let compact = self.compact(cx);
         let spacing = &cx.theme().tokens.spacing;
@@ -1500,15 +1702,15 @@ impl SessionsSidebar {
         .text_color(color)
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| {
+            // A shelf shuts with the rows it showed and opens at its first page.
             if !this.expanded_settled.remove(&key) {
-                this.expanded_settled.insert(key.clone());
-            } else {
                 this.settled_limits.remove(&key);
+                this.expanded_settled.insert(key.clone());
             }
             this.compact_model_dirty = true;
             cx.notify();
         }))
-        .child(collapse_chevron(!expanded, cx).text_color(color))
+        .child(collapse_chevron(turned, cx).text_color(color))
         .child(crate::tr!("sidebar.settled"))
         .child(count.to_string())
         .into_any_element()
@@ -1897,13 +2099,7 @@ impl SessionsSidebar {
                 crate::remote::local_machine_name(cx).map(SharedString::from),
             ),
         };
-        let dot = transition(
-            ("sidebar-hosts", "connection"),
-            dot,
-            settle(),
-            window,
-            cx,
-        );
+        let dot = transition(("sidebar-hosts", "connection"), dot, settle(), window, cx);
         let tooltip_name = name.clone();
         let control = Button::new("sidebar-hosts")
             .ghost()
@@ -2225,14 +2421,10 @@ impl SessionsSidebar {
         .on_click(cx.listener(move |this, _, _, cx| {
             this.toggle_project(&header_toggle_id, cx);
         }))
-        .child(
-            Icon::new(if collapsed {
-                IconName::ChevronRight
-            } else {
-                IconName::ChevronDown
-            })
-            .text_color(cx.theme().muted_foreground),
-        )
+        .child(collapse_chevron(
+            self.fold_progress(&fold_key(Fold::Project, &project_id), !collapsed),
+            cx,
+        ))
         .child(crate::project_icon::artwork(&group.project, 16.))
         .child(
             sidebar_label(name)
@@ -2323,7 +2515,6 @@ impl SessionsSidebar {
         row: &GroupedListRow,
         groups: &[ProjectGroup],
         flags: &HashMap<String, ThreadFlags>,
-        active_id: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -2336,13 +2527,16 @@ impl SessionsSidebar {
                 .child(self.render_group_header(&groups[*group], flags, *collapsed, window, cx))
                 .into_any_element(),
             GroupedListRow::Thread(meta) => item
-                .child(self.render_thread(
-                    meta,
-                    flags,
-                    active_id == Some(meta.id.as_str()),
-                    window,
-                    cx,
-                ))
+                .child({
+                    let active = self.store.read(cx).roster_session_id();
+                    self.render_thread(
+                        meta,
+                        flags,
+                        active.as_deref() == Some(meta.id.as_str()),
+                        window,
+                        cx,
+                    )
+                })
                 .into_any_element(),
             GroupedListRow::ToggleThreads {
                 group,
@@ -2460,7 +2654,6 @@ impl SessionsSidebar {
     fn thread_clickable_row(
         &self,
         base: gpui::Div,
-        row_id: gpui::SharedString,
         meta: &SessionMeta,
         state: &ThreadRowState,
         is_active: bool,
@@ -2468,6 +2661,7 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let session_id = state.session_id.clone();
+        let row_id = SharedString::from(format!("{}-row", state.row_key));
         // The selected fill glides from the row left to the row chosen.
         let active = cx.theme().list_active;
         let fill = transition(
@@ -2952,7 +3146,6 @@ impl SessionsSidebar {
         let row = self
             .thread_clickable_row(
                 selectable_row(h_flex(), is_active, false, cx),
-                gpui::SharedString::from(format!("thread-row-{session_id}")),
                 meta,
                 &state,
                 is_active,
@@ -2983,43 +3176,41 @@ impl SessionsSidebar {
                 window,
                 cx,
             )
-            .map(|shown| {
-                shown.fade(div().size(px(6.)).rounded_full().bg(cx.theme().primary))
-            });
+            .map(|shown| shown.fade(div().size(px(6.)).rounded_full().bg(cx.theme().primary)));
             row.children(unread)
-            .when(is_worktree, |row| {
-                row.child(
-                    Icon::empty()
-                        .path("icons/git-branch.svg")
-                        .text_color(cx.theme().muted_foreground),
+                .when(is_worktree, |row| {
+                    row.child(
+                        Icon::empty()
+                            .path("icons/git-branch.svg")
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                })
+                .child(self.thread_title_or_input(meta, &state, false, window, cx))
+                .children(Self::follow_up_glyph(meta, cx))
+                .children(self.pin_glyph(meta, &row_key, window, cx))
+                .when_some(
+                    (state.renaming.is_none())
+                        .then(|| {
+                            crate::pull_requests::sidebar_badge(
+                                &meta.pull_requests,
+                                &meta.id,
+                                self.store.clone(),
+                                cx,
+                            )
+                        })
+                        .flatten(),
+                    |row, badge| row.child(badge),
                 )
-            })
-            .child(self.thread_title_or_input(meta, &state, false, window, cx))
-            .children(Self::follow_up_glyph(meta, cx))
-            .children(self.pin_glyph(meta, &row_key, window, cx))
-            .when_some(
-                (state.renaming.is_none())
-                    .then(|| {
-                        crate::pull_requests::sidebar_badge(
-                            &meta.pull_requests,
-                            &meta.id,
-                            self.store.clone(),
-                            cx,
-                        )
-                    })
-                    .flatten(),
-                |row, badge| row.child(badge),
-            )
-            .when(!working, |row| {
-                row.child(self.render_flat_thread_right_slot(
-                    meta,
-                    &row_key,
-                    project_view_timestamp(meta),
-                    true,
-                    window,
-                    cx,
-                ))
-            })
+                .when(!working, |row| {
+                    row.child(self.render_flat_thread_right_slot(
+                        meta,
+                        &row_key,
+                        project_view_timestamp(meta),
+                        true,
+                        window,
+                        cx,
+                    ))
+                })
         };
 
         self.thread_context_menu(row, meta, &state, working, false, cx)
@@ -3125,7 +3316,6 @@ impl SessionsSidebar {
         let row = self
             .thread_clickable_row(
                 crate::material::selectable_row_two_line(v_flex(), is_active, false, cx),
-                gpui::SharedString::from(format!("flat-thread-row-{session_id}")),
                 meta,
                 &state,
                 is_active,
@@ -3500,6 +3690,7 @@ impl SessionsSidebar {
             };
 
             let mut rows = Vec::new();
+            let mut folds: Vec<f32> = Vec::new();
             let thread_rows = |visible: Vec<&SessionMeta>, recent: bool| {
                 let mut rows = Vec::new();
                 let last = visible.len().saturating_sub(1);
@@ -3579,12 +3770,17 @@ impl SessionsSidebar {
                     let mut visible = settled;
                     self.limit_settled_rows(key, &mut visible);
                     let hidden = count - visible.len();
+                    let more = self.settled_more_count(key, hidden);
+                    let (shelf, more_factor) = self.shelf_factors(key, &visible, more.is_some());
+                    folds.resize(rows.len(), 1.);
                     rows.extend(thread_rows(visible, true));
-                    if let Some(count) = self.settled_more_count(key, hidden) {
+                    folds.extend(shelf);
+                    if let Some(count) = more {
                         rows.push(CompactListRow::More {
                             key: format!("{key}-more"),
                             count,
                         });
+                        folds.push(more_factor);
                     }
                 }
             } else {
@@ -3594,7 +3790,9 @@ impl SessionsSidebar {
                     let has_header = groups.len() > 1 || group.project.quick_chat;
                     let collapsed = has_header && collapsed_projects.contains(key);
                     let start = rows.len();
-                    if !collapsed {
+                    let project_key = fold_key(Fold::Project, key);
+                    if self.fold_shown(&project_key, !collapsed) {
+                        folds.resize(rows.len(), 1.);
                         let (active, mut settled) = project_group_threads(&group.sessions);
                         rows.extend(thread_rows(active, false));
                         if !settled.is_empty() {
@@ -3605,16 +3803,30 @@ impl SessionsSidebar {
                             });
                             self.limit_settled_rows(key, &mut settled);
                             let hidden = count - settled.len();
+                            let more = self.settled_more_count(key, hidden);
+                            let (shelf, more_factor) =
+                                self.shelf_factors(key, &settled, more.is_some());
+                            folds.resize(rows.len(), 1.);
                             rows.extend(thread_rows(settled, false));
-                            if let Some(count) = self.settled_more_count(key, hidden) {
+                            folds.extend(shelf);
+                            if let Some(count) = more {
                                 rows.push(CompactListRow::More {
                                     key: format!("{key}-more"),
                                     count,
                                 });
+                                folds.push(more_factor);
                             }
+                        }
+                        folds.resize(rows.len(), 1.);
+                        let progress = self.fold_progress(&project_key, !collapsed);
+                        let count = rows.len() - start;
+                        for (index, factor) in folds[start..].iter_mut().enumerate() {
+                            *factor = nested_fold(fold_factor(progress, index, count), *factor);
                         }
                     }
                     if has_header {
+                        folds.resize(start.max(folds.len()), 1.);
+                        folds.insert(start, 1.);
                         rows.insert(
                             start,
                             CompactListRow::Project(CompactProjectRow {
@@ -3636,6 +3848,10 @@ impl SessionsSidebar {
                 }
             }
             rows.push(CompactListRow::BottomInset);
+            folds.resize(rows.len(), 1.);
+            let mut kept = folds.iter().map(|factor| *factor >= 0.);
+            rows.retain(|_| kept.next().unwrap_or(true));
+            folds.retain(|factor| *factor >= 0.);
             replace_list_rows(
                 &self.compact_list_state,
                 |index| {
@@ -3671,6 +3887,7 @@ impl SessionsSidebar {
             }
             self.compact_model = Some(Rc::new(CompactListModel {
                 rows,
+                folds,
                 has_projects: !groups.is_empty(),
                 locale: locale.to_string(),
                 minute: now / 60,
@@ -3761,9 +3978,9 @@ impl SessionsSidebar {
                 self.render_settled_more(key.trim_end_matches("-more"), *count, cx)
             }
             CompactListRow::Empty { .. } => self.render_active_empty(cx),
-            CompactListRow::Project(row) => {
-                self.render_compact_group_header(row, window, cx).into_any_element()
-            }
+            CompactListRow::Project(row) => self
+                .render_compact_group_header(row, window, cx)
+                .into_any_element(),
             CompactListRow::Thread(row) => {
                 let content = v_flex()
                     .w_full()
@@ -3819,6 +4036,7 @@ impl SessionsSidebar {
                 })
                 .flatten();
             let reveal_model = model.clone();
+            let compact_width = self.compact_list_state.viewport_bounds().size.width;
             div()
                 .id("compact-thread-list")
                 .debug_selector(|| "compact-thread-list".into())
@@ -3873,7 +4091,10 @@ impl SessionsSidebar {
                     list(
                         self.compact_list_state.clone(),
                         cx.processor(move |this, index: usize, window, cx| {
-                            this.render_compact_row(&model.rows[index], window, cx)
+                            let factor = model.folds.get(index).copied().unwrap_or(1.);
+                            this.fold_row(factor, compact_width, window, cx, |this, window, cx| {
+                                this.render_compact_row(&model.rows[index], window, cx)
+                            })
                         }),
                     )
                     .size_full(),
@@ -4024,11 +4245,13 @@ impl SessionsSidebar {
         )
         .children(self.shared_badge(&row.project_id, window, cx))
         .child(div().flex_none().child(row.count.clone()))
-        .child(Icon::new(if collapsed {
-            IconName::ChevronRight
-        } else {
-            IconName::ChevronDown
-        }))
+        .child(
+            collapse_chevron(
+                self.fold_progress(&fold_key(Fold::Project, &row.project_id), !collapsed),
+                cx,
+            )
+            .text_color(cx.theme().foreground),
+        )
     }
 
     /// One 56pt thread row. Long press opens the shared thread context menu.
@@ -4099,13 +4322,7 @@ impl SessionsSidebar {
         } else {
             cx.theme().list_active.opacity(0.)
         };
-        let fill = transition(
-            (cached.row_id.clone(), "fill"),
-            fill,
-            settle(),
-            window,
-            cx,
-        );
+        let fill = transition((cached.row_id.clone(), "fill"), fill, settle(), window, cx);
         let label = crate::pull_requests::badge_label(&meta.pull_requests, cx).map_or_else(
             || cached.label.to_string(),
             |badge| format!("{}, {badge}", cached.label),
@@ -4350,6 +4567,7 @@ impl Render for SessionsSidebar {
             self.compact_model_dirty = true;
         }
         self.reveal_selected_settled(cx);
+        self.sample_folds(window, cx);
         self.clear_finished_drag(cx);
         let spaces = spaces::for_store(&self.store, cx);
         self.spaces_observer.watch(spaces.as_ref(), cx);
@@ -4392,7 +4610,7 @@ impl Render for SessionsSidebar {
                         .into_any_element()
                 } else {
                     let rows = self.grouped_rows(&groups, self.store.read(cx));
-                    let keys = rows.iter().map(|row| row.key(&groups));
+                    let keys = rows.iter().map(|(row, _)| row.key(&groups));
                     if !keys.clone().eq(self
                         .grouped_row_keys
                         .iter()
@@ -4410,18 +4628,14 @@ impl Render for SessionsSidebar {
                         self.grouped_row_keys =
                             keys.map(|(kind, id)| (kind, id.to_owned())).collect();
                     }
+                    let grouped_width = self.grouped_list_state.viewport_bounds().size.width;
                     let thread_list = list(
                         self.grouped_list_state.clone(),
                         cx.processor(move |this, index: usize, window, cx| {
-                            this.render_grouped_row(
-                                index,
-                                &rows[index],
-                                &groups,
-                                &flags,
-                                active_id.as_deref(),
-                                window,
-                                cx,
-                            )
+                            let (row, factor) = &rows[index];
+                            this.fold_row(*factor, grouped_width, window, cx, |this, window, cx| {
+                                this.render_grouped_row(index, row, &groups, &flags, window, cx)
+                            })
                         }),
                     )
                     .flex_1()
@@ -4501,20 +4715,30 @@ impl Render for SessionsSidebar {
                             top += FLAT_ROW_HEIGHT;
                         }
                     }
+                    let more = self.settled_more_count("recent", settled_hidden_count);
+                    let (shelf, more_factor) =
+                        self.shelf_factors("recent", &settled_visible, more.is_some());
+                    let mut folds = vec![1.; visible.len()];
                     if settled_count > 0 {
                         if pinned.is_empty() && active.is_empty() {
                             visible.push(FlatListRow::Empty);
                         }
                         visible.push(FlatListRow::Settled);
                         top += bar_height(Bar::Section, false);
-                        for meta in settled_visible {
+                        folds.resize(visible.len(), 1.);
+                        for (meta, factor) in settled_visible.into_iter().zip(shelf) {
                             visible.push(FlatListRow::Thread(Box::new(meta.clone()), top));
+                            folds.push(factor);
                             top += FLAT_ROW_HEIGHT;
                         }
                     }
-                    if let Some(count) = self.settled_more_count("recent", settled_hidden_count) {
+                    if let Some(count) = more {
                         visible.push(FlatListRow::More(count));
+                        folds.push(more_factor);
                     }
+                    let mut kept = folds.iter().map(|factor| *factor >= 0.);
+                    visible.retain(|_| kept.next().unwrap_or(true));
+                    folds.retain(|factor| *factor >= 0.);
                     let keys = visible.iter().map(FlatListRow::key);
                     if !keys.clone().eq(self
                         .flat_row_keys
@@ -4551,89 +4775,94 @@ impl Render for SessionsSidebar {
                         })
                         .collect::<HashMap<_, _>>();
                     let active_id = active_id.clone();
+                    let flat_width = self.flat_list_state.viewport_bounds().size.width;
                     let thread_list = list(
                         self.flat_list_state.clone(),
                         cx.processor(move |this, index: usize, window, cx| {
-                            let Some(row) = visible.get(index) else {
-                                return div().into_any_element();
-                            };
-                            let (meta, target_top) = match row {
-                                FlatListRow::Thread(meta, top) => (meta, top),
-                                FlatListRow::Boundary(section, empty) => {
-                                    return div()
-                                        .w_full()
-                                        .px_2()
-                                        .child(this.render_drag_boundary(
-                                            *section,
-                                            *empty,
-                                            scope.clone(),
+                            let factor = folds.get(index).copied().unwrap_or(1.);
+                            this.fold_row(factor, flat_width, window, cx, |this, window, cx| {
+                                let Some(row) = visible.get(index) else {
+                                    return div().into_any_element();
+                                };
+                                let (meta, target_top) = match row {
+                                    FlatListRow::Thread(meta, top) => (meta, top),
+                                    FlatListRow::Boundary(section, empty) => {
+                                        return div()
+                                            .w_full()
+                                            .px_2()
+                                            .child(this.render_drag_boundary(
+                                                *section,
+                                                *empty,
+                                                scope.clone(),
+                                                window,
+                                                cx,
+                                            ))
+                                            .into_any_element();
+                                    }
+                                    FlatListRow::Settled => {
+                                        let header = this.render_settled_header(
+                                            "recent",
+                                            settled_count,
+                                            scope.as_deref(),
+                                            window,
                                             cx,
-                                        ))
-                                        .into_any_element();
-                                }
-                                FlatListRow::Settled => {
-                                    let header = this.render_settled_header(
-                                        "recent",
-                                        settled_count,
-                                        scope.as_deref(),
+                                        );
+                                        return this
+                                            .drop_zone(
+                                                div().w_full().child(header),
+                                                DropZone::Settled,
+                                                scope.clone(),
+                                                0.,
+                                                cx,
+                                            )
+                                            .into_any_element();
+                                    }
+                                    FlatListRow::More(count) => {
+                                        return this.render_settled_more("recent", *count, cx);
+                                    }
+                                    FlatListRow::Empty => return this.render_active_empty(cx),
+                                };
+                                let target_top = *target_top;
+                                let row = div().w_full().px_2().pb(px(2.));
+                                let row = if this
+                                    .drag
+                                    .as_ref()
+                                    .is_some_and(|drag| drag.session_id == meta.id)
+                                {
+                                    row.child(Self::render_drag_gap(
+                                        crate::material::selectable_row_two_line_height(false),
+                                    ))
+                                } else {
+                                    let project_name = meta
+                                        .project_id
+                                        .as_ref()
+                                        .and_then(|project_id| project_names.get(project_id))
+                                        .cloned();
+                                    let is_active = active_id.as_deref() == Some(meta.id.as_str());
+                                    row.child(this.render_flat_thread(
+                                        meta,
+                                        &flags,
+                                        project_name,
+                                        is_active,
                                         window,
                                         cx,
-                                    );
-                                    return this
-                                        .drop_zone(
-                                            div().w_full().child(header),
-                                            DropZone::Settled,
-                                            scope.clone(),
-                                            0.,
-                                            cx,
-                                        )
-                                        .into_any_element();
-                                }
-                                FlatListRow::More(count) => {
-                                    return this.render_settled_more("recent", *count, cx);
-                                }
-                                FlatListRow::Empty => return this.render_active_empty(cx),
-                            };
-                            let target_top = *target_top;
-                            let row = div().w_full().px_2().pb(px(2.));
-                            let row = if this
-                                .drag
-                                .as_ref()
-                                .is_some_and(|drag| drag.session_id == meta.id)
-                            {
-                                row.child(Self::render_drag_gap(
-                                    crate::material::selectable_row_two_line_height(false),
-                                ))
-                            } else {
-                                let project_name = meta
-                                    .project_id
-                                    .as_ref()
-                                    .and_then(|project_id| project_names.get(project_id))
-                                    .cloned();
-                                let is_active = active_id.as_deref() == Some(meta.id.as_str());
-                                row.child(this.render_flat_thread(
-                                    meta,
-                                    &flags,
-                                    project_name,
-                                    is_active,
-                                    window,
+                                    ))
+                                };
+                                let zone = DropZone::Row {
+                                    id: meta.id.clone(),
+                                    section: tcode_core::thread_sort::thread_section(meta),
+                                };
+                                this.drop_zone(
+                                    animate_flat_thread_position(
+                                        row, &meta.id, target_top, window, cx,
+                                    ),
+                                    zone,
+                                    scope.clone(),
+                                    8.,
                                     cx,
-                                ))
-                            };
-                            let zone = DropZone::Row {
-                                id: meta.id.clone(),
-                                section: tcode_core::thread_sort::thread_section(meta),
-                            };
-                            this.drop_zone(
-                                animate_flat_thread_position(
-                                    row, &meta.id, target_top, window, cx,
-                                ),
-                                zone,
-                                scope.clone(),
-                                8.,
-                                cx,
-                            )
-                            .into_any_element()
+                                )
+                                .into_any_element()
+                            })
                         }),
                     )
                     .flex_1()
@@ -5671,6 +5900,7 @@ mod tests {
                     );
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
+                draw_settled(cx);
                 let visible = ["compact-row-thread-0", "compact-row-thread-1"]
                     .into_iter()
                     .filter(|selector| cx.debug_bounds(selector).is_some())
@@ -6052,7 +6282,7 @@ mod tests {
         assert!(cx.debug_bounds("sidebar-thread-virtual-6").is_none());
         let more = cx.debug_bounds("show-more-project").unwrap();
         cx.simulate_click(more.center(), gpui::Modifiers::default());
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("sidebar-thread-virtual-5").is_some());
         assert!(
             cx.debug_bounds("sidebar-thread-virtual-250").is_none(),
@@ -6823,7 +7053,7 @@ mod tests {
         let click = |cx: &mut VisualTestContext, selector: &'static str| {
             let bounds = cx.debug_bounds(selector).unwrap();
             cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-            draw(cx);
+            draw_settled(cx);
         };
         for compact in [false, true] {
             store.update(cx, |store, _| store.select_session("mixed-a".into()));
@@ -6831,11 +7061,12 @@ mod tests {
                 state.compact = compact;
                 cx.notify();
             });
-            sidebar.update(cx, |sidebar, _| {
+            sidebar.update(cx, |sidebar, cx| {
                 sidebar.expanded_settled.clear();
                 sidebar.compact_model_dirty = true;
+                cx.notify();
             });
-            draw(cx);
+            draw_settled(cx);
             let shelves = sidebar.update(cx, |sidebar, cx| {
                 if compact {
                     sidebar
@@ -6853,7 +7084,7 @@ mod tests {
                     sidebar
                         .grouped_rows(&groups, store)
                         .into_iter()
-                        .filter_map(|row| match row {
+                        .filter_map(|(row, _)| match row {
                             GroupedListRow::Settled { group, count } => {
                                 Some((groups[group].project.id.clone(), count))
                             }
@@ -6942,7 +7173,7 @@ mod tests {
                 store.select_session("many-settled-1".into());
                 cx.notify();
             });
-            draw(cx);
+            draw_settled(cx);
             verify(cx, expected(shown, false, true));
 
             send(
@@ -6955,7 +7186,7 @@ mod tests {
             );
             cx.run_until_parked();
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            draw(cx);
+            draw_settled(cx);
             assert_eq!(
                 sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
                 lead(false)
