@@ -21,10 +21,11 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
+use gpui_base::motion::{Transition, transition};
 use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
@@ -427,7 +428,7 @@ impl ProviderDialog {
             .into_any_element()
     }
 
-    fn render_identity(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_identity(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         crate::material::section(
             Some(crate::tr!("providers.dialog.identity").into_owned().into()),
             cx,
@@ -444,14 +445,14 @@ impl ProviderDialog {
             self.field_block(
                 crate::tr!("providers.accent").into_owned().into(),
                 crate::tr!("providers.accent_help").into_owned().into(),
-                self.render_accent(cx),
+                self.render_accent(window, cx),
                 cx,
             ),
         ])
         .into_any_element()
     }
 
-    fn render_accent(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_accent(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.accent.clone();
         let mut swatches = h_flex().gap_2().items_center();
         for (index, preset) in ACCENT_PRESETS.iter().enumerate() {
@@ -463,6 +464,18 @@ impl ProviderDialog {
                 .into();
             let ring = crate::material::focus_ring(cx);
             let dialog = cx.entity().downgrade();
+            // The ring is always drawn, clear while unselected, so it can glide.
+            let border = transition(
+                ElementId::from(("accent-ring", index)),
+                if selected {
+                    cx.theme().foreground
+                } else {
+                    cx.theme().foreground.opacity(0.)
+                },
+                Transition::new(crate::edge_back::SETTLE),
+                window,
+                cx,
+            );
             swatches = swatches.child(
                 gpui_base::ColorSwatch::new(("accent", index), rgb(value).into())
                     .selected(selected)
@@ -472,9 +485,8 @@ impl ProviderDialog {
                     .rounded_full()
                     .cursor_pointer()
                     .bg(rgb(value))
-                    .when(selected, |s| {
-                        s.border_2().border_color(cx.theme().foreground)
-                    })
+                    .border_2()
+                    .border_color(border)
                     .focus_visible(move |style| style.shadow(vec![ring]))
                     .tooltip(move |window, cx| {
                         crate::widgets::tooltip::Tooltip::new(label.clone()).build(window, cx)
@@ -634,7 +646,7 @@ impl ProviderDialog {
             .into_any_element()
     }
 
-    fn render_models(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_models(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.store.read(cx).provider_dialog_models(
             &self.profile_id,
             &self.custom_models,
@@ -656,7 +668,7 @@ impl ProviderDialog {
                 );
 
         for (index, row) in rows.iter().enumerate() {
-            block = block.child(self.render_model_row(index, row, cx));
+            block = block.child(self.render_model_row(index, row, window, cx));
         }
 
         block = block.child(
@@ -682,12 +694,16 @@ impl ProviderDialog {
                         ),
                 ),
         );
-        if let Some(error) = &self.slug_error {
+        if let Some((error, slot)) =
+            crate::motion::transient("slug-error", self.slug_error.clone(), window, cx)
+        {
             block = block.child(
-                div()
-                    .text_secondary(false, cx)
-                    .text_color(cx.theme().danger_foreground)
-                    .child(error.clone()),
+                slot.wrap(
+                    div()
+                        .text_secondary(false, cx)
+                        .text_color(cx.theme().danger_foreground)
+                        .child(error),
+                ),
             );
         }
         crate::material::section(
@@ -702,6 +718,7 @@ impl ProviderDialog {
         &self,
         index: usize,
         row: &ResolvedModel,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -724,14 +741,23 @@ impl ProviderDialog {
                 cx,
             ));
         }
-        if hidden {
-            tags = tags.child(crate::material::semantic_chip(
+        if let Some(((), slot)) =
+            crate::motion::transient(("model-hidden", index), hidden.then_some(()), window, cx)
+        {
+            tags = tags.child(slot.wrap(crate::material::semantic_chip(
                 crate::tr!("providers.models.hidden").into_owned(),
                 cx.theme().warning.opacity(0.12),
                 cx.theme().warning_foreground,
                 cx,
-            ));
+            )));
         }
+        let name_color = transition(
+            ElementId::from(("model-name", index)),
+            if hidden { muted } else { cx.theme().foreground },
+            Transition::new(crate::edge_back::SETTLE),
+            window,
+            cx,
+        );
 
         let fav_id = row.id.clone();
         let is_fav = row.favorite;
@@ -752,11 +778,7 @@ impl ProviderDialog {
                     .gap_1p5()
                     .items_center()
                     .text_body(false, cx)
-                    .child(
-                        div()
-                            .when(hidden, |d| d.text_color(muted))
-                            .child(name.clone()),
-                    )
+                    .child(div().text_color(name_color).child(name.clone()))
                     .when(!capabilities.is_empty(), |this| {
                         this.child(
                             div()
@@ -828,7 +850,7 @@ impl ProviderDialog {
 }
 
 impl Render for ProviderDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("provider-dialog-body")
             .w_full()
@@ -839,9 +861,9 @@ impl Render for ProviderDialog {
                 v_flex()
                     .w_full()
                     .gap(crate::material::section_gap(cx))
-                    .child(self.render_identity(cx))
+                    .child(self.render_identity(window, cx))
                     .child(self.render_connection(cx))
-                    .child(self.render_models(cx)),
+                    .child(self.render_models(window, cx)),
             )
     }
 }
