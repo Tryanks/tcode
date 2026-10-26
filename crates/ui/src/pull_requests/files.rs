@@ -552,7 +552,7 @@ impl PullRequestView {
             window,
             cx,
         )?;
-        let chevron = crate::motion::chevron("pr-off-diff-chevron", open, window, cx);
+        let chevron = crate::widgets::Chevron::new("pr-off-diff-chevron", open);
         Some(self.off_diff_body(kept, card.map(|(_, rows)| rows), open, chevron, cx))
     }
 
@@ -656,7 +656,7 @@ impl PullRequestView {
         kept: crate::motion::Shown<String>,
         rows: Option<Vec<AnyElement>>,
         open: bool,
-        chevron: Icon,
+        chevron: crate::widgets::Chevron,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let label = kept.value.clone();
@@ -1577,11 +1577,7 @@ impl DiffListHost for PullRequestView {
             div()
                 .id(id.clone())
                 .flex_none()
-                .child(crate::motion::Sampled::new(move |window, cx| {
-                    crate::motion::chevron((id.into(), "turn"), !collapsed, window, cx)
-                        .text_color(muted)
-                        .into_any_element()
-                }))
+                .child(crate::widgets::Chevron::new(id, !collapsed).text_color(muted))
                 .tooltip(move |window, cx| {
                     Tooltip::new(
                         crate::tr!(if collapsed {
