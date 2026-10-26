@@ -341,26 +341,60 @@ pub(super) fn operation_chip(
     cx: &App,
 ) -> AnyElement {
     let (icon, color, label, tooltip) = chip_words(operation, cx);
+    // A stack write's chip recolours, and its glyph and words cross-fade, as the write moves
+    // from step to step; the chip stays where it is.
+    let glyph = match operation.kind {
+        StackOperationKind::Rebasing { .. } => None,
+        _ => Some(crate::icon::IconNamed::path(icon)),
+    };
+    let chip_id = SharedString::from(format!("pr-stack-operation-{}", operation.stack));
     let chip = || {
+        let (id, glyph, label) = (chip_id.clone(), glyph.clone(), label.clone());
         h_flex()
-            .id(SharedString::from(format!(
-                "pr-stack-operation-{}",
-                operation.stack
-            )))
+            .id(chip_id.clone())
             .flex_none()
-            .gap_1()
-            .items_center()
-            .px_2()
-            .py_0p5()
             .rounded(material::radius_chip(cx))
-            .bg(color.opacity(0.1))
             .text_secondary(compact, cx)
-            .text_color(color)
-            .child(match operation.kind {
-                StackOperationKind::Rebasing { .. } => Spinner::new().into_any_element(),
-                _ => Icon::new(icon).into_any_element(),
-            })
-            .child(label.clone())
+            .child(crate::motion::Sampled::new(move |window, cx| {
+                let color = gpui_base::motion::transition(
+                    (gpui::ElementId::from(id.clone()), "color"),
+                    color,
+                    crate::motion::settle(),
+                    window,
+                    cx,
+                );
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(material::radius_chip(cx))
+                    .bg(color.opacity(0.1))
+                    .text_color(color)
+                    .child(crate::motion::cross_fade(
+                        (gpui::ElementId::from(id.clone()), "glyph"),
+                        glyph,
+                        window,
+                        cx,
+                        |glyph, _, _| match glyph {
+                            Some(path) => Icon::empty().path(path.clone()).into_any_element(),
+                            None => Spinner::new().into_any_element(),
+                        },
+                    ))
+                    .child(crate::motion::cross_fade(
+                        (gpui::ElementId::from(id), "label"),
+                        label,
+                        window,
+                        cx,
+                        |label, _, _| {
+                            div()
+                                .whitespace_nowrap()
+                                .child(label.clone())
+                                .into_any_element()
+                        },
+                    ))
+                    .into_any_element()
+            }))
     };
     let (StackOperationKind::Merging {
         id,
@@ -648,7 +682,21 @@ pub(super) fn map_selector(
                     )
                     .into_owned(),
                 )
-                .children(status.map(|(icon, color, _)| Icon::new(icon).text_color(color)))
+                // The running write's glyph fades in and out beside the position.
+                .child({
+                    let status =
+                        status.map(|(icon, color, _)| (crate::icon::IconNamed::path(icon), color));
+                    crate::motion::Sampled::new(move |window, cx| {
+                        match crate::motion::shown("pr-layer-status", status, window, cx) {
+                            Some(shown) => {
+                                let (path, color) = shown.value.clone();
+                                shown.fade(Icon::empty().path(path).text_color(color))
+                            }
+                            // Out of flow, so an absent glyph takes no gap.
+                            None => div().absolute().into_any_element(),
+                        }
+                    })
+                })
                 .child(Icon::new(IconName::ChevronDown).text_color(muted)),
         );
     let popover = Popover::new("pr-layer-popover").trigger(trigger);
@@ -658,7 +706,7 @@ pub(super) fn map_selector(
         popover
     };
     popover
-        .content(move |_, _, cx| {
+        .content(move |_, window, cx| {
             let popover = cx.entity();
             map_content(
                 &view,
@@ -667,6 +715,7 @@ pub(super) fn map_selector(
                 action.as_ref(),
                 compact,
                 popover,
+                window,
                 cx,
             )
         })
@@ -680,6 +729,7 @@ fn map_content(
     action: Option<&PullRequestActionState>,
     compact: bool,
     popover: Entity<gpui_base::PopoverState>,
+    window: &mut Window,
     cx: &mut Context<gpui_base::PopoverState>,
 ) -> AnyElement {
     let map = offer.map();
@@ -728,7 +778,7 @@ fn map_content(
                     }
                 }),
         );
-    let note = (!collapsed).then(|| {
+    let note = crate::widgets::Collapsible::new("pr-stack-note", !collapsed).content(
         v_flex()
             .px_2()
             .pb_1()
@@ -743,17 +793,19 @@ fn map_content(
                     .icon(IconName::ExternalLink)
                     .label(tr("docs_link"))
                     .on_click(|_, _, cx| cx.open_url(core_pr::STACKS_DOCS_URL)),
-            )
-    });
-    let operation = offer.operation.as_ref().map(|operation| {
-        h_flex().px_2().py_1().child(operation_chip(
-            target.cloned(),
-            operation,
-            &offer.links,
-            compact,
-            cx,
-        ))
-    });
+            ),
+    );
+    // The running write's row folds in when it starts and out when it is done.
+    let operation = crate::motion::shown("pr-map-operation", offer.operation.clone(), window, cx)
+        .map(|shown| {
+            shown.fold(h_flex().px_2().py_1().child(operation_chip(
+                target.cloned(),
+                &shown.value,
+                &offer.links,
+                compact,
+                cx,
+            )))
+        });
     let rows = map.rows.iter().rev().map(|row| {
         let number = row.layer.number;
         let layer_key = PullRequestKey::new(&offer.key.host, &offer.key.repository, number);
@@ -987,7 +1039,7 @@ fn map_content(
         .gap_0p5()
         .overflow_y_scroll()
         .child(head)
-        .children(note)
+        .child(note)
         .children(operation)
         .children(rows)
         .child(base)
@@ -1035,9 +1087,20 @@ pub(super) fn caption(
                             .into_owned(),
                         )),
                 )
-                .children(
-                    operation.map(|operation| operation_chip(None, operation, links, compact, cx)),
-                ),
+                // The stack's write fades in beside its caption when it starts, and out after.
+                .child({
+                    let (operation, links) = (operation.cloned(), links.to_vec());
+                    let id = SharedString::from(format!("pr-stack-caption-operation-{}", stack.id));
+                    crate::motion::Sampled::new(move |window, cx| {
+                        match crate::motion::shown(id, operation, window, cx) {
+                            Some(shown) => {
+                                shown.fade(operation_chip(None, &shown.value, &links, compact, cx))
+                            }
+                            // Out of flow, so an absent chip takes no gap.
+                            None => div().absolute().into_any_element(),
+                        }
+                    })
+                }),
         )
         .child(
             h_flex()
