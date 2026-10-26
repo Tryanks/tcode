@@ -428,10 +428,12 @@ where
         .appearance(false)
         .mouse_button(button)
         .overlay_closable(true)
+        // Each opening builds a fresh menu; a closing one keeps its menu, so
+        // the leaving popover draws it again without building or focusing.
         .on_open_change({
             let menu_state = menu_state.clone();
             move |open, _, cx| {
-                if !open {
+                if *open {
                     menu_state.update(cx, |state, _| state.menu = None);
                 }
             }
@@ -463,16 +465,12 @@ where
             menu_state.update(cx, |state, _| state.menu = Some(menu.clone()));
             menu.focus_handle(cx).focus(window, cx);
             // Weak: `menu_state` owns the menu this subscription lives as long
-            // as, so strong captures would keep both alive after the trigger
-            // unmounts, with the popover's deferred registration.
+            // as, so a strong capture would keep the popover state, and its
+            // deferred registration, alive after the trigger unmounts.
             let popover = cx.entity().downgrade();
             window
-                .subscribe(&menu, cx, {
-                    let menu_state = menu_state.downgrade();
-                    move |_, _: &DismissEvent, window, cx| {
-                        let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        let _ = menu_state.update(cx, |state, _| state.menu = None);
-                    }
+                .subscribe(&menu, cx, move |_, _: &DismissEvent, window, cx| {
+                    let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
                 })
                 .detach();
             menu
