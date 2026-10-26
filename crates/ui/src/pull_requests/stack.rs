@@ -1847,7 +1847,21 @@ impl MergeStackDialog {
 }
 
 impl Render for MergeStackDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // What the dialog read — the scope, or why it could not — fades in in place of what it
+        // showed while it read.
+        let phase = match &self.state {
+            None => 0,
+            Some(Ok(_)) => 1,
+            Some(Err(_)) => 2,
+        };
+        let read = crate::motion::appear(
+            SharedString::from(format!("pr-stack-merge-phase-{phase}")),
+            true,
+            window,
+            cx,
+        )
+        .progress;
         let target = &self.target;
         let key = &target.offer.key;
         let theme = cx.theme().clone();
@@ -1914,28 +1928,34 @@ impl Render for MergeStackDialog {
             .method
             .filter(|method| state.is_some() && Some(*method) != self.project_default)
             .zip(self.project.clone())
-            .map(|(method, (_, project))| {
+            .map(|(method, (_, project))| (method, project));
+        let make_default = self.make_default;
+        let default_box = crate::motion::shown("pr-stack-merge-default", default_box, window, cx)
+            .map(|shown| {
+                let (method, project) = shown.value.clone();
                 let view = view.clone();
-                Checkbox::new("pr-stack-merge-default")
-                    .label(
-                        crate::tr!(
-                            "pull_requests.merge.make_default",
-                            method = super::lifecycle::segment_label(method),
-                            project = project
+                shown.fold(
+                    Checkbox::new("pr-stack-merge-default")
+                        .label(
+                            crate::tr!(
+                                "pull_requests.merge.make_default",
+                                method = super::lifecycle::segment_label(method),
+                                project = project
+                            )
+                            .into_owned(),
                         )
-                        .into_owned(),
-                    )
-                    .checked(self.make_default)
-                    .disabled(self.sending)
-                    .on_click(move |checked, _, cx| {
-                        let checked = *checked;
-                        view.update(cx, |dialog, cx| {
-                            dialog.make_default = checked;
-                            cx.notify();
-                        })
-                    })
+                        .checked(make_default)
+                        .disabled(self.sending)
+                        .on_click(move |checked, _, cx| {
+                            let checked = *checked;
+                            view.update(cx, |dialog, cx| {
+                                dialog.make_default = checked;
+                                cx.notify();
+                            })
+                        }),
+                )
             });
-        let mut body = v_flex().gap_3().child(facts).child(
+        let body = v_flex().gap_3().child(facts).child(
             v_flex()
                 .w_full()
                 .gap_2()
@@ -1944,9 +1964,11 @@ impl Render for MergeStackDialog {
                         .text_caption(cx)
                         .child(crate::tr!("pull_requests.merge.method").into_owned()),
                 )
-                .child(method)
+                .child(div().opacity(read).child(method))
                 .children(default_box),
         );
+        let outer = body;
+        let mut body = v_flex().gap_3().opacity(read);
         let mut ready = false;
         match &self.state {
             None => {
@@ -2176,18 +2198,23 @@ impl Render for MergeStackDialog {
                 }
                 body = body.child(self::notes(cx).children(notes));
                 let changed = self.notice.clone();
-                if let Some(changed) = &changed {
+                let again = cx.listener(|this, _, _, cx| this.load(cx));
+                if let Some(shown) =
+                    crate::motion::shown("pr-stack-merge-changed", changed.clone(), window, cx)
+                {
                     body = body.child(
-                        warning_wash(cx)
-                            .child(line(IconName::TriangleAlert, theme.warning, tr("changed")))
-                            .child(div().child(changed.clone()))
-                            .child(
-                                Button::new("pr-stack-review-again")
-                                    .outline()
-                                    .xsmall()
-                                    .label(tr("review_again"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
-                            ),
+                        shown.fold(
+                            warning_wash(cx)
+                                .child(line(IconName::TriangleAlert, theme.warning, tr("changed")))
+                                .child(div().child(shown.value.clone()))
+                                .child(
+                                    Button::new("pr-stack-review-again")
+                                        .outline()
+                                        .xsmall()
+                                        .label(tr("review_again"))
+                                        .on_click(again),
+                                ),
+                        ),
                     );
                 }
                 ready = blockers.is_empty() && changed.is_none() && self.method.is_some();
@@ -2203,7 +2230,7 @@ impl Render for MergeStackDialog {
         } else {
             tr_with("merge_confirm", &[("count", count.to_string())])
         };
-        body.child(
+        outer.child(body).child(
             h_flex()
                 .gap_2()
                 .justify_end()
@@ -2436,7 +2463,20 @@ impl RebaseStackDialog {
         .detach();
     }
 
-    fn confirm_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn confirm_view(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // What the dialog read fades in in place of what it showed while it read.
+        let phase = match &self.state {
+            None => 0,
+            Some(Ok(_)) => 1,
+            Some(Err(_)) => 2,
+        };
+        let read = crate::motion::appear(
+            SharedString::from(format!("pr-stack-rebase-phase-{phase}")),
+            true,
+            window,
+            cx,
+        )
+        .progress;
         let target = &self.target;
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
@@ -2447,7 +2487,7 @@ impl RebaseStackDialog {
             .as_ref()
             .map(StackOffer::base)
             .unwrap_or_default();
-        let mut body = v_flex().gap_3().child(
+        let body = v_flex().gap_3().child(
             v_flex()
                 .gap_1p5()
                 .child(fact(
@@ -2474,6 +2514,8 @@ impl RebaseStackDialog {
                     cx,
                 )),
         );
+        let outer = body;
+        let mut body = v_flex().gap_3().opacity(read);
         let mut ready = false;
         let mut count = 0;
         match &self.state {
@@ -2574,18 +2616,23 @@ impl RebaseStackDialog {
                         );
                 }
                 let changed = self.notice.clone();
-                if let Some(changed) = &changed {
+                let again = cx.listener(|this, _, _, cx| this.load(cx));
+                if let Some(shown) =
+                    crate::motion::shown("pr-stack-rebase-changed", changed.clone(), window, cx)
+                {
                     body = body.child(
-                        warning_wash(cx)
-                            .child(line(IconName::TriangleAlert, theme.warning, tr("changed")))
-                            .child(div().child(changed.clone()))
-                            .child(
-                                Button::new("pr-stack-rebase-review-again")
-                                    .outline()
-                                    .xsmall()
-                                    .label(tr("review_again"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
-                            ),
+                        shown.fold(
+                            warning_wash(cx)
+                                .child(line(IconName::TriangleAlert, theme.warning, tr("changed")))
+                                .child(div().child(shown.value.clone()))
+                                .child(
+                                    Button::new("pr-stack-rebase-review-again")
+                                        .outline()
+                                        .xsmall()
+                                        .label(tr("review_again"))
+                                        .on_click(again),
+                                ),
+                        ),
                     );
                 }
                 ready = blockers.is_empty() && changed.is_none();
@@ -2605,50 +2652,126 @@ impl RebaseStackDialog {
         } else {
             tr_with("rebase_confirm", &[("count", count.to_string())])
         };
-        body.child(
-            h_flex()
-                .gap_2()
-                .justify_end()
-                .child(
-                    Button::new("pr-stack-rebase-cancel")
-                        .outline()
-                        .small()
-                        .disabled(self.sending)
-                        .label(crate::tr!("pull_requests.actions.cancel"))
-                        .on_click(|_, window, cx| window.close_dialog(cx)),
-                )
-                .child(
-                    Button::new("pr-stack-rebase-confirm")
-                        .primary()
-                        .small()
-                        .icon(IconName::RefreshCw)
-                        .loading(self.sending)
-                        .disabled(!ready || self.sending)
-                        .label(label)
-                        .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
-                ),
-        )
-        .into_any_element()
+        outer
+            .child(body)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("pr-stack-rebase-cancel")
+                            .outline()
+                            .small()
+                            .disabled(self.sending)
+                            .label(crate::tr!("pull_requests.actions.cancel"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("pr-stack-rebase-confirm")
+                            .primary()
+                            .small()
+                            .icon(IconName::RefreshCw)
+                            .loading(self.sending)
+                            .disabled(!ready || self.sending)
+                            .label(label)
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
 impl Render for RebaseStackDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.started {
-            return self.confirm_view(cx);
-        }
-        progress_view(&self.target, &mut self.last, cx)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Starting the rebase turns the dialog to its progress, which fades in in its place.
+        let shown = crate::motion::appear(
+            SharedString::from(format!("pr-stack-rebase-view-{}", self.started)),
+            true,
+            window,
+            cx,
+        )
+        .progress;
+        let view = if self.started {
+            progress_view(&self.target, &mut self.last, window, cx)
+        } else {
+            self.confirm_view(window, cx)
+        };
+        div().opacity(shown).child(view)
     }
 }
 
 /// The rows of a rebase as the host runs it, or as the host keeps its end until the next sync.
+/// A rebase layer's step: its glyph and its words.
+fn step_parts(
+    step: &StackRebaseStep,
+    below: Option<u64>,
+    base: &str,
+    cx: &App,
+) -> (AnyElement, String) {
+    let theme = cx.theme();
+    let muted = theme.muted_foreground;
+    match step {
+        StackRebaseStep::Waiting => (
+            Icon::new(IconName::CircleDashed)
+                .text_color(muted)
+                .into_any_element(),
+            tr("step_waiting"),
+        ),
+        StackRebaseStep::Rebasing => (
+            Spinner::new().into_any_element(),
+            match below {
+                Some(below) => tr_with("step_rebasing", &[("number", below.to_string())]),
+                None => tr_with("step_rebasing_base", &[("base", base.to_owned())]),
+            },
+        ),
+        StackRebaseStep::Pushing => (Spinner::new().into_any_element(), tr("step_pushing")),
+        StackRebaseStep::Pushed { from, to } => (
+            Icon::new(IconName::CircleCheck)
+                .text_color(theme.success)
+                .into_any_element(),
+            tr_with("step_pushed", &[("from", short(from)), ("to", short(to))]),
+        ),
+        StackRebaseStep::AlreadyCurrent => (
+            Icon::new(IconName::Check)
+                .text_color(muted)
+                .into_any_element(),
+            tr("step_current"),
+        ),
+        StackRebaseStep::Failed { reason } => (
+            Icon::new(match reason {
+                StackRebaseFailure::PushUnconfirmed => IconName::CircleQuestionMark,
+                _ => IconName::CircleX,
+            })
+            .text_color(match reason {
+                StackRebaseFailure::PushUnconfirmed => theme.warning,
+                _ => theme.danger,
+            })
+            .into_any_element(),
+            match reason {
+                StackRebaseFailure::Conflict => tr("step_conflict"),
+                StackRebaseFailure::LeaseRefused => tr("step_lease"),
+                StackRebaseFailure::PushUnconfirmed => tr("step_unknown"),
+                StackRebaseFailure::Git { step, .. } => {
+                    tr_with("step_git", &[("step", git_step(*step))])
+                }
+            },
+        ),
+        StackRebaseStep::NotStarted => (
+            Icon::new(IconName::Minus)
+                .text_color(muted)
+                .into_any_element(),
+            tr("step_not_started"),
+        ),
+    }
+}
+
 fn progress_view(
     target: &Target,
     last: &mut Option<StackOperationKind>,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let theme = cx.theme().clone();
-    let muted = theme.muted_foreground;
     let store = target.store.read(cx);
     let machine = machine_label(Some(store));
     let offer = StackOffer::new(
@@ -2684,59 +2807,31 @@ fn progress_view(
                 .checked_sub(1)
                 .and_then(|below| last.get(below))
                 .map(|below| below.number);
-            let (icon, text): (AnyElement, String) = match &layer.step {
-                StackRebaseStep::Waiting => (
-                    Icon::new(IconName::CircleDashed)
-                        .text_color(muted)
-                        .into_any_element(),
-                    tr("step_waiting"),
-                ),
-                StackRebaseStep::Rebasing => (
-                    Spinner::new().into_any_element(),
-                    match below {
-                        Some(below) => tr_with("step_rebasing", &[("number", below.to_string())]),
-                        None => tr_with("step_rebasing_base", &[("base", base.clone())]),
-                    },
-                ),
-                StackRebaseStep::Pushing => (Spinner::new().into_any_element(), tr("step_pushing")),
-                StackRebaseStep::Pushed { from, to } => (
-                    Icon::new(IconName::CircleCheck)
-                        .text_color(theme.success)
-                        .into_any_element(),
-                    tr_with("step_pushed", &[("from", short(from)), ("to", short(to))]),
-                ),
-                StackRebaseStep::AlreadyCurrent => (
-                    Icon::new(IconName::Check)
-                        .text_color(muted)
-                        .into_any_element(),
-                    tr("step_current"),
-                ),
-                StackRebaseStep::Failed { reason } => (
-                    Icon::new(match reason {
-                        StackRebaseFailure::PushUnconfirmed => IconName::CircleQuestionMark,
-                        _ => IconName::CircleX,
-                    })
-                    .text_color(match reason {
-                        StackRebaseFailure::PushUnconfirmed => theme.warning,
-                        _ => theme.danger,
-                    })
-                    .into_any_element(),
-                    match reason {
-                        StackRebaseFailure::Conflict => tr("step_conflict"),
-                        StackRebaseFailure::LeaseRefused => tr("step_lease"),
-                        StackRebaseFailure::PushUnconfirmed => tr("step_unknown"),
-                        StackRebaseFailure::Git { step, .. } => {
-                            tr_with("step_git", &[("step", git_step(*step))])
-                        }
-                    },
-                ),
-                StackRebaseStep::NotStarted => (
-                    Icon::new(IconName::Minus)
-                        .text_color(muted)
-                        .into_any_element(),
-                    tr("step_not_started"),
-                ),
-            };
+            // Each layer's step cross-fades into the next: its glyph and its words.
+            let row_id = gpui::ElementId::from(SharedString::from(format!(
+                "pr-stack-progress-step-{}",
+                layer.number
+            )));
+            let step = (layer.step.clone(), below);
+            let icon = crate::motion::cross_fade(
+                (row_id.clone(), "icon"),
+                step.clone(),
+                window,
+                cx,
+                |(step, below), _, cx| step_parts(step, *below, &base, cx).0,
+            );
+            let text = crate::motion::cross_fade(
+                (row_id, "text"),
+                step,
+                window,
+                cx,
+                |(step, below), _, cx| {
+                    div()
+                        .whitespace_nowrap()
+                        .child(step_parts(step, *below, &base, cx).1)
+                        .into_any_element()
+                },
+            );
             material::group_row(cx)
                 .id(SharedString::from(format!(
                     "pr-stack-progress-{}",
@@ -2769,6 +2864,13 @@ fn progress_view(
         StackRebaseStep::Failed { reason } => Some((layer.number, reason)),
         _ => None,
     });
+    // The recovery folds in when the rebase stops on a layer.
+    let shown = crate::motion::shown(
+        "pr-stack-recovery",
+        (stopped.is_some() && ended).then_some(()),
+        window,
+        cx,
+    );
     if let Some((failed, reason)) = stopped.filter(|_| ended) {
         let numbers = |wanted: fn(&StackRebaseStep) -> bool| -> Vec<u64> {
             last.iter()
@@ -2851,21 +2953,20 @@ fn progress_view(
             "https://{}/{}/pull/{failed}",
             target.offer.key.host, target.offer.key.repository
         );
-        body = body.child(
-            warning_wash(cx)
-                .child(div().child(state))
-                .child(div().child(advice))
-                .child(
-                    h_flex().gap_2().items_center().children(ask).child(
-                        Button::new("pr-stack-open-failed")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::ExternalLink)
-                            .label(tr_with("open_layer", &[("number", failed.to_string())]))
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                    ),
+        let wash = warning_wash(cx)
+            .child(div().child(state))
+            .child(div().child(advice))
+            .child(
+                h_flex().gap_2().items_center().children(ask).child(
+                    Button::new("pr-stack-open-failed")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ExternalLink)
+                        .label(tr_with("open_layer", &[("number", failed.to_string())]))
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
                 ),
-        );
+            );
+        body = body.children(shown.map(|shown| shown.fold(wash)));
     }
     body.child(
         h_flex().justify_end().child(
