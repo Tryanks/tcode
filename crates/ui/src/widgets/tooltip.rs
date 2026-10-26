@@ -72,8 +72,15 @@ impl Render for Tooltip {
                 Kbd::binding_for_action(action.as_ref(), context.as_deref(), window)
             })
         });
+        // GPUI mounts and unmounts the tooltip view itself, and drops it the
+        // moment it hides, so a tooltip can only enter: neither gpui nor
+        // gpui-base keeps a hidden tooltip mounted for an exit.
+        let presence = crate::motion::appear("tooltip", true, window, cx);
         gpui_base::Tooltip::new("tooltip-popup")
             .h_flex()
+            .relative()
+            .top(crate::motion::lift(presence.progress))
+            .opacity(presence.progress)
             .font_family(cx.theme().font_family.clone())
             .m_3()
             .bg(cx.theme().popover)
