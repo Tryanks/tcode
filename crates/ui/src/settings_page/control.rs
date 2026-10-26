@@ -6,6 +6,15 @@ use tcode_protocol::ControlActivityEntry;
 /// How many recent `tcode_control` writes the section lists.
 const ACTIVITY_LIMIT: u32 = 50;
 
+/// What the activity list shows; the entries themselves are read where drawn.
+#[derive(Clone, PartialEq)]
+enum ActivityState {
+    Loading,
+    Failed(String),
+    Empty,
+    Entries,
+}
+
 #[derive(Default)]
 pub(super) struct ControlSection {
     activity: Option<Result<Vec<ControlActivityEntry>, String>>,
@@ -55,7 +64,11 @@ impl SettingsPage {
         })
     }
 
-    pub(super) fn render_control(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_control(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         if !self.control.activity_requested {
             self.refresh_control_activity(cx);
         }
@@ -183,9 +196,9 @@ impl SettingsPage {
             cx,
         );
 
-        let project_rows = self.control_project_rows(&control, projects, compact, cx);
-        let thread_rows = self.control_thread_rows(compact, cx);
-        let activity_rows = self.control_activity_rows(compact, cx);
+        let project_rows = self.control_project_rows(&control, projects, compact, window, cx);
+        let thread_rows = self.control_thread_rows(compact, window, cx);
+        let activity_rows = self.control_activity_rows(compact, window, cx);
         let default_heading = vec![
             crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
                 .child(crate::settings_rows::row_labels(
@@ -235,6 +248,7 @@ impl SettingsPage {
         control: &tcode_core::control::ControlSettings,
         projects: Vec<Project>,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
@@ -256,6 +270,12 @@ impl SettingsPage {
                 let own = control.project_overrides.get(&project.id);
                 let open = self.control.expanded_project.as_deref() == Some(project.id.as_str());
                 let toggle = project.id.clone();
+                let summary = crate::motion::shown(
+                    SharedString::from(format!("control-project-summary-{}", project.id)),
+                    own.map(crate::control::grant_summary),
+                    window,
+                    cx,
+                );
                 rows.push(
                     crate::material::accessible_clickable(
                         crate::material::group_row(cx),
@@ -276,17 +296,14 @@ impl SettingsPage {
                             .overflow_hidden()
                             .child(crate::widgets::fade_text(project.name.clone())),
                     )
-                    .children(own.map(|grant| {
-                        div()
-                            .text_secondary(true, cx)
-                            .child(crate::control::grant_summary(grant))
+                    .children(summary.map(|summary| {
+                        summary.fade(div().text_secondary(true, cx).child(summary.value.clone()))
                     }))
                     .child(
-                        Icon::new(if open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
+                        crate::widgets::Chevron::new(
+                            SharedString::from(format!("control-project-chevron-{}", project.id)),
+                            open,
+                        )
                         .text_color(cx.theme().muted_foreground),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -300,12 +317,23 @@ impl SettingsPage {
                     }))
                     .into_any_element(),
                 );
-                if open {
+                // The open project's grant folds out under its row; the one
+                // it replaces folds away.
+                let fold_id = SharedString::from(format!("control-project-fold-{}", project.id));
+                let shown = crate::motion::shown(fold_id.clone(), open.then_some(()), window, cx);
+                let mut fold = crate::widgets::Collapsible::new(fold_id, open).w_full();
+                if shown.is_some() {
                     let grant = own
                         .cloned()
                         .unwrap_or_else(|| control.default_grant.clone());
                     let id = project.id.clone();
-                    rows.push(
+                    let remove = crate::motion::shown(
+                        SharedString::from(format!("control-project-default-{}", project.id)),
+                        own.is_some().then_some(()),
+                        window,
+                        cx,
+                    );
+                    fold = fold.content(
                         crate::material::group_row_stacked(cx)
                             .child(crate::control::grant_editor(
                                 SharedString::from(format!("control-project-grant-{}", project.id)),
@@ -315,26 +343,32 @@ impl SettingsPage {
                                 self.project_grant_change(project.id.clone(), cx),
                                 cx,
                             ))
-                            .when(own.is_some(), |row| {
+                            .when_some(remove, |row, remove| {
                                 row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "control-project-default-{}",
-                                        project.id
-                                    )))
-                                    .ghost()
-                                    .label(crate::tr!("control.settings.remove_override"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let id = id.clone();
-                                        this.dispatch_settings(
-                                            move |store| store.set_control_project_grant(id, None),
-                                            cx,
-                                        )
-                                    })),
+                                    remove.fade(
+                                        Button::new(SharedString::from(format!(
+                                            "control-project-default-{}",
+                                            project.id
+                                        )))
+                                        .ghost()
+                                        .label(crate::tr!("control.settings.remove_override"))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                let id = id.clone();
+                                                this.dispatch_settings(
+                                                    move |store| {
+                                                        store.set_control_project_grant(id, None)
+                                                    },
+                                                    cx,
+                                                )
+                                            }),
+                                        ),
+                                    ),
                                 )
-                            })
-                            .into_any_element(),
+                            }),
                     );
                 }
+                rows.push(fold.into_any_element());
             }
             return rows;
         }
@@ -435,7 +469,14 @@ impl SettingsPage {
         rows
     }
 
-    fn control_thread_rows(&self, compact: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// Threads holding a grant, cross-fading with the empty row when the
+    /// first is granted or the last revoked.
+    fn control_thread_rows(
+        &self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let threads: Vec<SessionMeta> = self
             .store
             .read(cx)
@@ -443,14 +484,39 @@ impl SettingsPage {
             .into_iter()
             .filter(|meta| meta.control_grant.is_some())
             .collect();
-        if threads.is_empty() {
-            return vec![
-                crate::material::empty_row(crate::tr!("control.settings.threads_empty"), cx)
-                    .into_any_element(),
-            ];
-        }
+        let slot = if threads.is_empty() {
+            "empty"
+        } else {
+            "threads"
+        };
+        let body =
+            crate::motion::cross_fade(
+                "control-threads",
+                slot,
+                window,
+                cx,
+                |slot, _, cx| match *slot {
+                    "empty" => {
+                        crate::material::empty_row(crate::tr!("control.settings.threads_empty"), cx)
+                            .into_any_element()
+                    }
+                    _ => v_flex()
+                        .w_full()
+                        .children(self.control_thread_list(&threads, compact, cx))
+                        .into_any_element(),
+                },
+            );
+        vec![body]
+    }
+
+    fn control_thread_list(
+        &self,
+        threads: &[SessionMeta],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         threads
-            .into_iter()
+            .iter()
             .map(|meta| {
                 let summary = meta
                     .control_grant
@@ -485,7 +551,36 @@ impl SettingsPage {
             .collect()
     }
 
-    fn control_activity_rows(&self, compact: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The activity list, cross-fading between loading, failed, empty and
+    /// the entries as a query answers.
+    fn control_activity_rows(
+        &self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let state = match &self.control.activity {
+            None => ActivityState::Loading,
+            Some(Err(error)) => ActivityState::Failed(error.clone()),
+            Some(Ok(entries)) if entries.is_empty() => ActivityState::Empty,
+            Some(Ok(_)) => ActivityState::Entries,
+        };
+        let body =
+            crate::motion::cross_fade("control-activity", state, window, cx, |state, _, cx| {
+                v_flex()
+                    .w_full()
+                    .children(self.control_activity_state(state.clone(), compact, cx))
+                    .into_any_element()
+            });
+        vec![body]
+    }
+
+    fn control_activity_state(
+        &self,
+        state: ActivityState,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let refresh = Button::new("control-activity-refresh")
             .ghost()
             .xsmall()
@@ -494,41 +589,40 @@ impl SettingsPage {
             .aria_label(crate::tr!("control.settings.activity_refresh"))
             .disabled(self.control.activity_task.is_some())
             .on_click(cx.listener(|this, _, _, cx| this.refresh_control_activity(cx)));
-        let entries = match &self.control.activity {
-            None => {
+        let entries = match state {
+            ActivityState::Loading => {
                 return vec![
                     crate::material::empty_row(crate::tr!("control.settings.activity_loading"), cx)
                         .into_any_element(),
                 ];
             }
-            Some(Err(error)) => {
+            ActivityState::Failed(error) => {
                 return vec![
                     crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+                        .child(div().flex_1().text_secondary(compact, cx).child(error))
+                        .child(refresh)
+                        .into_any_element(),
+                ];
+            }
+            // Entries leaving for another state draw none: they are gone.
+            ActivityState::Entries => match &self.control.activity {
+                Some(Ok(entries)) if !entries.is_empty() => entries,
+                _ => return Vec::new(),
+            },
+            ActivityState::Empty => {
+                return vec![
+                    crate::material::group_row(cx)
                         .child(
                             div()
                                 .flex_1()
                                 .text_secondary(compact, cx)
-                                .child(error.clone()),
+                                .child(crate::tr!("control.settings.activity_empty")),
                         )
                         .child(refresh)
                         .into_any_element(),
                 ];
             }
-            Some(Ok(entries)) => entries,
         };
-        if entries.is_empty() {
-            return vec![
-                crate::material::group_row(cx)
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_secondary(compact, cx)
-                            .child(crate::tr!("control.settings.activity_empty")),
-                    )
-                    .child(refresh)
-                    .into_any_element(),
-            ];
-        }
         let now = now_secs();
         let mut rows = vec![
             crate::material::group_row(cx)
