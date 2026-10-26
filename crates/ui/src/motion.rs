@@ -382,19 +382,6 @@ pub(crate) fn status_icon(
     )
 }
 
-/// A disclosure chevron that turns from pointing right, shut, to pointing
-/// down, open.
-pub(crate) fn chevron(
-    id: impl Into<ElementId>,
-    open: bool,
-    window: &mut Window,
-    cx: &mut App,
-) -> crate::icon::Icon {
-    let turn = transition(id.into(), if open { 1. } else { 0. }, settle(), window, cx);
-    crate::icon::Icon::new(crate::icon::IconName::ChevronRight)
-        .rotate(gpui::radians(std::f32::consts::FRAC_PI_2 * turn))
-}
-
 /// An element built when it renders, for a helper that holds only `&App`
 /// and so cannot reach the window a transition samples.
 #[derive(IntoElement)]
