@@ -135,6 +135,10 @@ pub struct CommandPalette {
     search_generation: u64,
     results: Option<Rc<Results>>,
     list_state: ListState,
+    /// Whether [`Self::open`] has run since the palette last showed closed:
+    /// the host opens it on mount, and a palette reopened while it leaves is
+    /// still mounted, so it opens itself.
+    opened: bool,
     _search_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -185,6 +189,7 @@ impl CommandPalette {
             search_generation: 0,
             results: None,
             list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            opened: false,
             _search_task: None,
             _subscriptions: subscriptions,
         }
@@ -206,6 +211,7 @@ impl CommandPalette {
         self.selected = 0;
         self.content_hits.clear();
         self.invalidate_results(true, cx);
+        self.opened = true;
     }
 
     #[cfg(test)]
@@ -732,14 +738,28 @@ impl CommandPalette {
 
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = self.window_state.read(cx).compact;
-        let open = self.window_state.read(cx).palette_open;
-        let presence = gpui_base::motion::Presence::new("palette-presence", open)
-            .transition(gpui_base::motion::Transition::new(crate::edge_back::SETTLE))
-            .sample(window, cx);
-        if !open && (!compact || !presence.should_render() || presence.progress == 0.) {
+        let (compact, open, focus_query) = {
+            let state = self.window_state.read(cx);
+            (
+                state.compact,
+                state.palette_shown(),
+                state.palette_focuses_query,
+            )
+        };
+        if !open {
+            self.opened = false;
+            // A leaving palette takes no keys.
+            if self.focus_handle.contains_focused(window, cx) {
+                window.blur(cx);
+            }
+        } else if !self.opened {
+            self.open(focus_query, window, cx);
+        }
+        let presence = crate::motion::appear("palette-presence", open, window, cx);
+        if !open && (!presence.should_render() || presence.progress == 0.) {
             return div().into_any_element();
         }
+        let exiting = !open;
         let results = self.results(cx);
         let total = results.items.len();
         if total > 0 && self.selected >= total {
@@ -903,13 +923,33 @@ impl Render for CommandPalette {
                 )
                 .into_any_element();
         }
+        // A leaving palette keeps the open one's element tree and is inert:
+        // not topmost, no Escape, no backdrop press, and an occluding scrim
+        // and a shield over the card keep the pointer from it.
+        let card = card
+            .relative()
+            .top(crate::motion::lift(presence.progress))
+            .opacity(presence.progress)
+            .when(exiting, |card| {
+                card.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+                )
+            });
         gpui_base::Dialog::new(cx)
+            .layer(0, !exiting)
+            .close_on_escape(!exiting)
+            .close_on_backdrop_press(!exiting)
             // gpui-base's backdrop parent dismisses but does not block; the scrim stops wheels without occluding it.
             .backdrop(
                 div()
                     .absolute()
                     .size_full()
-                    .bg(crate::material::scrim(1., cx))
+                    .bg(crate::material::scrim(presence.progress, cx))
+                    .when(exiting, |scrim| scrim.occlude())
                     .on_scroll(|_, _, cx| cx.stop_propagation()),
             )
             .popup(card)
@@ -1174,17 +1214,22 @@ mod tests {
             let harness = harness.read(cx);
             (harness.palette.clone(), harness.window_state.clone())
         });
+        let settle = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
         let open = |cx: &mut VisualTestContext, focus_query: bool| {
             cx.update(|window, cx| {
                 window_state.update(cx, |state, cx| state.open_palette(cx));
                 palette.update(cx, |palette, cx| palette.open(focus_query, window, cx));
             });
-            cx.update(|window, cx| window.draw(cx).clear(cx));
+            settle(cx);
             assert!(cx.debug_bounds("palette-card").is_some());
         };
         let is_open = |cx: &mut VisualTestContext| {
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            window_state.read_with(cx, |state, _| state.palette_open)
+            window_state.read_with(cx, |state, _| state.palette_shown())
         };
 
         open(cx, true);
@@ -1194,6 +1239,11 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         assert!(!is_open(cx), "Escape reaches the dialog through the query");
+        assert!(
+            cx.debug_bounds("palette-card").is_some(),
+            "the palette leaves on screen"
+        );
+        settle(cx);
         assert!(cx.debug_bounds("palette-card").is_none());
 
         let page_scroll = harness.read_with(cx, |harness, _| harness.page_scroll.clone());
@@ -1222,6 +1272,8 @@ mod tests {
         assert!(is_open(cx), "the wheel leaves the palette open");
         cx.simulate_click(gpui::point(px(10.), px(10.)), gpui::Modifiers::default());
         assert!(!is_open(cx), "a backdrop press closes the palette");
+        settle(cx);
+        assert!(cx.debug_bounds("palette-card").is_none());
 
         drop(palette);
         driver.shutdown(cx, &workspace_store, &host);

@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, EventEmitter, SharedString};
+use gpui::{Context, Entity, EventEmitter, SharedString, Task};
 use serde::{Deserialize, Serialize};
 
 use crate::store::WorkspaceStore;
@@ -162,7 +162,11 @@ pub struct WindowState {
     /// Where the window has been, oldest first. Never empty: `history[0]` is
     /// [`Destination::Hosts`], the root the platform's Back gesture falls off.
     history: Vec<Destination>,
+    /// Whether the palette is on screen: open, or still leaving after a close
+    /// (see [`Self::palette_shown`]). Its host keeps it mounted meanwhile.
     pub palette_open: bool,
+    palette_leaving: bool,
+    _palette_exit: Option<Task<()>>,
     /// Whether the palette focuses its search input when it opens. A tap on
     /// the search pill wants the keyboard; the mobile "+" button lists
     /// projects to tap and must not raise it.
@@ -179,6 +183,8 @@ impl WindowState {
             compact: false,
             history: vec![Destination::Hosts],
             palette_open: false,
+            palette_leaving: false,
+            _palette_exit: None,
             palette_focuses_query: true,
             sidebar_collapsed,
             quit_prompt_epoch: 0,
@@ -338,7 +344,10 @@ impl WindowState {
 
     /// Switch to the settings route (closes the palette).
     pub fn open_settings(&mut self, cx: &mut Context<Self>) {
+        // Settings replaces the window the palette would leave over.
         self.palette_open = false;
+        self.palette_leaving = false;
+        self._palette_exit = None;
         self.go(Destination::Settings, cx);
     }
 
@@ -351,27 +360,58 @@ impl WindowState {
     }
 
     pub fn open_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = true;
-        self.palette_focuses_query = true;
-        cx.notify();
+        self.show_palette(true, cx);
     }
 
     /// Open the palette as a list to tap through, leaving the search input
     /// unfocused so no software keyboard comes up.
     pub fn open_palette_without_keyboard(&mut self, cx: &mut Context<Self>) {
+        self.show_palette(false, cx);
+    }
+
+    fn show_palette(&mut self, focuses_query: bool, cx: &mut Context<Self>) {
         self.palette_open = true;
-        self.palette_focuses_query = false;
+        self.palette_leaving = false;
+        self._palette_exit = None;
+        self.palette_focuses_query = focuses_query;
         cx.notify();
     }
 
+    /// Whether the palette is open, as opposed to on screen while it leaves.
+    pub fn palette_shown(&self) -> bool {
+        self.palette_open && !self.palette_leaving
+    }
+
+    /// The palette leaves over `SETTLE`, mounted and inert, then unmounts.
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = false;
+        if !self.palette_shown() {
+            return;
+        }
+        if cx.reduce_motion() {
+            self.palette_open = false;
+        } else {
+            self.palette_leaving = true;
+            self._palette_exit = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(crate::edge_back::SETTLE)
+                    .await;
+                this.update(cx, |state, cx| {
+                    state.palette_open = false;
+                    state.palette_leaving = false;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
         cx.notify();
     }
 
     pub fn toggle_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = !self.palette_open;
-        cx.notify();
+        if self.palette_shown() {
+            self.close_palette(cx);
+        } else {
+            self.open_palette(cx);
+        }
     }
 }
 
