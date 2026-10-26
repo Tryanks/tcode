@@ -181,8 +181,6 @@ sidebar:
   collapse: "折叠侧边栏"
   expand: "展开侧边栏"
   search: "搜索"
-  projects: "项目"
-  threads: "对话"
   all_projects: "全部项目"
   filter_project: "按项目筛选"
   recent: "最近活动"
