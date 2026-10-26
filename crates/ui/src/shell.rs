@@ -1084,7 +1084,7 @@ impl AppShell {
             window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx);
             return true;
         }
-        if self.window_state.read(cx).palette_shown() {
+        if self.window_state.read(cx).palette_open {
             self.window_state
                 .update(cx, |state, cx| state.close_palette(cx));
             return true;
@@ -1158,7 +1158,7 @@ impl AppShell {
             state.route() == Route::Chat
         };
         (on_screen
-            && !state.palette_open
+            && !state.palette_mounted()
             && self.pending_navigation_restore.is_none()
             && !gpui_base::GlobalState::is_in_deferred_context(cx))
         .then(|| attachment.chat.clone())
@@ -1244,7 +1244,7 @@ pub fn can_swipe_back(cx: &mut App) -> bool {
                 let shell = shell.read(cx);
                 !crate::overlay::dialog_open(window, cx)
                     && shell.compact(cx)
-                    && !shell.window_state.read(cx).palette_open
+                    && !shell.window_state.read(cx).palette_mounted()
                     && !gpui_base::GlobalState::is_in_deferred_context(cx)
                     && shell.nav.read(cx).depth() > 1
             }
@@ -2388,7 +2388,7 @@ impl AppShell {
                                 if (crate::overlay::active_sheet(window, cx).is_none()
                                     && (!hitbox.should_handle_scroll(window)
                                         || gpui_base::GlobalState::is_in_deferred_context(cx)
-                                        || shell.window_state.read(cx).palette_open
+                                        || shell.window_state.read(cx).palette_mounted()
                                         || !shell.compact(cx)
                                         || shell.nav.read(cx).depth() <= 1))
                                     || !bounds.contains(&event.position)
@@ -2695,7 +2695,7 @@ impl AppShell {
 
     fn render_wide(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let route = self.window_state.read(cx).route();
-        let palette_open = self.window_state.read(cx).palette_open;
+        let palette_open = self.window_state.read(cx).palette_mounted();
         let fullscreen = window.is_fullscreen();
         if self.attachment.is_none() {
             // No host: the hosts page is the whole window, and the only page
@@ -3231,7 +3231,7 @@ impl Render for AppShell {
         // The palette takes focus on the frame it opens, at either width.
         let (palette_open, focus_query) = {
             let state = self.window_state.read(cx);
-            (state.palette_open, state.palette_focuses_query)
+            (state.palette_mounted(), state.palette_focuses_query)
         };
         if palette_open
             && !self.palette_was_open
@@ -4933,10 +4933,7 @@ mod tests {
             }
             shell.read_with(cx, |shell, cx| {
                 let state = shell.window_state.read(cx);
-                assert!(
-                    !state.palette_shown(),
-                    "choosing a project closes the chooser"
-                );
+                assert!(!state.palette_open, "choosing a project closes the chooser");
                 if compact {
                     assert_eq!(
                         state.history().last(),
@@ -5369,7 +5366,7 @@ mod tests {
                 click_count: 1,
                 ..Default::default()
             });
-            assert!(!state.read_with(cx, |state, _| state.palette_shown()));
+            assert!(!state.read_with(cx, |state, _| state.palette_open));
             assert_eq!(
                 state.read_with(cx, |state, _| state.history().to_vec()),
                 history
@@ -5412,7 +5409,7 @@ mod tests {
             cx.update(|window, cx| {
                 shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
             });
-            assert!(!state.read_with(cx, |state, _| state.palette_shown()));
+            assert!(!state.read_with(cx, |state, _| state.palette_open));
             state.update(cx, |state, cx| state.open_thread(cx));
             cx.executor().advance_clock(Duration::from_millis(250));
             draw(cx);
@@ -6513,7 +6510,7 @@ mod tests {
         window_state.update(cx, |state, cx| state.open_palette(cx));
         assert!(back(cx), "back closes the overlay");
         shell.read_with(cx, |shell, cx| {
-            assert!(!shell.window_state.read(cx).palette_shown());
+            assert!(!shell.window_state.read(cx).palette_open);
             assert_eq!(
                 shell.destination(cx),
                 Destination::Thread,

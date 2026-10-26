@@ -181,7 +181,7 @@ impl PreviewPanel {
         let visible = visible_preview_key(
             active.as_deref(),
             window_state.route(),
-            window_state.palette_open,
+            window_state.palette_mounted(),
             self.store.read(cx).preview_panel_showing()
                 && self.store.read(cx).preview_browser_settings().enabled
                 && (!window_state.compact
@@ -1033,7 +1033,7 @@ impl PreviewPanel {
         let state = self.window_state.read(cx);
         if self.store.read(cx).active_session_id().as_deref() != Some(session_id)
             || !self.store.read(cx).preview_panel_showing()
-            || state.palette_open
+            || state.palette_mounted()
             || state.route() != crate::window_state::Route::Chat
             || (state.compact
                 && (state.destination() != crate::window_state::Destination::Panel

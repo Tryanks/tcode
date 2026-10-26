@@ -1,7 +1,7 @@
 //! Command palette with action, thread-title and message-content search.
 //!
 //! Rendered by [`crate::AppShell`] as a full-window overlay only while
-//! [`crate::WindowState::palette_open`] is set. Sources:
+//! [`crate::WindowState::palette_mounted`] holds. Sources:
 //! - Threads: fuzzy match over session titles (enter opens the thread).
 //! - Messages: debounced full-text search over persisted conversation events.
 //! - Actions: "New thread…" per project, "Open settings", "Toggle theme",
@@ -742,7 +742,7 @@ impl Render for CommandPalette {
             let state = self.window_state.read(cx);
             (
                 state.compact,
-                state.palette_shown(),
+                state.palette_open,
                 state.palette_focuses_query,
             )
         };
@@ -1001,7 +1001,7 @@ mod tests {
 
     impl Render for PaletteHarness {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let open = self.window_state.read(cx).palette_open;
+            let open = self.window_state.read(cx).palette_mounted();
             div()
                 .relative()
                 .size_full()
@@ -1229,7 +1229,7 @@ mod tests {
         };
         let is_open = |cx: &mut VisualTestContext| {
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            window_state.read_with(cx, |state, _| state.palette_shown())
+            window_state.read_with(cx, |state, _| state.palette_open)
         };
 
         open(cx, true);
