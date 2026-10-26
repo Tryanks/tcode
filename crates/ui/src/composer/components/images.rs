@@ -132,6 +132,7 @@ impl Composer {
         let link = store.attachment_link();
         let remote_limit = store.client_remote_attachment_limit_bytes();
         self.pending_image_loads += 1;
+        cx.notify();
         let generation = self.image_load_generation;
         let result_name = name.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -181,6 +182,7 @@ impl Composer {
                     Err(error) => {
                         composer.pending_image_loads =
                             composer.pending_image_loads.saturating_sub(1);
+                        cx.notify();
                         composer.notify_add_image_error(error, window, cx);
                         return;
                     }
@@ -198,6 +200,7 @@ impl Composer {
                     TransferVerdict::Reject => {
                         composer.pending_image_loads =
                             composer.pending_image_loads.saturating_sub(1);
+                        cx.notify();
                         window.push_notification(
                             Notification::error(
                                 crate::tr!(
@@ -226,9 +229,10 @@ impl Composer {
                             let result_name = result_name.clone();
                             let release = move |cx: &mut App| {
                                 if dropped.borrow_mut().take().is_some() {
-                                    release_entity.update(cx, |composer, _cx| {
+                                    release_entity.update(cx, |composer, cx| {
                                         composer.pending_image_loads =
                                             composer.pending_image_loads.saturating_sub(1);
+                                        cx.notify();
                                     });
                                 }
                             };
@@ -319,11 +323,9 @@ impl Composer {
                     return;
                 }
                 composer.pending_image_loads = composer.pending_image_loads.saturating_sub(1);
+                cx.notify();
                 match result {
-                    Ok(path) => {
-                        composer.pending_images.push(PendingImage { path, name });
-                        cx.notify();
-                    }
+                    Ok(path) => composer.pending_images.push(PendingImage { path, name }),
                     Err(err) => {
                         composer.notify_add_image_error(AddImageError::Persist(err), window, cx)
                     }
@@ -461,7 +463,7 @@ impl Composer {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.pending_images.is_empty() {
+        if self.pending_images.is_empty() && self.pending_image_loads == 0 {
             return None;
         }
         let mut row = h_flex().w_full().gap_1().flex_wrap();
@@ -521,6 +523,17 @@ impl Composer {
                             Box::new(ComposerMenu::ImageRemove(index)),
                         )
                     }),
+            );
+        }
+        for index in 0..self.pending_image_loads {
+            row = row.child(
+                Button::new(("thumb-loading", index))
+                    .secondary()
+                    .small()
+                    .chip()
+                    .icon(IconName::Image)
+                    .loading(true)
+                    .aria_label(crate::tr!("composer.loading")),
             );
         }
         Some(row.into_any_element())
