@@ -6646,9 +6646,27 @@ mod tests {
         let edge = gpui::point(pane.right() - px(20.), pane.center().y);
         cx.simulate_mouse_move(edge, Some(MouseButton::Left), gpui::Modifiers::default());
         draw(cx);
+        let painted_alpha = |cx: &mut VisualTestContext| {
+            let placeholder = cx
+                .debug_bounds("pane-drop-indicator")
+                .expect("the placeholder, still drawn while it fades out");
+            cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .find(|quad| quad.bounds == placeholder.scale(window.scale_factor()))
+                    .and_then(|quad| quad.background.as_solid())
+                    .expect("the placeholder's fill")
+                    .a
+            })
+        };
+        let leaving = painted_alpha(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 3);
+        draw(cx);
+        let fading = painted_alpha(cx);
         assert!(
-            cx.debug_bounds("pane-drop-indicator").is_some(),
-            "fading out"
+            fading < leaving,
+            "the placeholder fades: {leaving} then {fading}"
         );
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
