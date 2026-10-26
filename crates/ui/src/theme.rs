@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc, sync::LazyLock};
 
 use gpui::{App, Global, Hsla, Rgba, SharedString, Window, WindowAppearance, px};
 use gpui_base::{
-    ColorTokens, PlotTheme, RadiusTokens, ResizableTheme, ScrollbarMode, ScrollbarStyles,
-    ScrollbarTheme, SemanticThemeTokens, ThemeAppearance, TypographyTokens,
+    ColorTokens, PlotTheme, RadiusTokens, ResizableTheme, ScrollbarMode, ScrollbarMotion,
+    ScrollbarStyles, ScrollbarTheme, SemanticThemeTokens, ThemeAppearance, TypographyTokens,
 };
 use serde::Deserialize;
 
@@ -338,6 +338,12 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
             } else {
                 ScrollbarMode::Hover
             })
+            .with_motion(
+                ScrollbarMotion::default()
+                    .with_enter(crate::edge_back::SETTLE)
+                    .with_exit(crate::edge_back::SETTLE)
+                    .with_expand(crate::edge_back::SETTLE),
+            )
             .with_styles(
                 ScrollbarStyles::default()
                     .track(|style| style.bg(theme.scrollbar))
