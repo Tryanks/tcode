@@ -7,8 +7,9 @@ use crate::{
 use gpui::{
     AnyElement, App, ClickEvent, Corners, ElementId, InteractiveElement, Interactivity,
     IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
-    StyleRefinement, Styled, Window, prelude::FluentBuilder as _, px,
+    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
+use gpui_base::motion::{Transition, transition};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -64,6 +65,7 @@ impl From<Pixels> for ButtonRounded {
 
 #[derive(IntoElement)]
 pub struct Button {
+    id: ElementId,
     base: gpui_base::Button,
     icon: Option<Icon>,
     label: Option<SharedString>,
@@ -97,8 +99,10 @@ const CHIP_HEIGHT: f32 = 28.;
 
 impl Button {
     pub fn new(id: impl Into<ElementId>) -> Self {
+        let id = id.into();
         Self {
-            base: gpui_base::Button::new(id),
+            base: gpui_base::Button::new(id.clone()),
+            id,
             icon: None,
             label: None,
             children: Vec::new(),
@@ -265,7 +269,34 @@ impl StatefulInteractiveElement for Button {
 }
 
 impl RenderOnce for Button {
-    fn render(mut self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Hover is read at render, rather than left to a hover style, so its
+        // colour can glide; pressing has no style and stays immediate.
+        let hovered = window.use_keyed_state((self.id.clone(), "hovered"), cx, |_, _| false);
+        let is_hovered = *hovered.read(cx);
+        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let spinning = transition(
+            (self.id.clone(), "loading"),
+            if self.loading && self.icon.is_some() {
+                1.
+            } else {
+                0.
+            },
+            settle(),
+            window,
+            cx,
+        );
+        let dimmed = transition(
+            (self.id.clone(), "opacity"),
+            if self.disabled || self.loading {
+                0.5
+            } else {
+                1.
+            },
+            settle(),
+            window,
+            cx,
+        );
         let theme = cx.theme();
         let transparent = theme.background.opacity(0.);
         let (bg, fg, hover, border) = match self.variant {
@@ -334,6 +365,14 @@ impl RenderOnce for Button {
         // A caller that colours the button's text (a muted disclosure label)
         // keeps that colour; the variant supplies the default.
         let fg = self.base.style().text.color.unwrap_or(fg);
+        let (bg, border) = match (is_hovered, self.selected) {
+            (true, _) => (hover, border),
+            (false, true) => (theme.muted, theme.primary),
+            (false, false) => (bg, border),
+        };
+        let bg = transition((self.id.clone(), "bg"), bg, settle(), window, cx);
+        let fg = transition((self.id.clone(), "fg"), fg, settle(), window, cx);
+        let border = transition((self.id.clone(), "border"), border, settle(), window, cx);
         let accessibility_label = self.aria_label.clone().or_else(|| self.label.clone());
         let ring = crate::material::focus_ring(cx);
         let press = self
@@ -357,11 +396,26 @@ impl RenderOnce for Button {
                 _ => this.gap_2(),
             })
             .when_some(self.icon, |this, icon| {
-                this.child(if self.loading {
-                    Spinner::new().with_size(icon_size).into_any_element()
-                } else {
-                    icon.with_size(icon_size).into_any_element()
-                })
+                // The spinner cross-fades over the icon, which keeps its
+                // place so the label does not move.
+                this.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .child(icon.with_size(icon_size).opacity(1. - spinning))
+                        .when(spinning > 0., |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .opacity(spinning)
+                                    .child(Spinner::new().with_size(icon_size)),
+                            )
+                        }),
+                )
             })
             .when_some(self.label, |this, label| this.child(label))
             .children(self.children);
@@ -371,11 +425,7 @@ impl RenderOnce for Button {
             .when_some(accessibility_label, |this, label| {
                 this.accessibility_label(label)
             })
-            .styles(|styles| {
-                styles
-                    .selected(|style| style.bg(theme.muted).border_color(theme.primary))
-                    .disabled(|style| style.opacity(0.5))
-            })
+            .opacity(dimmed)
             .flex()
             .flex_shrink_0()
             .items_center()
@@ -412,15 +462,25 @@ impl RenderOnce for Button {
             .border_color(border)
             .bg(bg)
             .text_color(fg)
-            .hover(move |this| this.bg(hover))
             .when_some(self.on_click, |this, handler| {
                 this.on_click(move |event, window, cx| handler(event, window, cx))
             })
             .when_some(press, |this, press| {
                 this.on_a11y_action(gpui::accesskit::Action::Click, press)
             })
-            .when_some(self.on_hover, |this, handler| {
-                this.on_hover(move |hovered, window, cx| handler(hovered, window, cx))
+            .on_hover({
+                let on_hover = self.on_hover;
+                move |is_hovered, window, cx| {
+                    hovered.update(cx, |hovered, cx| {
+                        if *hovered != *is_hovered {
+                            *hovered = *is_hovered;
+                            cx.notify();
+                        }
+                    });
+                    if let Some(handler) = &on_hover {
+                        handler(is_hovered, window, cx);
+                    }
+                }
             })
             .child(content)
             .when_some(self.tooltip, |this, text| {
