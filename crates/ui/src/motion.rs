@@ -100,6 +100,16 @@ pub(crate) fn shown<T: Clone + PartialEq + 'static>(
 }
 
 impl<T> Shown<T> {
+    /// How far in it is, from absent to at rest.
+    pub(crate) fn progress(&self) -> f32 {
+        self.progress
+    }
+
+    /// Whether it is on its way out, drawn from the last value it had.
+    pub(crate) fn leaving(&self) -> bool {
+        self.leaving
+    }
+
     /// In a column: grows to its height and fades in, shrinks and fades out.
     pub(crate) fn fold(&self, content: impl IntoElement) -> AnyElement {
         MotionReveal::new(
@@ -344,6 +354,62 @@ fn shield() -> Div {
         .inset_0()
         .occlude()
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+}
+
+/// A status glyph: its colour glides and a new glyph cross-fades over the
+/// one it replaces.
+pub(crate) fn status_icon(
+    id: impl Into<ElementId>,
+    icon: crate::icon::IconName,
+    color: gpui::Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    use crate::icon::IconNamed as _;
+    let id = id.into();
+    let color = transition(child_id(&id, "color"), color, settle(), window, cx);
+    cross_fade(
+        child_id(&id, "glyph"),
+        icon.path(),
+        window,
+        cx,
+        move |path, _, _| {
+            crate::icon::Icon::empty()
+                .path(path.clone())
+                .text_color(color)
+                .into_any_element()
+        },
+    )
+}
+
+/// A disclosure chevron that turns from pointing right, shut, to pointing
+/// down, open.
+pub(crate) fn chevron(
+    id: impl Into<ElementId>,
+    open: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> crate::icon::Icon {
+    let turn = transition(id.into(), if open { 1. } else { 0. }, settle(), window, cx);
+    crate::icon::Icon::new(crate::icon::IconName::ChevronRight)
+        .rotate(gpui::radians(std::f32::consts::FRAC_PI_2 * turn))
+}
+
+/// An element built when it renders, for a helper that holds only `&App`
+/// and so cannot reach the window a transition samples.
+#[derive(IntoElement)]
+pub(crate) struct Sampled(Box<dyn FnOnce(&mut Window, &mut App) -> AnyElement>);
+
+impl Sampled {
+    pub(crate) fn new(build: impl FnOnce(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
+        Self(Box::new(build))
+    }
+}
+
+impl gpui::RenderOnce for Sampled {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        (self.0)(window, cx)
+    }
 }
 
 #[cfg(test)]
