@@ -14,9 +14,10 @@ use agent::{
     PluginScope, PluginSourceKind, ProviderPluginEntry, Tri,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Axis, Context, Entity, Hsla, InteractiveElement as _,
-    IntoElement, ListAlignment, ListState, ParentElement as _, Render, ScrollHandle, SharedString,
-    Styled as _, Subscription, Window, div, list, point, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Axis, Context, ElementId, Entity, Hsla,
+    InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _, Render,
+    ScrollHandle, SharedString, Styled as _, Subscription, Window, div, list, point,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{ScrollableMask, Scrollbar, h_flex, v_flex};
 use tcode_core::settings::{PluginManagementSettings, ResolvedProfile};
@@ -415,7 +416,6 @@ impl PluginsSettingsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let management = profile.kind.caps().plugin_management;
         let store = self.store.read(cx);
         let name = store.provider_profile_display_name(&profile.id);
         let catalog = store.provider_plugin_catalog(&profile.id).cloned();
@@ -458,8 +458,21 @@ impl PluginsSettingsPanel {
                 None => crate::tr!("providers.plugins.no_project_context"),
             },
         };
-        let loading = catalog.as_ref().is_none_or(|catalog| catalog.loading);
+        let on = off.is_none();
+        let loading = on && catalog.as_ref().is_none_or(|catalog| catalog.loading);
         let refresh_id = format!("plugins-refresh-{profile_id}");
+        let spinner = crate::motion::transient(
+            SharedString::from(format!("plugins-loading-{profile_id}")),
+            loading.then_some(()),
+            window,
+            cx,
+        );
+        let refresh = crate::motion::transient(
+            SharedString::from(format!("plugins-refresh-slot-{profile_id}")),
+            on.then_some(()),
+            window,
+            cx,
+        );
         let header = material::group_row(cx)
             .child(
                 v_flex()
@@ -473,43 +486,82 @@ impl PluginsSettingsPanel {
                     )
                     .child(div().text_secondary(false, cx).child(subtitle.into_owned())),
             )
-            .when(off.is_none(), |row| {
-                row.when(loading, |row| row.child(Spinner::new().color(muted)))
-                    .child(
-                        Button::new(SharedString::from(refresh_id.clone()))
-                            .debug_selector(move || refresh_id.clone())
-                            .ghost()
-                            .small()
-                            .icon(Icon::empty().path("icons/rotate-ccw.svg"))
-                            .tooltip(crate::tr!("providers.plugins.refresh", name = name))
-                            .on_click(cx.listener({
-                                let profile_id = profile_id.clone();
-                                move |this, _, _, cx| this.refresh(&profile_id, cx)
-                            })),
-                    )
-            })
+            .children(spinner.map(|((), spinner)| spinner.wrap(Spinner::new().color(muted))))
+            .children(refresh.map(|((), refresh)| {
+                refresh.wrap(
+                    Button::new(SharedString::from(refresh_id.clone()))
+                        .debug_selector(move || refresh_id.clone())
+                        .ghost()
+                        .small()
+                        .icon(Icon::empty().path("icons/rotate-ccw.svg"))
+                        .tooltip(crate::tr!("providers.plugins.refresh", name = name))
+                        .on_click(cx.listener({
+                            let profile_id = profile_id.clone();
+                            move |this, _, _, cx| this.refresh(&profile_id, cx)
+                        })),
+                )
+            }))
             .child(switch);
         let section_id = format!("plugins-section-{profile_id}");
         let section = v_flex()
             .id(SharedString::from(section_id.clone()))
             .debug_selector(move || section_id.clone())
-            .w_full()
-            .gap_3();
-        if off.is_some() {
-            return section
-                .child(material::group(cx).child(header))
-                .into_any_element();
-        }
+            .w_full();
 
         let mut card = vec![header.into_any_element()];
-        card.extend(self.status_rows(catalog.as_ref(), cx));
-        let section = section.child(material::grouped(card, cx));
-        let Some(catalog) = catalog else {
-            return section
-                .child(self.note_card(crate::tr!("providers.plugins.listing"), cx))
-                .into_any_element();
-        };
+        card.extend(self.status_rows(&profile_id, catalog.as_ref().filter(|_| on), window, cx));
+        // Switching a provider off folds its catalog away under the header;
+        // a shut fold is not built.
+        let body_id = SharedString::from(format!("plugins-body-{profile_id}"));
+        let unfolded = gpui_base::motion::transition(
+            (body_id.clone(), "built"),
+            if on { 1. } else { 0. },
+            gpui_base::motion::Transition::new(crate::edge_back::SETTLE),
+            window,
+            cx,
+        );
+        let body = (on || unfolded > 0.).then(|| {
+            let listed = crate::motion::CrossFade::new(
+                SharedString::from(format!("plugins-listed-{profile_id}")),
+                usize::from(catalog.is_some()),
+                2,
+                window,
+                cx,
+            );
+            let mut layers = Vec::new();
+            if listed.shows(0) {
+                layers.push((
+                    0,
+                    self.note_card(crate::tr!("providers.plugins.listing"), cx),
+                ));
+            }
+            if let Some(catalog) = catalog.filter(|_| listed.shows(1)) {
+                layers.push((1, self.views(profile, &profile_id, catalog, window, cx)));
+            }
+            listed.render(layers).w_full()
+        });
+        section
+            .child(material::grouped(card, cx))
+            .child(
+                Collapsible::new(body_id, on)
+                    .w_full()
+                    .content(v_flex().w_full().pt_3().children(body)),
+            )
+            .into_any_element()
+    }
 
+    /// The catalog's views (Installed, Available, Marketplaces) and the one
+    /// shown.
+    fn views(
+        &mut self,
+        profile: &ResolvedProfile,
+        profile_id: &str,
+        catalog: ProviderPluginCatalog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let management = profile.kind.caps().plugin_management;
+        let profile_id = profile_id.to_string();
         let installed: Vec<(usize, &ProviderPluginEntry)> = catalog
             .entries
             .iter()
@@ -579,77 +631,111 @@ impl PluginsSettingsPanel {
         let busy = !catalog.pending.is_empty();
         let content = match view {
             View::Installed => {
-                if installed.is_empty() {
-                    let unlisted = matches!(
-                        catalog.state,
-                        PluginCatalogState::Error { .. }
-                            | PluginCatalogState::Stale {
-                                reason: PluginStaleReason::NotLoaded
-                            }
-                    );
-                    if unlisted {
-                        div().into_any_element()
-                    } else {
-                        self.note_card(crate::tr!("providers.plugins.no_installed"), cx)
-                    }
-                } else {
+                let unlisted = matches!(
+                    catalog.state,
+                    PluginCatalogState::Error { .. }
+                        | PluginCatalogState::Stale {
+                            reason: PluginStaleReason::NotLoaded
+                        }
+                );
+                // Unlisted shows nothing, so the status row above speaks.
+                let state = crate::motion::CrossFade::new(
+                    SharedString::from(format!("plugins-installed-{profile_id}")),
+                    match (installed.is_empty(), unlisted) {
+                        (false, _) => 2,
+                        (true, false) => 1,
+                        (true, true) => 0,
+                    },
+                    3,
+                    window,
+                    cx,
+                );
+                let mut layers = Vec::new();
+                if state.shows(1) {
+                    layers.push((
+                        1,
+                        self.note_card(crate::tr!("providers.plugins.no_installed"), cx),
+                    ));
+                }
+                if state.shows(2) && !installed.is_empty() {
                     let rows = installed
                         .into_iter()
                         .map(|(index, entry)| {
-                            self.installed_row(&profile_id, &catalog, index, entry, cx)
+                            self.installed_row(&profile_id, &catalog, index, entry, window, cx)
                         })
                         .collect();
-                    material::grouped(rows, cx).into_any_element()
+                    layers.push((2, material::grouped(rows, cx).into_any_element()));
                 }
+                state.render(layers).w_full().into_any_element()
             }
             View::Available => self.available(&profile_id, catalog, window, cx),
-            View::Marketplaces => self.marketplaces(&profile_id, &catalog, busy, cx),
+            View::Marketplaces => self.marketplaces(&profile_id, &catalog, busy, window, cx),
         };
 
-        section.children(track).child(content).into_any_element()
+        v_flex()
+            .w_full()
+            .gap_3()
+            .children(track)
+            .child(content)
+            .into_any_element()
     }
 
     fn status_rows(
         &self,
+        profile_id: &str,
         catalog: Option<&ProviderPluginCatalog>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
         let warning = cx.theme().warning;
-        let Some(catalog) = catalog else {
-            return Vec::new();
-        };
-        let mut rows = Vec::new();
-        match &catalog.state {
-            PluginCatalogState::Fresh => {}
-            PluginCatalogState::Stale { reason } => {
-                let text = match reason {
+        let status = catalog.and_then(|catalog| match &catalog.state {
+            PluginCatalogState::Fresh => None,
+            PluginCatalogState::Stale { .. } if catalog.loading => Some(CatalogStatus::Note(
+                crate::tr!("providers.plugins.listing").into_owned(),
+            )),
+            PluginCatalogState::Stale { reason } => Some(CatalogStatus::Note(
+                match reason {
                     PluginStaleReason::NotLoaded => crate::tr!("providers.plugins.not_listed"),
                     PluginStaleReason::ContextChanged => {
                         crate::tr!("providers.plugins.stale_context")
                     }
                     PluginStaleReason::Changed => crate::tr!("providers.plugins.stale_changed"),
-                };
-                let text = if catalog.loading {
-                    crate::tr!("providers.plugins.listing")
-                } else {
-                    text
-                };
-                rows.push(self.note_row(text.into_owned(), muted, cx));
-            }
-            PluginCatalogState::Error { message } => rows.push(
-                material::group_row_stacked(cx)
+                }
+                .into_owned(),
+            )),
+            PluginCatalogState::Error { message } => Some(CatalogStatus::Failed(message.clone())),
+        });
+        let mut rows = Vec::new();
+        let status_id = SharedString::from(format!("plugins-status-{profile_id}"));
+        if let Some((status, slot)) =
+            crate::motion::transient(status_id.clone(), status, window, cx)
+        {
+            let row = match status {
+                CatalogStatus::Note(text) => {
+                    let text =
+                        crate::motion::swap((ElementId::from(status_id), "text"), text, window, cx);
+                    material::group_row_stacked(cx)
+                        .justify_center()
+                        .text_secondary(false, cx)
+                        .text_color(muted)
+                        .child(
+                            text.render(|text| div().child(text).into_any_element())
+                                .w_full(),
+                        )
+                }
+                CatalogStatus::Failed(message) => material::group_row_stacked(cx)
                     .debug_selector(|| "plugins-list-error".into())
                     .gap_1()
                     .text_secondary(false, cx)
                     .text_color(danger)
                     .child(crate::tr!("providers.plugins.list_failed").into_owned())
-                    .child(verbatim(message.clone(), cx))
-                    .into_any_element(),
-            ),
+                    .child(verbatim(message, cx)),
+            };
+            rows.push(slot.wrap(row).into_any_element());
         }
-        for error in &catalog.errors {
+        for error in catalog.iter().flat_map(|catalog| &catalog.errors) {
             rows.push(
                 material::group_row_stacked(cx)
                     .text_secondary(false, cx)
@@ -667,6 +753,7 @@ impl PluginsSettingsPanel {
         catalog: &ProviderPluginCatalog,
         index: usize,
         entry: &ProviderPluginEntry,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -699,6 +786,41 @@ impl PluginsSettingsPanel {
         };
         let row_id = format!("plugin-row-{profile_id}-{}", entry.id);
         let toggle_id = format!("plugin-details-{profile_id}-{}", entry.id);
+        let settle = || gpui_base::motion::Transition::new(crate::edge_back::SETTLE);
+        let enabled_id = SharedString::from(format!("{row_id}-enabled"));
+        let enabled_bg = gpui_base::motion::transition(
+            (enabled_id.clone(), "bg"),
+            enabled_bg,
+            settle(),
+            window,
+            cx,
+        );
+        let enabled_fg = gpui_base::motion::transition(
+            (enabled_id.clone(), "fg"),
+            enabled_fg,
+            settle(),
+            window,
+            cx,
+        );
+        let enabled_label = crate::motion::swap(
+            (ElementId::from(enabled_id), "label"),
+            SharedString::from(enabled_label.into_owned()),
+            window,
+            cx,
+        );
+        let spinner = crate::motion::transient(
+            SharedString::from(format!("{row_id}-pending")),
+            pending.then_some(()),
+            window,
+            cx,
+        );
+        let turn = gpui_base::motion::transition(
+            (SharedString::from(toggle_id.clone()), "turn"),
+            if expanded { 1. } else { 0. },
+            settle(),
+            window,
+            cx,
+        );
         let title = h_flex()
             .w_full()
             .items_center()
@@ -714,13 +836,14 @@ impl PluginsSettingsPanel {
                     .when_some(entry.version.clone(), |row, version| {
                         row.child(div().text_meta_mono(false, cx).child(version))
                     })
-                    .child(material::semantic_chip(
-                        enabled_label.into_owned(),
-                        enabled_bg,
-                        enabled_fg,
-                        cx,
-                    ))
-                    .when(pending, |row| row.child(Spinner::new().color(muted))),
+                    .child(
+                        material::chip_surface(enabled_bg, enabled_fg, cx)
+                            .overflow_hidden()
+                            .child(enabled_label.render(|label| label.into_any_element())),
+                    )
+                    .children(
+                        spinner.map(|((), spinner)| spinner.wrap(Spinner::new().color(muted))),
+                    ),
             )
             .when(has_details, |row| {
                 row.child(
@@ -728,11 +851,10 @@ impl PluginsSettingsPanel {
                         .debug_selector(move || toggle_id.clone())
                         .ghost()
                         .small()
-                        .icon(if expanded {
-                            IconName::ChevronUp
-                        } else {
-                            IconName::ChevronDown
-                        })
+                        .icon(
+                            Icon::new(IconName::ChevronDown)
+                                .rotate(gpui::radians(std::f32::consts::PI * turn)),
+                        )
                         .label(crate::tr!("providers.plugins.details").into_owned())
                         .tooltip(crate::tr!(
                             "providers.plugins.toggle_details",
@@ -901,13 +1023,14 @@ impl PluginsSettingsPanel {
                 &self.list,
                 list(
                     self.list.clone(),
-                    cx.processor(move |this, ix: usize, _, cx| {
+                    cx.processor(move |this, ix: usize, window, cx| {
                         let index = matches[ix];
                         let row = this.available_row(
                             &profile_id,
                             &catalog,
                             index,
                             &catalog.entries[index],
+                            window,
                             cx,
                         );
                         v_flex()
@@ -972,11 +1095,19 @@ impl PluginsSettingsPanel {
         catalog: &ProviderPluginCatalog,
         index: usize,
         entry: &ProviderPluginEntry,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let busy = !catalog.pending.is_empty();
         let pending = catalog.pending.contains(&entry.id);
+        let row_id = format!("plugin-available-{profile_id}-{}", entry.id);
+        let spinner = crate::motion::transient(
+            SharedString::from(format!("{row_id}-pending")),
+            pending.then_some(()),
+            window,
+            cx,
+        );
         let installs: Vec<PluginAction> = entry
             .actions
             .iter()
@@ -1015,7 +1146,6 @@ impl PluginsSettingsPanel {
                     .into_any_element(),
             ),
         };
-        let row_id = format!("plugin-available-{profile_id}-{}", entry.id);
         material::group_row_stacked(cx)
             .id((SharedString::from(row_id.clone()), index))
             .debug_selector(move || row_id.clone())
@@ -1037,7 +1167,10 @@ impl PluginsSettingsPanel {
                             .when_some(entry.version.clone(), |row, version| {
                                 row.child(div().text_meta_mono(false, cx).child(version))
                             })
-                            .when(pending, |row| row.child(Spinner::new().color(muted))),
+                            .children(
+                                spinner
+                                    .map(|((), spinner)| spinner.wrap(Spinner::new().color(muted))),
+                            ),
                     )
                     .when_some(entry.description.clone(), |col, description| {
                         col.child(div().text_secondary(false, cx).child(description))
@@ -1070,6 +1203,7 @@ impl PluginsSettingsPanel {
         profile_id: &str,
         catalog: &ProviderPluginCatalog,
         busy: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -1080,7 +1214,15 @@ impl PluginsSettingsPanel {
                 let removable = catalog.marketplace_actions.iter().any(|action| {
                     matches!(action, MarketplaceAction::Remove { marketplace: name, .. } if *name == marketplace.name)
                 });
-                let pending = catalog.pending.contains(&marketplace.name);
+                let spinner = crate::motion::transient(
+                    SharedString::from(format!(
+                        "plugin-marketplace-pending-{profile_id}-{}",
+                        marketplace.name
+                    )),
+                    catalog.pending.contains(&marketplace.name).then_some(()),
+                    window,
+                    cx,
+                );
                 let remove_id =
                     format!("plugin-marketplace-remove-{profile_id}-{}", marketplace.name);
                 let location = marketplace
@@ -1109,7 +1251,9 @@ impl PluginsSettingsPanel {
                                         muted,
                                         cx,
                                     ))
-                                    .when(pending, |row| row.child(Spinner::new().color(muted))),
+                                    .children(spinner.map(|((), spinner)| {
+                                        spinner.wrap(Spinner::new().color(muted))
+                                    })),
                             )
                             .child(
                                 div()
@@ -1145,11 +1289,24 @@ impl PluginsSettingsPanel {
                     .into_any_element()
             })
             .collect();
-        let list = if rows.is_empty() {
-            self.note_card(crate::tr!("providers.plugins.no_marketplaces"), cx)
-        } else {
-            material::grouped(rows, cx).into_any_element()
-        };
+        let state = crate::motion::CrossFade::new(
+            SharedString::from(format!("plugin-marketplaces-{profile_id}")),
+            usize::from(!rows.is_empty()),
+            2,
+            window,
+            cx,
+        );
+        let mut layers = Vec::new();
+        if state.shows(0) {
+            layers.push((
+                0,
+                self.note_card(crate::tr!("providers.plugins.no_marketplaces"), cx),
+            ));
+        }
+        if state.shows(1) && !rows.is_empty() {
+            layers.push((1, material::grouped(rows, cx).into_any_element()));
+        }
+        let list = state.render(layers).w_full();
         let can_add = catalog
             .marketplace_actions
             .contains(&MarketplaceAction::Add);
@@ -1281,6 +1438,13 @@ impl Render for PluginsSettingsPanel {
 
 fn manages(management: PluginManagement) -> bool {
     !management.actions.is_empty() || management.marketplaces
+}
+
+/// What the catalog's status row says, if it shows one.
+#[derive(Clone, PartialEq)]
+enum CatalogStatus {
+    Note(String),
+    Failed(String),
 }
 
 /// Enable and Disable side by side first, then Update, then Uninstall.

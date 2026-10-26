@@ -666,7 +666,8 @@ pub fn semantic_chip_with_icon(
     chip_surface(bg, fg, cx).child(icon).child(label.into())
 }
 
-fn chip_surface(bg: Hsla, fg: Hsla, cx: &App) -> Div {
+/// A [`semantic_chip`]'s surface, for a label that is not plain text.
+pub fn chip_surface(bg: Hsla, fg: Hsla, cx: &App) -> Div {
     let theme = cx.theme();
     gpui_base::h_flex()
         .flex_none()
