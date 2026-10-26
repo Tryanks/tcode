@@ -3,7 +3,7 @@ use gpui::{
     Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Subscription, Task,
     Window, div,
 };
-use gpui_base::h_flex;
+use gpui_base::{h_flex, v_flex};
 use tcode_core::permissions::ComputerUsePermissions;
 
 use crate::{
@@ -70,75 +70,87 @@ impl HostPermissions {
 impl Render for HostPermissions {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
-        let mut body = crate::material::group_row_stacked(cx).text_body(compact, cx);
-        match &self.result {
-            Some(Ok(ComputerUsePermissions::MacOs(status))) => {
-                for (name, granted) in [
-                    ("permissions.accessibility.name", status.accessibility),
-                    ("permissions.screen_recording.name", status.screen_recording),
-                ] {
-                    let (label, bg, fg) = if granted {
-                        (
-                            "permissions.granted",
-                            cx.theme().success,
-                            cx.theme().success_foreground,
-                        )
-                    } else {
-                        (
-                            "permissions.missing",
-                            cx.theme().warning,
-                            cx.theme().warning_foreground,
-                        )
-                    };
-                    body = body.child(
-                        h_flex()
-                            .w_full()
-                            .gap_3()
-                            .items_center()
-                            .child(div().flex_1().min_w_0().child(crate::tr!(name)))
-                            .child(crate::material::semantic_chip(
-                                crate::tr!(label),
-                                bg.opacity(0.12),
-                                fg,
-                                cx,
-                            )),
-                    );
+        // Checking, the grants, and a failure cross-fade as a check answers.
+        let status = crate::motion::cross_fade(
+            "host-permissions-status",
+            (self.result.clone(), self.connected),
+            window,
+            cx,
+            |(result, connected), _, cx| {
+                let mut body = v_flex()
+                    .w_full()
+                    .gap(cx.theme().tokens.spacing.sm)
+                    .items_start();
+                match result {
+                    Some(Ok(ComputerUsePermissions::MacOs(status))) => {
+                        for (name, granted) in [
+                            ("permissions.accessibility.name", status.accessibility),
+                            ("permissions.screen_recording.name", status.screen_recording),
+                        ] {
+                            let (label, bg, fg) = if granted {
+                                (
+                                    "permissions.granted",
+                                    cx.theme().success,
+                                    cx.theme().success_foreground,
+                                )
+                            } else {
+                                (
+                                    "permissions.missing",
+                                    cx.theme().warning,
+                                    cx.theme().warning_foreground,
+                                )
+                            };
+                            body = body.child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_3()
+                                    .items_center()
+                                    .child(div().flex_1().min_w_0().child(crate::tr!(name)))
+                                    .child(crate::material::semantic_chip(
+                                        crate::tr!(label),
+                                        bg.opacity(0.12),
+                                        fg,
+                                        cx,
+                                    )),
+                            );
+                        }
+                        if let Some(host) = self.store.read(cx).remote_host_name() {
+                            body = body.child(div().text_secondary(compact, cx).child(
+                                crate::tr!("permissions.manage_on_host", host = host).into_owned(),
+                            ));
+                        }
+                        body = body.child(
+                            div()
+                                .text_secondary(compact, cx)
+                                .child(crate::tr!("permissions.restart_on_host")),
+                        );
+                    }
+                    Some(Ok(ComputerUsePermissions::NotRequired)) => {
+                        body = body.child(crate::tr!("permissions.not_required"));
+                    }
+                    Some(Ok(ComputerUsePermissions::Unsupported)) => {
+                        body = body.child(crate::tr!("permissions.host_unsupported"));
+                    }
+                    Some(Err(error)) => {
+                        body = body
+                            .child(
+                                div()
+                                    .text_color(cx.theme().danger_foreground)
+                                    .child(crate::tr!("permissions.check_failed")),
+                            )
+                            .child(div().text_secondary(compact, cx).child(error.clone()));
+                    }
+                    None => {
+                        body = body.child(crate::tr!(if *connected {
+                            "permissions.checking"
+                        } else {
+                            "permissions.disconnected"
+                        }));
+                    }
                 }
-                if let Some(host) = self.store.read(cx).remote_host_name() {
-                    body =
-                        body.child(div().text_secondary(compact, cx).child(
-                            crate::tr!("permissions.manage_on_host", host = host).into_owned(),
-                        ));
-                }
-                body = body.child(
-                    div()
-                        .text_secondary(compact, cx)
-                        .child(crate::tr!("permissions.restart_on_host")),
-                );
-            }
-            Some(Ok(ComputerUsePermissions::NotRequired)) => {
-                body = body.child(crate::tr!("permissions.not_required"));
-            }
-            Some(Ok(ComputerUsePermissions::Unsupported)) => {
-                body = body.child(crate::tr!("permissions.host_unsupported"));
-            }
-            Some(Err(error)) => {
-                body = body
-                    .child(
-                        div()
-                            .text_color(cx.theme().danger_foreground)
-                            .child(crate::tr!("permissions.check_failed")),
-                    )
-                    .child(div().text_secondary(compact, cx).child(error.clone()));
-            }
-            None => {
-                body = body.child(crate::tr!(if self.connected {
-                    "permissions.checking"
-                } else {
-                    "permissions.disconnected"
-                }));
-            }
-        }
+                body.into_any_element()
+            },
+        );
         let mut button = Button::new("host-permissions-recheck")
             .outline()
             .small()
@@ -148,7 +160,12 @@ impl Render for HostPermissions {
         if compact {
             button = button.w_full();
         }
-        crate::material::group(cx).child(body.child(div().child(button)))
+        crate::material::group(cx).child(
+            crate::material::group_row_stacked(cx)
+                .text_body(compact, cx)
+                .child(status)
+                .child(div().child(button)),
+        )
     }
 }
 
