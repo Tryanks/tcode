@@ -209,7 +209,12 @@ impl Picker {
         cx.notify();
     }
 
-    fn render_tile(&self, entry: &IconImageEntry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tile(
+        &self,
+        entry: &IconImageEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let path = entry.path.clone();
         let is_dir = entry.is_dir;
         let is_selected = self.selected.as_ref() == Some(&path);
@@ -229,66 +234,83 @@ impl Picker {
                 })
                 .into_any_element()
         };
-        crate::material::accessible_clickable(
-            v_flex(),
-            SharedString::from(format!("icon-file-{}", entry.name)),
-            Role::Button,
-            entry.name.clone(),
+        let id = SharedString::from(format!("icon-file-{}", entry.name));
+        let (border, bg) = if is_selected {
+            (cx.theme().primary, cx.theme().accent)
+        } else {
+            (cx.theme().border, cx.theme().background)
+        };
+        // Selection and hover glide; the hover fill lies over the tile's own.
+        let border = gpui_base::motion::transition(
+            (id.clone(), "border"),
+            border,
+            crate::motion::settle(),
+            window,
             cx,
-        )
-        .aria_selected(is_selected)
-        .debug_selector({
-            let name = entry.name.clone();
-            move || format!("icon-file-{name}")
-        })
-        .w(px(TILE_WIDTH))
-        .h(px(108.))
-        .p_2()
-        .gap_1()
-        .items_center()
-        .justify_center()
-        .rounded(crate::material::radius_card(cx))
-        .border_1()
-        .border_color(if is_selected {
-            cx.theme().primary
-        } else {
-            cx.theme().border
-        })
-        .bg(if is_selected {
-            cx.theme().accent
-        } else {
-            cx.theme().background
-        })
-        .hover(|el| el.bg(cx.theme().accent))
-        .cursor_pointer()
-        .child(
-            div()
-                .h(px(68.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(content),
-        )
-        .child(
-            div()
-                .w_full()
-                .overflow_hidden()
-                .text_secondary(false, cx)
-                .child(crate::widgets::fade_text(entry.name.clone())),
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            if this.saving {
-                return;
-            }
-            if is_dir {
-                this.browse(path.clone(), window, cx);
-            } else {
-                this.selected = Some(path.clone());
-                this.error = None;
-                cx.notify();
-            }
-        }))
-        .into_any_element()
+        );
+        let bg = gpui_base::motion::transition(
+            (id.clone(), "bg"),
+            bg,
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        let (hover, on_hover) =
+            crate::motion::hover_fill(id.clone(), cx.theme().accent, window, cx);
+        crate::material::accessible_clickable(v_flex(), id, Role::Button, entry.name.clone(), cx)
+            .aria_selected(is_selected)
+            .debug_selector({
+                let name = entry.name.clone();
+                move || format!("icon-file-{name}")
+            })
+            .w(px(TILE_WIDTH))
+            .h(px(108.))
+            .p_2()
+            .gap_1()
+            .items_center()
+            .justify_center()
+            .relative()
+            .rounded(crate::material::radius_card(cx))
+            .border_1()
+            .border_color(border)
+            .bg(bg)
+            .on_hover(on_hover)
+            .cursor_pointer()
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(crate::material::radius_card(cx))
+                    .bg(hover),
+            )
+            .child(
+                div()
+                    .h(px(68.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(content),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .text_secondary(false, cx)
+                    .child(crate::widgets::fade_text(entry.name.clone())),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.saving {
+                    return;
+                }
+                if is_dir {
+                    this.browse(path.clone(), window, cx);
+                } else {
+                    this.selected = Some(path.clone());
+                    this.error = None;
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
     }
 }
 
@@ -318,6 +340,16 @@ impl Render for Picker {
         // window leaves instead of DIALOG_LIST_HEIGHT.
         let viewport_height =
             (f32::from(window.viewport_size().height) * 0.9 - 360.).clamp(48., 320.);
+        // Loading… fades out over the folder it loaded, which fades in.
+        let leaving =
+            crate::motion::shown("icon-file-loading", self.loading.then_some(()), window, cx);
+        let arriving = gpui_base::motion::transition(
+            ("icon-file-grid", "opacity"),
+            if self.loading { 0. } else { 1. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
         let content = if self.loading {
             crate::material::empty_row(crate::tr!("project_icon.loading"), cx).into_any_element()
         } else if matches.is_empty() {
@@ -327,15 +359,15 @@ impl Render for Picker {
             let list = uniform_list(
                 "icon-file-rows",
                 rows,
-                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                     range
                         .map(|row| {
                             let tiles =
                                 &matches[row * columns..matches.len().min((row + 1) * columns)];
                             h_flex().gap(px(TILE_GAP)).pb(px(TILE_GAP)).children(
-                                tiles
-                                    .iter()
-                                    .map(|&index| this.render_tile(&this.entries[index], cx)),
+                                tiles.iter().map(|&index| {
+                                    this.render_tile(&this.entries[index], window, cx)
+                                }),
                             )
                         })
                         .collect()
@@ -427,7 +459,26 @@ impl Render for Picker {
                 div()
                     .id("icon-file-grid")
                     .h(px(viewport_height))
-                    .child(content)
+                    .relative()
+                    .child(
+                        div()
+                            .size_full()
+                            .when(!self.loading, |grid| grid.opacity(arriving))
+                            .child(content),
+                    )
+                    .when_some(leaving.filter(|_| !self.loading), |grid, leaving| {
+                        grid.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .child(leaving.fade(crate::material::empty_row(
+                                    crate::tr!("project_icon.loading"),
+                                    cx,
+                                ))),
+                        )
+                    })
                     .on_prepaint(move |bounds, _, cx| {
                         _ = picker.update(cx, |picker, cx| {
                             if picker.grid_width != bounds.size.width {
@@ -437,14 +488,19 @@ impl Render for Picker {
                         });
                     }),
             )
-            .when_some(self.error.clone(), |el, error| {
-                el.child(
-                    div()
-                        .text_secondary(false, cx)
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
-            })
+            .when_some(
+                crate::motion::shown("icon-error", self.error.clone(), window, cx),
+                |el, error| {
+                    el.child(
+                        error.fold(
+                            div()
+                                .text_secondary(false, cx)
+                                .text_color(cx.theme().danger)
+                                .child(error.value.clone()),
+                        ),
+                    )
+                },
+            )
             .child(
                 div().text_secondary(false, cx).child(
                     self.entries
