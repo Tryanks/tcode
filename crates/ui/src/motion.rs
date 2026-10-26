@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Pixels, Stateful, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::motion::{
     MotionReveal, Presence, PresenceSample, Transition, TransitionId, transition,
@@ -240,4 +240,212 @@ pub(crate) fn hover_fill(
         });
     };
     (fill, on_hover)
+}
+
+/// An inline element that comes and goes with `value`: mounted while its
+/// [`appear`] sample should render, it keeps showing the last value it had
+/// while it leaves. `None` once it is gone.
+pub(crate) fn transient<T: Clone + PartialEq + 'static>(
+    id: impl Into<ElementId>,
+    value: Option<T>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<(T, Transient)> {
+    let id = id.into();
+    let sample = appear(id.clone(), value.is_some(), window, cx);
+    let value = retain((id.clone(), "retained"), value, window, cx)?;
+    sample
+        .should_render()
+        .then_some((value, Transient { id, sample }))
+}
+
+/// The present-or-leaving state of a [`transient`] element.
+pub(crate) struct Transient {
+    id: ElementId,
+    sample: PresenceSample,
+}
+
+impl Transient {
+    /// `child` faded and lifted at the sample's progress; a shield takes the
+    /// pointer while it leaves.
+    pub(crate) fn wrap(self, child: impl IntoElement) -> Stateful<Div> {
+        let progress = self.sample.progress;
+        div()
+            .id(self.id)
+            .relative()
+            .top(lift(progress))
+            .opacity(progress)
+            .child(child)
+            .when(self.sample.phase == PresencePhase::Exiting, |el| {
+                el.child(shield())
+            })
+    }
+}
+
+/// `value`, or while it is `None` the last `Some` it had, so content that
+/// leaves can still be drawn from it.
+pub(crate) fn retain<T: Clone + PartialEq + 'static>(
+    id: impl Into<ElementId>,
+    value: Option<T>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<T> {
+    let kept = window.use_keyed_state(id, cx, |_, _| None::<T>);
+    match value {
+        Some(value) => {
+            if kept.read(cx).as_ref() != Some(&value) {
+                kept.update(cx, |kept, _| *kept = Some(value.clone()));
+            }
+            Some(value)
+        }
+        None => kept.read(cx).clone(),
+    }
+}
+
+/// Mutually exclusive states of one region (loading, loaded, failed) that
+/// cross-fade: each state draws in its own layer, so its element tree holds
+/// while it fades. The current layer is laid out; a leaving one is drawn
+/// under it from the top, inert. With [`CrossFade::fill`] every layer fills
+/// the region, which then needs a definite size.
+pub(crate) struct CrossFade {
+    id: ElementId,
+    current: usize,
+    opacity: Vec<f32>,
+    fill: bool,
+}
+
+impl CrossFade {
+    pub(crate) fn new(
+        id: impl Into<ElementId>,
+        current: usize,
+        count: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let id = id.into();
+        let opacity = (0..count)
+            .map(|layer| {
+                transition(
+                    (id.clone(), format!("layer-{layer}")),
+                    if layer == current { 1. } else { 0. },
+                    Transition::new(crate::edge_back::SETTLE),
+                    window,
+                    cx,
+                )
+            })
+            .collect();
+        Self {
+            id,
+            current,
+            opacity,
+            fill: false,
+        }
+    }
+
+    pub(crate) fn fill(mut self) -> Self {
+        self.fill = true;
+        self
+    }
+
+    /// Whether `layer` is drawn this frame, so only those are built.
+    pub(crate) fn shows(&self, layer: usize) -> bool {
+        layer == self.current || self.opacity.get(layer).is_some_and(|opacity| *opacity > 0.)
+    }
+
+    /// The region holding `layers`, each tagged with its index; layers that
+    /// are not [`shown`](Self::shows) are skipped.
+    pub(crate) fn render(
+        self,
+        layers: impl IntoIterator<Item = (usize, AnyElement)>,
+    ) -> Stateful<Div> {
+        let mut layers: Vec<_> = layers
+            .into_iter()
+            .filter(|(layer, _)| self.shows(*layer))
+            .collect();
+        // The current layer is drawn last, over the leaving ones' shields.
+        layers.sort_by_key(|(layer, _)| *layer == self.current);
+        let fill = self.fill;
+        div()
+            .id(self.id.clone())
+            .relative()
+            .children(layers.into_iter().map(|(layer, content)| {
+                let leaving = layer != self.current;
+                div()
+                    .id((self.id.clone(), format!("layer-{layer}")))
+                    .opacity(self.opacity[layer])
+                    .map(|el| {
+                        if fill {
+                            el.absolute().inset_0()
+                        } else if leaving {
+                            el.absolute().top_0().left_0()
+                        } else {
+                            el
+                        }
+                    })
+                    .child(content)
+                    .when(leaving, |el| el.child(shield()))
+            }))
+    }
+}
+
+/// Content that follows `value` and cross-fades when it changes: a status
+/// line, a chip's label. Two layers take turns, the leaving one keeping the
+/// value it was drawn from.
+pub(crate) fn swap<T: Clone + PartialEq + 'static>(
+    id: impl Into<ElementId>,
+    value: T,
+    window: &mut Window,
+    cx: &mut App,
+) -> SwapLayers<T> {
+    let id = id.into();
+    let slots = window.use_keyed_state((id.clone(), "slots"), cx, |_, _| SwapSlots {
+        values: [Some(value.clone()), None],
+        current: 0,
+    });
+    if slots.read(cx).values[slots.read(cx).current].as_ref() != Some(&value) {
+        slots.update(cx, |slots, _| {
+            slots.current ^= 1;
+            slots.values[slots.current] = Some(value);
+        });
+    }
+    let SwapSlots { values, current } = slots.read(cx).clone();
+    SwapLayers {
+        fade: CrossFade::new(id, current, 2, window, cx),
+        values,
+    }
+}
+
+#[derive(Clone)]
+struct SwapSlots<T> {
+    values: [Option<T>; 2],
+    current: usize,
+}
+
+/// The two layers of a [`swap`].
+pub(crate) struct SwapLayers<T> {
+    fade: CrossFade,
+    values: [Option<T>; 2],
+}
+
+impl<T> SwapLayers<T> {
+    pub(crate) fn render(self, mut build: impl FnMut(T) -> AnyElement) -> Stateful<Div> {
+        let fade = self.fade;
+        let layers = self
+            .values
+            .into_iter()
+            .enumerate()
+            .filter(|(layer, _)| fade.shows(*layer))
+            .filter_map(|(layer, value)| Some((layer, build(value?))))
+            .collect::<Vec<_>>();
+        fade.render(layers)
+    }
+}
+
+/// Covers a leaving element so it takes no pointer, wheel or focus.
+fn shield() -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
 }

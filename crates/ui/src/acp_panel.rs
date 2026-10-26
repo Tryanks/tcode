@@ -4,6 +4,7 @@ use crate::overlay::{DialogActions, OverlayExt as _};
 use crate::settings_rows::ToggleRow;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
+use crate::widgets::Collapsible;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::switch::Switch;
@@ -13,11 +14,14 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ListAlignment, ListState, ParentElement as _, Render, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, list, prelude::FluentBuilder as _, px,
+    AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, ListAlignment, ListState, ParentElement as _, Render,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
+    prelude::FluentBuilder as _, px,
 };
+use gpui_base::motion::{Transition, transition};
 use gpui_base::{Scrollbar, h_flex, v_flex};
+use std::f32::consts::PI;
 use std::rc::Rc;
 
 use tcode_core::acp::InstalledAcpAgent;
@@ -64,15 +68,34 @@ impl AcpAgentCard {
         }
     }
 
-    fn render_header(&self, agent: &InstalledAcpAgent, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header(
+        &self,
+        agent: &InstalledAcpAgent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id = agent.id.clone();
         let toggle_id = id.clone();
         let name = agent.name.clone();
-        let dot_color = if agent.enabled {
-            cx.theme().success
-        } else {
-            cx.theme().warning
-        };
+        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let dot_color = transition(
+            "acp-status-dot",
+            if agent.enabled {
+                cx.theme().success
+            } else {
+                cx.theme().warning
+            },
+            settle(),
+            window,
+            cx,
+        );
+        let turn = transition(
+            "acp-details-chevron",
+            if self.expanded { 1. } else { 0. },
+            settle(),
+            window,
+            cx,
+        );
         let glyph = div()
             .relative()
             .flex_none()
@@ -122,11 +145,7 @@ impl AcpAgentCard {
                 Button::new(gpui::SharedString::from(format!("acp-details-{id}")))
                     .ghost()
                     .xsmall()
-                    .icon(if self.expanded {
-                        IconName::ChevronUp
-                    } else {
-                        IconName::ChevronDown
-                    })
+                    .icon(Icon::new(IconName::ChevronDown).rotate(gpui::radians(PI * turn)))
                     .tooltip(crate::tr!("providers.toggle_details", name = name.clone()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.expanded = !this.expanded;
@@ -235,13 +254,19 @@ impl AcpAgentCard {
 }
 
 impl Render for AcpAgentCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let agent = self.store.read(cx).installed_acp_agent(&self.agent_id);
+        // The details carry the card's gap above them, so it folds with them.
+        let gap = cx.theme().tokens.spacing.sm;
         material::card_secondary(cx)
             .w_full()
+            .gap_0()
             .when_some(agent, |card, agent| {
-                card.child(self.render_header(&agent, cx))
-                    .when(self.expanded, |card| card.child(self.render_details(cx)))
+                card.child(self.render_header(&agent, window, cx)).child(
+                    Collapsible::new("acp-details", self.expanded)
+                        .w_full()
+                        .content(div().w_full().pt(gap).child(self.render_details(cx))),
+                )
             })
     }
 }
@@ -299,6 +324,7 @@ pub struct AcpPanel {
     /// touch edge bounce see its full extent.
     market_list: ListState,
     market_ids: Vec<String>,
+    focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -332,6 +358,7 @@ impl AcpPanel {
             account_error: None,
             market_list: ListState::new(0, ListAlignment::Top, px(120.)).measure_all(),
             market_ids: Vec::new(),
+            focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
         panel
@@ -360,8 +387,7 @@ impl AcpPanel {
             .update(cx, |i, cx| i.set_value(model, window, cx));
         self.tp_key.update(cx, |i, cx| i.set_value("", window, cx));
         self.tp_inherit_config = false;
-        self.view = PanelView::ThirdParty;
-        cx.notify();
+        self.navigate(PanelView::ThirdParty, window, cx);
     }
 
     fn open_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -369,8 +395,7 @@ impl AcpPanel {
             .update(cx, |i, cx| i.set_value("", window, cx));
         self.account_inherit_config = true;
         self.account_error = None;
-        self.view = PanelView::Account;
-        cx.notify();
+        self.navigate(PanelView::Account, window, cx);
     }
 
     /// Add the account on the host, which starts its sign-in, then show that
@@ -428,8 +453,84 @@ impl AcpPanel {
         .detach();
     }
 
-    fn render_market_row(&self, agent: &AcpMarketplaceItem, cx: &mut Context<Self>) -> AnyElement {
+    /// Shows `view`. The page being left stays drawn while it fades, so focus
+    /// leaves it for the panel.
+    fn navigate(&mut self, view: PanelView, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view != view {
+            self.view = view;
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn render_market_row(
+        &self,
+        agent: &AcpMarketplaceItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id = agent.id.clone();
+        let state = crate::motion::CrossFade::new(
+            gpui::SharedString::from(format!("acp-install-state-{id}")),
+            if agent.installed {
+                0
+            } else if !agent.supported {
+                1
+            } else {
+                2
+            },
+            3,
+            window,
+            cx,
+        );
+        let mut layers = Vec::new();
+        if state.shows(0) {
+            layers.push((
+                0,
+                material::semantic_chip(
+                    crate::tr!("providers.acp.installed").into_owned(),
+                    cx.theme().success.opacity(0.12),
+                    cx.theme().success_foreground,
+                    cx,
+                )
+                .into_any_element(),
+            ));
+        }
+        if state.shows(1) {
+            layers.push((
+                1,
+                material::semantic_chip(
+                    crate::tr!("providers.acp.unsupported").into_owned(),
+                    cx.theme().muted,
+                    cx.theme().muted_foreground,
+                    cx,
+                )
+                .into_any_element(),
+            ));
+        }
+        if state.shows(2) {
+            layers.push((
+                2,
+                Button::new(gpui::SharedString::from(format!(
+                    "acp-install-{}",
+                    agent.id
+                )))
+                .outline()
+                .xsmall()
+                .loading(agent.installing)
+                .label(crate::tr!("providers.acp.install").into_owned())
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _, _, cx| {
+                        let id = id.clone();
+                        this.store.update(cx, |store, _cx| {
+                            store.install_acp_agent(id);
+                        });
+                    }
+                }))
+                .into_any_element(),
+            ));
+        }
         material::group_row(cx)
             .id(gpui::SharedString::from(format!("acp-market-row-{id}")))
             .debug_selector({
@@ -467,43 +568,11 @@ impl AcpPanel {
                             .child(agent.description.clone()),
                     ),
             )
-            .child(if agent.installed {
-                material::semantic_chip(
-                    crate::tr!("providers.acp.installed").into_owned(),
-                    cx.theme().success.opacity(0.12),
-                    cx.theme().success_foreground,
-                    cx,
-                )
-                .into_any_element()
-            } else if !agent.supported {
-                material::semantic_chip(
-                    crate::tr!("providers.acp.unsupported").into_owned(),
-                    cx.theme().muted,
-                    cx.theme().muted_foreground,
-                    cx,
-                )
-                .into_any_element()
-            } else {
-                Button::new(gpui::SharedString::from(format!(
-                    "acp-install-{}",
-                    agent.id
-                )))
-                .outline()
-                .xsmall()
-                .loading(agent.installing)
-                .label(crate::tr!("providers.acp.install").into_owned())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let id = id.clone();
-                    this.store.update(cx, |store, _cx| {
-                        store.install_acp_agent(id);
-                    });
-                }))
-                .into_any_element()
-            })
+            .child(state.render(layers).flex_none())
             .into_any_element()
     }
 
-    fn render_marketplace(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_marketplace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let query = self.search.read(cx).value().trim().to_lowercase();
         let market: Rc<Vec<AcpMarketplaceItem>> = Rc::new(
             self.store
@@ -525,27 +594,56 @@ impl AcpPanel {
         let error = self.store.read(cx).acp_registry_error();
         let loading = self.store.read(cx).acp_registry_loading();
         let empty = market.is_empty();
-        let rows = if let Some(error) = error.filter(|_| empty) {
-            material::empty_row(error, cx)
-                .text_color(cx.theme().danger_foreground)
-                .into_any_element()
-        } else if empty && loading {
-            material::empty_row(crate::tr!("providers.acp.loading").into_owned(), cx)
-                .into_any_element()
-        } else {
-            crate::scroll::page_viewport(
-                "acp-market-bounce",
-                &self.market_list,
-                list(
-                    self.market_list.clone(),
-                    cx.processor(move |this, ix: usize, _, cx| {
-                        this.render_market_row(&market[ix], cx)
-                    }),
+        let error = error.filter(|_| empty);
+        let state = crate::motion::CrossFade::new(
+            "acp-market-state",
+            if error.is_some() {
+                0
+            } else if empty && loading {
+                1
+            } else {
+                2
+            },
+            3,
+            window,
+            cx,
+        )
+        .fill();
+        let error = crate::motion::retain("acp-market-error", error, window, cx);
+        let mut layers = Vec::new();
+        if let Some(error) = error.filter(|_| state.shows(0)) {
+            layers.push((
+                0,
+                material::empty_row(error, cx)
+                    .text_color(cx.theme().danger_foreground)
+                    .into_any_element(),
+            ));
+        }
+        if state.shows(1) {
+            layers.push((
+                1,
+                material::empty_row(crate::tr!("providers.acp.loading").into_owned(), cx)
+                    .into_any_element(),
+            ));
+        }
+        if state.shows(2) {
+            layers.push((
+                2,
+                crate::scroll::page_viewport(
+                    "acp-market-bounce",
+                    &self.market_list,
+                    list(
+                        self.market_list.clone(),
+                        cx.processor(move |this, ix: usize, window, cx| {
+                            this.render_market_row(&market[ix], window, cx)
+                        }),
+                    )
+                    .size_full(),
                 )
-                .size_full(),
-            )
-            .into_any_element()
-        };
+                .into_any_element(),
+            ));
+        }
+        let rows = state.render(layers).size_full();
         v_flex()
             .w_full()
             .flex_1()
@@ -575,9 +673,8 @@ impl AcpPanel {
                         .small()
                         .icon(IconName::Plus)
                         .label(crate::tr!("providers.acp.custom").into_owned())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.view = PanelView::CustomAcp;
-                            cx.notify();
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.navigate(PanelView::CustomAcp, window, cx);
                         })),
                 ),
             )
@@ -587,13 +684,14 @@ impl AcpPanel {
     /// The provider entries shown above the ACP marketplace: Claude Code (opens
     /// the third-party endpoint form), another Claude account, and Codex
     /// (present but disabled for now).
-    fn render_provider_entries(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_provider_entries(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         type Open = fn(&mut AcpPanel, &mut Window, &mut Context<AcpPanel>);
         let entry = |id: &'static str,
                      glyph: Icon,
                      title: String,
                      subtitle: String,
                      open: Option<Open>,
+                     window: &mut Window,
                      cx: &mut Context<Self>|
          -> AnyElement {
             let enabled = open.is_some();
@@ -625,9 +723,31 @@ impl AcpPanel {
                         .child(div().text_secondary(false, cx).truncate().child(subtitle)),
                 );
             if let Some(open) = open {
+                // Hover is read at render so its fill can glide.
+                let hovered =
+                    window.use_keyed_state((ElementId::from(id), "hovered"), cx, |_, _| false);
+                let bg = transition(
+                    (id, "bg"),
+                    if *hovered.read(cx) {
+                        cx.theme().list_hover
+                    } else {
+                        cx.theme().muted
+                    },
+                    Transition::new(crate::edge_back::SETTLE),
+                    window,
+                    cx,
+                );
                 material::accessible_clickable(row, id, gpui::Role::Button, title, cx)
                     .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().list_hover))
+                    .bg(bg)
+                    .on_hover(move |is_hovered, _, cx| {
+                        hovered.update(cx, |hovered, cx| {
+                            if *hovered != *is_hovered {
+                                *hovered = *is_hovered;
+                                cx.notify();
+                            }
+                        });
+                    })
                     .child(Icon::new(IconName::ChevronRight).text_color(muted))
                     .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
                     .into_any_element()
@@ -655,6 +775,7 @@ impl AcpPanel {
                 crate::tr!("providers.third_party.claude_title").into_owned(),
                 crate::tr!("providers.third_party.claude_subtitle").into_owned(),
                 Some(|this, window, cx| this.open_third_party(TpPreset::Kimi, window, cx)),
+                window,
                 cx,
             ))
             .when(
@@ -666,6 +787,7 @@ impl AcpPanel {
                         crate::tr!("providers.account.title").into_owned(),
                         crate::tr!("providers.account.subtitle").into_owned(),
                         Some(Self::open_account),
+                        window,
                         cx,
                     ))
                 },
@@ -676,6 +798,7 @@ impl AcpPanel {
                 crate::tr!("providers.third_party.codex_title").into_owned(),
                 crate::tr!("providers.third_party.codex_subtitle").into_owned(),
                 None,
+                window,
                 cx,
             ))
             .into_any_element()
@@ -711,9 +834,8 @@ impl AcpPanel {
                     .xsmall()
                     .icon(IconName::ArrowLeft)
                     .label(crate::tr!("settings.back").into_owned())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.view = PanelView::Home;
-                        cx.notify();
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.navigate(PanelView::Home, window, cx);
                     })),
             )
             .child(
@@ -797,9 +919,7 @@ impl AcpPanel {
                                         inherit_config,
                                     );
                                 });
-                                this.view = PanelView::Home;
                                 window.close_dialog(cx);
-                                cx.notify();
                             })),
                     ),
             )
@@ -816,9 +936,8 @@ impl AcpPanel {
                     .xsmall()
                     .icon(IconName::ArrowLeft)
                     .label(crate::tr!("settings.back").into_owned())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.view = PanelView::Home;
-                        cx.notify();
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.navigate(PanelView::Home, window, cx);
                     })),
             )
             .child(
@@ -898,9 +1017,8 @@ impl AcpPanel {
                     .xsmall()
                     .icon(IconName::ArrowLeft)
                     .label(crate::tr!("settings.back").into_owned())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.view = PanelView::Home;
-                        cx.notify();
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.navigate(PanelView::Home, window, cx);
                     })),
             )
             .child(
@@ -948,9 +1066,7 @@ impl AcpPanel {
                                 this.store.update(cx, |store, _cx| {
                                     store.add_custom_acp_agent(name, command, args, env);
                                 });
-                                this.view = PanelView::Home;
                                 window.close_dialog(cx);
-                                cx.notify();
                             })),
                     ),
             )
@@ -960,18 +1076,47 @@ impl AcpPanel {
 
 impl Render for AcpPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().size_full().min_h_0().child(match self.view {
-            PanelView::Home => v_flex()
-                .size_full()
-                .min_h_0()
-                .gap_3()
-                .child(self.render_provider_entries(cx))
-                .child(self.render_marketplace(window, cx))
-                .into_any_element(),
-            PanelView::ThirdParty => self.render_third_party(cx),
-            PanelView::Account => self.render_account(cx),
-            PanelView::CustomAcp => self.render_custom(cx),
-        })
+        const PAGES: [PanelView; 4] = [
+            PanelView::Home,
+            PanelView::ThirdParty,
+            PanelView::Account,
+            PanelView::CustomAcp,
+        ];
+        let current = PAGES.iter().position(|page| *page == self.view);
+        let pages = crate::motion::CrossFade::new(
+            "acp-panel-page",
+            current.unwrap_or_default(),
+            PAGES.len(),
+            window,
+            cx,
+        )
+        .fill();
+        let mut layers = Vec::new();
+        for (index, page) in PAGES.into_iter().enumerate() {
+            if !pages.shows(index) {
+                continue;
+            }
+            layers.push((
+                index,
+                match page {
+                    PanelView::Home => v_flex()
+                        .size_full()
+                        .min_h_0()
+                        .gap_3()
+                        .child(self.render_provider_entries(window, cx))
+                        .child(self.render_marketplace(window, cx))
+                        .into_any_element(),
+                    PanelView::ThirdParty => self.render_third_party(cx),
+                    PanelView::Account => self.render_account(cx),
+                    PanelView::CustomAcp => self.render_custom(cx),
+                },
+            ));
+        }
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .track_focus(&self.focus_handle)
+            .child(pages.render(layers).size_full())
     }
 }
 
