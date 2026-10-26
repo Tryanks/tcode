@@ -49,6 +49,7 @@ use crate::chat::ChatView;
 use crate::diff::DiffPanel;
 use crate::icon::{Icon, IconName};
 use crate::palette::CommandPalette;
+use crate::panes::ThreadPanel;
 use crate::preview_panel::PreviewPanel;
 #[cfg(preview_backend)]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
@@ -63,6 +64,7 @@ use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
 use crate::window_state::{Destination, OpenPanel, OpenThread, Route, WindowState};
+use gpui_base::dock::{DockArea, DockLayout};
 
 actions!(tcode, [Quit, TogglePalette]);
 
@@ -173,6 +175,8 @@ struct ShellAttachment {
     link: Attachment,
     sidebar: Entity<SessionsSidebar>,
     chat: Entity<ChatView>,
+    /// The wide layout's chat column; its one pane shows `chat`.
+    thread_panes: Entity<DockArea>,
     diff: Entity<DiffPanel>,
     preview: Entity<PreviewPanel>,
     settings_page: Entity<SettingsPage>,
@@ -821,8 +825,17 @@ impl AppShell {
         };
 
         let observed_session_id = store.read(cx).active_session_id();
+        let chat = cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), window, cx));
+        let thread_panel = cx.new(|cx| ThreadPanel::new(chat.clone(), window, cx));
+        let thread_panes = cx.new(|cx| {
+            let mut area = DockArea::new("thread-panes", None, window, cx)
+                .with_renderer(Rc::new(crate::panes::ThreadPanes));
+            area.set_center(DockLayout::tabs().panel(thread_panel.clone()), window, cx);
+            area
+        });
         self.attachment = Some(ShellAttachment {
-            chat: cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), window, cx)),
+            chat,
+            thread_panes,
             diff: cx.new(|cx| DiffPanel::new(store.clone(), self.window_state.clone(), cx)),
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
@@ -2935,19 +2948,11 @@ impl AppShell {
                 panel.size_range(chat_min..Pixels::MAX)
             })
             .child(
-                v_flex()
-                    .size_full()
-                    .bg(crate::material::content_surface(cx))
-                    .shadow_sm()
-                    .child(
-                        div().flex_1().min_h_0().child(
-                            self.attachment
-                                .as_ref()
-                                .expect("attachment checked above")
-                                .chat
-                                .clone(),
-                        ),
-                    ),
+                self.attachment
+                    .as_ref()
+                    .expect("attachment checked above")
+                    .thread_panes
+                    .clone(),
             );
         let attachment = self.attachment.as_ref().expect("attachment checked above");
         // Beside the chat, `flex_none`: whatever the group's sizes leave over or
@@ -4811,6 +4816,150 @@ mod tests {
                 "a restored terminal must not steal focus after navigation has blurred"
             )
         });
+    }
+
+    #[gpui::test]
+    fn timeline_selection_copies_without_focusing_the_composer(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        cx.update(|window, _| window.activate_window());
+        let session = "thread-1";
+        let cwd = std::path::Path::new("/tmp/tcode-selection");
+        let records: Vec<agent::AgentEvent> = vec![
+            agent::AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "answer".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::AssistantMessage {
+                    text: "Selectable answer alpha beta gamma".into(),
+                    summarized: false,
+                },
+            }),
+            agent::AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            },
+        ];
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            cwd.into(),
+            None,
+        );
+        meta.id = session.into();
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: vec![meta],
+                    projects: Vec::new(),
+                }),
+            ),
+            (
+                Topic::SessionStatus {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(session_status(session, cwd))),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                    from: 0,
+                    end: records.len() as u64,
+                    records: records.into_iter().map(Into::into).collect(),
+                },
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, _| store.select_session(session.into()));
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        resize(cx, 1200.);
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+        });
+        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        let text = cx
+            .debug_bounds("markdown-block-0")
+            .expect("the answer's paragraph");
+        let at = |dx: f32| gpui::point(text.left() + px(dx), text.center().y);
+        let none = gpui::Modifiers::default();
+        let select =
+            |from: gpui::Point<Pixels>, to: gpui::Point<Pixels>, cx: &mut VisualTestContext| {
+                cx.simulate_mouse_down(from, MouseButton::Left, none);
+                draw(cx);
+                for step in [from + gpui::point(px(5.), px(0.)), to] {
+                    cx.simulate_mouse_move(step, Some(MouseButton::Left), none);
+                    draw(cx);
+                }
+                cx.simulate_mouse_up(to, MouseButton::Left, none);
+                draw(cx);
+                cx.simulate_keystrokes("cmd-c");
+                draw(cx);
+                let copied = cx.read_from_clipboard().and_then(|item| item.text());
+                cx.update(|window, _| assert!(!focus.is_focused(window), "{copied:?}"));
+                copied
+            };
+
+        assert_eq!(
+            select(at(1.), at(600.), cx).as_deref(),
+            Some("Selectable answer alpha beta gamma")
+        );
+
+        cx.simulate_mouse_down(at(30.), MouseButton::Left, none);
+        cx.simulate_mouse_up(at(30.), MouseButton::Left, none);
+        draw(cx);
+        cx.update(|window, _| assert!(!focus.is_focused(window)));
+        assert_eq!(select(at(1.), at(60.), cx).as_deref(), Some("Select"));
+    }
+
+    #[gpui::test]
+    fn a_click_in_the_thread_pane_focuses_the_composer_only_on_desktop(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        // Focus listeners run only for an active window, as on screen.
+        cx.update(|window, _| window.activate_window());
+        resize(cx, 1200.);
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+        });
+        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        let timeline = gpui::point(px(700.), px(300.));
+        for mobile in [true, false] {
+            cx.update(|window, cx| {
+                crate::window_seam::override_mobile_for_test(cx, mobile);
+                window.blur(cx);
+            });
+            draw(cx);
+            cx.simulate_mouse_down(timeline, MouseButton::Left, gpui::Modifiers::default());
+            cx.simulate_mouse_up(timeline, MouseButton::Left, gpui::Modifiers::default());
+            draw(cx);
+            cx.update(|window, _| {
+                assert_eq!(focus.is_focused(window), !mobile, "mobile: {mobile}");
+            });
+        }
     }
 
     #[gpui::test]
