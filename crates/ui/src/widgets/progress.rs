@@ -57,7 +57,15 @@ impl Styled for Progress {
 }
 impl RenderOnce for Progress {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let color = self.color.unwrap_or(cx.theme().primary);
+        // A bar that changes colour with its value (a usage meter crossing a
+        // threshold) glides between them with the fill.
+        let color = transition(
+            (self.id.clone(), "color"),
+            self.color.unwrap_or(cx.theme().primary),
+            Transition::new(crate::edge_back::SETTLE),
+            window,
+            cx,
+        );
         let height = match self.size {
             Size::XSmall => px(4.),
             Size::Small => px(6.),
