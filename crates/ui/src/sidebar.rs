@@ -19,9 +19,9 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    Action, AnimationExt as _, App, AppContext as _, Context, Entity, InteractiveElement as _,
-    IntoElement, ListAlignment, ListState, ParentElement as _, Render, Role, SharedString,
-    SpringAnimation, SpringConfig, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Action, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ListAlignment, ListState, ParentElement as _, Render, Role, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription,
     Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
@@ -69,10 +69,10 @@ fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static,
 /// Each flat slot: the desktop two-line row and the 2pt gap reserved below it.
 const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(false) + 2.;
 
-/// A critically damped spring keeps reordering legible without bouncing rows
-/// past their destinations. GPUI also makes this snap to the target when the
-/// operating system's reduced-motion preference is enabled.
-const FLAT_REORDER_SPRING: SpringConfig = SpringConfig::new(420., 41., 1.);
+/// A row moved by a reorder travels from where it was; a quarter pixel from
+/// rest is rest.
+const FLAT_REORDER_SPRING: gpui_base::motion::Spring =
+    gpui_base::motion::Spring::new(crate::edge_back::SETTLE).with_epsilon(0.25);
 
 /// A sidebar label that owns the remaining row width, on one line.
 fn sidebar_label(text: impl Into<SharedString>) -> gpui::Div {
@@ -210,19 +210,26 @@ fn project_view_timestamp(meta: &SessionMeta) -> u64 {
     }
 }
 
-fn animate_flat_thread_position(row: gpui::Div, session_id: &str, target_top: f32) -> gpui::Div {
+fn animate_flat_thread_position(
+    row: gpui::Div,
+    session_id: &str,
+    target_top: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::Div {
+    let top = gpui_base::motion::spring(
+        SharedString::from(format!("flat-thread-position-{session_id}")),
+        px(target_top),
+        FLAT_REORDER_SPRING,
+        window,
+        cx,
+    );
     // `list` positions each item root explicitly during prepaint, which
-    // overrides relative offsets applied to that root. Keep an unanimated
-    // outer item for the list to position and move the row inside it instead.
-    div().w_full().child(
-        row.with_spring(
-            gpui::SharedString::from(format!("flat-thread-position-{session_id}")),
-            SpringAnimation::new(FLAT_REORDER_SPRING)
-                .to(px(target_top))
-                .with_epsilon(0.25),
-            move |row, animated_top| row.relative().top(animated_top - px(target_top)),
-        ),
-    )
+    // overrides relative offsets applied to that root. Keep an unmoved outer
+    // item for the list to position and move the row inside it instead.
+    div()
+        .w_full()
+        .child(row.relative().top(top - px(target_top)))
 }
 
 // Thread-row context-menu actions (each carries the target session id, so a
@@ -4308,7 +4315,7 @@ impl Render for SessionsSidebar {
                     let active_id = active_id.clone();
                     let thread_list = list(
                         self.flat_list_state.clone(),
-                        cx.processor(move |this, index: usize, _window, cx| {
+                        cx.processor(move |this, index: usize, window, cx| {
                             let Some(row) = visible.get(index) else {
                                 return div().into_any_element();
                             };
@@ -4378,7 +4385,9 @@ impl Render for SessionsSidebar {
                                 section: tcode_core::thread_sort::thread_section(meta),
                             };
                             this.drop_zone(
-                                animate_flat_thread_position(row, &meta.id, target_top),
+                                animate_flat_thread_position(
+                                    row, &meta.id, target_top, window, cx,
+                                ),
                                 zone,
                                 scope.clone(),
                                 8.,
@@ -4508,7 +4517,7 @@ mod tests {
                 ["first", "second"]
             };
 
-            list(self.list_state.clone(), move |index, _, _| {
+            list(self.list_state.clone(), move |index, window, cx| {
                 let id = order[index];
                 let target_top = index as f32 * FLAT_ROW_HEIGHT;
                 animate_flat_thread_position(
@@ -4517,6 +4526,8 @@ mod tests {
                         .debug_selector(move || format!("flat-reorder-row-{id}")),
                     id,
                     target_top,
+                    window,
+                    cx,
                 )
                 .into_any_element()
             })
