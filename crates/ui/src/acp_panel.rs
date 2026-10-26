@@ -121,7 +121,11 @@ impl AcpAgentCard {
                 Button::new(gpui::SharedString::from(format!("acp-details-{id}")))
                     .ghost()
                     .xsmall()
-                    .icon(IconName::ChevronDown)
+                    .icon(if self.expanded {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    })
                     .tooltip(crate::tr!("providers.toggle_details", name = name.clone()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.expanded = !this.expanded;
