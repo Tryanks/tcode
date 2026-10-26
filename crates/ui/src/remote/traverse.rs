@@ -278,10 +278,12 @@ impl TraversePanel {
                     .px(px(crate::material::CARD_INSET))
                     .pb(cx.theme().tokens.spacing.sm)
                     .child(
-                        gpui_base::Collapsible::new()
-                            .w_full()
-                            .open(source.expanded)
-                            .content(status_detail(status, cx)),
+                        crate::widgets::Collapsible::new(
+                            ("remote-traverse-detail", index),
+                            source.expanded,
+                        )
+                        .w_full()
+                        .content(status_detail(status, cx)),
                     )
             });
             let switch_id = SharedString::from(format!("remote-traverse-{index}"));
