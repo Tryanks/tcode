@@ -9,6 +9,7 @@ use gpui::{
     px,
 };
 use gpui_base::StyledExt as _;
+use gpui_base::motion::{Transition, transition};
 use gpui_base::{SwitchThumb, SwitchTrack};
 use std::rc::Rc;
 
@@ -83,7 +84,7 @@ impl Styled for Switch {
 }
 
 impl RenderOnce for Switch {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let checked = self.checked;
         let (width, height, thumb) = match self.size {
             Size::XSmall | Size::Small => (px(28.), px(16.), px(12.)),
@@ -93,6 +94,25 @@ impl RenderOnce for Switch {
         let checked_bg = self.color.unwrap_or(cx.theme().primary);
         let unchecked_bg = cx.theme().muted;
         let thumb_bg = cx.theme().background;
+        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let track_bg = transition(
+            (self.id.clone(), "track-bg"),
+            if checked { checked_bg } else { unchecked_bg },
+            settle(),
+            window,
+            cx,
+        );
+        let thumb_left = transition(
+            (self.id.clone(), "thumb-left"),
+            if checked {
+                width - thumb - inset * 2
+            } else {
+                px(0.)
+            },
+            settle(),
+            window,
+            cx,
+        );
         gpui_base::Switch::new(self.id.clone())
             .checked(checked)
             .disabled(self.disabled)
@@ -118,26 +138,15 @@ impl RenderOnce for Switch {
                     .items_center()
                     .border(inset)
                     .border_color(cx.theme().background.opacity(0.))
-                    .bg(unchecked_bg)
-                    .styles(|styles| {
-                        styles
-                            .checked(|style| style.bg(checked_bg))
-                            .disabled(|style| style.opacity(0.5))
-                    })
+                    .bg(track_bg)
+                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
                     .child(
                         SwitchThumb::new(checked)
                             .disabled(self.disabled)
                             .size(thumb)
                             .rounded(height)
                             .bg(thumb_bg)
-                            .styles(|styles| {
-                                styles.checked(|style| style.left(width - thumb - inset * 2))
-                            })
-                            .left(if checked {
-                                width - thumb - inset * 2
-                            } else {
-                                px(0.)
-                            }),
+                            .left(thumb_left),
                     )
                     .when_some(self.tooltip, |this, text| {
                         this.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
