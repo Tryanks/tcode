@@ -10,9 +10,9 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -336,28 +336,6 @@ impl OrchestrateSettingsPanel {
         }
     }
 
-    /// The per-item "restore default" affordance: icon-only, ghost, and inline
-    /// immediately after the row's title.
-    fn reset_button(
-        &self,
-        id: impl Into<ElementId>,
-        cx: &mut Context<Self>,
-        on_reset: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
-        let label = crate::tr!("settings.reset_item").into_owned();
-        Button::new(id)
-            .ghost()
-            .xsmall()
-            .icon(IconName::Undo)
-            .tooltip(label.clone())
-            .aria_label(label)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                on_reset(this, window, cx);
-            }))
-            .into_any_element()
-    }
-
     fn row_title(
         &self,
         title: impl Into<gpui::SharedString>,
@@ -443,13 +421,15 @@ impl OrchestrateSettingsPanel {
 
     fn render_child_approval(&self, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.store.read(cx).settings().orchestrate.child_approval;
-        let reset = (selected != ChildApprovalMode::Auto).then(|| {
-            self.reset_button("reset-orchestrate-child-approval", cx, |this, _, cx| {
+        let reset = crate::settings_rows::reset_action(
+            "reset-orchestrate-child-approval",
+            selected != ChildApprovalMode::Auto,
+            cx.listener(|this, _, _, cx| {
                 this.store.update(cx, |store, _cx| {
                     store.set_orchestrate_child_approval(ChildApprovalMode::Auto)
                 });
-            })
-        });
+            }),
+        );
         let selected_label = match selected {
             ChildApprovalMode::Orchestrator => {
                 crate::tr!("orchestrate.child_approval.orchestrator")
@@ -605,13 +585,15 @@ impl OrchestrateSettingsPanel {
 
     fn render_child_worktrees(&self, cx: &mut Context<Self>) -> AnyElement {
         let checked = self.store.read(cx).settings().orchestrate.child_worktrees;
-        let reset = checked.then(|| {
-            self.reset_button("reset-orchestrate-child-worktrees", cx, |this, _, cx| {
+        let reset = crate::settings_rows::reset_action(
+            "reset-orchestrate-child-worktrees",
+            checked,
+            cx.listener(|this, _, _, cx| {
                 this.store.update(cx, |store, _cx| {
                     store.set_orchestrate_child_worktrees(false)
                 });
-            })
-        });
+            }),
+        );
         crate::material::group(cx)
             .child(
                 crate::material::group_row(cx)
@@ -771,15 +753,13 @@ impl OrchestrateSettingsPanel {
             } else {
                 format!("{} · {}", provider_label(provider), row.model)
             };
-            let reset = (!profile.description.is_empty()
-                && profile.bundled_guidance(decision).is_some())
-            .then(|| {
-                self.reset_button(
-                    ("reset-orchestrate-child", index),
-                    cx,
-                    move |this, window, cx| this.reset_child_definition(index, window, cx),
-                )
-            });
+            let reset = crate::settings_rows::reset_action(
+                ("reset-orchestrate-child", index),
+                !profile.description.is_empty() && profile.bundled_guidance(decision).is_some(),
+                cx.listener(move |this, _, window, cx| {
+                    this.reset_child_definition(index, window, cx)
+                }),
+            );
             rows.push(
                 crate::material::group_row_stacked(cx)
                     .items_stretch()
