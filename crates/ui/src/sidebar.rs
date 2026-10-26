@@ -1891,13 +1891,7 @@ impl SessionsSidebar {
         let sort_label = crate::settings::project_sort_label(self.store.read(cx).project_sort());
         bar("sidebar-projects-header", Bar::Section, false, cx)
             .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_caption(cx)
-                    // Small-caps section label; `to_uppercase` is a no-op on CJK.
-                    .child(crate::tr!("sidebar.projects").to_uppercase()),
-            )
+            .justify_end()
             .child(
                 h_flex()
                     .gap(cx.theme().tokens.spacing.xxs)
@@ -2026,12 +2020,7 @@ impl SessionsSidebar {
 
         bar("sidebar-flat-header", Bar::Section, false, cx)
             .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_caption(cx)
-                    .child(crate::tr!("sidebar.threads").to_uppercase()),
-            )
+            .justify_end()
             .child(
                 h_flex()
                     .gap(cx.theme().tokens.spacing.xxs)
