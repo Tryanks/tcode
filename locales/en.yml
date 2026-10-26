@@ -181,8 +181,6 @@ sidebar:
   collapse: "Collapse sidebar"
   expand: "Expand sidebar"
   search: "Search"
-  projects: "PROJECTS"
-  threads: "Threads"
   all_projects: "All projects"
   filter_project: "Filter by project"
   recent: "Recent"
