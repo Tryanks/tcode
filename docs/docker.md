@@ -94,7 +94,6 @@ login, configuration and history under `/data/home`, and none uses a keyring
 on Linux, so the container needs no D-Bus. `/tmp` is not persisted; Claude
 Code keeps its scratchpad and copies of pasted images in `/tmp/claude-<uid>`
 and OpenCode keeps temporary files in `/tmp/opencode`, both lost on restart.
-The [research notes](research/agent-persistence.md) cite each CLI's paths.
 
 The entrypoint initializes the volume, then runs both CLI installation and
 Tcode as `PUID:PGID` (1000:1000 by default). Agent processes and terminal panes
