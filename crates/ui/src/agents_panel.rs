@@ -298,10 +298,18 @@ fn detail(provider: Option<ProviderKind>, model: Option<&str>) -> String {
         .join(" · ")
 }
 
-/// Open a thread reached from its lead. An archived agent is reached the way
-/// Settings → Archived Threads reaches every archived thread: unarchived.
-pub(crate) fn open_agent(store: &Entity<WorkspaceStore>, id: String, cx: &mut App) {
-    store.update(cx, |store, cx| {
+/// Open a thread reached from its lead: beside the lead's pane on the
+/// desktop, in the lead's place where there are no panes or no room. An
+/// archived agent is reached the way Settings → Archived Threads reaches
+/// every archived thread: unarchived.
+pub(crate) fn open_agent(
+    store: &Entity<WorkspaceStore>,
+    id: String,
+    lead: Option<&str>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    store.update(cx, |store, _| {
         if store
             .archived_sessions()
             .iter()
@@ -309,8 +317,10 @@ pub(crate) fn open_agent(store: &Entity<WorkspaceStore>, id: String, cx: &mut Ap
         {
             store.unarchive_session(id.clone());
         }
-        store.select_session(id, cx);
     });
+    if !crate::shell::show_beside(&id, lead, window, cx) {
+        store.update(cx, |store, cx| store.select_session(id, cx));
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -453,7 +463,8 @@ impl AgentsPanel {
         if let Some(sheet) = self.sheet.as_ref().and_then(WeakEntity::upgrade) {
             sheet.update(cx, |sheet, cx| sheet.dismiss(window, cx));
         }
-        open_agent(&self.store, action.0.clone(), cx);
+        let lead = self.store.read(cx).active_session_id();
+        open_agent(&self.store, action.0.clone(), lead.as_deref(), window, cx);
     }
 
     fn on_stop(&mut self, action: &AgentStop, _: &mut Window, cx: &mut Context<Self>) {

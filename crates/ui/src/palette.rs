@@ -95,6 +95,7 @@ enum Action {
     },
     /// A pane command, which the shell answers.
     Pane(PaneAction),
+    Layout(crate::panes::PaneLayout),
 }
 
 /// One rendered palette row.
@@ -456,6 +457,13 @@ impl CommandPalette {
                 }
             }
         }
+        for layout in crate::shell::pane_layouts(window, cx) {
+            push_action(
+                layout.label().into_owned(),
+                layout.icon(),
+                Action::Layout(layout),
+            );
+        }
         if store.scope().is_full() {
             push_action(
                 crate::tr!("palette.check_updates").into_owned(),
@@ -660,6 +668,10 @@ impl CommandPalette {
             Action::Pane(action) => {
                 self.close(cx);
                 window.dispatch_action(action(), cx);
+            }
+            Action::Layout(layout) => {
+                self.close(cx);
+                window.dispatch_action(Box::new(layout), cx);
             }
             Action::OpenThread { session_id, turn } => {
                 self.store.update(cx, |store, cx| {

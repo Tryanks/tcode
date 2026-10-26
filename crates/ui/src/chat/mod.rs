@@ -2206,9 +2206,16 @@ impl ChatView {
                 .any(|meta| meta.id == child_id)
         };
         let store = self.workspace_store.clone();
+        let lead = self.session_id.clone();
         let on_open = exists.then(|| {
-            Box::new(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                crate::agents_panel::open_agent(&store, child_id.clone(), cx);
+            Box::new(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                crate::agents_panel::open_agent(
+                    &store,
+                    child_id.clone(),
+                    lead.as_deref(),
+                    window,
+                    cx,
+                );
             }) as components::subagent::ClickHandler
         });
         let toggle_key = key.clone();
@@ -2720,13 +2727,22 @@ impl ChatView {
                 })
                 .map(|meta| meta.id)
         });
+        let shown = mirror_id
+            .as_deref()
+            .is_some_and(|mirror_id| crate::shell::shown_in_pane(mirror_id, cx));
         let on_open = mirror_id.map(|mirror_id| {
             let store = self.workspace_store.clone();
-            Box::new(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                store.update(cx, |store, cx| store.select_session(mirror_id.clone(), cx));
+            Box::new(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                crate::agents_panel::open_agent(
+                    &store,
+                    mirror_id.clone(),
+                    active_id.as_deref(),
+                    window,
+                    cx,
+                );
             }) as components::subagent::ClickHandler
         });
-        components::subagent::subagent_row(entry, on_open, cx)
+        components::subagent::subagent_row(entry, on_open, shown, cx)
     }
 
     /// Show the "Copied!" confirmation on `key` for 2s; a second copy re-arms the timer.

@@ -7,17 +7,18 @@ use gpui::{
     Action, AnyElement, AnyView, App, Axis, Bounds, Context, Div, Empty, Entity, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
     Render, Stateful, Styled as _, Subscription, WeakEntity, Window, actions, div,
-    prelude::FluentBuilder as _,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::dock::{
-    DockAreaRenderer, PaneNode, PaneRef, Panel, PanelEvent, PanelId, TabGroup, TabGroupContext,
-    TabGroupRenderer,
+    DockAreaRenderer, DockLayout, DropIndicator, PaneNode, PaneRef, Panel, PanelEvent, PanelId,
+    TabGroup, TabGroupContext, TabGroupRenderer,
 };
-use gpui_base::{ElementExt as _, v_flex};
+use gpui_base::{ElementExt as _, Placement, v_flex};
 use serde::Deserialize;
 
 use crate::chat::{ChatView, WindowEdges};
 use crate::icon::{Icon, IconName};
+use crate::theme::ActiveTheme as _;
 
 actions!(tcode, [SplitRight, SplitDown, ClosePane, ZoomPane]);
 
@@ -32,6 +33,76 @@ pub(crate) enum FocusPane {
     Down,
     Next,
     Previous,
+}
+
+/// Show a thread in a new pane right of the focused one, or focus the pane
+/// already showing it.
+#[derive(Action, Clone, Debug, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode, no_json)]
+pub(crate) struct OpenInNewPane(pub(crate) String);
+
+/// Lay the whole column out at once. The panes there fill the new slots in
+/// the layout's order, the focused one first; panes left over close, and
+/// slots left over wait for a thread.
+#[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode, no_json)]
+pub(crate) enum PaneLayout {
+    Columns,
+    Grid,
+    OneBesideTwo,
+    Single,
+    /// The focused thread on the left, its agents stacked on the right.
+    SpreadAgents,
+}
+
+impl PaneLayout {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Columns,
+        Self::Grid,
+        Self::OneBesideTwo,
+        Self::Single,
+        Self::SpreadAgents,
+    ];
+
+    /// How a layout of `count` panes grows from its first: pane `ix + 1`
+    /// opens on the given side of pane `from`.
+    pub(crate) fn splits(self, count: usize) -> Vec<(usize, Placement)> {
+        match self {
+            Self::Single => Vec::new(),
+            Self::Columns => vec![(0, Placement::Right)],
+            Self::Grid => vec![
+                (0, Placement::Right),
+                (0, Placement::Bottom),
+                (1, Placement::Bottom),
+            ],
+            Self::OneBesideTwo => vec![(0, Placement::Right), (1, Placement::Bottom)],
+            Self::SpreadAgents => (0..count.saturating_sub(1))
+                .map(|ix| match ix {
+                    0 => (0, Placement::Right),
+                    ix => (ix, Placement::Bottom),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn icon(self) -> IconName {
+        match self {
+            Self::Columns => IconName::Columns2,
+            Self::Grid | Self::OneBesideTwo => IconName::LayoutDashboard,
+            Self::Single => IconName::Square,
+            Self::SpreadAgents => IconName::Users,
+        }
+    }
+
+    pub(crate) fn label(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Columns => crate::tr!("panes.layout_columns"),
+            Self::Grid => crate::tr!("panes.layout_grid"),
+            Self::OneBesideTwo => crate::tr!("panes.layout_one_beside_two"),
+            Self::Single => crate::tr!("panes.layout_single"),
+            Self::SpreadAgents => crate::tr!("panes.spread_agents"),
+        }
+    }
 }
 
 /// The most panes the chat column holds.
@@ -187,8 +258,20 @@ impl Panel for ThreadPanel {
     }
 }
 
+/// Whether a thread dragged over a pane would land there: the pane's content
+/// bounds and the edge it would open on, `None` for the pane itself.
+pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window, &App) -> bool>;
+
 /// The panes' appearance: the area is the chat column's reading surface.
-pub(crate) struct ThreadPanes;
+pub(crate) struct ThreadPanes {
+    lands: DropLands,
+}
+
+impl ThreadPanes {
+    pub(crate) fn new(lands: DropLands) -> Self {
+        Self { lands }
+    }
+}
 
 impl DockAreaRenderer for ThreadPanes {
     fn frame(&self, _: &mut Window, cx: &mut App) -> Stateful<Div> {
@@ -199,12 +282,21 @@ impl DockAreaRenderer for ThreadPanes {
     }
 
     fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
-        Rc::new(ThreadTabs)
+        Rc::new(ThreadTabs {
+            lands: self.lands.clone(),
+        })
     }
 }
 
+/// A placeholder travels between the drops it would land in; a quarter
+/// pixel from rest is rest.
+const DROP_SPRING: gpui_base::motion::Spring =
+    gpui_base::motion::Spring::new(crate::edge_back::SETTLE).with_epsilon(0.25);
+
 /// A pane's thread wears its own header, so the group draws no tab bar.
-struct ThreadTabs;
+struct ThreadTabs {
+    lands: DropLands,
+}
 
 impl TabGroupRenderer for ThreadTabs {
     fn render_tab_bar(&self, _: &TabGroupContext, _: &mut Window, _: &mut App) -> AnyElement {
@@ -242,6 +334,67 @@ impl TabGroupRenderer for ThreadTabs {
                 )
             })
             .into_any_element()
+    }
+
+    /// The pane a dragged thread would open as, or the pane it would replace.
+    /// `DropIndicator` names no group, so the shell finds the pane by the
+    /// bounds the drag hovers.
+    fn render_drop_indicator(
+        &self,
+        indicator: DropIndicator,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        if !(self.lands)(indicator.bounds(), indicator.placement(), window, cx) {
+            return None;
+        }
+        let to = indicator.to();
+        let id = "pane-drop-placeholder";
+        let spring = |channel, target, window: &mut Window, cx: &mut App| -> Pixels {
+            gpui_base::motion::spring((id, channel), target, DROP_SPRING, window, cx)
+        };
+        let left = spring("left", to.origin().x, window, cx);
+        let top = spring("top", to.origin().y, window, cx);
+        let width = spring("width", to.size().width, window, cx);
+        let height = spring("height", to.size().height, window, cx);
+        let inset = cx.theme().tokens.spacing.sm;
+        let accent = cx.theme().primary;
+        Some(
+            div()
+                .debug_selector(|| "pane-drop-indicator".into())
+                .absolute()
+                .left(left + inset)
+                .top(top + inset)
+                .w((width - inset * 2.).max(px(0.)))
+                .h((height - inset * 2.).max(px(0.)))
+                .rounded(crate::material::radius_card(cx))
+                .border_1()
+                .border_color(accent.opacity(0.5))
+                .bg(accent.opacity(0.1))
+                .into_any_element(),
+        )
+    }
+}
+
+/// `node` as a layout to install, each panel the pane `pane` names.
+pub(crate) fn layout_of(
+    node: &PaneNode,
+    pane: &impl Fn(PanelId) -> Option<Entity<ThreadPanel>>,
+) -> DockLayout {
+    match node.kind() {
+        PaneRef::Tabs { panels, .. } => panels
+            .iter()
+            .filter_map(|panel| pane(*panel))
+            .fold(DockLayout::tabs(), DockLayout::panel),
+        PaneRef::Split { axis, children, .. } => {
+            let split = match axis {
+                Axis::Horizontal => DockLayout::h_split(),
+                Axis::Vertical => DockLayout::v_split(),
+            };
+            children.iter().fold(split, |split, child| {
+                split.child(layout_of(child, pane), None)
+            })
+        }
     }
 }
 
