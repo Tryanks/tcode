@@ -1,4 +1,6 @@
-use gpui::{AnyElement, App, IntoElement as _, ParentElement as _, Styled as _, div, px};
+use gpui::{
+    AnyElement, App, ElementId, IntoElement as _, ParentElement as _, Styled as _, Window, div, px,
+};
 use gpui_base::{h_flex, v_flex};
 
 use crate::theme::ActiveTheme as _;
@@ -18,13 +20,20 @@ fn qr_modules(payload: &str) -> Option<(usize, Vec<bool>)> {
 /// A link's QR next to the text about it. Compact stacks the QR over the
 /// text rather than putting a fixed-size image beside text that then has
 /// nowhere to wrap; a wide layout too narrow for both wraps the QR under it.
+/// A new payload cross-fades from the code `id` showed before.
 pub(super) fn beside_qr(
+    id: impl Into<ElementId>,
     text: impl gpui::IntoElement,
     payload: &str,
     compact: bool,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> gpui::Div {
-    let qr = qr_element(payload, compact, cx);
+    let qr = qr_modules(payload).is_some().then(|| {
+        crate::motion::cross_fade(id, payload.to_owned(), window, cx, |payload, _, cx| {
+            qr_element(payload, compact, cx).unwrap_or_else(|| div().into_any_element())
+        })
+    });
     let layout = if compact {
         v_flex().items_center().children(qr).child(text)
     } else {

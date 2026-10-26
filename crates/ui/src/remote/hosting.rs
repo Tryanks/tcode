@@ -470,7 +470,12 @@ impl HostingPanel {
         cx.notify();
     }
 
-    fn render_machine(&mut self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_machine(
+        &mut self,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (hosting, pairing, failure) = cx
             .try_global::<RemoteController>()
             .map(|controller| {
@@ -494,19 +499,20 @@ impl HostingPanel {
             .error(failure)
             .into_any_element(),
         ];
-        if hosting {
-            rows.push(
-                ToggleRow::new(
-                    "remote-pairing",
-                    crate::tr!("remote.pairing.title"),
-                    pairing,
-                    compact,
-                    cx.listener(|this, checked: &bool, window, cx| {
-                        this.set_pairing_enabled(*checked, window, cx);
-                    }),
-                )
-                .into_any_element(),
-            );
+        // Pairing is a setting of a running host, so it folds in and out
+        // with hosting.
+        if let Some(shown) =
+            crate::motion::shown("remote-pairing", hosting.then_some(()), window, cx)
+        {
+            rows.push(shown.fold(ToggleRow::new(
+                "remote-pairing",
+                crate::tr!("remote.pairing.title"),
+                pairing,
+                compact,
+                cx.listener(|this, checked: &bool, window, cx| {
+                    this.set_pairing_enabled(*checked, window, cx);
+                }),
+            )));
         }
         rows.push(
             field_row(compact, cx)
@@ -542,13 +548,18 @@ impl Render for HostingPanel {
         let spaces = super::spaces::local(cx);
         self.observer.watch(spaces.as_ref(), cx);
         let hosting = spaces.is_some();
+        // The section folds itself in and out with hosting, so it stays
+        // mounted; its gap rides inside the fold.
+        let gap = crate::material::section_gap(cx);
+        let access = crate::motion::shown("remote-access-gap", hosting.then_some(()), window, cx)
+            .map(|shown| shown.fold(div().h(gap)));
         v_flex()
             .w_full()
             .min_w_0()
-            .gap(crate::material::section_gap(cx))
             .debug_selector(|| "hosting-settings".into())
-            .child(self.render_machine(compact, cx))
-            .when(hosting, |column| column.child(self.access.clone()))
+            .child(self.render_machine(compact, window, cx))
+            .children(access)
+            .child(self.access.clone())
     }
 }
 
@@ -594,6 +605,8 @@ mod tests {
             HostingPanel::new(store, window, cx)
         });
         cx.simulate_resize(gpui::size(px(900.), px(1200.)));
+        // One frame starts whatever the change moves, the next draws it
+        // settled.
         let draw = |cx: &mut gpui::VisualTestContext| {
             for _ in 0..2 {
                 cx.run_until_parked();
@@ -601,6 +614,7 @@ mod tests {
                     window.refresh();
                     _ = window.draw(cx);
                 });
+                cx.executor().advance_clock(crate::edge_back::SETTLE);
             }
         };
         draw(cx);
