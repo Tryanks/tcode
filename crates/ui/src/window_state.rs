@@ -162,8 +162,8 @@ pub struct WindowState {
     /// Where the window has been, oldest first. Never empty: `history[0]` is
     /// [`Destination::Hosts`], the root the platform's Back gesture falls off.
     history: Vec<Destination>,
-    /// Whether the palette is on screen: open, or still leaving after a close
-    /// (see [`Self::palette_shown`]). Its host keeps it mounted meanwhile.
+    /// Whether the palette is open. A closed palette stays on screen while it
+    /// leaves (see [`Self::palette_mounted`]).
     pub palette_open: bool,
     palette_leaving: bool,
     _palette_exit: Option<Task<()>>,
@@ -377,26 +377,25 @@ impl WindowState {
         cx.notify();
     }
 
-    /// Whether the palette is open, as opposed to on screen while it leaves.
-    pub fn palette_shown(&self) -> bool {
-        self.palette_open && !self.palette_leaving
+    /// Whether the palette is on screen: open, or still leaving after a
+    /// close. Its host keeps it mounted meanwhile.
+    pub fn palette_mounted(&self) -> bool {
+        self.palette_open || self.palette_leaving
     }
 
     /// The palette leaves over `SETTLE`, mounted and inert, then unmounts.
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
-        if !self.palette_shown() {
+        if !self.palette_open {
             return;
         }
-        if cx.reduce_motion() {
-            self.palette_open = false;
-        } else {
+        self.palette_open = false;
+        if !cx.reduce_motion() {
             self.palette_leaving = true;
             self._palette_exit = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(crate::edge_back::SETTLE)
                     .await;
                 this.update(cx, |state, cx| {
-                    state.palette_open = false;
                     state.palette_leaving = false;
                     cx.notify();
                 })
@@ -407,7 +406,7 @@ impl WindowState {
     }
 
     pub fn toggle_palette(&mut self, cx: &mut Context<Self>) {
-        if self.palette_shown() {
+        if self.palette_open {
             self.close_palette(cx);
         } else {
             self.open_palette(cx);
