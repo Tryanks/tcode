@@ -124,20 +124,28 @@ fn reply_field(cx: &App) -> gpui::Div {
         .child(crate::tr!("pull_requests.compose.reply_row"))
 }
 
-/// A comment's body and its editor fade in as one replaces the other.
-fn fade_on_edit(comment: &str, editing: bool, body: AnyElement) -> AnyElement {
+/// A comment's body and its editor cross-fade as one replaces the other, each in its own
+/// layer. A closed editor's input is gone, so on cancel or save only the body fades in.
+fn fade_on_edit(
+    comment: &str,
+    editor: Option<AnyElement>,
+    text: Option<AnyElement>,
+) -> Option<AnyElement> {
+    if editor.is_none() && text.is_none() {
+        return None;
+    }
     let id = SharedString::from(format!("pr-comment-editing-{comment}"));
-    let body = std::cell::RefCell::new(Some(body));
-    crate::motion::Sampled::new(move |window, cx| {
-        crate::motion::cross_fade(id, editing, window, cx, |shown, _, _| {
-            match body.borrow_mut().take().filter(|_| *shown == editing) {
-                Some(body) => body,
-                // What it replaced has gone with its state; only the new one fades in.
-                None => div().into_any_element(),
-            }
+    let editing = editor.is_some();
+    Some(
+        crate::motion::Sampled::new(move |window, cx| {
+            let fade = crate::motion::CrossFade::new(id, usize::from(editing), 2, window, cx);
+            let layers = [(0, text), (1, editor)]
+                .into_iter()
+                .filter_map(|(layer, element)| element.map(|element| (layer, element)));
+            fade.render(layers).w_full().min_w_0().into_any_element()
         })
-    })
-    .into_any_element()
+        .into_any_element(),
+    )
 }
 
 /// A reaction chip; the account's own reactions show selected.
@@ -1023,10 +1031,9 @@ impl PullRequestView {
             Slot::Edit(comment.id.clone())
         };
         let editing = self.editing_body(&slot, cx);
-        let is_editing = editing.is_some();
-        let body = editing.or_else(|| self.body(comment, true, cx));
-        let empty_description = description && body.is_none();
-        let body = body.map(|body| fade_on_edit(&comment.id, is_editing, body));
+        let text = self.body(comment, true, cx);
+        let empty_description = description && editing.is_none() && text.is_none();
+        let body = fade_on_edit(&comment.id, editing, text);
         v_flex()
             .w_full()
             .min_w_0()
@@ -1324,10 +1331,7 @@ impl PullRequestView {
             let editing = (!inline)
                 .then(|| self.editing_body(&Slot::Edit(comment.id.clone()), cx))
                 .flatten();
-            let is_editing = editing.is_some();
-            let body = editing
-                .or_else(|| self.body(&comment, inline, cx))
-                .map(|body| fade_on_edit(&comment.id, is_editing, body));
+            let body = fade_on_edit(&comment.id, editing, self.body(&comment, inline, cx));
             card = card.child(
                 v_flex()
                     .px(px(material::CARD_INSET))
@@ -1509,10 +1513,10 @@ impl PullRequestView {
                 };
                 // The editor cross-fades over the field that stood for it.
                 let id = SharedString::from(format!("pr-reply-editing-{}", thread.id));
-                let reply = std::cell::RefCell::new(Some(reply));
+                let mut reply = Some(reply);
                 crate::motion::Sampled::new(move |window, cx| {
                     crate::motion::cross_fade(id, editing, window, cx, |shown, _, cx| {
-                        match reply.borrow_mut().take().filter(|_| *shown == editing) {
+                        match reply.take().filter(|_| *shown == editing) {
                             Some(reply) => reply,
                             None if !*shown => {
                                 div().w_full().child(reply_field(cx)).into_any_element()
@@ -1866,9 +1870,9 @@ fn settle_media(url: &str, stand_in: Option<(bool, AnyElement)>) -> Option<AnyEl
     let id = SharedString::from(format!("pr-media-{url}"));
     Some(
         crate::motion::Sampled::new(move |window, cx| {
-            let stand_in = std::cell::RefCell::new(Some(stand_in));
+            let mut stand_in = Some(stand_in);
             crate::motion::cross_fade(id, loading, window, cx, |shown, _, cx| {
-                match stand_in.borrow_mut().take().filter(|_| *shown == loading) {
+                match stand_in.take().filter(|_| *shown == loading) {
                     Some(stand_in) => stand_in,
                     None if *shown => loading_media(cx).into_any_element(),
                     None => div().into_any_element(),
