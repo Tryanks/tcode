@@ -1336,38 +1336,31 @@ impl DiffPanel {
     fn render_body(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let loading = self.cache.is_none()
             && (self.loading_key.is_some() || self.render_loading_key.is_some());
-        let reading = gpui_base::motion::transition(
-            "diff-loading",
-            if loading { 1. } else { 0. },
-            crate::motion::settle(),
-            window,
-            cx,
-        );
-        let body = self.render_loaded(window, cx);
-        div()
-            .relative()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .opacity(if loading { reading } else { 1. - reading })
-                    .child(body),
-            )
-            .when(!loading && reading > 0., |slot| {
-                slot.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .flex_col()
-                        .opacity(reading)
-                        .child(self.render_status(crate::tr!("diff.loading").into_owned(), cx)),
-                )
-            })
+        let fade =
+            crate::motion::CrossFade::new("diff-loading", usize::from(!loading), 2, window, cx)
+                .fill();
+        let column = |body: AnyElement| {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(body)
+                .into_any_element()
+        };
+        let mut layers = Vec::new();
+        if fade.shows(0) {
+            layers.push((
+                0,
+                column(self.render_status(crate::tr!("diff.loading").into_owned(), cx)),
+            ));
+        }
+        if !loading {
+            layers.push((1, column(self.render_loaded(window, cx))));
+        }
+        fade.render(layers)
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .into_any_element()
     }
 
