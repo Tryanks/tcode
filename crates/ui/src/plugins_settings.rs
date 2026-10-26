@@ -461,13 +461,13 @@ impl PluginsSettingsPanel {
         let on = off.is_none();
         let loading = on && catalog.as_ref().is_none_or(|catalog| catalog.loading);
         let refresh_id = format!("plugins-refresh-{profile_id}");
-        let spinner = crate::motion::transient(
+        let spinner = crate::motion::shown(
             SharedString::from(format!("plugins-loading-{profile_id}")),
             loading.then_some(()),
             window,
             cx,
         );
-        let refresh = crate::motion::transient(
+        let refresh = crate::motion::shown(
             SharedString::from(format!("plugins-refresh-slot-{profile_id}")),
             on.then_some(()),
             window,
@@ -486,9 +486,9 @@ impl PluginsSettingsPanel {
                     )
                     .child(div().text_secondary(false, cx).child(subtitle.into_owned())),
             )
-            .children(spinner.map(|((), spinner)| spinner.wrap(Spinner::new().color(muted))))
-            .children(refresh.map(|((), refresh)| {
-                refresh.wrap(
+            .children(spinner.map(|spinner| spinner.fade(Spinner::new().color(muted))))
+            .children(refresh.map(|refresh| {
+                refresh.fade(
                     Button::new(SharedString::from(refresh_id.clone()))
                         .debug_selector(move || refresh_id.clone())
                         .ghost()
@@ -516,7 +516,7 @@ impl PluginsSettingsPanel {
         let unfolded = gpui_base::motion::transition(
             (body_id.clone(), "built"),
             if on { 1. } else { 0. },
-            gpui_base::motion::Transition::new(crate::edge_back::SETTLE),
+            crate::motion::settle(),
             window,
             cx,
         );
@@ -709,21 +709,21 @@ impl PluginsSettingsPanel {
         });
         let mut rows = Vec::new();
         let status_id = SharedString::from(format!("plugins-status-{profile_id}"));
-        if let Some((status, slot)) =
-            crate::motion::transient(status_id.clone(), status, window, cx)
-        {
-            let row = match status {
+        if let Some(slot) = crate::motion::shown(status_id.clone(), status, window, cx) {
+            let row = match slot.value.clone() {
                 CatalogStatus::Note(text) => {
-                    let text =
-                        crate::motion::swap((ElementId::from(status_id), "text"), text, window, cx);
+                    let text = crate::motion::cross_fade(
+                        (ElementId::from(status_id), "text"),
+                        text,
+                        window,
+                        cx,
+                        |text, _, _| div().child(text.clone()).into_any_element(),
+                    );
                     material::group_row_stacked(cx)
                         .justify_center()
                         .text_secondary(false, cx)
                         .text_color(muted)
-                        .child(
-                            text.render(|text| div().child(text).into_any_element())
-                                .w_full(),
-                        )
+                        .child(text)
                 }
                 CatalogStatus::Failed(message) => material::group_row_stacked(cx)
                     .debug_selector(|| "plugins-list-error".into())
@@ -733,7 +733,7 @@ impl PluginsSettingsPanel {
                     .child(crate::tr!("providers.plugins.list_failed").into_owned())
                     .child(verbatim(message, cx)),
             };
-            rows.push(slot.wrap(row).into_any_element());
+            rows.push(slot.fold(row));
         }
         for error in catalog.iter().flat_map(|catalog| &catalog.errors) {
             rows.push(
@@ -786,7 +786,7 @@ impl PluginsSettingsPanel {
         };
         let row_id = format!("plugin-row-{profile_id}-{}", entry.id);
         let toggle_id = format!("plugin-details-{profile_id}-{}", entry.id);
-        let settle = || gpui_base::motion::Transition::new(crate::edge_back::SETTLE);
+        let settle = crate::motion::settle;
         let enabled_id = SharedString::from(format!("{row_id}-enabled"));
         let enabled_bg = gpui_base::motion::transition(
             (enabled_id.clone(), "bg"),
@@ -802,13 +802,14 @@ impl PluginsSettingsPanel {
             window,
             cx,
         );
-        let enabled_label = crate::motion::swap(
+        let enabled_label = crate::motion::cross_fade(
             (ElementId::from(enabled_id), "label"),
             SharedString::from(enabled_label.into_owned()),
             window,
             cx,
+            |label, _, _| label.clone().into_any_element(),
         );
-        let spinner = crate::motion::transient(
+        let spinner = crate::motion::shown(
             SharedString::from(format!("{row_id}-pending")),
             pending.then_some(()),
             window,
@@ -839,11 +840,9 @@ impl PluginsSettingsPanel {
                     .child(
                         material::chip_surface(enabled_bg, enabled_fg, cx)
                             .overflow_hidden()
-                            .child(enabled_label.render(|label| label.into_any_element())),
+                            .child(enabled_label),
                     )
-                    .children(
-                        spinner.map(|((), spinner)| spinner.wrap(Spinner::new().color(muted))),
-                    ),
+                    .children(spinner.map(|spinner| spinner.fade(Spinner::new().color(muted)))),
             )
             .when(has_details, |row| {
                 row.child(
@@ -1122,7 +1121,7 @@ impl PluginsSettingsPanel {
         let busy = !catalog.pending.is_empty();
         let pending = catalog.pending.contains(&entry.id);
         let row_id = format!("plugin-available-{profile_id}-{}", entry.id);
-        let spinner = crate::motion::transient(
+        let spinner = crate::motion::shown(
             SharedString::from(format!("{row_id}-pending")),
             pending.then_some(()),
             window,
@@ -1188,8 +1187,7 @@ impl PluginsSettingsPanel {
                                 row.child(div().text_meta_mono(false, cx).child(version))
                             })
                             .children(
-                                spinner
-                                    .map(|((), spinner)| spinner.wrap(Spinner::new().color(muted))),
+                                spinner.map(|spinner| spinner.fade(Spinner::new().color(muted))),
                             ),
                     )
                     .when_some(entry.description.clone(), |col, description| {
@@ -1234,7 +1232,7 @@ impl PluginsSettingsPanel {
                 let removable = catalog.marketplace_actions.iter().any(|action| {
                     matches!(action, MarketplaceAction::Remove { marketplace: name, .. } if *name == marketplace.name)
                 });
-                let spinner = crate::motion::transient(
+                let spinner = crate::motion::shown(
                     SharedString::from(format!(
                         "plugin-marketplace-pending-{profile_id}-{}",
                         marketplace.name
@@ -1271,8 +1269,8 @@ impl PluginsSettingsPanel {
                                         muted,
                                         cx,
                                     ))
-                                    .children(spinner.map(|((), spinner)| {
-                                        spinner.wrap(Spinner::new().color(muted))
+                                    .children(spinner.map(|spinner| {
+                                        spinner.fade(Spinner::new().color(muted))
                                     })),
                             )
                             .child(
