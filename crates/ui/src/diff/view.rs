@@ -1713,25 +1713,35 @@ impl Render for DiffPanel {
             .when(!compact, |root| {
                 root.child(self.render_tab_strip(window, cx))
             });
-        // A tab's body fades in in place of the one before it, which is another view and goes
-        // at once.
-        let shown = crate::motion::appear(
-            gpui::SharedString::from(format!("right-tab-body-{tab:?}")),
-            true,
-            window,
-            cx,
-        )
-        .progress;
-        let body = v_flex().flex_1().min_h_0().opacity(shown);
-        root.child(match tab {
-            // AppShell mounts Preview separately; this container handles Diff/Plan.
-            RightTab::Diff | RightTab::Preview => body
-                .child(self.render_toolbar(cx))
-                .child(self.render_body(window, cx)),
-            RightTab::PullRequests => body.child(self.pull_requests.clone()),
-            RightTab::Plan => body.child(self.plan.clone()),
-            RightTab::Agents => body.child(self.agents.clone()),
-        })
+        // Tab bodies cross-fade, each in its own layer, built only while it shows.
+        let layer = match tab {
+            RightTab::Diff | RightTab::Preview => 0,
+            RightTab::PullRequests => 1,
+            RightTab::Plan => 2,
+            RightTab::Agents => 3,
+        };
+        let fade = crate::motion::CrossFade::new("right-tab-body", layer, 4, window, cx).fill();
+        let body = || v_flex().size_full().min_h_0();
+        let mut layers = Vec::new();
+        if fade.shows(0) {
+            layers.push((
+                0,
+                body()
+                    .child(self.render_toolbar(cx))
+                    .child(self.render_body(window, cx))
+                    .into_any_element(),
+            ));
+        }
+        for (index, view) in [
+            (1, self.pull_requests.clone().into_any_element()),
+            (2, self.plan.clone().into_any_element()),
+            (3, self.agents.clone().into_any_element()),
+        ] {
+            if fade.shows(index) {
+                layers.push((index, body().child(view).into_any_element()));
+            }
+        }
+        root.child(fade.render(layers).flex_1().min_h_0())
     }
 }
 
