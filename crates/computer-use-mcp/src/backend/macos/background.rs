@@ -99,6 +99,7 @@ impl BackgroundDispatcher {
         button: MouseButton,
         click_count: u32,
     ) -> Result<(), BackendError> {
+        self.prime()?;
         let point = CGPoint::new(x, y);
         for (index, (down, up)) in input::click_events(x, y, button, click_count)?
             .into_iter()
@@ -112,6 +113,25 @@ impl BackgroundDispatcher {
             }
         }
         self.last_point.set(point);
+        Ok(())
+    }
+
+    /// Chromium swallows the first click a background window receives as its
+    /// activation click. This click at (-1, -1) lies outside every window, so
+    /// it is the one swallowed there, and lands on nothing in an app that would
+    /// take it as a real click.
+    fn prime(&self) -> Result<(), BackendError> {
+        let point = CGPoint::new(-1.0, -1.0);
+        let Some((down, up)) = input::click_events(point.x, point.y, MouseButton::Left, 1)?
+            .into_iter()
+            .next()
+        else {
+            return Err(operation("could not build the background click primer"));
+        };
+        self.post_mouse(&down, point, 1, 1.0);
+        thread::sleep(Duration::from_millis(30));
+        self.post_mouse(&up, point, 1, 0.0);
+        thread::sleep(Duration::from_millis(20));
         Ok(())
     }
 
@@ -137,6 +157,7 @@ impl BackgroundDispatcher {
 
     pub(super) fn drag(&self, path: &[[f64; 2]], button: MouseButton) -> Result<(), BackendError> {
         let events = input::drag_events(path, button)?;
+        self.prime()?;
         let final_index = events.len().saturating_sub(1);
         for (index, event) in events.into_iter().enumerate() {
             let point_index = index.min(path.len().saturating_sub(1));
@@ -345,9 +366,6 @@ impl BackgroundActivation {
 
         post_appkit_event(target_pid, i64::from(root.window_id), 1);
         thread::sleep(Duration::from_millis(20));
-        let dispatcher = BackgroundDispatcher::new(root)?;
-        let (center_x, center_y) = root.frame.center();
-        dispatcher.click(center_x, center_y, MouseButton::Left, 1)?;
         Ok(guard)
     }
 }
