@@ -73,11 +73,6 @@ fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static,
 /// Each flat slot: the desktop two-line row and the 2pt gap reserved below it.
 const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(false) + 2.;
 
-/// A row moved by a reorder travels from where it was; a quarter pixel from
-/// rest is rest.
-const FLAT_REORDER_SPRING: gpui_base::motion::Spring =
-    gpui_base::motion::Spring::new(crate::edge_back::SETTLE).with_epsilon(0.25);
-
 /// A status shown beside other row content: it fades in and out in place,
 /// and a change from one value to another cross-fades.
 fn faded_status<T: Clone + PartialEq + 'static>(
@@ -284,7 +279,7 @@ fn animate_flat_thread_position(
     let top = gpui_base::motion::spring(
         SharedString::from(format!("flat-thread-position-{session_id}")),
         px(target_top),
-        FLAT_REORDER_SPRING,
+        crate::motion::FOLLOW,
         window,
         cx,
     );

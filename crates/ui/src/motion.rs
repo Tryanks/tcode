@@ -38,6 +38,12 @@ pub(crate) fn settle() -> Transition {
     Transition::new(crate::edge_back::SETTLE)
 }
 
+/// The house spring, for a position that follows the pointer or a reorder
+/// and may be retargeted mid-flight: [`crate::edge_back::SETTLE`], at rest a
+/// quarter pixel away.
+pub(crate) const FOLLOW: gpui_base::motion::Spring =
+    gpui_base::motion::Spring::new(crate::edge_back::SETTLE).with_epsilon(0.25);
+
 fn child_id(id: &ElementId, channel: &'static str) -> ElementId {
     ElementId::NamedChild(std::sync::Arc::new(id.clone()), channel.into())
 }

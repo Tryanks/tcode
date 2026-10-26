@@ -79,6 +79,7 @@ pub struct PopupMenu {
     items: Vec<MenuItem>,
     selected: Option<usize>,
     scroll: ScrollHandle,
+    after_choose: Option<AfterChoose>,
 }
 impl FluentBuilder for PopupMenu {}
 
@@ -90,6 +91,7 @@ impl PopupMenu {
             items: Vec::new(),
             selected: None,
             scroll: ScrollHandle::new(),
+            after_choose: None,
         }
     }
     fn build(
@@ -173,6 +175,12 @@ impl PopupMenu {
             disabled: false,
             checked: false,
         });
+        self
+    }
+    /// Run `then` once a chosen row's action has run and the menu has
+    /// handed the focus back to where it opened from.
+    pub fn after_choose(mut self, then: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.after_choose = Some(Rc::new(then));
         self
     }
     pub fn label(mut self, text: impl Into<SharedString>) -> Self {
@@ -263,6 +271,9 @@ impl PopupMenu {
         };
         window.dispatch_action(action.boxed_clone(), cx);
         cx.emit(DismissEvent);
+        if let Some(then) = self.after_choose.clone() {
+            window.defer(cx, move |window, cx| then(window, cx));
+        }
     }
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
@@ -404,6 +415,7 @@ impl Render for PopupMenu {
 
 type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 type ItemRenderer = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+type AfterChoose = Rc<dyn Fn(&mut Window, &mut App)>;
 
 #[derive(Default)]
 struct MenuState {

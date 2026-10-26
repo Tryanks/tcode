@@ -124,38 +124,55 @@ pub(crate) fn subagent_row(
             },
         );
 
-    if let Some(on_open) = on_open {
-        let shown_label = SharedString::from(crate::tr!("panes.shown_beside").into_owned());
-        let row = row.when(shown, |row| {
-            row.bg(cx.theme().accent).child(
-                div()
-                    .id(SharedString::from(format!("subagent-shown-{}", entry.id)))
-                    .debug_selector(|| "subagent-shown".into())
-                    .flex_none()
-                    .role(Role::Status)
-                    .aria_label(shown_label.clone())
-                    .tooltip(move |window, cx| {
-                        crate::widgets::tooltip::Tooltip::new(shown_label.clone()).build(window, cx)
-                    })
-                    .child(Icon::new(IconName::Check).text_color(muted)),
-            )
-        });
+    let Some(on_open) = on_open else {
+        return row.into_any_element();
+    };
+    let id = entry.id.clone();
+    let rest = crate::material::content_surface(cx);
+    let fill = cx.theme().accent;
+    // The fill and the check come and go as a pane starts or stops showing
+    // the agent.
+    crate::motion::Sampled::new(move |window, cx| {
+        let row = row.bg(gpui_base::motion::transition(
+            SharedString::from(format!("subagent-fill-{id}")),
+            if shown { fill } else { rest },
+            crate::motion::settle(),
+            window,
+            cx,
+        ));
+        let check_id = SharedString::from(format!("subagent-shown-{id}"));
+        let row = match crate::motion::shown(check_id.clone(), shown.then_some(()), window, cx) {
+            Some(check) => {
+                let label = SharedString::from(crate::tr!("panes.shown_beside").into_owned());
+                row.child(
+                    check.fade(
+                        div()
+                            .id(check_id)
+                            .debug_selector(|| "subagent-shown".into())
+                            .role(Role::Status)
+                            .aria_label(label.clone())
+                            .tooltip(move |window, cx| {
+                                crate::widgets::tooltip::Tooltip::new(label.clone())
+                                    .build(window, cx)
+                            })
+                            .child(Icon::new(IconName::Check).text_color(muted)),
+                    ),
+                )
+            }
+            None => row,
+        };
         crate::material::accessible_clickable(
             row,
-            SharedString::from(format!("subagent-row-{}", entry.id)),
+            SharedString::from(format!("subagent-row-{id}")),
             Role::Button,
             row_label,
             cx,
         )
-        .debug_selector({
-            let id = entry.id.clone();
-            move || format!("subagent-row-{id}")
-        })
+        .debug_selector(move || format!("subagent-row-{id}"))
         .cursor_pointer()
-        .hover(|row| row.bg(cx.theme().accent))
+        .hover(move |row| row.bg(fill))
         .on_click(on_open)
         .into_any_element()
-    } else {
-        row.into_any_element()
-    }
+    })
+    .into_any_element()
 }
