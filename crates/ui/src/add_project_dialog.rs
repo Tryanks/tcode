@@ -321,26 +321,54 @@ impl AddProjectDialog {
         .detach();
     }
 
-    fn render_recent(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        match &self.recent {
-            RecentState::Loading => v_flex()
-                .child(crate::material::empty_row(
-                    crate::tr!("sidebar.recent_loading"),
+    fn render_recent(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let state = crate::motion::CrossFade::new(
+            "recent-directories-state",
+            match &self.recent {
+                RecentState::Loading => 0,
+                RecentState::Failed(_) => 1,
+                RecentState::Ready(recent) if recent.is_empty() => 2,
+                RecentState::Ready(_) => 3,
+            },
+            4,
+            window,
+            cx,
+        );
+        let mut layers = Vec::new();
+        if state.shows(0) {
+            layers.push((
+                0,
+                v_flex()
+                    .child(crate::material::empty_row(
+                        crate::tr!("sidebar.recent_loading"),
+                        cx,
+                    ))
+                    .child(Progress::new("recent-directories-loading").loading(true))
+                    .into_any_element(),
+            ));
+        }
+        if let RecentState::Failed(error) = &self.recent {
+            layers.push((
+                1,
+                crate::material::empty_row(
+                    crate::tr!("sidebar.recent_failed", reason = error.clone()).into_owned(),
                     cx,
-                ))
-                .child(Progress::new("recent-directories-loading").loading(true))
+                )
+                .text_color(cx.theme().danger)
                 .into_any_element(),
-            RecentState::Failed(error) => crate::material::empty_row(
-                crate::tr!("sidebar.recent_failed", reason = error.clone()).into_owned(),
-                cx,
-            )
-            .text_color(cx.theme().danger)
-            .into_any_element(),
-            RecentState::Ready(recent) if recent.is_empty() => {
+            ));
+        }
+        if state.shows(2) {
+            layers.push((
+                2,
                 crate::material::empty_row(crate::tr!("sidebar.recent_empty"), cx)
-                    .into_any_element()
-            }
-            RecentState::Ready(recent) => {
+                    .into_any_element(),
+            ));
+        }
+        if let RecentState::Ready(recent) = &self.recent
+            && !recent.is_empty()
+        {
+            layers.push((3, {
                 // Keep the viewport and the flex column separate. Putting the
                 // max height on the column itself lets flexbox shrink every row
                 // until there is no overflow left for the wheel to scroll.
@@ -409,8 +437,9 @@ impl AddProjectDialog {
                     .overflow_y_scrollbar()
                     .child(div().size_full().child(rows))
                     .into_any_element()
-            }
+            }));
         }
+        state.render(layers).w_full().into_any_element()
     }
 }
 
@@ -484,14 +513,22 @@ impl Render for AddProjectDialog {
                     .when_some(path_hint, |column, hint| {
                         column.child(div().text_secondary(false, cx).child(hint))
                     })
-                    .when_some(self.error.clone(), |column, error| {
-                        column.child(
-                            div()
-                                .text_secondary(false, cx)
-                                .text_color(cx.theme().danger)
-                                .child(error),
+                    .children(
+                        crate::motion::transient(
+                            "add-project-error",
+                            self.error.clone(),
+                            window,
+                            cx,
                         )
-                    }),
+                        .map(|(error, slot)| {
+                            slot.wrap(
+                                div()
+                                    .text_secondary(false, cx)
+                                    .text_color(cx.theme().danger)
+                                    .child(error),
+                            )
+                        }),
+                    ),
             )
             .child(
                 v_flex()
@@ -543,7 +580,7 @@ impl ImportProgress {
 }
 
 impl Render for ImportProgress {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self
             .store
             .read(cx)
@@ -570,20 +607,36 @@ impl Render for ImportProgress {
         };
         let project_id = self.project_id.clone();
         let store = self.store.clone();
-        v_flex()
-            .gap_3()
-            .py_2()
-            .child(Progress::new("external-import-progress").value(percent))
-            .when_some(running, |column, (done, total, tool)| {
-                column.child(div().text_secondary(false, cx).child(crate::tr!(
-                    "sidebar.import_progress",
-                    done = done,
-                    total = total,
-                    tool = tool
-                )))
-            })
-            .when_some(summary, |column, (imported, skipped)| {
-                column
+        // The summary cross-fades over the last "n of N" line.
+        let outcome = crate::motion::CrossFade::new(
+            "external-import-outcome",
+            usize::from(summary.is_some()),
+            2,
+            window,
+            cx,
+        );
+        let running = crate::motion::retain("external-import-running", running, window, cx)
+            .filter(|_| outcome.shows(0));
+        let mut layers = Vec::new();
+        if let Some((done, total, tool)) = running {
+            layers.push((
+                0,
+                div()
+                    .text_secondary(false, cx)
+                    .child(crate::tr!(
+                        "sidebar.import_progress",
+                        done = done,
+                        total = total,
+                        tool = tool
+                    ))
+                    .into_any_element(),
+            ));
+        }
+        if let Some((imported, skipped)) = summary {
+            layers.push((
+                1,
+                v_flex()
+                    .gap_3()
                     .child(div().text_title(cx).child(crate::tr!(
                         "sidebar.import_summary",
                         imported = imported,
@@ -602,6 +655,15 @@ impl Render for ImportProgress {
                                 }),
                         ),
                     )
+                    .into_any_element(),
+            ));
+        }
+        v_flex()
+            .gap_3()
+            .py_2()
+            .child(Progress::new("external-import-progress").value(percent))
+            .when(!layers.is_empty(), |column| {
+                column.child(outcome.render(layers).w_full())
             })
     }
 }
