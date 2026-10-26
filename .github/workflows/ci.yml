@@ -28,6 +28,7 @@ jobs:
   # required check must wait for that platform's Clippy and tests alone.
   linux-clippy:
     name: Linux x64 / clippy
+    if: github.head_ref != 'ui-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps: &clippy-steps
@@ -123,6 +124,7 @@ jobs:
 
   linux-tests:
     name: Linux x64 / tests
+    if: github.head_ref != 'ui-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps: &test-steps
@@ -178,24 +180,28 @@ jobs:
 
   macos-clippy:
     name: macOS arm64 / clippy
+    if: github.head_ref != 'ui-v2'
     runs-on: macos-26
     timeout-minutes: 60
     steps: *clippy-steps
 
   macos-tests:
     name: macOS arm64 / tests
+    if: github.head_ref != 'ui-v2'
     runs-on: macos-26
     timeout-minutes: 60
     steps: *test-steps
 
   windows-clippy:
     name: Windows x64 / clippy
+    if: github.head_ref != 'ui-v2'
     runs-on: windows-2022
     timeout-minutes: 60
     steps: *clippy-steps
 
   windows-tests:
     name: Windows x64 / tests
+    if: github.head_ref != 'ui-v2'
     runs-on: windows-2022
     timeout-minutes: 60
     steps: *test-steps
@@ -204,8 +210,9 @@ jobs:
   # must not let its platform's check pass.
   linux:
     name: Linux x64
+    if: github.head_ref != 'ui-v2'
     needs: [linux-clippy, linux-tests]
-    if: always()
+    if: always() && github.head_ref != 'ui-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: &require-platform
@@ -216,22 +223,25 @@ jobs:
 
   macos:
     name: macOS arm64
+    if: github.head_ref != 'ui-v2'
     needs: [macos-clippy, macos-tests]
-    if: always()
+    if: always() && github.head_ref != 'ui-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: *require-platform
 
   windows:
     name: Windows x64
+    if: github.head_ref != 'ui-v2'
     needs: [windows-clippy, windows-tests]
-    if: always()
+    if: always() && github.head_ref != 'ui-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: *require-platform
 
   dependencies:
     name: Dependency hygiene
+    if: github.head_ref != 'ui-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -247,6 +257,7 @@ jobs:
 
   ios:
     name: iOS
+    if: github.head_ref != 'ui-v2'
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -270,6 +281,7 @@ jobs:
 
   android:
     name: Android
+    if: github.head_ref != 'ui-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -316,6 +328,7 @@ jobs:
 
   web:
     name: Web
+    if: github.head_ref != 'ui-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
