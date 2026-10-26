@@ -5124,6 +5124,9 @@ mod tests {
         send(cx, 2, TouchPhase::Started, outside);
         send(cx, 2, TouchPhase::Ended, outside);
         draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        draw(cx);
         assert!(cx.debug_bounds("tcode-popup-menu").is_none());
         assert_eq!(
             store.read_with(cx, |store, _| store.active_session_id()),
