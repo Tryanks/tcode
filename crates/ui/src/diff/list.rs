@@ -604,7 +604,7 @@ impl RowAnchor {
     }
 }
 
-fn reconcile_rows(state: &ListState, old: &[DiffListItem], new: &[DiffListItem]) {
+pub(crate) fn reconcile_rows<T: PartialEq>(state: &ListState, old: &[T], new: &[T]) {
     let prefix = old
         .iter()
         .zip(new)
