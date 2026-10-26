@@ -1291,7 +1291,7 @@ impl PullRequestView {
             "pr-files-partial",
             (files.next_cursor.is_none() && !files.complete).then(|| {
                 let listed = files.files.len();
-                let text = if files.changed_files > listed as u64 {
+                if files.changed_files > listed as u64 {
                     crate::tr!(
                         "pull_requests.files.partial",
                         shown = listed.to_string(),
@@ -1301,8 +1301,7 @@ impl PullRequestView {
                 } else {
                     crate::tr!("pull_requests.files.partial_unknown")
                 }
-                .into_owned();
-                text
+                .into_owned()
             }),
             window,
             cx,
