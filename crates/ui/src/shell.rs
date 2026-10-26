@@ -49,7 +49,7 @@ use crate::chat::ChatView;
 use crate::diff::DiffPanel;
 use crate::icon::{Icon, IconName};
 use crate::palette::CommandPalette;
-use crate::panes::ThreadPanel;
+use crate::panes::{ClosePane, FocusPane, SplitDown, SplitRight, ThreadPanel, ZoomPane};
 use crate::preview_panel::PreviewPanel;
 #[cfg(preview_backend)]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
@@ -64,7 +64,7 @@ use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
 use crate::window_state::{Destination, OpenPanel, OpenThread, Route, WindowState};
-use gpui_base::dock::{DockArea, DockLayout};
+use gpui_base::dock::{DockArea, DockLayout, DockPlacement, InsertTarget, PanelId};
 
 actions!(tcode, [Quit, TogglePalette]);
 
@@ -174,11 +174,11 @@ impl Render for DestinationView {
 struct ShellAttachment {
     link: Attachment,
     sidebar: Entity<SessionsSidebar>,
-    chat: Entity<ChatView>,
-    /// The wide layout's chat column; its one pane shows `chat`.
+    /// The wide layout's chat column, a dock of [`ThreadPanel`]s.
     thread_panes: Entity<DockArea>,
-    /// The pane in `thread_panes`.
-    thread_pane: Entity<ThreadPanel>,
+    /// The pane showing the store's focused thread, or waiting for it; the
+    /// compact layout's conversation is its chat.
+    focused_pane: Entity<ThreadPanel>,
     diff: Entity<DiffPanel>,
     preview: Entity<PreviewPanel>,
     settings_page: Entity<SettingsPage>,
@@ -218,6 +218,71 @@ struct ShellAttachment {
     stamped: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+impl ShellAttachment {
+    /// The chat column's panes, in the layout's order.
+    fn panes(&self, cx: &App) -> Vec<Entity<ThreadPanel>> {
+        let area = self.thread_panes.read(cx);
+        area.layout(DockPlacement::Center)
+            .map(|tree| {
+                tree.panels()
+                    .filter_map(|panel| area.panel(panel)?.view().downcast::<ThreadPanel>().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The focused pane's conversation.
+    fn chat(&self, cx: &App) -> Entity<ChatView> {
+        self.focused_pane.read(cx).chat()
+    }
+}
+
+/// Which pane commands the window offers now; none in the compact layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PaneControls {
+    pub(crate) split_right: bool,
+    pub(crate) split_down: bool,
+    pub(crate) close: bool,
+    pub(crate) zoom: bool,
+    pub(crate) zoomed: bool,
+}
+
+/// This window's [`PaneControls`] for the pane showing `session_id`, or the
+/// focused pane; `None` where there are no panes.
+pub(crate) fn pane_controls(
+    session_id: Option<&str>,
+    window: &Window,
+    cx: &App,
+) -> Option<PaneControls> {
+    let shell = current_shell(cx)?;
+    let shell = shell.read(cx);
+    if shell.compact(cx) {
+        return None;
+    }
+    let attachment = shell.attachment.as_ref()?;
+    let panes = attachment.panes(cx);
+    let pane = session_id
+        .and_then(|session_id| {
+            panes
+                .iter()
+                .find(|pane| pane.read(cx).session_id() == Some(session_id))
+        })
+        .unwrap_or(&attachment.focused_pane);
+    let closable = pane
+        .read(cx)
+        .group()
+        .is_some_and(|group| group.read(cx).is_closable(cx));
+    let zoomed = attachment.thread_panes.read(cx).is_zoomed();
+    let split = |placement| shell.split_allowed(pane, placement, window, cx);
+    Some(PaneControls {
+        split_right: split(gpui_base::Placement::Right),
+        split_down: split(gpui_base::Placement::Bottom),
+        close: closable || (zoomed && panes.len() > 1),
+        zoom: panes.len() > 1,
+        zoomed,
+    })
 }
 
 /// What bootstrap tells the shell that is not the window itself.
@@ -310,13 +375,11 @@ const RIGHT_PANEL_WIDTH: f32 = 560.;
 /// The panel's narrowest: the icon tabs and the panel's own controls fit in
 /// 320pt, beside the window's caption buttons where the panel's strip holds them.
 const RIGHT_PANEL_MIN_WIDTH: f32 = 320. + window_caption::RIGHT_PANEL_CAPTION_WIDTH;
-/// The chat column never gets narrower than this beside the right panel, plus
-/// whatever its header holds beyond the plain one (`header_extra_width`). At
-/// 16pt padding the compact header fits: a title kept to a few words beside a
-/// "+10" pull request badge, the git and Open split buttons as icon and
-/// chevron, and five panel toggles measure 531pt. Where the chat's minimum and
-/// the panel's do not both fit beside the sidebar, the panel floats over the
-/// chat instead.
+/// A pane never gets narrower than this beside the right panel, plus whatever
+/// its header holds beyond the plain one (`header_extra_width_for`); panes side
+/// by side add up ([`AppShell::chat_min_width`]). Where the chat column's
+/// minimum and the panel's do not both fit beside the sidebar, the panel
+/// floats over the chat instead.
 const CHAT_MIN_WIDTH: f32 = crate::chat::HEADER_COMPACT_MIN_WIDTH;
 const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
@@ -476,7 +539,7 @@ impl AppShell {
             {
                 // Select once, before the baseline can trigger an empty-workspace
                 // draft fallback. Validation below never selects it again.
-                store.update(cx, |store, _| store.select_session(session_id.clone()));
+                store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
                 if let Some(attachment) = &mut shell.attachment {
                     attachment.observed_session_id = Some(session_id.clone());
                 }
@@ -614,8 +677,7 @@ impl AppShell {
                 .expect("checked above");
             store.update(cx, |store, cx| {
                 if store.active_session_id().as_deref() == Some(&pending.session_id) {
-                    store.leave_session();
-                    cx.notify();
+                    store.leave_session(cx);
                 }
             });
             self.window_state
@@ -747,7 +809,7 @@ impl AppShell {
             .first()
             .map(|(id, _)| id.clone());
         if let Some(id) = &pending_session {
-            store.update(cx, |store, _| store.select_session(id.clone()));
+            store.update(cx, |store, cx| store.select_session(id.clone(), cx));
         }
         let preview =
             cx.new(|cx| PreviewPanel::new(store.clone(), self.window_state.clone(), window, cx));
@@ -755,7 +817,7 @@ impl AppShell {
             cx.new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx));
         let subscriptions = vec![
             cx.observe_in(&store, window, move |this, store, window, cx| {
-                this.bind_pane_to_focus(cx);
+                this.reconcile_panes(window, cx);
                 this.stamp_connected(cx);
                 let selected = store.read(cx).active_session_id();
                 if let Some(attachment) = &mut this.attachment
@@ -828,8 +890,7 @@ impl AppShell {
         };
 
         let observed_session_id = store.read(cx).active_session_id();
-        let chat = cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), window, cx));
-        let thread_panel = cx.new(|cx| ThreadPanel::new(chat.clone(), window, cx));
+        let thread_panel = self.new_pane(&store, window, cx);
         let thread_panes = cx.new(|cx| {
             let mut area = DockArea::new("thread-panes", None, window, cx)
                 .with_renderer(Rc::new(crate::panes::ThreadPanes));
@@ -837,9 +898,8 @@ impl AppShell {
             area
         });
         self.attachment = Some(ShellAttachment {
-            chat,
             thread_panes,
-            thread_pane: thread_panel,
+            focused_pane: thread_panel,
             diff: cx.new(|cx| DiffPanel::new(store.clone(), self.window_state.clone(), cx)),
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
@@ -886,18 +946,127 @@ impl AppShell {
         cx.notify();
     }
 
-    /// The pane shows the focused thread, and so does the compact layout's
-    /// conversation, which is the pane's.
-    fn bind_pane_to_focus(&self, cx: &mut App) {
-        let Some(attachment) = &self.attachment else {
+    fn new_pane(
+        &self,
+        store: &Entity<WorkspaceStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ThreadPanel> {
+        let chat = cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), window, cx));
+        let shell = cx.entity().downgrade();
+        cx.new(|cx| {
+            ThreadPanel::new(
+                chat,
+                move |pane, window, cx| {
+                    _ = shell.update(cx, |shell, cx| shell.pane_focused(pane, window, cx));
+                },
+                window,
+                cx,
+            )
+        })
+    }
+
+    /// Keep the panes and the store's focus telling one story. The store's
+    /// focused thread is shown by the pane already showing it, which takes
+    /// the keyboard, or else by the focused pane. A pane whose thread the
+    /// store closed leaves the column; the focused pane, and the last one,
+    /// stay and show nothing until the store focuses something for them.
+    fn reconcile_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.compact(cx);
+        let Some(attachment) = &mut self.attachment else {
             return;
         };
-        let focused = attachment.link.store.read(cx).active_session_id();
-        if attachment.thread_pane.read(cx).session_id(cx) != focused.as_deref() {
-            attachment
-                .thread_pane
-                .update(cx, |pane, cx| pane.set_session(focused, cx));
+        let panes = attachment.panes(cx);
+        if !panes.contains(&attachment.focused_pane)
+            && let Some(first) = panes.first()
+        {
+            attachment.focused_pane = first.clone();
         }
+        let store = attachment.link.store.clone();
+        let focused = store.read(cx).active_session_id();
+        if let Some(session_id) = focused {
+            let showing = panes
+                .iter()
+                .find(|pane| pane.read(cx).session_id() == Some(session_id.as_str()))
+                .cloned();
+            match showing {
+                Some(pane) if pane != attachment.focused_pane => {
+                    attachment.focused_pane = pane.clone();
+                    if !compact {
+                        let area = attachment.thread_panes.clone();
+                        let group = pane.read(cx).group().map(|group| group.read(cx).node());
+                        area.update(cx, |area, cx| {
+                            if area
+                                .zoomed_group()
+                                .is_some_and(|zoomed| Some(zoomed) != group)
+                            {
+                                area.set_zoomed_out(window, cx);
+                            }
+                        });
+                        window.focus(&pane.focus_handle(cx), cx);
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let pane = attachment.focused_pane.clone();
+                    let left = pane.read(cx).session_id().map(str::to_owned);
+                    pane.update(cx, |pane, cx| pane.set_session(Some(session_id), cx));
+                    // A pane that waited with the keyboard had no composer to
+                    // give it to until now.
+                    if left.is_none() && pane.focus_handle(cx).is_focused(window) {
+                        pane.read(cx)
+                            .chat()
+                            .update(cx, |chat, cx| chat.focus_composer(window, cx));
+                    }
+                    if let Some(left) = left
+                        && store.read(cx).is_thread_open(&left)
+                    {
+                        store.update(cx, |store, cx| store.close_thread(&left, cx));
+                    }
+                }
+            }
+        }
+        let store = store.read(cx);
+        let closed: Vec<_> = panes
+            .iter()
+            .filter(|pane| {
+                pane.read(cx)
+                    .session_id()
+                    .is_some_and(|session_id| !store.is_thread_open(session_id))
+            })
+            .cloned()
+            .collect();
+        let area = attachment.thread_panes.clone();
+        let mut remaining = panes.len();
+        for pane in closed {
+            if pane == attachment.focused_pane || remaining == 1 {
+                pane.update(cx, |pane, cx| pane.set_session(None, cx));
+            } else {
+                area.update(cx, |area, cx| area.remove_panel(pane, window, cx));
+                remaining -= 1;
+            }
+        }
+    }
+
+    /// The keyboard entered `pane`: the store acts on its thread.
+    fn pane_focused(&mut self, pane: Entity<ThreadPanel>, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(attachment) = &mut self.attachment else {
+            return;
+        };
+        if !attachment.panes(cx).contains(&pane) {
+            return;
+        }
+        attachment.focused_pane = pane.clone();
+        let session_id = pane.read(cx).session_id().map(str::to_owned);
+        attachment
+            .link
+            .store
+            .update(cx, |store, cx| match session_id {
+                Some(session_id) => store.focus_thread(&session_id, cx),
+                None if store.active_session_id().is_some() => store.release_focus(cx),
+                None => {}
+            });
+        cx.notify();
     }
 
     /// Record on the saved record when this window actually reached the host,
@@ -950,6 +1119,329 @@ impl AppShell {
             state.sidebar_collapsed = collapsed;
             cx.notify();
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Panes
+// ---------------------------------------------------------------------------
+
+impl AppShell {
+    /// The pane a command acts on: the one holding the keyboard, or the
+    /// focused one while the keyboard is elsewhere.
+    fn acting_pane(&self, window: &Window, cx: &App) -> Option<Entity<ThreadPanel>> {
+        let attachment = self.attachment.as_ref()?;
+        attachment
+            .panes(cx)
+            .into_iter()
+            .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))
+            .or_else(|| Some(attachment.focused_pane.clone()))
+    }
+
+    /// A pane beside the acting one, focused and waiting for a thread.
+    fn add_pane(
+        &mut self,
+        placement: gpui_base::Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(Entity<ThreadPanel>, Option<String>)> {
+        if self.compact(cx) {
+            return None;
+        }
+        let from = self.acting_pane(window, cx)?;
+        if !self.split_allowed(&from, placement, window, cx) {
+            return None;
+        }
+        let attachment = self.attachment.as_ref()?;
+        let node = from.read(cx).group()?.read(cx).node();
+        let beside = from.read(cx).session_id().map(str::to_owned);
+        let store = attachment.link.store.clone();
+        let area = attachment.thread_panes.clone();
+        let pane = self.new_pane(&store, window, cx);
+        pane.update(cx, |pane, cx| pane.set_session(None, cx));
+        area.update(cx, |area, cx| {
+            area.set_zoomed_out(window, cx);
+            // `DockArea::split_at` splits only a panel the area already
+            // holds, and base has no other way to register one: the pane
+            // joins the area, then moves beside `node`.
+            area.add_panel(pane.clone(), DockPlacement::Center, None, window, cx);
+            area.move_panel(
+                PanelId::from(pane.entity_id()),
+                InsertTarget::Split {
+                    node,
+                    placement,
+                    size: None,
+                },
+                window,
+                cx,
+            );
+        });
+        self.attachment.as_mut()?.focused_pane = pane.clone();
+        window.focus(&pane.focus_handle(cx), cx);
+        cx.notify();
+        Some((pane, beside))
+    }
+
+    /// Split the acting pane: the new pane shows a fresh draft in the same
+    /// project, and the thread split from stays open.
+    fn split_pane(
+        &mut self,
+        placement: gpui_base::Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, beside)) = self.add_pane(placement, window, cx) else {
+            return;
+        };
+        if let Some(store) = self.store() {
+            store.update(cx, |store, cx| {
+                store.release_focus(cx);
+                store.start_draft_beside(beside.as_deref(), cx);
+            });
+        }
+    }
+
+    /// Show `session_id` in a new pane beside the acting one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn open_in_new_pane(
+        &mut self,
+        session_id: String,
+        placement: gpui_base::Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.add_pane(placement, window, cx).is_none() {
+            return;
+        }
+        if let Some(store) = self.store() {
+            store.update(cx, |store, cx| {
+                store.open_thread(&session_id);
+                store.focus_thread(&session_id, cx);
+            });
+        }
+    }
+
+    /// Close the acting pane; its thread closes and stays in the threads
+    /// list. The dock hands the keyboard to a neighbour, whose thread the
+    /// store then focuses. The last pane stays.
+    fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) {
+            return;
+        }
+        let Some(pane) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let area = attachment.thread_panes.clone();
+        let store = attachment.link.store.clone();
+        let Some(group) = pane.read(cx).group() else {
+            return;
+        };
+        area.update(cx, |area, cx| area.set_zoomed_out(window, cx));
+        if !group.read(cx).is_closable(cx) {
+            return;
+        }
+        let session_id = pane.read(cx).session_id().map(str::to_owned);
+        let handle = pane.focus_handle(cx);
+        if !handle.contains_focused(window, cx) {
+            window.focus(&handle, cx);
+        }
+        area.update(cx, |area, cx| area.remove_panel(pane, window, cx));
+        if let Some(session_id) = session_id {
+            store.update(cx, |store, cx| store.close_thread(&session_id, cx));
+        }
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let panes = attachment.panes(cx);
+        if let Some(next) = panes
+            .iter()
+            .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))
+            .or(panes.first())
+            .cloned()
+        {
+            self.pane_focused(next, window, cx);
+        }
+    }
+
+    fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) {
+            return;
+        }
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        if attachment.panes(cx).len() < 2 {
+            return;
+        }
+        let Some(group) = self
+            .acting_pane(window, cx)
+            .and_then(|pane| pane.read(cx).group())
+        else {
+            return;
+        };
+        group.update(cx, |group, cx| group.toggle_zoom(window, cx));
+    }
+
+    /// Spatial moves go to the nearest pane painted on that side; Next and
+    /// Previous follow the layout's order and wrap. A zoomed pane is the only
+    /// one on screen, so nothing moves.
+    fn focus_pane(&mut self, direction: FocusPane, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) {
+            return;
+        }
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        if attachment.thread_panes.read(cx).is_zoomed() {
+            return;
+        }
+        let Some(from) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let panes = attachment.panes(cx);
+        let Some(at) = panes.iter().position(|pane| *pane == from) else {
+            return;
+        };
+        let target = match direction {
+            FocusPane::Next => Some((at + 1) % panes.len()),
+            FocusPane::Previous => Some((at + panes.len() - 1) % panes.len()),
+            _ => {
+                let bounds: Vec<_> = panes.iter().map(|pane| pane.read(cx).bounds()).collect();
+                crate::panes::neighbour(bounds[at], &bounds, direction)
+            }
+        };
+        if let Some(target) = target.and_then(|ix| panes.get(ix))
+            && *target != from
+        {
+            window.focus(&target.focus_handle(cx), cx);
+        }
+    }
+
+    /// The narrowest the chat column can be: its panes' headers at their
+    /// compact widths, side by side. Base's dock gives every pane the same
+    /// `resizable_panel` range and has no per-panel minimum, so a pane's own
+    /// handle can still drag it below its header; this only keeps the right
+    /// panel from squeezing the column.
+    fn chat_min_width(&self, collapsed: bool, fullscreen: bool, cx: &App) -> Pixels {
+        let Some(tree) = self.attachment.as_ref().and_then(|attachment| {
+            attachment
+                .thread_panes
+                .read(cx)
+                .layout(DockPlacement::Center)
+        }) else {
+            return px(CHAT_MIN_WIDTH);
+        };
+        px(self.column_min_width(tree, collapsed, fullscreen, cx))
+    }
+
+    /// [`Self::chat_min_width`] for `tree`. Only the pane along the column's
+    /// left edge clears the traffic lights over a collapsed sidebar.
+    fn column_min_width(
+        &self,
+        tree: &gpui_base::dock::PaneTree,
+        collapsed: bool,
+        fullscreen: bool,
+        cx: &App,
+    ) -> f32 {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return CHAT_MIN_WIDTH;
+        };
+        let area = attachment.thread_panes.read(cx);
+        let store = attachment.link.store.read(cx);
+        let pane_min = |panel: PanelId, edges: crate::chat::WindowEdges| {
+            let session_id = area
+                .panel(panel)
+                .and_then(|panel| panel.view().downcast::<ThreadPanel>().ok())
+                .and_then(|pane| pane.read(cx).session_id().map(str::to_owned));
+            CHAT_MIN_WIDTH
+                + crate::chat::header_extra_width_for(
+                    store,
+                    session_id.as_deref(),
+                    collapsed && edges.left,
+                    fullscreen,
+                    false,
+                )
+        };
+        crate::panes::min_width(tree.root(), crate::chat::WindowEdges::BOTH, &pane_min)
+            .max(CHAT_MIN_WIDTH)
+    }
+
+    /// Whether `pane` may split along `placement`: below the cap, and with
+    /// the column's minimum after the split still fitting beside the sidebar.
+    fn split_allowed(
+        &self,
+        pane: &Entity<ThreadPanel>,
+        placement: gpui_base::Placement,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return false;
+        };
+        if self.compact(cx) || attachment.panes(cx).len() >= crate::panes::MAX_PANES {
+            return false;
+        }
+        let Some(node) = pane.read(cx).group().map(|group| group.read(cx).node()) else {
+            return false;
+        };
+        let Some(mut tree) = attachment
+            .thread_panes
+            .read(cx)
+            .layout(DockPlacement::Center)
+            .cloned()
+        else {
+            return false;
+        };
+        tree.split(node, PanelId::from_u64(u64::MAX), placement, None);
+        let collapsed = self.window_state.read(cx).sidebar_collapsed;
+        let sidebar = if collapsed {
+            px(0.)
+        } else {
+            attachment.sidebar_width.get()
+        };
+        px(self.column_min_width(&tree, collapsed, window.is_fullscreen(), cx))
+            <= window.viewport_size().width - sidebar
+    }
+
+    /// Tell each pane whether it shares the column, and its conversation
+    /// which window edges its header runs along. The layout's tree decides
+    /// both, so they hold from the frame a split lands; a zoomed pane is the
+    /// whole column.
+    fn sync_panes(&self, cx: &mut App) {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let compact = self.compact(cx);
+        let area = attachment.thread_panes.read(cx);
+        let zoomed = area.is_zoomed();
+        let edges: Vec<_> = attachment
+            .panes(cx)
+            .into_iter()
+            .map(|pane| {
+                let edges = area
+                    .layout(DockPlacement::Center)
+                    .filter(|_| !compact && !zoomed)
+                    .and_then(|tree| {
+                        crate::panes::edges_of(
+                            tree.root(),
+                            crate::chat::WindowEdges::BOTH,
+                            PanelId::from(pane.entity_id()),
+                        )
+                    })
+                    .unwrap_or(crate::chat::WindowEdges::BOTH);
+                (pane, edges)
+            })
+            .collect();
+        let among_others = edges.len() > 1;
+        for (pane, edges) in edges {
+            pane.update(cx, |pane, cx| pane.set_among_others(among_others, cx));
+            pane.read(cx)
+                .chat()
+                .update(cx, |chat, cx| chat.set_edges(edges, cx));
+        }
     }
 }
 
@@ -1090,10 +1582,10 @@ impl AppShell {
             self.window_state
                 .update(cx, |state, cx| state.leave_route_for_chat(cx));
         }
-        self.bind_pane_to_focus(cx);
+        self.reconcile_panes(window, cx);
         if let Some(attachment) = &self.attachment {
             attachment
-                .chat
+                .chat(cx)
                 .update(cx, |chat, cx| chat.focus_composer(window, cx));
         }
         // Selecting another thread can leave the destination unchanged. Its
@@ -1126,7 +1618,7 @@ impl AppShell {
             && self.destination(cx) == Destination::Thread
             && let Some((store, parent)) = self.agent_lead(cx)
         {
-            store.update(cx, |store, _| store.select_session(parent));
+            store.update(cx, |store, cx| store.select_session(parent, cx));
             return true;
         }
         // Everything below is one history: settings detail, settings root, a
@@ -1193,7 +1685,7 @@ impl AppShell {
             && !state.palette_mounted()
             && self.pending_navigation_restore.is_none()
             && !gpui_base::GlobalState::is_in_deferred_context(cx))
-        .then(|| attachment.chat.clone())
+        .then(|| attachment.chat(cx))
     }
 }
 
@@ -1213,6 +1705,42 @@ pub(crate) fn navigate_thread(action: &crate::shortcut::NavigateThread, cx: &mut
                 state.go(Destination::Thread, cx);
             });
         }
+    });
+}
+
+/// Pane commands are app-level, so they reach the shell from anywhere in the
+/// window, with nothing focused too, once the dispatch that carried them ends.
+pub(crate) fn init_pane_actions(cx: &mut App) {
+    fn act(
+        cx: &mut App,
+        command: impl FnOnce(&mut AppShell, &mut Window, &mut Context<AppShell>) + 'static,
+    ) {
+        let Some((window, shell)) = current_window_shell(cx) else {
+            return;
+        };
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                shell.update(cx, |shell, cx| command(shell, window, cx));
+            });
+        });
+    }
+    cx.on_action(|_: &SplitRight, cx| {
+        act(cx, |shell, window, cx| {
+            shell.split_pane(gpui_base::Placement::Right, window, cx)
+        })
+    });
+    cx.on_action(|_: &SplitDown, cx| {
+        act(cx, |shell, window, cx| {
+            shell.split_pane(gpui_base::Placement::Bottom, window, cx)
+        })
+    });
+    cx.on_action(|_: &ClosePane, cx| act(cx, AppShell::close_pane));
+    cx.on_action(|_: &ZoomPane, cx| act(cx, AppShell::toggle_zoom));
+    cx.on_action(|direction: &FocusPane, cx| {
+        let direction = *direction;
+        act(cx, move |shell, window, cx| {
+            shell.focus_pane(direction, window, cx)
+        })
     });
 }
 
@@ -1483,7 +2011,7 @@ impl AppShell {
                                 SharedString::from(id.clone()),
                                 cx,
                             );
-                            store.update(cx, |store, _| store.select_session(id.clone()));
+                            store.update(cx, |store, cx| store.select_session(id.clone(), cx));
                         })
                 })
                 .autohide(true),
@@ -1564,7 +2092,7 @@ impl AppShell {
         store.update(cx, |store, cx| {
             match anchor.position {
                 Some(position) => store.select_session_at_position(anchor.thread_id, position, cx),
-                None => store.select_session(anchor.thread_id),
+                None => store.select_session(anchor.thread_id, cx),
             }
             cx.notify();
         });
@@ -2035,7 +2563,7 @@ impl AppShell {
         let body = if self.pending_navigation_restore.is_some() {
             crate::material::loading_skeleton(cx)
         } else {
-            attachment.chat.clone().into_any_element()
+            attachment.chat(cx).into_any_element()
         };
         v_flex()
             .debug_selector(|| "compact-thread-page".into())
@@ -2157,7 +2685,7 @@ impl AppShell {
             crate::material::loading_skeleton(cx)
         } else if terminal {
             attachment
-                .chat
+                .chat(cx)
                 .read(cx)
                 .terminal_drawer()
                 .into_any_element()
@@ -2169,7 +2697,7 @@ impl AppShell {
         // The drawer sizes its grid from the space it is actually given.
         if terminal {
             let size = window.viewport_size();
-            let drawer = attachment.chat.read(cx).terminal_drawer();
+            let drawer = attachment.chat(cx).read(cx).terminal_drawer();
             let (width, height) = (f32::from(size.width), f32::from(size.height) - 110.);
             if !drawer.read(cx).is_size(width, height) {
                 drawer.update(cx, |drawer, cx| drawer.resize(width, height, cx));
@@ -2207,7 +2735,7 @@ impl AppShell {
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
         };
-        let view = attachment.chat.read(cx).pull_request_view(cx);
+        let view = attachment.chat(cx).read(cx).pull_request_view(cx);
         let session = attachment.link.store.read(cx).active_session_id();
         let key = session.as_deref().and_then(|session| {
             attachment
@@ -2890,13 +3418,10 @@ impl AppShell {
         // over the chat's right edge and the chat keeps the whole column
         // underneath, rather than either being squeezed below its minimum.
         let beside_sidebar = viewport_width - sidebar_layout_width;
-        let chat_min = px(CHAT_MIN_WIDTH
-            + crate::chat::header_extra_width(
-                attachment.link.store.read(cx),
-                collapsed,
-                fullscreen,
-                false,
-            ));
+        let chat_min = self.chat_min_width(collapsed, fullscreen, cx);
+        let Some(attachment) = &mut self.attachment else {
+            unreachable!("checked above");
+        };
         let right_floats =
             diff_open && chat_visible && beside_sidebar < chat_min + px(RIGHT_PANEL_MIN_WIDTH);
         attachment.floating_focus.update(cx, |focus, cx| {
@@ -3238,8 +3763,7 @@ impl Render for AppShell {
         // The window may have been resized without a bounds notification (a
         // first frame, or an inset change that narrowed the content box).
         self.sync_layout(window, cx);
-        // A selection made without notifying the store reaches the pane here.
-        self.bind_pane_to_focus(cx);
+        self.sync_panes(cx);
         if let Some(attachment) = &self.attachment {
             let title = attachment.link.store.read(cx).shell_window_title();
             if title != self.window_title {
@@ -3954,7 +4478,7 @@ mod tests {
                     .attachment
                     .as_ref()
                     .unwrap()
-                    .chat
+                    .chat(cx)
                     .read(cx)
                     .composer();
                 assert!(!composer.read(cx).input_focus_handle(cx).is_focused(window));
@@ -4031,7 +4555,7 @@ mod tests {
                     .attachment
                     .as_ref()
                     .unwrap()
-                    .chat
+                    .chat(cx)
                     .read(cx)
                     .composer()
                     .read(cx)
@@ -4193,7 +4717,7 @@ mod tests {
         let store = store_of(&shell, cx);
         // An OpenThread intent on the existing page must checkpoint without
         // waiting for a host response or a changed history.
-        store.update(cx, |store, _| store.select_session("thread-b".into()));
+        store.update(cx, |store, cx| store.select_session("thread-b".into(), cx));
         shell
             .read_with(cx, |shell, _| shell.window_state())
             .update(cx, |state, cx| state.open_thread(cx));
@@ -4210,8 +4734,7 @@ mod tests {
         );
 
         store.update(cx, |store, cx| {
-            store.select_session("thread-c".into());
-            cx.notify();
+            store.select_session("thread-c".into(), cx);
         });
         shell
             .read_with(cx, |shell, _| shell.window_state())
@@ -4348,7 +4871,13 @@ mod tests {
         resize(cx, 393.);
         let store = store_of(&shell, cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         for width in [1024., 393., 1024.] {
@@ -4358,7 +4887,7 @@ mod tests {
                     if id == "thread-2" {
                         focus.focus(window, cx);
                     }
-                    store.update(cx, |store, _| store.select_session(id.into()));
+                    store.update(cx, |store, cx| store.select_session(id.into(), cx));
                     let state = shell.read(cx).window_state();
                     state.update(cx, |_, cx| cx.emit(OpenThread));
                 });
@@ -4440,7 +4969,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("thread-a".into());
+            store.select_session("thread-a".into(), cx);
         });
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
@@ -4450,7 +4979,13 @@ mod tests {
         cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_thread(window, cx)));
         draw(cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let card = cx.debug_bounds("composer-card").unwrap();
@@ -4578,7 +5113,13 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         cx.update(|window, cx| focus.focus(window, cx));
@@ -4639,7 +5180,13 @@ mod tests {
         restore_status(&shell, &host, cx);
         let store = store_of(&shell, cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let deliver = |session: &str, readonly: bool, cx: &mut VisualTestContext| {
             let mut meta = tcode_core::project::SessionMeta::new(
@@ -4657,7 +5204,7 @@ mod tests {
                 id: "reasoningEffort".into(),
                 value: serde_json::json!("high"),
             }];
-            store.update(cx, |store, _| store.select_session(session.into()));
+            store.update(cx, |store, cx| store.select_session(session.into(), cx));
             for (topic, event) in [
                 (
                     Topic::Settings,
@@ -4915,11 +5462,17 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
         await_restore_update(&shell, cx, |store| !store.chat_loading());
         resize(cx, 1200.);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let text = cx
@@ -4959,12 +5512,16 @@ mod tests {
     #[gpui::test]
     fn a_click_in_the_thread_pane_focuses_the_composer_only_on_desktop(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
-        // Focus listeners run only for an active window, as on screen.
-        cx.update(|window, _| window.activate_window());
+        let (shell, _host, cx) = mount_panes(cx);
         resize(cx, 1200.);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let timeline = gpui::point(px(700.), px(300.));
@@ -4981,6 +5538,385 @@ mod tests {
                 assert_eq!(focus.is_focused(window), !mobile, "mobile: {mobile}");
             });
         }
+    }
+
+    /// A wide window over two indexed threads, `thread-1` (listed first)
+    /// shown in its only pane, the keyboard in it.
+    fn mount_panes(
+        cx: &mut TestAppContext,
+    ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
+        let (shell, host, cx) = mount(cx);
+        cx.update(|window, cx| {
+            // Focus listeners run only for an active window, as on screen.
+            window.activate_window();
+            crate::shortcut::init(cx);
+            set_back_target(window.window_handle(), &shell, cx);
+        });
+        resize(cx, 2000.);
+        send_events(
+            &host,
+            vec![
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(Default::default()),
+                ),
+                panes_index(&[]),
+            ],
+        );
+        serve_thread(&host, "thread-1");
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.open_thread(cx));
+        draw(cx);
+        (shell, host, cx)
+    }
+
+    const PANES_CWD: &str = "/tmp/tcode-panes";
+
+    fn send_events(host: &MountedShell, events: Vec<(Topic, ServerEvent)>) {
+        for (topic, event) in events {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+    }
+
+    /// The index of [`mount_panes`]' two threads, `thread-1` listed first,
+    /// with `archived` archived.
+    fn panes_index(archived: &[&str]) -> (Topic, ServerEvent) {
+        let sessions = [("thread-1", 2), ("thread-2", 1)].map(|(id, updated_at)| {
+            let mut meta = tcode_core::project::SessionMeta::new(
+                agent::ProviderKind::Codex,
+                PANES_CWD.into(),
+                None,
+            );
+            meta.id = id.into();
+            meta.title = id.into();
+            meta.updated_at = updated_at;
+            meta.archived_at = archived.contains(&id).then_some(3);
+            meta
+        });
+        (
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                summary: Default::default(),
+                sessions: sessions.to_vec(),
+                projects: Vec::new(),
+            }),
+        )
+    }
+
+    fn serve_status(host: &MountedShell, id: &str, draft: bool) {
+        let mut status = session_status(id, std::path::Path::new(PANES_CWD));
+        status.draft = draft;
+        send_events(
+            host,
+            vec![(
+                Topic::SessionStatus {
+                    session_id: id.into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
+            )],
+        );
+    }
+
+    /// What the host answers a thread's subscriptions with: its status and an
+    /// empty log.
+    fn serve_thread(host: &MountedShell, id: &str) {
+        serve_status(host, id, false);
+        send_events(
+            host,
+            vec![(
+                Topic::SessionEvents {
+                    session_id: id.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                    from: 0,
+                    end: 0,
+                    records: Vec::new(),
+                },
+            )],
+        );
+    }
+
+    /// The thread each pane shows, in the layout's order.
+    fn pane_threads(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<Option<String>> {
+        shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).session_id().map(str::to_owned))
+                .collect()
+        })
+    }
+
+    /// Which pane holds the keyboard.
+    fn keyboard_pane(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> Option<usize> {
+        cx.update(|window, cx| {
+            shell
+                .read(cx)
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .panes(cx)
+                .iter()
+                .position(|pane| pane.focus_handle(cx).contains_focused(window, cx))
+        })
+    }
+
+    /// Answer the scratch draft the client asked for with `draft`.
+    fn answer_draft(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        draft: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        let request = std::iter::from_fn(|| host.outgoing.try_recv().ok())
+            .map(|line| decode_client_line(&line).expect("client line"))
+            .find(|message| {
+                matches!(
+                    message.payload,
+                    ClientPayload::Command(Command::StartScratchDraft)
+                )
+            })
+            .expect("a draft was asked for");
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Ack {
+                    id: request.id,
+                    result: Ok(tcode_protocol::CommandResponse::SessionId(Some(
+                        draft.into(),
+                    ))),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        await_restore_update(shell, cx, |store| {
+            store.active_session_id().as_deref() == Some(draft)
+        });
+        serve_thread(host, draft);
+        await_restore_update(shell, cx, |store| !store.chat_loading());
+        draw(cx);
+    }
+
+    /// Splitting a thread puts a draft beside it, in the thread's place in
+    /// the store's focus, while the thread stays open in its own pane. Both
+    /// panes' headers then have to fit beside the right panel for it to dock.
+    #[gpui::test]
+    fn splitting_a_thread_shows_a_draft_beside_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw(cx);
+        let _ = sent(&host);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        assert!(cx.debug_bounds("waiting-pane").is_some());
+        answer_draft(&shell, &host, "draft-1", cx);
+        assert!(cx.debug_bounds("waiting-pane").is_none());
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("draft-1"));
+            assert!(store.is_thread_open("thread-1"));
+        });
+
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.active_session_id()),
+            Some("thread-1".into())
+        );
+        let docks = SIDEBAR_WIDTH + 2. * CHAT_MIN_WIDTH + RIGHT_PANEL_MIN_WIDTH;
+        for (width, docked) in [(docks + 20., true), (docks - 20., false)] {
+            resize(cx, width);
+            draw(cx);
+            assert_eq!(
+                cx.debug_bounds("right-panel")
+                    .is_some_and(|panel| panel.size.width > px(0.)),
+                docked,
+                "{width}pt"
+            );
+            assert_eq!(
+                cx.debug_bounds("right-panel-overlay").is_some(),
+                !docked,
+                "{width}pt"
+            );
+        }
+    }
+
+    /// Beside a draft no draft is asked for, since the host would answer with
+    /// that same draft: the new pane waits with the keyboard, and the thread
+    /// chosen next from the threads list fills it.
+    #[gpui::test]
+    fn splitting_a_draft_leaves_the_new_pane_waiting(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        serve_status(&host, "thread-1", true);
+        await_restore_update(&shell, cx, |store| {
+            store.session_status().is_some_and(|status| status.draft)
+        });
+        draw(cx);
+        let _ = sent(&host);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        assert!(!sent(&host).iter().any(|payload| matches!(
+            payload,
+            ClientPayload::Command(Command::StartDraft { .. } | Command::StartScratchDraft)
+        )));
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        assert!(cx.debug_bounds("waiting-pane").is_some());
+
+        cx.simulate_keystrokes("secondary-2");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-1"));
+        });
+    }
+
+    /// A split the window has no room for is refused; stacking still fits.
+    #[gpui::test]
+    fn a_split_without_room_is_refused(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        resize(cx, SIDEBAR_WIDTH + 2. * CHAT_MIN_WIDTH - 10.);
+        let _ = sent(&host);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        assert!(
+            !sent(&host).iter().any(|payload| matches!(
+                payload,
+                ClientPayload::Command(Command::StartScratchDraft)
+            ))
+        );
+
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+    }
+
+    /// A thread archived while another pane has the keyboard takes its pane
+    /// with it; the focused thread is left alone.
+    #[gpui::test]
+    fn archiving_a_background_panes_thread_closes_the_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.open_in_new_pane("thread-2".into(), gpui_base::Placement::Right, window, cx)
+            })
+        });
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        send_events(&host, vec![panes_index(&["thread-1"])]);
+        await_restore_update(&shell, cx, |store| !store.is_thread_open("thread-1"));
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+        });
+    }
+
+    /// Closing a pane closes its thread, which stays listed, and the store
+    /// moves on to the thread of the pane the keyboard lands in.
+    #[gpui::test]
+    fn closing_a_pane_focuses_its_neighbours_thread(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("draft-1"));
+            assert!(!store.is_thread_open("thread-1"));
+        });
+        assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
+
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("draft-1".into())],
+            "the last pane stays"
+        );
+    }
+
+    /// Choosing from the threads list a thread another pane shows moves the
+    /// keyboard there instead of showing the thread twice.
+    #[gpui::test]
+    fn choosing_a_thread_shown_in_another_pane_focuses_that_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.open_in_new_pane("thread-2".into(), gpui_base::Placement::Right, window, cx)
+            })
+        });
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        // The threads list's first row, through its shortcut.
+        cx.simulate_keystrokes("secondary-1");
+        draw(cx);
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("thread-2"));
+        });
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
     }
 
     #[gpui::test]
@@ -5137,7 +6073,7 @@ mod tests {
                     .attachment
                     .as_ref()
                     .unwrap()
-                    .chat
+                    .chat(cx)
                     .read(cx)
                     .composer()
                     .read(cx)
@@ -5802,9 +6738,7 @@ mod tests {
             .collect();
         seed_wide_diff_with(&shell, &host, cx, conversation);
         draw(cx);
-        let chat = shell.read_with(cx, |shell, _| {
-            shell.attachment.as_ref().unwrap().chat.clone()
-        });
+        let chat = shell.read_with(cx, |shell, cx| shell.attachment.as_ref().unwrap().chat(cx));
         let mut reading_position = None;
         for destination in [Destination::Thread, Destination::Panel] {
             shell.update(cx, |shell, cx| shell.go(destination, cx));
@@ -5841,7 +6775,13 @@ mod tests {
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         let history = state.read_with(cx, |state, _| state.history().to_vec());
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         cx.update(|window, cx| {
             composer.update(cx, |composer, cx| {
@@ -6111,7 +7051,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("first".into());
+            store.select_session("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
@@ -6170,7 +7110,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("first".into());
+            store.select_session("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
@@ -6178,7 +7118,7 @@ mod tests {
             })
         });
         let search = shell.read_with(cx, |shell, cx| {
-            let chat = shell.attachment.as_ref().unwrap().chat.read(cx);
+            let chat = shell.attachment.as_ref().unwrap().chat(cx).read(cx);
             chat.composer().read(cx).model_search_focus_handle(cx)
         });
 
@@ -6264,7 +7204,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("first".into());
+            store.select_session("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
@@ -6373,7 +7313,13 @@ mod tests {
             "ctrl-z"
         };
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let input = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         cx.update(|window, cx| input.focus(window, cx));
@@ -6457,7 +7403,7 @@ mod tests {
             .unwrap();
         store.update(cx, |store, cx| {
             store.drain_host_events_for_test(cx);
-            store.select_session("thread-1".into());
+            store.select_session("thread-1".into(), cx);
         });
 
         resize(cx, 1024.);
@@ -6485,7 +7431,7 @@ mod tests {
                 .attachment
                 .as_ref()
                 .expect("attached")
-                .chat
+                .chat(cx)
                 .read(cx)
                 .composer()
         });
@@ -6527,7 +7473,7 @@ mod tests {
                 .attachment
                 .as_ref()
                 .unwrap()
-                .chat
+                .chat(cx)
                 .read(cx)
                 .composer()
                 .entity_id()),
@@ -6660,7 +7606,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session("thread-1".into()));
+        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
         as_mobile(cx);
         resize(cx, 393.);
 
@@ -6830,8 +7776,7 @@ mod tests {
 
             let store = store_of(&shell, cx);
             store.update(cx, |store, cx| {
-                store.select_session(thread.into());
-                cx.notify();
+                store.select_session(thread.into(), cx);
             });
             draw(cx);
 
@@ -6939,15 +7884,15 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session("thread-1".into()));
+        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
         as_mobile(cx);
         resize(cx, 393.);
-        let chat = shell.read_with(cx, |shell, _| {
+        let chat = shell.read_with(cx, |shell, cx| {
             shell
                 .attachment
                 .as_ref()
                 .expect("attached")
-                .chat
+                .chat(cx)
                 .entity_id()
         });
         let _ = sent(&host);
@@ -6982,7 +7927,7 @@ mod tests {
                     .attachment
                     .as_ref()
                     .expect("attached")
-                    .chat
+                    .chat(cx)
                     .entity_id(),
                 chat,
                 "the views over the workspace were never rebuilt"
@@ -7131,7 +8076,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
     }
@@ -7243,7 +8188,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
         await_restore_update(&shell, cx, |store| {
             store.composer_state().turn_running && !store.chat_loading()
         });
@@ -7274,8 +8219,8 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("working-status-19").is_none());
 
-        let chat = shell.read_with(cx, |shell, _| {
-            shell.attachment.as_ref().expect("attached").chat.clone()
+        let chat = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").chat(cx)
         });
         let invalidations = Rc::new(Cell::new(0));
         let _observer = cx.update(|_, cx| {
@@ -7311,7 +8256,7 @@ mod tests {
             )
             .unwrap();
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         crate::settings::assert_follows_language_switch(cx, "chat.new_thread", |cx| {
@@ -7558,7 +8503,13 @@ mod tests {
                 });
                 let chat_min = CHAT_MIN_WIDTH
                     + store.read_with(cx, |store, _| {
-                        crate::chat::header_extra_width(store, collapsed, false, false)
+                        crate::chat::header_extra_width_for(
+                            store,
+                            store.active_session_id().as_deref(),
+                            collapsed,
+                            false,
+                            false,
+                        )
                     });
                 let beside = width - sidebar;
                 if beside >= chat_min + RIGHT_PANEL_MIN_WIDTH {
@@ -7729,7 +8680,7 @@ mod tests {
                 .attachment
                 .as_ref()
                 .unwrap()
-                .chat
+                .chat(cx)
                 .read(cx)
                 .composer()
                 .read(cx)
@@ -7918,7 +8869,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         resize(cx, 1200.);

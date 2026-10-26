@@ -2987,7 +2987,7 @@ mod tests {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("live".into()));
+        store.update(cx, |store, cx| store.select_session("live".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
         let mut page = None;
         let (_, cx) = cx.add_window_view(|window, cx| {

@@ -23,7 +23,7 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::copy::CopiedMark;
-use crate::widgets::menu::{ContextMenuExt as _, PopupMenu, open_in_zed};
+use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, open_in_zed};
 use crate::widgets::tooltip::Tooltip;
 use crate::{
     icon::{Icon, IconName},
@@ -96,10 +96,14 @@ pub(crate) use crate::material::{
 /// Below this header width the git and Open split buttons drop their text and
 /// keep their icon and chevron. The header with its longest git label, five
 /// panel toggles and a title kept to a few words beside a "+10" pull request
-/// badge measures under 672pt in English, the widest shipped locale.
-/// [`header_extra_width`] adds what a thread's header holds beyond that.
-const HEADER_LABELS_MIN_WIDTH: f32 = 672.;
-pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 532.;
+/// badge measures under 672pt in English, the widest shipped locale, and the
+/// pane menu adds 28pt. [`header_extra_width_for`] adds what a thread's header holds beyond
+/// that.
+const HEADER_LABELS_MIN_WIDTH: f32 = 700.;
+/// At 16pt padding the compact header fits: that title and badge, the git
+/// and Open split buttons as icon and chevron, and five panel toggles measure
+/// 531pt; the pane menu adds its 24pt button and 4pt gap.
+pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 560.;
 /// The way back to the parent thread, each with the 8pt gap that follows it.
 /// Its arrow alone measures 20pt. With the parent's title cut to its
 /// 24-character maximum it measured 215pt for an ordinary title; 265pt leaves
@@ -133,27 +137,10 @@ fn traffic_light_clearance(sidebar_collapsed: bool, fullscreen: bool) -> f32 {
     }
 }
 
-/// [`header_extra_width_for`] the focused thread.
-pub(crate) fn header_extra_width(
-    store: &WorkspaceStore,
-    sidebar_collapsed: bool,
-    fullscreen: bool,
-    labelled: bool,
-) -> f32 {
-    let focused = store.active_session_id();
-    header_extra_width_for(
-        store,
-        focused.as_deref(),
-        sidebar_collapsed,
-        fullscreen,
-        labelled,
-    )
-}
-
 /// How much wider than the plain header `session_id`'s header is, with
 /// its split buttons labelled or not: the padding that clears the macOS
 /// traffic lights, and the parent link.
-fn header_extra_width_for(
+pub(crate) fn header_extra_width_for(
     store: &WorkspaceStore,
     session_id: Option<&str>,
     sidebar_collapsed: bool,
@@ -167,6 +154,46 @@ fn header_extra_width_for(
     };
     traffic_light_clearance(sidebar_collapsed, fullscreen) + parent_link
 }
+/// The header's pane commands, for the pane it heads.
+fn pane_menu(panes: crate::shell::PaneControls) -> impl IntoElement {
+    use crate::panes::{ClosePane, SplitDown, SplitRight, ZoomPane};
+    Button::new("pane-menu")
+        .debug_selector(|| "pane-menu".into())
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .ghost()
+        .small()
+        .compact()
+        .icon(IconName::Columns2)
+        .tooltip(crate::tr!("panes.menu"))
+        .dropdown_menu(move |menu, _, _| {
+            let (zoom, zoom_icon) = if panes.zoomed {
+                (crate::tr!("panes.unzoom"), IconName::Minimize2)
+            } else {
+                (crate::tr!("panes.zoom"), IconName::Maximize2)
+            };
+            menu.menu_with_icon_and_enable(
+                crate::tr!("panes.split_right").into_owned(),
+                IconName::Columns2,
+                Box::new(SplitRight),
+                panes.split_right,
+            )
+            .menu_with_icon_and_enable(
+                crate::tr!("panes.split_down").into_owned(),
+                IconName::Rows2,
+                Box::new(SplitDown),
+                panes.split_down,
+            )
+            .separator()
+            .menu_with_icon_and_enable(zoom.into_owned(), zoom_icon, Box::new(ZoomPane), panes.zoom)
+            .menu_with_icon_and_enable(
+                crate::tr!("panes.close").into_owned(),
+                IconName::Close,
+                Box::new(ClosePane),
+                panes.close,
+            )
+        })
+}
+
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
 const TURN_GAP: f32 = 32.;
@@ -439,10 +466,28 @@ enum FullOutput {
     Failed(String),
 }
 
+/// Which of the window's edges a conversation's header runs along, and so
+/// which window chrome it makes room for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WindowEdges {
+    /// Where macOS draws the traffic lights over a collapsed sidebar.
+    pub(crate) left: bool,
+    /// Where Windows' caption buttons sit with no right panel open.
+    pub(crate) right: bool,
+}
+
+impl WindowEdges {
+    pub(crate) const BOTH: Self = Self {
+        left: true,
+        right: true,
+    };
+}
+
 pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     /// The thread this view shows and acts on.
     session_id: Option<String>,
+    edges: WindowEdges,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -783,6 +828,7 @@ impl ChatView {
             pull_requests,
             workspace_store,
             session_id,
+            edges: WindowEdges::BOTH,
             window_state,
             composer,
             terminal_drawer,
@@ -830,6 +876,13 @@ impl ChatView {
 
     /// Show `session_id`'s thread, or none; the next sync finds the thread
     /// changed.
+    pub(crate) fn set_edges(&mut self, edges: WindowEdges, cx: &mut Context<Self>) {
+        if self.edges != edges {
+            self.edges = edges;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
         if self.session_id == session_id {
             return;
@@ -2648,7 +2701,7 @@ impl ChatView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let parent_id = parent_id.clone();
                     this.workspace_store
-                        .update(cx, |store, _| store.select_session(parent_id));
+                        .update(cx, |store, cx| store.select_session(parent_id, cx));
                 }))
                 .into_any_element(),
         )
@@ -2670,7 +2723,7 @@ impl ChatView {
         let on_open = mirror_id.map(|mirror_id| {
             let store = self.workspace_store.clone();
             Box::new(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                store.update(cx, |store, _| store.select_session(mirror_id.clone()));
+                store.update(cx, |store, cx| store.select_session(mirror_id.clone(), cx));
             }) as components::subagent::ClickHandler
         });
         components::subagent::subagent_row(entry, on_open, cx)
@@ -2858,23 +2911,25 @@ impl ChatView {
         // top-right corner, so it hosts the caption buttons — flush to the
         // right edge, past the header's usual inset.
         let (right_panel_open, right_tab) = self.workspace_store.read(cx).window_caption_state();
-        let hosts_caption = window_caption::hosts_caption_for_state(
-            window_caption::CaptionSurface::Chat,
-            self.window_state.read(cx).route(),
-            right_panel_open,
-            right_tab,
-        );
+        let hosts_caption = self.edges.right
+            && window_caption::hosts_caption_for_state(
+                window_caption::CaptionSurface::Chat,
+                self.window_state.read(cx).route(),
+                right_panel_open,
+                right_tab,
+            );
+        let under_traffic_lights = collapsed && self.edges.left;
         let labelled_extra = header_extra_width_for(
             self.workspace_store.read(cx),
             self.session_id.as_deref(),
-            collapsed,
+            under_traffic_lights,
             window.is_fullscreen(),
             true,
         );
         let labelled = width - labelled_extra >= HEADER_LABELS_MIN_WIDTH;
         let traffic_lights = window_caption::traffic_light_inset(window);
         let base = crate::material::bar("chat-header", crate::material::Bar::Strip, false, cx)
-            .when(collapsed && traffic_lights > px(0.), |this| {
+            .when(under_traffic_lights && traffic_lights > px(0.), |this| {
                 this.pl(traffic_lights)
             })
             .when(hosts_caption, |this| this.pr_0())
@@ -2882,7 +2937,7 @@ impl ChatView {
                 + header_extra_width_for(
                     self.workspace_store.read(cx),
                     self.session_id.as_deref(),
-                    collapsed,
+                    under_traffic_lights,
                     window.is_fullscreen(),
                     false,
                 )
@@ -3190,6 +3245,10 @@ impl ChatView {
                                         this.workspace_store
                                             .update(cx, |store, cx| store.toggle_diff_panel(cx));
                                     })),
+                            )
+                            .children(
+                                crate::shell::pane_controls(self.session_id.as_deref(), window, cx)
+                                    .map(pane_menu),
                             ),
                     )
             })
@@ -5462,7 +5521,7 @@ mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
             store.read_with(cx, |store, _| !store.chat_loading())
         });
@@ -5610,7 +5669,7 @@ mod tests {
         cx.simulate_click(header.center(), gpui::Modifiers::default());
         settle(cx, "the reopened panel", &|_| output_topics().len() == 1);
 
-        store.update(cx, |store, _| store.select_session(other_id));
+        store.update(cx, |store, cx| store.select_session(other_id, cx));
         settle(cx, "leaving the thread", &|_| output_topics().is_empty());
         driver.shutdown(cx, &store, &host);
     }
@@ -5975,7 +6034,7 @@ mod tests {
                         .any(|model| model.id == "effort-layout")
             })
         });
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.chat_loading()
@@ -6709,7 +6768,7 @@ mod tests {
                 cx,
             )
         });
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
             store.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.chat_loading()
@@ -7304,7 +7363,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, _| store.select_session("long".into()));
+        store.update(cx, |store, cx| store.select_session("long".into(), cx));
         event(
             Topic::Settings,
             ServerEvent::SettingsSnapshot(Default::default()),
@@ -7467,9 +7526,9 @@ mod tests {
         // Left with that page held, the thread reopens from its cursor with
         // the window its tail needed.
         while outgoing.try_recv().is_ok() {}
-        store.update(cx, |store, _| {
-            store.select_session("other".into());
-            store.select_session("long".into());
+        store.update(cx, |store, cx| {
+            store.select_session("other".into(), cx);
+            store.select_session("long".into(), cx);
         });
         let events_topic = Topic::SessionEvents {
             session_id: "long".into(),
@@ -7819,8 +7878,8 @@ mod tests {
         let view = view.root(cx).expect("chat window should have a root");
         assert!(view.read_with(cx, |chat, _| chat.pending_md_builds.contains_key("large")));
 
-        workspace_store.update(cx, |store, _| {
-            store.select_session("replacement-session".into());
+        workspace_store.update(cx, |store, cx| {
+            store.select_session("replacement-session".into(), cx);
         });
         view.update(cx, |chat, cx| chat.sync_markdown_states(cx));
         driver.wait_until(cx, &workspace_store, "replacement history snapshot", |cx| {
@@ -8012,7 +8071,7 @@ This begins after the hard break."#;
         driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
-        workspace_store.update(cx, |store, _| store.select_session(session_id.clone()));
+        workspace_store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
             workspace_store.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.chat_loading()
@@ -8379,7 +8438,7 @@ This begins after the hard break."#;
                 )
                 .expect("the seeded history is read");
         }
-        workspace_store.update(cx, |store, _| store.select_session(session_id.clone()));
+        workspace_store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
             workspace_store.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.chat_loading()
