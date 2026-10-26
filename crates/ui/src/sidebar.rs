@@ -957,6 +957,58 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
+    /// The list's body: while threads load, the skeleton (or the rows still
+    /// waiting for a connection); once loaded, `loaded`, fading in under the
+    /// skeleton as it fades out.
+    fn loading_body(
+        &mut self,
+        loaded: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> gpui::AnyElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let loading = self.store.read(cx).threads_loading();
+        let skeleton = loading && self.store.read(cx).pending_sessions().is_empty();
+        let leaving = crate::motion::shown(
+            "sidebar-loading-skeleton",
+            skeleton.then_some(()),
+            window,
+            cx,
+        );
+        let arriving = transition(
+            ("sidebar-loaded", "opacity"),
+            if loading { 0. } else { 1. },
+            settle(),
+            window,
+            cx,
+        );
+        if skeleton {
+            return crate::material::loading_skeleton(cx);
+        }
+        if loading {
+            return self.pending_thread_rows(cx);
+        }
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .opacity(arriving)
+                    .child(loaded(self, window, cx)),
+            )
+            .when_some(leaving, |body, leaving| {
+                body.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(leaving.fade(crate::material::loading_skeleton(cx))),
+                )
+            })
+            .into_any_element()
+    }
+
     /// Track the pointer over `group`'s row for [`Self::hover_progress`].
     fn track_hover(
         row: gpui::Stateful<gpui::Div>,
@@ -4000,114 +4052,114 @@ impl SessionsSidebar {
         self.compact_rows_rendered.set(0);
         let model = self.compact_model(cx);
         let layout = self.store.read(cx).sidebar_layout();
-        let body = if self.store.read(cx).threads_loading() {
-            if self.store.read(cx).pending_sessions().is_empty() {
-                crate::material::loading_skeleton(cx)
-            } else {
-                self.pending_thread_rows(cx)
-            }
-        } else if !model.has_projects {
-            div()
-                .id("threads-empty")
-                .debug_selector(|| "threads-empty".into())
-                .size_full()
-                .child(crate::material::empty_state(
-                    Icon::new(IconName::Folder),
-                    if self.store.read(cx).scope().is_full() {
-                        crate::tr!("mobile.projects_empty")
-                    } else {
-                        crate::tr!("member.empty_title")
-                    },
-                    if self.store.read(cx).scope().is_full() {
-                        crate::tr!("mobile.projects_help")
-                    } else {
-                        crate::tr!("member.empty_description")
-                    },
-                    cx,
-                ))
-                .into_any_element()
-        } else {
-            let reveal = std::mem::take(&mut self.compact_reveal_active)
-                .then(|| {
-                    let active = self.store.read(cx).roster_session_id();
-                    model.rows.iter().position(|row| {
-                        matches!(row, CompactListRow::Thread(row) if Some(&row.meta.id) == active.as_ref())
-                    })
-                })
-                .flatten();
-            let reveal_model = model.clone();
-            let compact_width = self.compact_list_state.viewport_bounds().size.width;
-            div()
-                .id("compact-thread-list")
-                .debug_selector(|| "compact-thread-list".into())
-                .flex_1()
-                .min_h_0()
-                .relative()
-                .when_some(reveal, |list, index| {
-                    list.child(
-                        gpui::canvas(
-                            cx.processor(
-                                move |this, bounds: gpui::Bounds<gpui::Pixels>, window, cx| {
-                                    // Child autoscroll retries prepaint without rolling back
-                                    // accessibility nodes in gpui-fast 3755a55. Measure the
-                                    // lead using this frame's bounds before the list prepaints.
-                                    let mut remaining = bounds.size.height / 3.;
-                                    let mut first = index;
-                                    while first > 0 && remaining > px(0.) {
-                                        first -= 1;
-                                        remaining -= this
-                                            .render_compact_row(
-                                                &reveal_model.rows[first],
-                                                window,
-                                                cx,
-                                            )
-                                            .layout_as_root(
-                                                gpui::size(
-                                                    gpui::AvailableSpace::Definite(
-                                                        bounds.size.width,
-                                                    ),
-                                                    gpui::AvailableSpace::MinContent,
-                                                ),
-                                                window,
-                                                cx,
-                                            )
-                                            .height;
-                                    }
-                                    this.compact_list_state.scroll_to(gpui::ListOffset {
-                                        item_ix: first,
-                                        offset_in_item: (-remaining).max(px(0.)),
-                                    });
-                                },
-                            ),
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    )
-                })
-                .child(crate::scroll::page_viewport(
-                    "compact-thread-bounce",
-                    &self.compact_list_state,
-                    list(
-                        self.compact_list_state.clone(),
-                        cx.processor(move |this, index: usize, window, cx| {
-                            let factor = model.folds.get(index).copied().unwrap_or(1.);
-                            this.fold_row(factor, compact_width, window, cx, |this, window, cx| {
-                                this.render_compact_row(&model.rows[index], window, cx)
+        let body = self.loading_body(
+            move |this, window, cx| {
+                if !model.has_projects {
+                    div()
+                        .id("threads-empty")
+                        .debug_selector(|| "threads-empty".into())
+                        .size_full()
+                        .child(crate::material::empty_state(
+                            Icon::new(IconName::Folder),
+                            if this.store.read(cx).scope().is_full() {
+                                crate::tr!("mobile.projects_empty")
+                            } else {
+                                crate::tr!("member.empty_title")
+                            },
+                            if this.store.read(cx).scope().is_full() {
+                                crate::tr!("mobile.projects_help")
+                            } else {
+                                crate::tr!("member.empty_description")
+                            },
+                            cx,
+                        ))
+                        .into_any_element()
+                } else {
+                    let reveal = std::mem::take(&mut this.compact_reveal_active)
+                        .then(|| {
+                            let active = this.store.read(cx).roster_session_id();
+                            model.rows.iter().position(|row| {
+                                matches!(row, CompactListRow::Thread(row) if Some(&row.meta.id) == active.as_ref())
                             })
-                        }),
-                    )
-                    .size_full(),
-                ))
-                .when(!window.is_inspector_picking(cx), |list| {
-                    list.child(thread_list_scrollbar(
-                        "compact-thread-scrollbar",
-                        &self.compact_list_state,
-                        compact_thread_row_height(cx),
-                    ))
-                })
-                .into_any_element()
-        };
+                        })
+                        .flatten();
+                    let reveal_model = model.clone();
+                    let compact_width = this.compact_list_state.viewport_bounds().size.width;
+                    div()
+                        .id("compact-thread-list")
+                        .debug_selector(|| "compact-thread-list".into())
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .when_some(reveal, |list, index| {
+                            list.child(
+                                gpui::canvas(
+                                    cx.processor(
+                                        move |this, bounds: gpui::Bounds<gpui::Pixels>, window, cx| {
+                                            // Child autoscroll retries prepaint without rolling back
+                                            // accessibility nodes in gpui-fast 3755a55. Measure the
+                                            // lead using this frame's bounds before the list prepaints.
+                                            let mut remaining = bounds.size.height / 3.;
+                                            let mut first = index;
+                                            while first > 0 && remaining > px(0.) {
+                                                first -= 1;
+                                                remaining -= this
+                                                    .render_compact_row(
+                                                        &reveal_model.rows[first],
+                                                        window,
+                                                        cx,
+                                                    )
+                                                    .layout_as_root(
+                                                        gpui::size(
+                                                            gpui::AvailableSpace::Definite(
+                                                                bounds.size.width,
+                                                            ),
+                                                            gpui::AvailableSpace::MinContent,
+                                                        ),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                    .height;
+                                            }
+                                            this.compact_list_state.scroll_to(gpui::ListOffset {
+                                                item_ix: first,
+                                                offset_in_item: (-remaining).max(px(0.)),
+                                            });
+                                        },
+                                    ),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full(),
+                            )
+                        })
+                        .child(crate::scroll::page_viewport(
+                            "compact-thread-bounce",
+                            &this.compact_list_state,
+                            list(
+                                this.compact_list_state.clone(),
+                                cx.processor(move |this, index: usize, window, cx| {
+                                    let factor = model.folds.get(index).copied().unwrap_or(1.);
+                                    this.fold_row(factor, compact_width, window, cx, |this, window, cx| {
+                                        this.render_compact_row(&model.rows[index], window, cx)
+                                    })
+                                }),
+                            )
+                            .size_full(),
+                        ))
+                        .when(!window.is_inspector_picking(cx), |list| {
+                            list.child(thread_list_scrollbar(
+                                "compact-thread-scrollbar",
+                                &this.compact_list_state,
+                                compact_thread_row_height(cx),
+                            ))
+                        })
+                        .into_any_element()
+                }
+            },
+            window,
+            cx,
+        );
 
         v_flex()
             .size_full()
@@ -4942,20 +4994,18 @@ impl Render for SessionsSidebar {
             .child(self.render_search_row(cx))
             .child(self.render_machine_control(window, cx))
             .child(header)
-            .child(if self.store.read(cx).threads_loading() {
-                if self.store.read(cx).pending_sessions().is_empty() {
-                    crate::material::loading_skeleton(cx)
-                } else {
-                    self.pending_thread_rows(cx)
-                }
-            } else {
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.pending_thread_rows(cx))
-                    .child(thread_list)
-                    .into_any_element()
-            })
+            .child(self.loading_body(
+                |this, _, cx| {
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(this.pending_thread_rows(cx))
+                        .child(thread_list)
+                        .into_any_element()
+                },
+                window,
+                cx,
+            ))
             .child(self.render_footer(cx))
             .into_any_element()
     }
