@@ -27,6 +27,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui::{Styled as _, rgb};
+use gpui_base::motion::{Transition, transition};
 use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
@@ -101,7 +102,7 @@ impl ProviderCard {
         });
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let provider = self.provider;
         // Update checks target the built-in installation; a custom profile can
         // launch another binary with a different package-manager environment.
@@ -163,7 +164,7 @@ impl ProviderCard {
                 .min_w_0()
                 .gap_0p5()
                 .child(title)
-                .child(self.render_summary_line(&summary, cx))
+                .child(self.render_summary_line(&summary, window, cx))
                 .when(!provider.caps().mcp_servers, |this| {
                     this.child(
                         div()
@@ -183,9 +184,15 @@ impl ProviderCard {
 
         crate::material::group_row(cx)
             .child(body)
-            .when(update_available, |this| {
-                this.child(self.render_update_popover(cx))
-            })
+            .children(
+                crate::motion::transient(
+                    "update-available-slot",
+                    update_available.then_some(()),
+                    window,
+                    cx,
+                )
+                .map(|((), slot)| slot.wrap(self.render_update_popover(cx))),
+            )
             .child(
                 Button::new("configure-profile")
                     .ghost()
@@ -220,6 +227,7 @@ impl ProviderCard {
     fn render_summary_line(
         &self,
         summary: &crate::provider_status::StatusSummary,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -239,29 +247,41 @@ impl ProviderCard {
             ),
             StatusDot::Amber => (cx.theme().muted, muted),
         };
-        let (lead, rest) = match &summary.email {
-            Some(_) => summary
-                .headline
-                .split_once(EMAIL_SLOT)
-                .map(|(prefix, suffix)| (prefix.trim_end().to_string(), Some(suffix)))
-                .unwrap_or((summary.headline.clone(), Some(""))),
+        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let status_bg = transition(("provider-status", "bg"), status_bg, settle(), window, cx);
+        let status_fg = transition(("provider-status", "fg"), status_fg, settle(), window, cx);
+        let (lead, email) = match &summary.email {
+            Some(email) => match summary.headline.split_once(EMAIL_SLOT) {
+                Some((prefix, suffix)) => (
+                    prefix.trim_end().to_string(),
+                    Some((email.clone(), suffix.trim_start().to_string())),
+                ),
+                None => (
+                    summary.headline.clone(),
+                    Some((email.clone(), String::new())),
+                ),
+            },
             None => (summary.headline.clone(), None),
         };
-        let mut line = crate::material::semantic_chip(lead, status_bg, status_fg, cx)
-            .flex()
-            .items_center()
-            .gap_1();
-
-        if let (Some(email), Some(suffix)) = (&summary.email, rest) {
-            {
-                let revealed = self.email_revealed;
-                let shown = if revealed {
-                    email.clone()
-                } else {
-                    redact_email(email)
-                };
-                line = line
-                    .child(
+        let text = crate::motion::swap(
+            "provider-status-text",
+            (lead, email, summary.detail.clone()),
+            window,
+            cx,
+        );
+        let revealed = self.email_revealed;
+        let text = text.render(|(lead, email, detail)| {
+            h_flex()
+                .items_center()
+                .gap_1()
+                .child(lead)
+                .when_some(email, |line, (email, suffix)| {
+                    let shown = if revealed {
+                        email
+                    } else {
+                        redact_email(&email)
+                    };
+                    line.child(
                         Button::new("reveal-email")
                             .text()
                             .xsmall()
@@ -276,12 +296,16 @@ impl ProviderCard {
                                 cx.notify();
                             })),
                     )
-                    .child(div().child(suffix.trim_start().to_string()));
-            }
-        }
-        if !summary.detail.is_empty() {
-            line = line.child(div().child(format!("· {}", summary.detail)));
-        }
+                    .child(div().child(suffix))
+                })
+                .when(!detail.is_empty(), |line| {
+                    line.child(div().child(format!("· {detail}")))
+                })
+                .into_any_element()
+        });
+        let line = crate::material::chip_surface(status_bg, status_fg, cx)
+            .overflow_hidden()
+            .child(text);
         // Row wrapper so the chip left-aligns and hugs its content instead of
         // being stretched to the column width by the surrounding v_flex.
         h_flex().w_full().min_w_0().child(line).into_any_element()
@@ -408,8 +432,8 @@ impl ProviderCard {
 }
 
 impl Render for ProviderCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().w_full().child(self.render_header(cx))
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex().w_full().child(self.render_header(window, cx))
     }
 }
 
