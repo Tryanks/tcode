@@ -14,12 +14,12 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, InteractiveElement as _,
+    AnyElement, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, ListAlignment, ListState, ParentElement as _, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::motion::{Transition, transition};
+use gpui_base::motion::transition;
 use gpui_base::{Scrollbar, h_flex, v_flex};
 use std::f32::consts::PI;
 use std::rc::Rc;
@@ -77,7 +77,7 @@ impl AcpAgentCard {
         let id = agent.id.clone();
         let toggle_id = id.clone();
         let name = agent.name.clone();
-        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let settle = crate::motion::settle;
         let dot_color = transition(
             "acp-status-dot",
             if agent.enabled {
@@ -609,7 +609,8 @@ impl AcpPanel {
             cx,
         )
         .fill();
-        let error = crate::motion::retain("acp-market-error", error, window, cx);
+        let error =
+            crate::motion::shown("acp-market-error", error, window, cx).map(|error| error.value);
         let mut layers = Vec::new();
         if let Some(error) = error.filter(|_| state.shows(0)) {
             layers.push((
@@ -696,11 +697,24 @@ impl AcpPanel {
          -> AnyElement {
             let enabled = open.is_some();
             let muted = cx.theme().muted_foreground;
+            let hover =
+                enabled.then(|| crate::motion::hover_fill(id, cx.theme().list_hover, window, cx));
+            let (fill, on_hover) = hover.unzip();
             let row = material::card(cx)
                 .flex_row()
                 .w_full()
                 .items_center()
                 .text_body(false, cx)
+                // Under the content, over the card's own fill.
+                .when_some(fill, |row, fill| {
+                    row.relative().child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(material::radius_card(cx))
+                            .bg(fill),
+                    )
+                })
                 .child(glyph.text_color(if enabled {
                     cx.theme().foreground
                 } else {
@@ -722,32 +736,10 @@ impl AcpPanel {
                         )
                         .child(div().text_secondary(false, cx).truncate().child(subtitle)),
                 );
-            if let Some(open) = open {
-                // Hover is read at render so its fill can glide.
-                let hovered =
-                    window.use_keyed_state((ElementId::from(id), "hovered"), cx, |_, _| false);
-                let bg = transition(
-                    (id, "bg"),
-                    if *hovered.read(cx) {
-                        cx.theme().list_hover
-                    } else {
-                        cx.theme().muted
-                    },
-                    Transition::new(crate::edge_back::SETTLE),
-                    window,
-                    cx,
-                );
+            if let Some((open, on_hover)) = open.zip(on_hover) {
                 material::accessible_clickable(row, id, gpui::Role::Button, title, cx)
                     .cursor_pointer()
-                    .bg(bg)
-                    .on_hover(move |is_hovered, _, cx| {
-                        hovered.update(cx, |hovered, cx| {
-                            if *hovered != *is_hovered {
-                                *hovered = *is_hovered;
-                                cx.notify();
-                            }
-                        });
-                    })
+                    .on_hover(on_hover)
                     .child(Icon::new(IconName::ChevronRight).text_color(muted))
                     .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
                     .into_any_element()

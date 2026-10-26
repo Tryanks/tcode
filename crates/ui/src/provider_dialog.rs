@@ -25,7 +25,7 @@ use gpui::{
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_base::motion::{Transition, transition};
+use gpui_base::motion::transition;
 use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
@@ -472,7 +472,7 @@ impl ProviderDialog {
                 } else {
                     cx.theme().foreground.opacity(0.)
                 },
-                Transition::new(crate::edge_back::SETTLE),
+                crate::motion::settle(),
                 window,
                 cx,
             );
@@ -694,15 +694,14 @@ impl ProviderDialog {
                         ),
                 ),
         );
-        if let Some((error, slot)) =
-            crate::motion::transient("slug-error", self.slug_error.clone(), window, cx)
+        if let Some(error) = crate::motion::shown("slug-error", self.slug_error.clone(), window, cx)
         {
             block = block.child(
-                slot.wrap(
+                error.fold(
                     div()
                         .text_secondary(false, cx)
                         .text_color(cx.theme().danger_foreground)
-                        .child(error),
+                        .child(error.value.clone()),
                 ),
             );
         }
@@ -741,10 +740,10 @@ impl ProviderDialog {
                 cx,
             ));
         }
-        if let Some(((), slot)) =
-            crate::motion::transient(("model-hidden", index), hidden.then_some(()), window, cx)
+        if let Some(chip) =
+            crate::motion::shown(("model-hidden", index), hidden.then_some(()), window, cx)
         {
-            tags = tags.child(slot.wrap(crate::material::semantic_chip(
+            tags = tags.child(chip.fade(crate::material::semantic_chip(
                 crate::tr!("providers.models.hidden").into_owned(),
                 cx.theme().warning.opacity(0.12),
                 cx.theme().warning_foreground,
@@ -754,7 +753,7 @@ impl ProviderDialog {
         let name_color = transition(
             ElementId::from(("model-name", index)),
             if hidden { muted } else { cx.theme().foreground },
-            Transition::new(crate::edge_back::SETTLE),
+            crate::motion::settle(),
             window,
             cx,
         );

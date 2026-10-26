@@ -514,20 +514,15 @@ impl Render for AddProjectDialog {
                         column.child(div().text_secondary(false, cx).child(hint))
                     })
                     .children(
-                        crate::motion::transient(
-                            "add-project-error",
-                            self.error.clone(),
-                            window,
-                            cx,
-                        )
-                        .map(|(error, slot)| {
-                            slot.wrap(
-                                div()
-                                    .text_secondary(false, cx)
-                                    .text_color(cx.theme().danger)
-                                    .child(error),
-                            )
-                        }),
+                        crate::motion::shown("add-project-error", self.error.clone(), window, cx)
+                            .map(|error| {
+                                error.fold(
+                                    div()
+                                        .text_secondary(false, cx)
+                                        .text_color(cx.theme().danger)
+                                        .child(error.value.clone()),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -615,7 +610,8 @@ impl Render for ImportProgress {
             window,
             cx,
         );
-        let running = crate::motion::retain("external-import-running", running, window, cx)
+        let running = crate::motion::shown("external-import-running", running, window, cx)
+            .map(|running| running.value)
             .filter(|_| outcome.shows(0));
         let mut layers = Vec::new();
         if let Some((done, total, tool)) = running {
