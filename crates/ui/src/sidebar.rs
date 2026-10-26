@@ -822,8 +822,7 @@ impl SessionsSidebar {
         if let Some(id) = threads.get(index) {
             self.compact_model_dirty = true;
             self.store.update(cx, |store, cx| {
-                store.select_session(id.clone());
-                cx.notify();
+                store.select_session(id.clone(), cx);
             });
             self.window_state
                 .update(cx, |state, cx| state.open_thread(cx));
@@ -1543,7 +1542,7 @@ impl SessionsSidebar {
                     }
                 }
                 if let Some(id) = entry.reopen {
-                    store.update(cx, |store, _| store.select_session(id));
+                    store.update(cx, |store, cx| store.select_session(id, cx));
                 }
             }
         })
@@ -2745,8 +2744,7 @@ impl SessionsSidebar {
             let session_id = session_id.clone();
             this.compact_model_dirty = true;
             this.store.update(cx, |store, cx| {
-                store.select_session(session_id.clone());
-                cx.notify();
+                store.select_session(session_id.clone(), cx);
             });
             this.window_state
                 .update(cx, |state, cx| state.open_thread(cx));
@@ -4002,8 +4000,7 @@ impl SessionsSidebar {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.store.update(cx, |store, cx| {
-                                store.select_session(id.clone());
-                                cx.notify();
+                                store.select_session(id.clone(), cx);
                             });
                             this.window_state
                                 .update(cx, |state, cx| state.open_thread(cx));
@@ -4403,8 +4400,7 @@ impl SessionsSidebar {
                     return;
                 }
                 this.store.update(cx, |store, cx| {
-                    store.select_session(click_id.clone());
-                    cx.notify();
+                    store.select_session(click_id.clone(), cx);
                 });
                 this.window_state
                     .update(cx, |state, cx| state.open_thread(cx));
@@ -5180,7 +5176,9 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("background".into()));
+        store.update(cx, |store, cx| {
+            store.select_session("background".into(), cx)
+        });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -5478,7 +5476,9 @@ mod tests {
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(320.), px(600.)));
-        store.update(cx, |store, _| store.select_session("codex-thread".into()));
+        store.update(cx, |store, cx| {
+            store.select_session("codex-thread".into(), cx)
+        });
         // (row selector, mark selector); the active Codex row comes first.
         let selectors = [
             (
@@ -6176,7 +6176,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("virtual-0".into()));
+        store.update(cx, |store, cx| store.select_session("virtual-0".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
             sidebar: cx.new(|cx| SessionsSidebar::new(store.clone(), window_state, cx)),
@@ -6318,7 +6318,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("virtual-0".into()));
+        store.update(cx, |store, cx| store.select_session("virtual-0".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
@@ -6487,7 +6487,7 @@ mod tests {
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // A selection keeps the store from opening a draft against a host
         // this fake transport never answers.
-        store.update(cx, |store, _| store.select_session("other".into()));
+        store.update(cx, |store, cx| store.select_session("other".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -6499,7 +6499,7 @@ mod tests {
         assert!(cx.debug_bounds("compact-row-child").is_none());
         assert!(cx.debug_bounds("compact-row-mirror").is_none());
 
-        store.update(cx, |store, _| store.select_session("child".into()));
+        store.update(cx, |store, cx| store.select_session("child".into(), cx));
         sidebar.update(cx, |_, cx| cx.notify());
         draw_settled(cx);
         let lead = cx.debug_bounds("compact-row-parent").unwrap();
@@ -6701,7 +6701,9 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("settled-39".into()));
+        store.update(cx, |store, cx| {
+            store.select_session("settled-39".into(), cx)
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -6871,7 +6873,9 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // The open thread is settled, so the closed shelf shows its row.
-        store.update(cx, |store, _| store.select_session("settled-20".into()));
+        store.update(cx, |store, cx| {
+            store.select_session("settled-20".into(), cx)
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -7068,7 +7072,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("mixed-a".into()));
+        store.update(cx, |store, cx| store.select_session("mixed-a".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -7106,7 +7110,7 @@ mod tests {
             draw_settled(cx);
         };
         for compact in [false, true] {
-            store.update(cx, |store, _| store.select_session("mixed-a".into()));
+            store.update(cx, |store, cx| store.select_session("mixed-a".into(), cx));
             window_state.update(cx, |state, cx| {
                 state.compact = compact;
                 cx.notify();
@@ -7220,8 +7224,7 @@ mod tests {
             click(cx, "settled-lead");
             verify(cx, expected(shown, false, false));
             store.update(cx, |store, cx| {
-                store.select_session("many-settled-1".into());
-                cx.notify();
+                store.select_session("many-settled-1".into(), cx);
             });
             draw_settled(cx);
             verify(cx, expected(shown, false, true));
@@ -7569,7 +7572,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("arranged".into()));
+        store.update(cx, |store, cx| store.select_session("arranged".into(), cx));
         let mut driver = crate::store::tests::LocalHostDriver::from_link(link);
         // The host records commands on its own thread; the driver routes replies
         // while the UI awaits each acknowledgement, as in the running app.

@@ -421,7 +421,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, _| store.select_session("session".into()));
+        store.update(cx, |store, cx| store.select_session("session".into(), cx));
         for line in deferred {
             incoming.try_send(line).unwrap();
         }

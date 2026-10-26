@@ -230,7 +230,7 @@ pub fn sidebar_badge(
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             store.update(cx, |store, cx| {
-                store.select_session(id.clone());
+                store.select_session(id.clone(), cx);
                 store.open_tab_for(&id, RightTab::PullRequests, cx);
             });
         })
@@ -305,7 +305,7 @@ pub fn sidebar_badge(
                                 .hover(|s| s.bg(cx.theme().list_hover))
                                 .on_click(move |_, _, cx| {
                                     store.update(cx, |store, cx| {
-                                        store.select_session(id.clone());
+                                        store.select_session(id.clone(), cx);
                                         store.open_tab_for(&id, RightTab::PullRequests, cx);
                                         store.set_open_pull_request(&id, Some(open.clone()), cx);
                                     });

@@ -448,37 +448,53 @@ impl WorkspaceStore {
         self.local_settings_changed(cx);
     }
     /// Leave the focused thread: nothing is focused, and the thread closes.
-    pub(crate) fn leave_session(&mut self) {
+    pub(crate) fn leave_session(&mut self, cx: &mut Context<Self>) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
         if let Some(session_id) = self.focused_session_id.take() {
-            self.close_thread(&session_id);
+            self.close_thread(&session_id, cx);
+        }
+        cx.notify();
+    }
+
+    /// Focus nothing while every thread stays open, for a surface about to
+    /// show a thread that does not exist yet.
+    pub(crate) fn release_focus(&mut self, cx: &mut Context<Self>) {
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+        if self.focused_session_id.take().is_some() {
+            cx.notify();
         }
     }
 
     /// Act on an open thread, which another surface shows, leaving every
     /// other thread as it is. A thread that is not open is not focused.
-    pub(crate) fn focus_thread(&mut self, session_id: &str) {
+    pub(crate) fn focus_thread(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if self.focused_session_id.as_deref() == Some(session_id)
-            || !self
-                .threads
-                .get(session_id)
-                .is_some_and(|thread| thread.open)
+            || !self.is_thread_open(session_id)
         {
             return;
         }
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.focused_session_id = Some(session_id.to_owned());
+        cx.notify();
+    }
+
+    /// Whether a surface shows the thread, so its topics are subscribed.
+    pub(crate) fn is_thread_open(&self, session_id: &str) -> bool {
+        self.threads
+            .get(session_id)
+            .is_some_and(|thread| thread.open)
     }
 
     /// Stop showing a thread: its topics are unsubscribed and its paging
     /// state forgotten, while its replicas stay for a while so reopening it
     /// fetches only what it missed. Closing the focused thread leaves
     /// nothing focused.
-    pub(crate) fn close_thread(&mut self, session_id: &str) {
+    pub(crate) fn close_thread(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if self.focused_session_id.as_deref() == Some(session_id) {
             self.focused_session_id = None;
         }
+        cx.notify();
         self.clear_command_outputs(session_id);
         if let Some(thread) = self.threads.get_mut(session_id) {
             thread.open = false;
@@ -594,23 +610,20 @@ impl WorkspaceStore {
 
     /// Act on a thread: one another surface shows only takes the focus,
     /// any other replaces the focused thread.
-    pub fn select_session(&mut self, session_id: String) {
-        let shown = self
-            .threads
-            .get(&session_id)
-            .is_some_and(|thread| thread.open);
-        self.select(session_id, shown);
+    pub fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let shown = self.is_thread_open(&session_id);
+        self.select(session_id, shown, cx);
     }
 
     /// Select the focused thread afresh once a new baseline dropped its
     /// subscriptions.
-    pub(super) fn reselect_focused(&mut self) {
+    pub(super) fn reselect_focused(&mut self, cx: &mut Context<Self>) {
         if let Some(session_id) = self.focused_session_id.take() {
-            self.select(session_id, false);
+            self.select(session_id, false, cx);
         }
     }
 
-    fn select(&mut self, session_id: String, shown: bool) {
+    fn select(&mut self, session_id: String, shown: bool, cx: &mut Context<Self>) {
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
         if self.focused_session_id.as_ref() == Some(&session_id) {
@@ -624,17 +637,22 @@ impl WorkspaceStore {
             .and_then(|meta| meta.project_id.clone());
         self.remember_project(project_id);
         if shown {
-            self.focus_thread(&session_id);
+            self.focus_thread(&session_id, cx);
             return;
         }
-        self.leave_session();
+        self.leave_session(cx);
         self.focused_session_id = Some(session_id.clone());
         self.open_thread(&session_id);
     }
-    pub fn select_session_at_turn(&mut self, session_id: String, turn: usize) {
+    pub fn select_session_at_turn(
+        &mut self,
+        session_id: String,
+        turn: usize,
+        cx: &mut Context<Self>,
+    ) {
         self.anchor_turn_task = None;
         self.pending_chat_turn = Some((session_id.clone(), turn));
-        self.select_session(session_id);
+        self.select_session(session_id, cx);
     }
     /// Open a thread, then scroll it to the turn holding the entry at
     /// `position` once the host names that turn. Only the host can: the
@@ -646,7 +664,7 @@ impl WorkspaceStore {
         cx: &mut Context<Self>,
     ) {
         self.pending_chat_turn = None;
-        self.select_session(session_id.clone());
+        self.select_session(session_id.clone(), cx);
         let generation = self.selection_generation;
         let host = self.host.clone();
         self.anchor_turn_task = Some(cx.spawn(async move |this, cx| {
@@ -865,6 +883,34 @@ impl WorkspaceStore {
     pub fn start_scratch_draft(&mut self, cx: &mut Context<Self>) {
         self.create_and_select(Command::StartScratchDraft, cx);
     }
+    /// Start a draft in the project `session_id` belongs to, or a scratch
+    /// draft when it belongs to none. Beside a draft nothing starts: the host
+    /// answers a project's or a quick chat's draft request with its standing
+    /// draft, which would be that same draft.
+    pub(crate) fn start_draft_beside(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
+        if self
+            .session_status_for(session_id)
+            .is_some_and(|status| status.draft)
+        {
+            return;
+        }
+        let project = session_id
+            .and_then(|id| {
+                self.index_replica
+                    .0
+                    .iter()
+                    .find(|meta| meta.id == id)
+                    .and_then(|meta| meta.project_id.clone())
+                    .or_else(|| self.threads.get(id)?.status.as_ref()?.project_id.clone())
+            })
+            .and_then(|project_id| self.project(&project_id))
+            .filter(|project| !project.quick_chat)
+            .map(|project| (project.id.clone(), project.root.clone()));
+        match project {
+            Some((project_id, root)) => self.start_draft(project_id, root, cx),
+            None => self.start_scratch_draft(cx),
+        }
+    }
     fn create_and_select(&mut self, command: Command, cx: &mut Context<Self>) {
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         let request_generation = self.creation_request_generation;
@@ -881,8 +927,7 @@ impl WorkspaceStore {
                 if store.selection_generation == selection_generation
                     && let Ok(CommandResponse::SessionId(Some(id))) = response
                 {
-                    store.select_session(id);
-                    cx.notify();
+                    store.select_session(id, cx);
                 }
             });
         })

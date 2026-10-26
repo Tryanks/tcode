@@ -14,6 +14,7 @@ pub(crate) enum NavigateThread {
 
 pub(crate) fn init(cx: &mut App) {
     cx.on_action(crate::shell::navigate_thread);
+    crate::shell::init_pane_actions(cx);
     // With nothing focused the shell's own Undo listener is off the dispatch path.
     cx.on_action(crate::shell::undo_thread_action);
     let bindings = [
@@ -59,11 +60,31 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("ctrl-tab", NavigateThread::Next, None),
         KeyBinding::new("ctrl-shift-tab", NavigateThread::Previous, None),
     ]);
+    // Later than gpui-base's editor bindings, so these win inside a text
+    // field too, where they shadow only its add-cursor keys on macOS and
+    // Windows (`secondary-alt-up`/`-down`).
+    {
+        use crate::panes::{ClosePane, FocusPane, SplitDown, SplitRight, ZoomPane};
+        let [split_right, split_down, close, zoom, left, right, up, down] = PANE_KEYS;
+        cx.bind_keys([
+            KeyBinding::new(split_right, SplitRight, None),
+            KeyBinding::new(split_down, SplitDown, None),
+            KeyBinding::new(close, ClosePane, None),
+            KeyBinding::new(zoom, ZoomPane, None),
+            KeyBinding::new(left, FocusPane::Left, None),
+            KeyBinding::new(right, FocusPane::Right, None),
+            KeyBinding::new(up, FocusPane::Up, None),
+            KeyBinding::new(down, FocusPane::Down, None),
+        ]);
+    }
     // Bindings dispatch before key-down listeners, and the terminal forwards
     // raw keystrokes (Tab, Ctrl-C as an interrupt) from its listener, so the
     // window root's focus traversal and selection copy must not claim them.
     let terminal = Some(crate::terminal_drawer::CONTEXT);
     let undo = secondary("secondary-z", NoAction, terminal, cx);
+    // A terminal reads every pane key itself (Ctrl-D is EOF), so none is a
+    // binding while it has the keyboard.
+    cx.bind_keys(PANE_KEYS.map(|key| KeyBinding::new(key, NoAction, terminal)));
     cx.bind_keys([
         undo,
         KeyBinding::new("tab", NoAction, terminal),
@@ -89,6 +110,18 @@ pub(crate) fn secondary<A: Action>(
     KeyBinding::load(keystrokes, Box::new(action), context, false, None, cx)
         .expect("valid keystroke")
 }
+
+/// The chat column's pane commands' keys, in [`init`]'s order.
+const PANE_KEYS: [&str; 8] = [
+    "secondary-d",
+    "secondary-shift-d",
+    "secondary-shift-w",
+    "secondary-shift-enter",
+    "secondary-alt-left",
+    "secondary-alt-right",
+    "secondary-alt-up",
+    "secondary-alt-down",
+];
 
 /// Format a shortcut using GPUI's semantic secondary modifier.
 pub(crate) fn format_secondary_shortcut(key: &str, cx: &App) -> String {

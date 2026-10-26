@@ -641,7 +641,7 @@ impl WorkspaceStore {
                     let _ = self.host.unsubscribe(subscription);
                 }
             }
-            self.leave_session();
+            self.leave_session(cx);
             self.threads.clear();
             self.conversation_ui.clear();
             self.index_replica = Default::default();
@@ -686,7 +686,7 @@ impl WorkspaceStore {
                         after: None,
                     });
                 }
-                self.reselect_focused();
+                self.reselect_focused(cx);
             }
             Scope::Full => {}
             Scope::Space {
@@ -1310,7 +1310,7 @@ impl WorkspaceStore {
                 self.threads.retain(|session_id, thread| {
                     thread.open || snapshot.sessions.iter().any(|meta| meta.id == *session_id)
                 });
-                self.restore_index_selection();
+                self.restore_index_selection(cx);
                 self.apply_index_summary(&snapshot.summary, cx);
                 if self.archived_holds > 0 {
                     self.load_archived_sessions(cx);
@@ -1330,7 +1330,7 @@ impl WorkspaceStore {
                             images::invalidate_project_icon(project, cx);
                         }
                     }
-                    self.restore_index_selection();
+                    self.restore_index_selection(cx);
                     if self.archived_holds > 0 {
                         self.load_archived_sessions(cx);
                     }
@@ -1652,42 +1652,43 @@ impl WorkspaceStore {
 
     /// Decide what the workspace shows after the index changed.
     ///
-    /// Only the conversation on screen is reconciled, so archiving a
+    /// Every open thread that left the visible index — archived (alone or
+    /// with its lead), deleted — closes, so no surface keeps showing it. Only
+    /// the conversation on screen picks what comes next, so archiving a
     /// background thread (an Orchestrate sibling completing, a sweep) never
-    /// steals navigation. When the thread on screen leaves the visible index —
-    /// archived (alone or with its lead), deleted — the workspace
-    /// follows its still-visible parent; with no such parent it falls back to
-    /// the last interacted project's draft, which is also what an empty
-    /// workspace opens.
+    /// steals navigation: the workspace follows the focused thread's
+    /// still-visible parent; with no such parent it falls back to the last
+    /// interacted project's draft, which is also what an empty workspace
+    /// opens.
     fn reconcile_destination(&mut self, cx: &mut Context<Self>) {
         // A deletion can arrive before the rejected Ack. Keep the authored
         // write on screen so its failure still has Retry and Discard controls.
         if !self.delivery_messages().is_empty() {
             return;
         }
+        let left: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|(id, thread)| {
+                thread.open
+                    && self.focused_session_id.as_ref() != Some(*id)
+                    && thread
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| self.left_index(status))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for session_id in left {
+            self.close_thread(&session_id, cx);
+        }
         match self.focused_status() {
-            // A draft has no index entry of its own; it stays until the user
-            // navigates away. Its project leaving the index is the exception:
-            // there is nothing left to draft into, so it is treated like a
-            // vanished thread.
-            Some(status) if status.draft => {
-                let project_gone = status.project_id.as_ref().is_some_and(|project_id| {
-                    !self
-                        .index_replica
-                        .1
-                        .iter()
-                        .any(|project| project.id == *project_id)
-                });
-                if !project_gone {
-                    return;
-                }
-                self.leave_session();
-            }
+            Some(status) if !self.left_index(status) => return,
+            // A draft has no index entry of its own; its project leaving
+            // the index leaves nothing to draft into.
+            Some(status) if status.draft => self.leave_session(cx),
             Some(status) => {
                 let session_id = status.session_id.clone();
-                if self.session_visible(&session_id) {
-                    return;
-                }
                 let parent = self
                     .index_replica
                     .0
@@ -1697,10 +1698,10 @@ impl WorkspaceStore {
                     .and_then(|meta| meta.parent_session_id.clone())
                     .filter(|parent| self.session_visible(parent));
                 if let Some(parent) = parent {
-                    self.select_session(parent);
+                    self.select_session(parent, cx);
                     return;
                 }
-                self.leave_session();
+                self.leave_session(cx);
             }
             // Focused, but its first status has not arrived: nothing to
             // decide yet. Without a focus this is the empty workspace.
@@ -1708,6 +1709,22 @@ impl WorkspaceStore {
             None => {}
         }
         self.open_last_project_draft(cx);
+    }
+
+    /// Whether a thread is gone from the visible index. A draft has no index
+    /// entry of its own and stays until the user navigates away, unless its
+    /// project leaves the index.
+    fn left_index(&self, status: &SessionStatus) -> bool {
+        if status.draft {
+            return status.project_id.as_ref().is_some_and(|project_id| {
+                !self
+                    .index_replica
+                    .1
+                    .iter()
+                    .any(|project| project.id == *project_id)
+            });
+        }
+        !self.session_visible(&status.session_id)
     }
 
     fn session_visible(&self, session_id: &str) -> bool {
@@ -2236,7 +2253,7 @@ impl WorkspaceStore {
             .flatten()
     }
 
-    fn restore_index_selection(&mut self) {
+    fn restore_index_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.focused_session_id.clone() {
             let visible = self.index_replica.0.iter().any(|meta| meta.id == id)
                 || self.focused_status().is_some_and(|status| {
@@ -2253,9 +2270,9 @@ impl WorkspaceStore {
                         session_id: id.clone(),
                     })
             {
-                self.reselect_focused();
+                self.reselect_focused(cx);
             } else if !visible && !self.scope.is_full() {
-                self.leave_session();
+                self.leave_session(cx);
             }
         }
     }
@@ -3365,10 +3382,10 @@ impl WorkspaceStore {
         &mut self,
         session_id: String,
         timeline: Timeline,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         if self.focused_session_id.as_ref() != Some(&session_id) {
-            self.select_session(session_id.clone());
+            self.select_session(session_id.clone(), cx);
         }
         self.threads
             .get_mut(&session_id)
@@ -5020,7 +5037,7 @@ pub(crate) mod tests {
         let mut driver = LocalHostDriver::new(&host);
         let link = driver.link.clone();
         let workspace = driver.workspace(cx);
-        workspace.update(cx, |store, _| store.select_session("deleted".into()));
+        workspace.update(cx, |store, cx| store.select_session("deleted".into(), cx));
         driver.wait_until(cx, &workspace, "selected thread", |cx| {
             selected_status(cx, &workspace, "deleted")
         });
@@ -5135,11 +5152,11 @@ pub(crate) mod tests {
             let task_count = store.attachment_tasks.len();
             for index in 0..20 {
                 let id = if index % 2 == 0 { "one" } else { "two" };
-                store.select_session(id.into());
+                store.select_session(id.into(), cx);
                 assert_eq!(store.active_session_id().as_deref(), Some(id));
                 assert!(store.session_loading());
                 let messages = outgoing.len();
-                store.select_session(id.into());
+                store.select_session(id.into(), cx);
                 assert_eq!(outgoing.len(), messages, "second tap must send nothing");
                 assert_eq!(store.attachment_tasks.len(), task_count);
                 assert_eq!(
@@ -5202,7 +5219,7 @@ pub(crate) mod tests {
                 seed_full_scope(&workspace, &incoming, Vec::new(), cx);
                 workspace.update(cx, |store, cx| {
                     let topic = Topic::SessionEvents { session_id: "a".into() };
-                    store.select_session("a".into());
+                    store.select_session("a".into(), cx);
                     let record = |text: &str| SessionEventRecord::from(AgentEvent::Delta {
                         item_id: "answer".into(), kind: agent::DeltaKind::AssistantText, text: text.into(),
                     });
@@ -5213,8 +5230,8 @@ pub(crate) mod tests {
                     }, cx);
                     host.subscribe(Subscription { topic: topic.clone(), after: Some(12), known_index: None }).unwrap();
                     let old_id = host.subscription_request_id(&topic).unwrap();
-                    store.select_session("b".into());
-                    store.select_session("a".into());
+                    store.select_session("b".into(), cx);
+                    store.select_session("a".into(), cx);
                     let current_id = host.subscription_request_id(&topic).unwrap();
                     assert_ne!(old_id, current_id);
                     let reply = |id| EventEnvelope {
@@ -5268,7 +5285,7 @@ pub(crate) mod tests {
         });
         seed_full_scope(&workspace, &_incoming, Vec::new(), cx);
         workspace.update(cx, |store, cx| {
-            store.select_session("large".into());
+            store.select_session("large".into(), cx);
             let records = (450..500)
                 .flat_map(|index| {
                     [
@@ -5651,12 +5668,12 @@ pub(crate) mod tests {
                 std::collections::HashMap::from([("left".into(), 50), ("shown".into(), 50)]);
 
             store.set_conversation_on_screen(true, cx);
-            store.select_session("left".into());
-            store.leave_session();
+            store.select_session("left".into(), cx);
+            store.leave_session(cx);
             store.apply_domain_event(&session_snapshot("left", 0, vec![reply(1)]), cx);
             assert_eq!(reads(), [], "left before the conversation loaded");
 
-            store.select_session("shown".into());
+            store.select_session("shown".into(), cx);
             assert_eq!(reads(), [], "nothing has loaded yet");
             // A compact window went back to the thread list, which keeps the
             // thread selected, before the conversation arrived.
@@ -6099,7 +6116,7 @@ pub(crate) mod tests {
         });
         crate::store::tests::seed_full_scope(&workspace, &incoming, deferred, cx);
         workspace.update(cx, |store, cx| {
-            store.select_session(a.session_id.clone());
+            store.select_session(a.session_id.clone(), cx);
             store.open_thread(&b.session_id);
             store.apply_domain_event(&status(&a), cx);
             store.apply_domain_event(&session_snapshot(&a.session_id, 0, vec![reply(1)]), cx);
@@ -6132,7 +6149,7 @@ pub(crate) mod tests {
         // Selecting the thread another pane shows moves the focus and closes
         // nothing: the thread left keeps receiving its events.
         workspace.update(cx, |store, cx| {
-            store.select_session(b.session_id.clone());
+            store.select_session(b.session_id.clone(), cx);
             store.apply_domain_event(&status(&with_running_turn(&a, None, Some(question()))), cx);
         });
         workspace.read_with(cx, |store, _| {
@@ -6434,7 +6451,7 @@ pub(crate) mod tests {
         driver.wait_until(cx, &workspace, "initial workspace baseline", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
-        workspace.update(cx, |store, _| store.select_session("one".into()));
+        workspace.update(cx, |store, cx| store.select_session("one".into(), cx));
         driver.wait_until(cx, &workspace, "initial selected thread baseline", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
@@ -6504,7 +6521,7 @@ pub(crate) mod tests {
         let link = tcode_client::HostLink::new(to_host, host.from_host.clone());
         let mut driver = LocalHostDriver::from_link(link);
         let workspace = driver.workspace(cx);
-        workspace.update(cx, |store, _| store.select_session("one".into()));
+        workspace.update(cx, |store, cx| store.select_session("one".into(), cx));
         driver.wait_until(cx, &workspace, "selected thread baseline", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
@@ -6703,7 +6720,7 @@ pub(crate) mod tests {
                     cx: &mut TestAppContext,
                     workspace: &gpui::Entity<WorkspaceStore>,
                     id: &str| {
-            workspace.update(cx, |store, _| store.select_session(id.into()));
+            workspace.update(cx, |store, cx| store.select_session(id.into(), cx));
             driver.wait_until(cx, workspace, id, |cx| {
                 workspace.read_with(cx, |store, _| {
                     store.baseline_ready()
@@ -6751,8 +6768,8 @@ pub(crate) mod tests {
                 }
             }
         });
-        workspace.update(cx, |store, _| {
-            store.select_session(kept.clone());
+        workspace.update(cx, |store, cx| {
+            store.select_session(kept.clone(), cx);
             assert_eq!(events_cursor(store), Some(Some(end)));
         });
         let total = end + missed.len() as u64;
@@ -6789,8 +6806,8 @@ pub(crate) mod tests {
             let (released, away) = (released.clone(), away.clone());
             move |state, cx| state.record_event_for_replica_test(&released, 100, &away, cx)
         });
-        workspace.update(cx, |store, _| {
-            store.select_session(released.clone());
+        workspace.update(cx, |store, cx| {
+            store.select_session(released.clone(), cx);
             assert_eq!(events_cursor(store), Some(None));
         });
         driver.wait_until(cx, &workspace, "the released thread's baseline", |cx| {
@@ -7061,7 +7078,7 @@ pub(crate) mod tests {
             let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
             // A thread on screen, so the empty-workspace draft does not open.
             store.update(cx, |store, cx| {
-                store.select_session("other".into());
+                store.select_session("other".into(), cx);
                 store.apply_domain_event(
                     &EventEnvelope {
                         request_id: None,
@@ -7170,14 +7187,14 @@ pub(crate) mod tests {
             )
         });
 
-        workspace.update(cx, |store, _| store.select_session("parent".into()));
+        workspace.update(cx, |store, cx| store.select_session("parent".into(), cx));
         driver.wait_until(cx, &workspace, "parent on screen", |cx| {
             selected_status(cx, &workspace, "parent")
                 && workspace.read_with(cx, |store, _| held_window(store, "parent").is_some())
         });
         let parent_cursor =
             workspace.read_with(cx, |store, _| Some(held_history(store, "parent").end));
-        workspace.update(cx, |store, _| store.select_session("child".into()));
+        workspace.update(cx, |store, cx| store.select_session("child".into(), cx));
         driver.wait_until(cx, &workspace, "child selected", |cx| {
             selected_status(cx, &workspace, "child")
         });
@@ -7294,7 +7311,7 @@ pub(crate) mod tests {
                 .right_panel_open = true;
         });
 
-        workspace.update(cx, |store, _| store.select_session("child".into()));
+        workspace.update(cx, |store, cx| store.select_session("child".into(), cx));
         driver.wait_until(cx, &workspace, "child selected", |cx| {
             selected_status(cx, &workspace, "child")
         });
@@ -7322,6 +7339,65 @@ pub(crate) mod tests {
         });
         assert!(archived(cx, &workspace, "parent"));
         assert!(archived(cx, &workspace, "child"));
+
+        driver.shutdown(cx, &workspace, &host);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A pane split beside a thread asks for a draft in the thread's project
+    /// with the focus released: the draft is focused when it arrives, and
+    /// the thread split from stays open for the pane still showing it.
+    #[gpui::test]
+    fn a_draft_beside_an_open_thread_leaves_it_open(cx: &mut TestAppContext) {
+        let root = scratch_root("draft-beside");
+        let disk = SessionStore::open_at(root.clone()).expect("open test store");
+        disk.upsert_project(&project_at("p", &root))
+            .expect("persist project");
+        disk.upsert_meta(&thread(&root, "first", "p", None))
+            .expect("persist session");
+        let host = test_host(disk);
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace, "launch draft", |cx| {
+            workspace.read_with(cx, |store, _| store.focused_session_id.is_some())
+        });
+        workspace.update(cx, |store, cx| store.select_session("first".into(), cx));
+        driver.wait_until(cx, &workspace, "first selected", |cx| {
+            selected_status(cx, &workspace, "first")
+        });
+
+        workspace.update(cx, |store, cx| {
+            store.release_focus(cx);
+            store.start_draft_beside(Some("first"), cx);
+        });
+        driver.wait_until(cx, &workspace, "a draft in the thread's project", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .focused_status()
+                    .is_some_and(|status| status.draft && status.project_id.as_deref() == Some("p"))
+            })
+        });
+        workspace.read_with(cx, |store, _| {
+            assert!(store.is_thread_open("first"));
+            assert!(
+                store
+                    .host
+                    .subscribed_topics()
+                    .contains(&Topic::SessionEvents {
+                        session_id: "first".into()
+                    }),
+                "the thread split from still receives its events"
+            );
+        });
 
         driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
@@ -7405,7 +7481,7 @@ pub(crate) mod tests {
         let host = test_host(disk);
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
-        workspace.update(cx, |store, _| store.select_session("reconnect".into()));
+        workspace.update(cx, |store, cx| store.select_session("reconnect".into(), cx));
         driver.wait_until(cx, &workspace, "selected status", |cx| {
             workspace.read_with(cx, |store, _| store.focused_status().is_some())
         });
@@ -7504,7 +7580,7 @@ pub(crate) mod tests {
         let host = test_host(session_store);
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
-        workspace.update(cx, |store, _| store.select_session(session_id.clone()));
+        workspace.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &workspace, "initial session timeline replica", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.focused_session_id.as_ref() == Some(&session_id)
@@ -7782,7 +7858,7 @@ pub(crate) mod tests {
         let host = test_host(session_store);
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
-        workspace.update(cx, |store, _| store.select_session(session_id.clone()));
+        workspace.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &workspace, "selected session status", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -7874,7 +7950,7 @@ pub(crate) mod tests {
         let host = test_host(session_store);
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
-        workspace.update(cx, |store, _| store.select_session(first.id.clone()));
+        workspace.update(cx, |store, cx| store.select_session(first.id.clone(), cx));
         driver.wait_until(cx, &workspace, "first selected session", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -7918,7 +7994,7 @@ pub(crate) mod tests {
                 .take_native_rewind_prefill_for(store.active_session_id().as_deref())),
             Some("first parked prefill".into())
         );
-        workspace.update(cx, |store, _| store.select_session(second.id.clone()));
+        workspace.update(cx, |store, cx| store.select_session(second.id.clone(), cx));
         driver.wait_until(cx, &workspace, "second selected session", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -7948,7 +8024,7 @@ pub(crate) mod tests {
         let host = test_host(session_store);
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
-        workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
+        workspace.update(cx, |store, cx| store.select_session(meta.id.clone(), cx));
         driver.wait_until(cx, &workspace, "selected session baseline", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
@@ -8056,7 +8132,9 @@ pub(crate) mod tests {
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
 
-        workspace.update(cx, |store, _| store.select_session("git-replica".into()));
+        workspace.update(cx, |store, cx| {
+            store.select_session("git-replica".into(), cx)
+        });
         // Subscribing adopts the session and spawns a real git probe of the
         // (non-repo) cwd. Let that probe land before injecting the fixture
         // status, or its late result overwrites the injected one.
@@ -8175,7 +8253,9 @@ pub(crate) mod tests {
             mark_draft_state(cx, &workspace);
 
             if !viewing_draft {
-                workspace.update(cx, |store, _| store.select_session("kept-thread".into()));
+                workspace.update(cx, |store, cx| {
+                    store.select_session("kept-thread".into(), cx)
+                });
                 driver.wait_until(cx, &workspace, "kept thread selected", |cx| {
                     selected_status(cx, &workspace, "kept-thread")
                 });

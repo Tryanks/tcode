@@ -682,7 +682,7 @@ fn main() {
                     if let Some(id) = session_id
                         && let Some(store) = shell.read(cx).store()
                     {
-                        store.update(cx, |store, _| store.select_session(id));
+                        store.update(cx, |store, cx| store.select_session(id, cx));
                     }
                     let window_state = shell.read(cx).window_state();
                     window_state.update(cx, |state, cx| {
@@ -706,7 +706,7 @@ fn main() {
                             link.command(Command::OpenLatestSession).await
                             && let Some(store) = cx.update(|cx| shell.read(cx).store())
                         {
-                            store.update(cx, |store, _| store.select_session(id));
+                            store.update(cx, |store, cx| store.select_session(id, cx));
                         }
                     }
                 })

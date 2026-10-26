@@ -1549,8 +1549,8 @@ mod replica_tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, _| {
-            store.select_session(status.session_id.clone())
+        store.update(cx, |store, cx| {
+            store.select_session(status.session_id.clone(), cx)
         });
         (store, incoming, outgoing, status)
     }
@@ -1621,8 +1621,8 @@ mod replica_tests {
             );
             status.session_id = "other-thread".into();
             status.project_id = Some("project-b".into());
-            store.update(cx, |store, _| {
-                store.select_session(status.session_id.clone())
+            store.update(cx, |store, cx| {
+                store.select_session(status.session_id.clone(), cx)
             });
             composer.update(cx, |composer, cx| {
                 composer.set_session(Some(status.session_id.clone()), cx)
@@ -1656,8 +1656,8 @@ mod replica_tests {
             if is_draft {
                 restored_status.session_id = "reopened-project-draft".into();
             }
-            store.update(cx, |store, _| {
-                store.select_session(restored_status.session_id.clone())
+            store.update(cx, |store, cx| {
+                store.select_session(restored_status.session_id.clone(), cx)
             });
             composer.update(cx, |composer, cx| {
                 composer.set_session(Some(restored_status.session_id.clone()), cx)
@@ -1697,8 +1697,8 @@ mod replica_tests {
                 (status, "Other destination draft，你好"),
                 (restored_status, ""),
             ] {
-                store.update(cx, |store, _| {
-                    store.select_session(destination.session_id.clone())
+                store.update(cx, |store, cx| {
+                    store.select_session(destination.session_id.clone(), cx)
                 });
                 composer.update(cx, |composer, cx| {
                     composer.set_session(Some(destination.session_id.clone()), cx)
