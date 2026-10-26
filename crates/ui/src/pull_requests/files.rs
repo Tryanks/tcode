@@ -541,7 +541,22 @@ impl PullRequestView {
             .collect()
     }
 
-    fn off_diff(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The card of comments not drawn on a diff line, which fades in with its first and out
+    /// with its last, holding its label as it leaves.
+    fn off_diff(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let card = self.off_diff_card(cx);
+        let open = self.page()?.files_view.off_diff_open;
+        let kept = crate::motion::shown(
+            "pr-off-diff-card",
+            card.as_ref().map(|(label, _)| label.clone()),
+            window,
+            cx,
+        )?;
+        let chevron = crate::motion::chevron("pr-off-diff-chevron", open, window, cx);
+        Some(self.off_diff_body(kept, card.map(|(_, rows)| rows), open, chevron, cx))
+    }
+
+    fn off_diff_card(&self, cx: &mut Context<Self>) -> Option<(String, Vec<AnyElement>)> {
         let page = self.page()?;
         let conversation = page.conversation.data.as_ref()?;
         let inline: Vec<_> = self
@@ -577,112 +592,115 @@ impl PullRequestView {
             crate::tr!("pull_requests.files.off_diff", count = count.to_string())
         }
         .into_owned();
-        let open = page.files_view.off_diff_open;
         let muted = cx.theme().muted_foreground;
         let xs = cx.theme().tokens.typography.xs;
-        Some(
-            // `card` insets its content, and these rows are full-bleed hover targets that
-            // carry the card inset themselves (`card_header_row`).
-            v_flex()
-                .flex_none()
-                .mx_2()
-                .mb_1()
-                .rounded(material::radius_card(cx))
-                .bg(cx.theme().muted)
+        let rows = pending
+            .into_iter()
+            .chain(threads.into_iter().map(|thread| {
+                let line = thread
+                    .anchor
+                    .as_ref()
+                    .map(|anchor| format!("{}:{}", thread.path, anchor.end_line))
+                    .unwrap_or_else(|| thread.path.clone());
+                let excerpt = thread
+                    .comments
+                    .first()
+                    .map(|comment| comment.body.lines().next().unwrap_or_default().to_owned())
+                    .unwrap_or_default();
+                let id = thread.id.clone();
+                material::accessible_clickable(
+                    material::card_header_row(cx),
+                    SharedString::from(format!("pr-off-diff-{}", thread.id)),
+                    gpui::Role::Button,
+                    format!("{line} {excerpt}"),
+                    cx,
+                )
+                .text_token(&xs)
+                .cursor_pointer()
+                .hover(|row| row.bg(cx.theme().list_hover))
                 .child(
-                    material::accessible_clickable(
-                        material::card_header_row(cx),
-                        "pr-off-diff",
-                        gpui::Role::Button,
-                        label.clone(),
+                    div()
+                        .flex_none()
+                        .max_w(px(220.))
+                        .overflow_hidden()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .child(crate::widgets::fade_text(line)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_color(muted)
+                        .child(crate::widgets::fade_text(excerpt)),
+                )
+                .when(thread.outdated, |row| {
+                    row.child(material::semantic_chip(
+                        crate::tr!("pull_requests.conversation.outdated").into_owned(),
+                        cx.theme().secondary,
+                        muted,
                         cx,
-                    )
-                    .aria_expanded(open)
-                    .text_token(&xs)
-                    .cursor_pointer()
-                    .child(
-                        Icon::new(if open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .text_color(muted),
-                    )
-                    .child(label)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(page) = this.page_mut() {
-                            page.files_view.off_diff_open = !page.files_view.off_diff_open;
-                        }
-                        cx.notify();
-                    })),
+                    ))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.show_thread(&id, cx);
+                }))
+                .into_any_element()
+            }))
+            .collect();
+        Some((label, rows))
+    }
+
+    fn off_diff_body(
+        &self,
+        kept: crate::motion::Shown<String>,
+        rows: Option<Vec<AnyElement>>,
+        open: bool,
+        chevron: Icon,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = kept.value.clone();
+        let muted = cx.theme().muted_foreground;
+        let xs = cx.theme().tokens.typography.xs;
+        // `card` insets its content, and these rows are full-bleed hover targets that
+        // carry the card inset themselves (`card_header_row`).
+        let card = v_flex()
+            .flex_none()
+            .mx_2()
+            .mb_1()
+            .rounded(material::radius_card(cx))
+            .bg(cx.theme().muted)
+            .child(
+                material::accessible_clickable(
+                    material::card_header_row(cx),
+                    "pr-off-diff",
+                    gpui::Role::Button,
+                    label.clone(),
+                    cx,
                 )
-                .child(
-                    crate::widgets::Collapsible::new("pr-off-diff-body", open).content(
-                        v_flex()
-                            .id("pr-off-diff-rows")
-                            .max_h(px(240.))
-                            .overflow_y_scroll()
-                            .pb_1()
-                            .children(pending)
-                            .children(threads.into_iter().map(|thread| {
-                                let line = thread
-                                    .anchor
-                                    .as_ref()
-                                    .map(|anchor| format!("{}:{}", thread.path, anchor.end_line))
-                                    .unwrap_or_else(|| thread.path.clone());
-                                let excerpt = thread
-                                    .comments
-                                    .first()
-                                    .map(|comment| {
-                                        comment.body.lines().next().unwrap_or_default().to_owned()
-                                    })
-                                    .unwrap_or_default();
-                                let id = thread.id.clone();
-                                material::accessible_clickable(
-                                    material::card_header_row(cx),
-                                    SharedString::from(format!("pr-off-diff-{}", thread.id)),
-                                    gpui::Role::Button,
-                                    format!("{line} {excerpt}"),
-                                    cx,
-                                )
-                                .text_token(&xs)
-                                .cursor_pointer()
-                                .hover(|row| row.bg(cx.theme().list_hover))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .max_w(px(220.))
-                                        .overflow_hidden()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .child(crate::widgets::fade_text(line)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_color(muted)
-                                        .child(crate::widgets::fade_text(excerpt)),
-                                )
-                                .when(thread.outdated, |row| {
-                                    row.child(material::semantic_chip(
-                                        crate::tr!("pull_requests.conversation.outdated")
-                                            .into_owned(),
-                                        cx.theme().secondary,
-                                        muted,
-                                        cx,
-                                    ))
-                                })
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.show_thread(&id, cx);
-                                    },
-                                ))
-                            })),
-                    ),
-                )
-                .into_any_element(),
-        )
+                .aria_expanded(open)
+                .text_token(&xs)
+                .cursor_pointer()
+                .child(chevron.text_color(muted))
+                .child(label)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(page) = this.page_mut() {
+                        page.files_view.off_diff_open = !page.files_view.off_diff_open;
+                    }
+                    cx.notify();
+                })),
+            )
+            .child(
+                crate::widgets::Collapsible::new("pr-off-diff-body", open).content(
+                    v_flex()
+                        .id("pr-off-diff-rows")
+                        .max_h(px(240.))
+                        .overflow_y_scroll()
+                        .pb_1()
+                        .children(rows.into_iter().flatten()),
+                ),
+            );
+        kept.fold(card)
     }
 
     fn viewed_box(
@@ -702,7 +720,9 @@ impl PullRequestView {
         let path = entry.path.clone();
         if state == Viewed::Unknown {
             let unreadable = self.page().is_some_and(|page| page.viewed.error.is_some());
-            return Some(
+            return Some(settle_viewed(
+                file,
+                false,
                 div()
                     .id(SharedString::from(format!("pr-viewed-unknown-{file}")))
                     .flex_none()
@@ -722,7 +742,8 @@ impl PullRequestView {
                         .build(window, cx)
                     })
                     .into_any_element(),
-            );
+                cx,
+            ));
         }
         let checked = state == Viewed::Marked;
         let tooltip = if read_only {
@@ -747,7 +768,9 @@ impl PullRequestView {
         if labelled && !compact {
             checkbox = checkbox.label(crate::tr!("pull_requests.files.viewed"));
         }
-        Some(
+        Some(settle_viewed(
+            file,
+            true,
             div()
                 .id(SharedString::from(format!("pr-viewed-box-{file}")))
                 .flex_none()
@@ -760,7 +783,8 @@ impl PullRequestView {
                 .child(checkbox)
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                 .into_any_element(),
-        )
+            cx,
+        ))
     }
 
     /// "%{count} files", with a "+" while pages remain.
@@ -832,7 +856,20 @@ impl PullRequestView {
                 .id("pr-viewed-counter")
                 .flex_none()
                 .text_secondary(compact, cx)
-                .child(counter)
+                .child(crate::motion::Sampled::new(move |window, cx| {
+                    crate::motion::cross_fade(
+                        "pr-viewed-count",
+                        counter,
+                        window,
+                        cx,
+                        |text, _, _| {
+                            div()
+                                .whitespace_nowrap()
+                                .child(text.clone())
+                                .into_any_element()
+                        },
+                    )
+                }))
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         });
         let split = self.store.read(cx).diff_split();
@@ -1184,6 +1221,14 @@ impl PullRequestView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let loading = self
+            .page()
+            .is_some_and(|page| page.files.data.is_none() && page.files.error.is_none());
+        let body = self.files_body(window, cx);
+        self.settle_body("files", loading, body, window, cx)
+    }
+
+    fn files_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_list(cx);
         self.apply_text(cx);
         if let Some(failure) = self
@@ -1242,57 +1287,105 @@ impl PullRequestView {
         let wide = !compact
             && f32::from(window.viewport_size().width) >= FILE_COLUMN_MIN_WIDTH
             && self.file_column;
-        let partial = (files.next_cursor.is_none() && !files.complete).then(|| {
-            let listed = files.files.len();
-            let text = if files.changed_files > listed as u64 {
-                crate::tr!(
-                    "pull_requests.files.partial",
-                    shown = listed.to_string(),
-                    total = files.changed_files.to_string(),
-                    host_name = self.host_name(cx)
-                )
-            } else {
-                crate::tr!("pull_requests.files.partial_unknown")
-            }
-            .into_owned();
-            div().mx_2().mb_1().child(render_notice(text, cx))
+        let partial = crate::motion::shown(
+            "pr-files-partial",
+            (files.next_cursor.is_none() && !files.complete).then(|| {
+                let listed = files.files.len();
+                let text = if files.changed_files > listed as u64 {
+                    crate::tr!(
+                        "pull_requests.files.partial",
+                        shown = listed.to_string(),
+                        total = files.changed_files.to_string(),
+                        host_name = self.host_name(cx)
+                    )
+                } else {
+                    crate::tr!("pull_requests.files.partial_unknown")
+                }
+                .into_owned();
+                text
+            }),
+            window,
+            cx,
+        )
+        .map(|kept| {
+            kept.fold(
+                div()
+                    .mx_2()
+                    .mb_1()
+                    .child(render_notice(kept.value.clone(), cx)),
+            )
         });
         // Keep the paging footer until prepared rows are appended, so the old
         // list cannot clamp to a larger viewport before the new page exists.
         let footer = (page.files_view.page_loading
             || (page.files_view.rendering && page.files_view.list.is_some())
             || page.files_view.page_error.is_some())
-        .then(|| {
-            let failed = page.files_view.page_error.is_some();
-            material::bar("pr-files-footer", material::Bar::Toolbar, compact, cx)
+        .then(|| page.files_view.page_error.is_some());
+        let listed = page.files_view.list.is_some();
+        // The footer comes and goes, and its loading and failed lines cross-fade.
+        let footer = crate::motion::shown("pr-files-footer", footer, window, cx).map(|kept| {
+            let failed = kept.value;
+            let failing = gpui_base::motion::transition(
+                "pr-files-footer-failed",
+                if failed { 1. } else { 0. },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            let loading_line = || {
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(crate::widgets::spinner::Spinner::new())
+                    .child(crate::tr!("pull_requests.files.loading_more"))
+            };
+            let bar = material::bar("pr-files-footer", material::Bar::Toolbar, compact, cx)
                 .items_center()
                 .text_secondary(compact, cx)
+                .when(failed && failing < 1., |row| {
+                    row.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .px(cx.theme().tokens.spacing.sm)
+                            .opacity(1. - failing)
+                            .child(loading_line()),
+                    )
+                })
                 .when(!failed, |row| {
-                    row.child(crate::widgets::spinner::Spinner::new())
-                        .child(crate::tr!("pull_requests.files.loading_more"))
+                    row.child(loading_line().opacity(1. - failing))
                 })
                 .when(failed, |row| {
-                    row.child(crate::tr!("pull_requests.files.rest_failed"))
-                        .child(
-                            Button::new("pr-files-rest-retry")
-                                .outline()
-                                .xsmall()
-                                .label(crate::tr!("pull_requests.detail.retry"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(page) = this.page_mut() {
-                                        page.files_view.page_error = None;
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                })
+                    row.child(
+                        div()
+                            .opacity(failing)
+                            .child(crate::tr!("pull_requests.files.rest_failed")),
+                    )
+                    .child(
+                        Button::new("pr-files-rest-retry")
+                            .outline()
+                            .xsmall()
+                            .label(crate::tr!("pull_requests.detail.retry"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(page) = this.page_mut() {
+                                    page.files_view.page_error = None;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                });
+            kept.fold(bar)
         });
-        let body = if page.files_view.list.is_some() {
+        // The list is built in the background after the read; it cross-fades over the skeleton.
+        let body = if listed {
             render_list(self, "pr-files-body", split, wrap, window, cx)
         } else {
             material::loading_skeleton(cx)
         };
-        let off_diff = self.off_diff(cx);
+        let body = self.settle_body("files-list", !listed, body, window, cx);
+        let off_diff = self.off_diff(window, cx);
         let content = v_flex()
             .flex_1()
             .min_w_0()
@@ -1307,7 +1400,7 @@ impl PullRequestView {
                     .child(body),
             )
             .children(footer);
-        let review_bar = self.review_bar(cx);
+        let review_bar = self.review_bar(window, cx);
         v_flex()
             .size_full()
             .min_h_0()
@@ -1479,18 +1572,17 @@ impl DiffListHost for PullRequestView {
     fn header_leading(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         let path = self.files_of()?.get(file)?.path.clone();
         let collapsed = self.collapsed(&path);
+        let muted = cx.theme().muted_foreground;
+        let id = SharedString::from(format!("pr-file-chevron-{file}"));
         Some(
             div()
-                .id(SharedString::from(format!("pr-file-chevron-{file}")))
+                .id(id.clone())
                 .flex_none()
-                .child(
-                    Icon::new(if collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .text_color(cx.theme().muted_foreground),
-                )
+                .child(crate::motion::Sampled::new(move |window, cx| {
+                    crate::motion::chevron((id.into(), "turn"), !collapsed, window, cx)
+                        .text_color(muted)
+                        .into_any_element()
+                }))
                 .tooltip(move |window, cx| {
                     Tooltip::new(
                         crate::tr!(if collapsed {
@@ -1508,13 +1600,26 @@ impl DiffListHost for PullRequestView {
 
     fn header_note(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         let path = &self.files_of()?.get(file)?.path;
-        (self.viewed_state(path) == Viewed::Changed).then(|| {
-            div()
-                .text_secondary(false, cx)
-                .text_color(cx.theme().warning)
-                .child(crate::tr!("pull_requests.files.changed_since_viewed"))
-                .into_any_element()
-        })
+        let changed = self.viewed_state(path) == Viewed::Changed;
+        let text = div()
+            .text_secondary(false, cx)
+            .text_color(cx.theme().warning);
+        Some(
+            crate::motion::Sampled::new(move |window, cx| {
+                crate::motion::shown(
+                    gpui::ElementId::from((gpui::ElementId::from(file), "pr-changed-since-viewed")),
+                    changed.then_some(()),
+                    window,
+                    cx,
+                )
+                .map(|kept| {
+                    kept.fade(text.child(crate::tr!("pull_requests.files.changed_since_viewed")))
+                })
+                // Out of flow, so an absent note takes no gap in the header.
+                .unwrap_or_else(|| div().absolute().into_any_element())
+            })
+            .into_any_element(),
+        )
     }
 
     fn header_trailing(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1639,4 +1744,41 @@ fn render(
         rendered.removed = file.deletions;
     }
     rendered
+}
+
+/// The viewed box once the host says whether the file was viewed, faded in over the
+/// question mark that held its place.
+fn settle_viewed(file: usize, known: bool, cell: AnyElement, cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    crate::motion::Sampled::new(move |window, cx| {
+        let unknown = gpui_base::motion::transition(
+            gpui::ElementId::from((gpui::ElementId::from(file), "pr-viewed-known")),
+            if known { 0. } else { 1. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .opacity(if known { 1. - unknown } else { 1. })
+                    .child(cell),
+            )
+            .when(known && unknown > 0., |slot| {
+                slot.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(unknown)
+                        .child(Icon::new(IconName::CircleQuestionMark).text_color(muted)),
+                )
+            })
+            .into_any_element()
+    })
+    .into_any_element()
 }
