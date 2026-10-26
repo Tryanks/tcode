@@ -360,6 +360,8 @@ struct TerminalGridCache {
 
 pub struct TerminalDrawer {
     workspace_store: Entity<WorkspaceStore>,
+    /// The thread whose terminals the drawer shows.
+    session_id: Option<String>,
     focus_handle: FocusHandle,
     key_bar: Entity<TerminalKeyBar>,
     grid_bounds: Rc<RefCell<HashMap<u64, GridGeometry>>>,
@@ -415,24 +417,36 @@ impl TerminalDrawer {
         let focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
         let key_bar = cx.new(|_| TerminalKeyBar::new(focus_handle.clone()));
         let focus_store = workspace_store.clone();
+        let drawer = cx.entity().downgrade();
         let focus_in = window.on_focus_in(&focus_handle, cx, move |_, cx| {
-            focus_store.read(cx).with_terminal_workspace(|workspace| {
-                if let Some(entry) = workspace.active()
-                    && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
-                {
-                    entry.terminal.write_raw(b"\x1b[I".to_vec());
-                }
-            });
+            let Ok(session_id) = drawer.read_with(cx, |drawer, _| drawer.session_id.clone()) else {
+                return;
+            };
+            focus_store
+                .read(cx)
+                .with_terminal_workspace_for(session_id.as_deref(), |workspace| {
+                    if let Some(entry) = workspace.active()
+                        && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
+                    {
+                        entry.terminal.write_raw(b"\x1b[I".to_vec());
+                    }
+                });
         });
         let focus_store = workspace_store.clone();
+        let drawer = cx.entity().downgrade();
         let focus_out = window.on_focus_out(&focus_handle, cx, move |_, _, cx| {
-            focus_store.read(cx).with_terminal_workspace(|workspace| {
-                if let Some(entry) = workspace.active()
-                    && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
-                {
-                    entry.terminal.write_raw(b"\x1b[O".to_vec());
-                }
-            });
+            let Ok(session_id) = drawer.read_with(cx, |drawer, _| drawer.session_id.clone()) else {
+                return;
+            };
+            focus_store
+                .read(cx)
+                .with_terminal_workspace_for(session_id.as_deref(), |workspace| {
+                    if let Some(entry) = workspace.active()
+                        && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
+                    {
+                        entry.terminal.write_raw(b"\x1b[O".to_vec());
+                    }
+                });
         });
         let key_bar_subscription = cx.subscribe_in(
             &key_bar,
@@ -464,6 +478,7 @@ impl TerminalDrawer {
         #[cfg(test)]
         let blink_task = None;
         Self {
+            session_id: workspace_store.read(cx).active_session_id(),
             workspace_store,
             focus_handle,
             key_bar,
@@ -489,6 +504,14 @@ impl TerminalDrawer {
         }
     }
 
+    /// Show the terminals of `session_id`'s thread, or none.
+    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        if self.session_id != session_id {
+            self.session_id = session_id;
+            cx.notify();
+        }
+    }
+
     pub fn is_size(&self, width: f32, height: f32) -> bool {
         self.current_size == Some((width, height))
     }
@@ -498,18 +521,20 @@ impl TerminalDrawer {
             return;
         }
         self.current_size = Some((width, height));
-        self.workspace_store
-            .update(cx, |store, cx| store.set_terminal_height(height, cx));
+        self.workspace_store.update(cx, |store, cx| {
+            store.set_terminal_height_for(self.session_id.clone().unwrap_or_default(), height, cx)
+        });
     }
 
     fn with_terminal(&self, cx: &mut Context<Self>, f: impl FnOnce(&crate::store::ClientTerminal)) {
-        self.workspace_store
-            .read(cx)
-            .with_terminal_workspace(|workspace| {
+        self.workspace_store.read(cx).with_terminal_workspace_for(
+            self.session_id.as_deref(),
+            |workspace| {
                 if let Some(entry) = workspace.active() {
                     f(&entry.terminal);
                 }
-            });
+            },
+        );
     }
 
     fn with_terminal_id(
@@ -518,13 +543,14 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
         f: impl FnOnce(&crate::store::ClientTerminal),
     ) {
-        self.workspace_store
-            .read(cx)
-            .with_terminal_workspace(|workspace| {
+        self.workspace_store.read(cx).with_terminal_workspace_for(
+            self.session_id.as_deref(),
+            |workspace| {
                 if let Some(entry) = workspace.terminal(terminal_id) {
                     f(&entry.terminal);
                 }
-            });
+            },
+        );
     }
 
     fn paste_to_terminal(&self, terminal_id: u64, text: &str, cx: &mut Context<Self>) {
@@ -539,7 +565,7 @@ impl TerminalDrawer {
         let terminal = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(|workspace| {
+            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
                 workspace.active().map(|entry| entry.terminal.clone())
             })
             .flatten();
@@ -562,7 +588,7 @@ impl TerminalDrawer {
         let terminal = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(|workspace| {
+            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
                 workspace
                     .terminal(terminal_id)
                     .map(|entry| entry.terminal.clone())
@@ -595,7 +621,7 @@ impl TerminalDrawer {
         if let Some(text) = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(|workspace| {
+            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
                 workspace
                     .terminal(action.0)
                     .and_then(|entry| entry.terminal.selected_text())
@@ -642,8 +668,12 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workspace_store
-            .update(cx, |store, _cx| store.capture_terminal_selection(action.0));
+        self.workspace_store.update(cx, |store, _cx| {
+            store.capture_terminal_selection_for(
+                self.session_id.clone().unwrap_or_default(),
+                action.0,
+            )
+        });
     }
 
     fn on_overflow(
@@ -653,14 +683,20 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
     ) {
         self.workspace_store.update(cx, |store, cx| match action {
-            TerminalOverflow::SplitHorizontal => {
-                store.split_terminal(TerminalSplitDirection::Horizontal)
+            TerminalOverflow::SplitHorizontal => store.split_terminal_for(
+                self.session_id.clone().unwrap_or_default(),
+                TerminalSplitDirection::Horizontal,
+            ),
+            TerminalOverflow::SplitVertical => store.split_terminal_for(
+                self.session_id.clone().unwrap_or_default(),
+                TerminalSplitDirection::Vertical,
+            ),
+            TerminalOverflow::Restart => {
+                store.restart_terminal_for(self.session_id.clone().unwrap_or_default())
             }
-            TerminalOverflow::SplitVertical => {
-                store.split_terminal(TerminalSplitDirection::Vertical)
+            TerminalOverflow::Close => {
+                store.close_terminal_panel_for(self.session_id.clone().unwrap_or_default(), cx)
             }
-            TerminalOverflow::Restart => store.restart_terminal(),
-            TerminalOverflow::Close => store.close_terminal_panel(cx),
         });
     }
 
@@ -668,18 +704,26 @@ impl TerminalDrawer {
         let TerminalTabMenu { id, kind } = *action;
         self.workspace_store.update(cx, |store, cx| match kind {
             TerminalTabMenuKind::Restart => {
-                store.activate_terminal(id);
-                store.restart_terminal();
+                store.activate_terminal_for(self.session_id.clone().unwrap_or_default(), id);
+                store.restart_terminal_for(self.session_id.clone().unwrap_or_default());
             }
             TerminalTabMenuKind::SplitHorizontal => {
-                store.activate_terminal(id);
-                store.split_terminal(TerminalSplitDirection::Horizontal);
+                store.activate_terminal_for(self.session_id.clone().unwrap_or_default(), id);
+                store.split_terminal_for(
+                    self.session_id.clone().unwrap_or_default(),
+                    TerminalSplitDirection::Horizontal,
+                );
             }
             TerminalTabMenuKind::SplitVertical => {
-                store.activate_terminal(id);
-                store.split_terminal(TerminalSplitDirection::Vertical);
+                store.activate_terminal_for(self.session_id.clone().unwrap_or_default(), id);
+                store.split_terminal_for(
+                    self.session_id.clone().unwrap_or_default(),
+                    TerminalSplitDirection::Vertical,
+                );
             }
-            TerminalTabMenuKind::Close => store.close_terminal(id, cx),
+            TerminalTabMenuKind::Close => {
+                store.close_terminal_for(self.session_id.clone().unwrap_or_default(), id, cx)
+            }
         });
     }
 
@@ -688,7 +732,7 @@ impl TerminalDrawer {
         let notices = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(|workspace| {
+            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
                 workspace
                     .terminals
                     .iter()
@@ -724,7 +768,7 @@ impl TerminalDrawer {
                     if let Some(text) = self
                         .workspace_store
                         .read(cx)
-                        .with_terminal_workspace(|workspace| {
+                        .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
                             workspace
                                 .active()
                                 .and_then(|entry| entry.terminal.selected_text())
@@ -744,7 +788,9 @@ impl TerminalDrawer {
                         && let Some(terminal_id) = self
                             .workspace_store
                             .read(cx)
-                            .with_terminal_workspace(|workspace| workspace.active_id)
+                            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
+                                workspace.active_id
+                            })
                             .flatten()
                     {
                         self.paste_to_terminal(terminal_id, &text, cx);
@@ -777,7 +823,9 @@ impl TerminalDrawer {
         if let Some(id) = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(|workspace| workspace.active_id)
+            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
+                workspace.active_id
+            })
             .flatten()
         {
             self.bell_tabs.remove(&id);
@@ -798,9 +846,9 @@ impl TerminalDrawer {
         let lines = (total / self.cell_height).trunc() as i32;
         *remainder = total - lines as f32 * self.cell_height;
         if lines != 0 {
-            self.workspace_store
-                .read(cx)
-                .with_terminal_workspace(|workspace| {
+            self.workspace_store.read(cx).with_terminal_workspace_for(
+                self.session_id.as_deref(),
+                |workspace| {
                     if let Some(entry) = workspace.terminal(terminal_id) {
                         let mode = entry.terminal.mode();
                         let point = self
@@ -825,7 +873,8 @@ impl TerminalDrawer {
                             entry.terminal.scroll(lines);
                         }
                     }
-                });
+                },
+            );
             cx.stop_propagation();
             cx.notify();
         }
@@ -989,17 +1038,18 @@ impl TerminalDrawer {
         let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
             return;
         };
-        self.workspace_store
-            .update(cx, |store, _cx| store.activate_terminal(terminal_id));
+        self.workspace_store.update(cx, |store, _cx| {
+            store.activate_terminal_for(self.session_id.clone().unwrap_or_default(), terminal_id)
+        });
         let workspace_store = self.workspace_store.clone();
         let mut stop_propagation = false;
         #[cfg(target_os = "linux")]
         let primary_text = (event.button == MouseButton::Middle)
             .then(|| cx.read_from_primary().and_then(|item| item.text()))
             .flatten();
-        workspace_store
-            .read(cx)
-            .with_terminal_workspace(|workspace| {
+        workspace_store.read(cx).with_terminal_workspace_for(
+            self.session_id.as_deref(),
+            |workspace| {
                 if let Some(entry) = workspace.terminal(terminal_id) {
                     let mode = entry.terminal.mode();
                     if mappings::routes_mouse(mode, event.modifiers.shift) {
@@ -1074,7 +1124,8 @@ impl TerminalDrawer {
                         }
                     }
                 }
-            });
+            },
+        );
         if stop_propagation {
             cx.stop_propagation();
         }
@@ -1093,9 +1144,9 @@ impl TerminalDrawer {
             return;
         };
         let workspace_store = self.workspace_store.clone();
-        workspace_store
-            .read(cx)
-            .with_terminal_workspace(|workspace| {
+        workspace_store.read(cx).with_terminal_workspace_for(
+            self.session_id.as_deref(),
+            |workspace| {
                 let Some(entry) = workspace.terminal(terminal_id) else {
                     return;
                 };
@@ -1177,7 +1228,8 @@ impl TerminalDrawer {
                         }
                     }
                 }
-            });
+            },
+        );
         cx.notify();
     }
 
@@ -1193,7 +1245,7 @@ impl TerminalDrawer {
             .and_then(|(point, _side)| {
                 self.workspace_store
                     .read(cx)
-                    .with_terminal_workspace(|workspace| {
+                    .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
                         let entry = workspace.terminal(terminal_id)?;
                         let mode = entry.terminal.mode();
                         if mappings::routes_mouse(mode, event.modifiers.shift) {
@@ -1238,7 +1290,7 @@ impl TerminalDrawer {
             if let Some(text) = self
                 .workspace_store
                 .read(cx)
-                .with_terminal_workspace(|workspace| {
+                .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
                     workspace
                         .terminal(terminal_id)
                         .and_then(|entry| entry.terminal.selected_text())
@@ -1257,7 +1309,7 @@ impl TerminalDrawer {
         let Some(terminal) = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(|workspace| {
+            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
                 workspace
                     .terminal(terminal_id)
                     .map(|entry| entry.terminal.clone())
@@ -1269,7 +1321,9 @@ impl TerminalDrawer {
         let register_input = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(|workspace| workspace.active_id == Some(terminal_id))
+            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
+                workspace.active_id == Some(terminal_id)
+            })
             .unwrap_or(false);
 
         let model = terminal.model();
@@ -1384,17 +1438,21 @@ impl TerminalDrawer {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
-                                store.capture_terminal_selection(terminal_id)
+                                store.capture_terminal_selection_for(
+                                    this.session_id.clone().unwrap_or_default(),
+                                    terminal_id,
+                                )
                             });
                         })),
                 )
             })
             .context_menu({
                 let workspace_store = self.workspace_store.clone();
+                let session_id = self.session_id.clone();
                 move |menu, _window, cx| {
                     let has_selection = workspace_store
                         .read(cx)
-                        .with_terminal_workspace(|workspace| {
+                        .with_terminal_workspace_for(session_id.as_deref(), |workspace| {
                             workspace
                                 .terminal(terminal_id)
                                 .and_then(|entry| entry.terminal.selected_text())
@@ -1466,7 +1524,7 @@ impl Render for TerminalDrawer {
         let (tabs, active_id, active_split) = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(|workspace| {
+            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
                 (
                     workspace
                         .terminals
@@ -1512,8 +1570,12 @@ impl Render for TerminalDrawer {
                 TabItem::new(("terminal-tab", id), label.clone())
                     .selected(selected)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.workspace_store
-                            .update(cx, |store, _cx| store.activate_terminal(id));
+                        this.workspace_store.update(cx, |store, _cx| {
+                            store.activate_terminal_for(
+                                this.session_id.clone().unwrap_or_default(),
+                                id,
+                            )
+                        });
                     }))
                     .trailing(
                         h_flex()
@@ -1538,7 +1600,11 @@ impl Render for TerminalDrawer {
                                     .tooltip(crate::tr!("terminal.close_tab"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.workspace_store.update(cx, |store, cx| {
-                                            store.close_terminal(close_id, cx)
+                                            store.close_terminal_for(
+                                                this.session_id.clone().unwrap_or_default(),
+                                                close_id,
+                                                cx,
+                                            )
                                         });
                                     })),
                             ),
@@ -1547,7 +1613,7 @@ impl Render for TerminalDrawer {
                         let can_split = self
                             .workspace_store
                             .read(cx)
-                            .session_status()
+                            .session_status_for(self.session_id.as_deref())
                             .is_some_and(|status| status.terminal_split_available);
                         move |menu, _, _| {
                             let item = |kind| Box::new(TerminalTabMenu { id, kind });
@@ -1578,12 +1644,12 @@ impl Render for TerminalDrawer {
         let at_limit = self
             .workspace_store
             .read(cx)
-            .session_status()
+            .session_status_for(self.session_id.as_deref())
             .is_some_and(|status| status.terminal_limit_reached);
         let can_split = self
             .workspace_store
             .read(cx)
-            .session_status()
+            .session_status_for(self.session_id.as_deref())
             .is_some_and(|status| status.terminal_split_available);
         let active_exited = tabs
             .iter()
@@ -1613,8 +1679,9 @@ impl Render for TerminalDrawer {
                     .flex_none()
                     .disabled(at_limit)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_store
-                            .update(cx, |store, _cx| store.new_terminal());
+                        this.workspace_store.update(cx, |store, _cx| {
+                            store.new_terminal_for(this.session_id.clone().unwrap_or_default())
+                        });
                     })),
                 )
                 .child(
@@ -1658,8 +1725,11 @@ impl Render for TerminalDrawer {
                             .small()
                             .label(crate::tr!("terminal.restart"))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.workspace_store
-                                    .update(cx, |store, _cx| store.restart_terminal());
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.restart_terminal_for(
+                                        this.session_id.clone().unwrap_or_default(),
+                                    )
+                                });
                             })),
                     )
                 })
@@ -1674,7 +1744,10 @@ impl Render for TerminalDrawer {
                         .tooltip(crate::tr!("terminal.split_horizontal"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
-                                store.split_terminal(TerminalSplitDirection::Horizontal)
+                                store.split_terminal_for(
+                                    this.session_id.clone().unwrap_or_default(),
+                                    TerminalSplitDirection::Horizontal,
+                                )
                             });
                         })),
                 )
@@ -1689,7 +1762,10 @@ impl Render for TerminalDrawer {
                         .tooltip(crate::tr!("terminal.split_vertical"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
-                                store.split_terminal(TerminalSplitDirection::Vertical)
+                                store.split_terminal_for(
+                                    this.session_id.clone().unwrap_or_default(),
+                                    TerminalSplitDirection::Vertical,
+                                )
                             });
                         })),
                 )
@@ -1703,8 +1779,9 @@ impl Render for TerminalDrawer {
                         .disabled(at_limit)
                         .tooltip(new_tooltip)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.workspace_store
-                                .update(cx, |store, _cx| store.new_terminal());
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.new_terminal_for(this.session_id.clone().unwrap_or_default())
+                            });
                         })),
                 )
                 .child(
@@ -1716,8 +1793,12 @@ impl Render for TerminalDrawer {
                     )
                     .flex_none()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_store
-                            .update(cx, |store, cx| store.close_terminal_panel(cx));
+                        this.workspace_store.update(cx, |store, cx| {
+                            store.close_terminal_panel_for(
+                                this.session_id.clone().unwrap_or_default(),
+                                cx,
+                            )
+                        });
                     })),
                 );
         }
@@ -1813,6 +1894,7 @@ impl Render for TerminalDrawer {
                     let workspace_store = self.workspace_store.clone();
                     let (cell_width, cell_height) = (self.cell_width, self.cell_height);
                     let split_sizes = self.split_sizes.clone();
+                    let session_id = self.session_id.clone();
                     move |bounds, window, cx| {
                         let width = f32::from(bounds.size.width);
                         let height = f32::from(bounds.size.height);
@@ -1829,9 +1911,9 @@ impl Render for TerminalDrawer {
                                     (cell_width * scale_factor).round().max(1.) as u32;
                                 let cell_height_px =
                                     (cell_height * scale_factor).round().max(1.) as u32;
-                                workspace_store
-                                    .read(cx)
-                                    .with_terminal_workspace(|workspace| {
+                                workspace_store.read(cx).with_terminal_workspace_for(
+                                    session_id.as_deref(),
+                                    |workspace| {
                                         if let Some(entry) = workspace.terminal(terminal_id) {
                                             entry.terminal.resize_with_cell_size(
                                                 cols,
@@ -1840,7 +1922,8 @@ impl Render for TerminalDrawer {
                                                 cell_height_px,
                                             );
                                         }
-                                    });
+                                    },
+                                );
                             };
                         match active_split {
                             None => {

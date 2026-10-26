@@ -42,7 +42,12 @@ impl Composer {
     /// Load the workspace file/folder listing for the active session cwd in the
     /// background (gitignore-respected), the first time a mention menu opens.
     pub(in super::super) fn ensure_workspace(&mut self, cx: &mut Context<Self>) {
-        let Some(cwd) = self.workspace_store.read(cx).composer_state().active_cwd else {
+        let Some(cwd) = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref())
+            .active_cwd
+        else {
             return;
         };
         if self.workspace_loading || self.workspace.as_ref().is_some_and(|(c, _)| *c == cwd) {
@@ -50,7 +55,9 @@ impl Composer {
         }
         self.workspace_loading = true;
         let store = self.workspace_store.clone();
-        let walked = store.update(cx, |store, cx| store.list_active_workspace(cx));
+        let walked = store.update(cx, |store, cx| {
+            store.list_workspace_for(self.session_id.as_deref(), cx)
+        });
         cx.spawn(async move |this, cx| {
             let walked = walked.await;
             let _ = this.update(cx, |this, cx| {
@@ -100,7 +107,7 @@ impl Composer {
                 let commands = self
                     .workspace_store
                     .read(cx)
-                    .composer_state()
+                    .composer_state_for(self.session_id.as_deref())
                     .provider_commands;
                 let rows =
                     filter_provider_commands(&commands, ProviderCommandKind::Skill, &trigger.query)
@@ -119,7 +126,10 @@ impl Composer {
                 (rows, String::new(), false)
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
-                let composer = self.workspace_store.read(cx).composer_state();
+                let composer = self
+                    .workspace_store
+                    .read(cx)
+                    .composer_state_for(self.session_id.as_deref());
                 let compact_offered = compact_offered(&composer);
                 let goal_offered = goal_offered(&composer).is_some();
                 let mut builtins: Vec<(&str, Option<&str>, &str, MenuAccept)> = vec![
@@ -209,10 +219,13 @@ impl Composer {
     /// provider takes `tcode_control`.
     fn thread_rows(&self, query: &str, cx: &App) -> Vec<MenuRow> {
         let store = self.workspace_store.read(cx);
-        let Some(status) = store.session_status().filter(|status| !status.draft) else {
+        let Some(status) = store
+            .session_status_for(self.session_id.as_deref())
+            .filter(|status| !status.draft)
+        else {
             return Vec::new();
         };
-        let (Some(control), Some(session_id)) = (&status.control, store.active_session_id()) else {
+        let (Some(control), Some(session_id)) = (&status.control, self.session_id.clone()) else {
             return Vec::new();
         };
         if query.is_empty() {

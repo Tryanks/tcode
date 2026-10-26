@@ -258,7 +258,11 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         self.workspace_store.update(cx, |store, _cx| {
-            store.respond_approval(request_id, decision)
+            store.respond_approval_for(
+                self.session_id.clone().unwrap_or_default(),
+                request_id,
+                decision,
+            )
         });
     }
 }

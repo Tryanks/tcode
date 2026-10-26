@@ -27,18 +27,27 @@ impl CommandOutputReplica {
 }
 
 impl WorkspaceStore {
-    pub(crate) fn command_output(&self, item_id: &str) -> Option<&CommandOutputReplica> {
-        self.focused_thread()?.command_outputs.get(item_id)
+    pub(crate) fn command_output_for(
+        &self,
+        session_id: Option<&str>,
+        item_id: &str,
+    ) -> Option<&CommandOutputReplica> {
+        self.thread(session_id)?.command_outputs.get(item_id)
     }
 
-    /// Hold `item_id`'s output at `cols` on the focused thread. The host
+    /// Hold `item_id`'s output at `cols` on the open thread. The host
     /// answers once, then pushes again while the output grows.
-    pub(crate) fn watch_command_output(&mut self, item_id: &str, cols: u16) {
-        let Some(session_id) = self.focused_session_id.clone() else {
+    pub(crate) fn watch_command_output_for(
+        &mut self,
+        session_id: Option<&str>,
+        item_id: &str,
+        cols: u16,
+    ) {
+        let Some(session_id) = session_id else {
             return;
         };
         let host = self.host.clone();
-        let Some(thread) = self.threads.get_mut(&session_id) else {
+        let Some(thread) = self.open_thread_mut(session_id) else {
             return;
         };
         let replica = thread
@@ -50,18 +59,18 @@ impl WorkspaceStore {
         }
         let previous = replica.watched.replace(cols);
         if let Some(previous) = previous {
-            let _ = host.unsubscribe(command_output_subscription(&session_id, item_id, previous));
+            let _ = host.unsubscribe(command_output_subscription(session_id, item_id, previous));
         }
-        let _ = host.subscribe(command_output_subscription(&session_id, item_id, cols));
+        let _ = host.subscribe(command_output_subscription(session_id, item_id, cols));
     }
 
-    pub(crate) fn unwatch_command_output(&mut self, item_id: &str) {
-        let Some(session_id) = self.focused_session_id.clone() else {
+    pub(crate) fn unwatch_command_output_for(&mut self, session_id: Option<&str>, item_id: &str) {
+        let Some(session_id) = session_id else {
             return;
         };
         let Some(cols) = self
             .threads
-            .get_mut(&session_id)
+            .get_mut(session_id)
             .and_then(|thread| thread.command_outputs.get_mut(item_id))
             .and_then(|replica| replica.watched.take())
         else {
@@ -69,7 +78,7 @@ impl WorkspaceStore {
         };
         let _ = self
             .host
-            .unsubscribe(command_output_subscription(&session_id, item_id, cols));
+            .unsubscribe(command_output_subscription(session_id, item_id, cols));
     }
 
     /// Release the thread's outputs when it closes.

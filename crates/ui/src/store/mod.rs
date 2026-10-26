@@ -686,9 +686,7 @@ impl WorkspaceStore {
                         after: None,
                     });
                 }
-                if let Some(id) = self.focused_session_id.take() {
-                    self.select_session(id);
-                }
+                self.reselect_focused();
             }
             Scope::Full => {}
             Scope::Space {
@@ -942,16 +940,22 @@ impl WorkspaceStore {
     }
 
     pub fn baseline_ready(&self) -> bool {
+        self.baseline_ready_for(self.focused_session_id.as_deref())
+    }
+
+    /// The workspace's baselines have arrived, and those of `session_id`'s
+    /// thread when there is one.
+    pub fn baseline_ready_for(&self, session_id: Option<&str>) -> bool {
         self.baseline_topics.contains(&Topic::Scope)
             && self.baseline_topics.contains(&self.index_topic())
             && (!self.scope.is_full() || self.baseline_topics.contains(&Topic::Settings))
-            && self.focused_session_id.as_ref().is_none_or(|id| {
+            && session_id.is_none_or(|id| {
                 self.baseline_topics.contains(&Topic::SessionStatus {
-                    session_id: id.clone(),
+                    session_id: id.to_owned(),
                 }) && self.baseline_topics.contains(&Topic::SessionPlan {
-                    session_id: id.clone(),
+                    session_id: id.to_owned(),
                 }) && self.baseline_topics.contains(&Topic::SessionEvents {
-                    session_id: id.clone(),
+                    session_id: id.to_owned(),
                 })
             })
     }
@@ -966,16 +970,21 @@ impl WorkspaceStore {
     }
 
     pub fn chat_loading(&self) -> bool {
+        self.chat_loading_for(self.focused_session_id.as_deref())
+    }
+
+    /// Whether a conversation showing `session_id`, or no thread, is still
+    /// waiting for what it draws.
+    pub fn chat_loading_for(&self, session_id: Option<&str>) -> bool {
         if !self.delivery_messages().is_empty() {
             return false;
         }
         if !self.index_hydrated || !self.settings_hydrated {
             return true;
         }
-        if self.focused_session_id.is_some() {
-            self.session_loading()
-        } else {
-            self.threads_loading()
+        match session_id {
+            Some(id) => self.session_loading_for(id),
+            None => self.threads_loading(),
         }
     }
 
@@ -1039,20 +1048,57 @@ impl WorkspaceStore {
     }
 
     fn focused_thread(&self) -> Option<&ThreadReplica> {
-        self.threads.get(self.focused_session_id.as_ref()?)
+        self.thread(self.focused_session_id.as_deref())
     }
 
+    #[cfg(test)]
     fn focused_thread_mut(&mut self) -> Option<&mut ThreadReplica> {
         let id = self.focused_session_id.clone()?;
         self.threads.get_mut(&id)
     }
 
     fn focused_status(&self) -> Option<&SessionStatus> {
-        self.focused_thread()?.status.as_ref()
+        self.thread_status(self.focused_session_id.as_deref())
     }
 
+    #[cfg(test)]
     fn focused_timeline(&self) -> Option<&Timeline> {
-        self.focused_thread()?.timeline.as_ref()
+        self.thread_timeline(self.focused_session_id.as_deref())
+    }
+
+    #[cfg(test)]
+    fn focused_git(&self) -> Option<&GitStatusStatus> {
+        self.thread_git(self.focused_session_id.as_deref())
+    }
+
+    fn thread(&self, session_id: Option<&str>) -> Option<&ThreadReplica> {
+        self.threads.get(session_id?)
+    }
+
+    fn thread_status(&self, session_id: Option<&str>) -> Option<&SessionStatus> {
+        self.thread(session_id)?.status.as_ref()
+    }
+
+    fn thread_timeline(&self, session_id: Option<&str>) -> Option<&Timeline> {
+        self.thread(session_id)?.timeline.as_ref()
+    }
+
+    fn thread_git(&self, session_id: Option<&str>) -> Option<&GitStatusStatus> {
+        self.thread(session_id)?.git.as_ref()
+    }
+
+    /// The conversation state of the thread's destination.
+    fn thread_conversation_ui(&self, session_id: Option<&str>) -> Option<&ConversationUiState> {
+        self.conversation_ui
+            .get(self.thread(session_id)?.destination.as_ref()?)
+    }
+
+    fn thread_conversation_ui_mut(
+        &mut self,
+        session_id: Option<&str>,
+    ) -> Option<&mut ConversationUiState> {
+        let destination = self.thread(session_id)?.destination.clone()?;
+        self.conversation_ui.get_mut(&destination)
     }
 
     /// Focus a thread as open without the host round trip, for tests that
@@ -1812,16 +1858,13 @@ impl WorkspaceStore {
             .count()
     }
 
-    fn active_conversation_ui(&self) -> Option<&crate::conversation_ui::ConversationUiState> {
-        self.conversation_ui
-            .get(self.focused_thread()?.destination.as_ref()?)
+    fn active_conversation_ui(&self) -> Option<&ConversationUiState> {
+        self.thread_conversation_ui(self.focused_session_id.as_deref())
     }
 
-    fn active_conversation_ui_mut(
-        &mut self,
-    ) -> Option<&mut crate::conversation_ui::ConversationUiState> {
-        let destination = self.focused_thread()?.destination.clone()?;
-        self.conversation_ui.get_mut(&destination)
+    fn active_conversation_ui_mut(&mut self) -> Option<&mut ConversationUiState> {
+        let session_id = self.focused_session_id.clone();
+        self.thread_conversation_ui_mut(session_id.as_deref())
     }
 
     fn suppress_task_auto_open_if_running(&mut self) {
@@ -2210,8 +2253,7 @@ impl WorkspaceStore {
                         session_id: id.clone(),
                     })
             {
-                self.focused_session_id = None;
-                self.select_session(id);
+                self.reselect_focused();
             } else if !visible && !self.scope.is_full() {
                 self.leave_session();
             }
@@ -2965,13 +3007,10 @@ impl WorkspaceStore {
         })
     }
 
-    /// The focused thread's git status as the host last reported it.
-    fn focused_git(&self) -> Option<&GitStatusStatus> {
-        self.focused_thread()?.git.as_ref()
-    }
-
-    pub(crate) fn commit_dialog_state(&self) -> CommitDialogState {
-        let status = self.focused_git().and_then(|git| git.status.as_ref());
+    pub(crate) fn commit_dialog_state_for(&self, session_id: Option<&str>) -> CommitDialogState {
+        let status = self
+            .thread_git(session_id)
+            .and_then(|git| git.status.as_ref());
         CommitDialogState {
             files: status
                 .map(|status| status.changed_files.clone())
@@ -3073,11 +3112,23 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn panel_state(&self) -> PanelState {
-        snapshots::panel_state(self.active_conversation_ui(), self.focused_timeline())
+        self.panel_state_for(self.focused_session_id.as_deref())
+    }
+
+    /// The panels of `session_id`'s conversation, or of no thread.
+    pub(crate) fn panel_state_for(&self, session_id: Option<&str>) -> PanelState {
+        snapshots::panel_state(
+            self.thread_conversation_ui(session_id),
+            self.thread_timeline(session_id),
+        )
     }
 
     pub fn review_comments(&self) -> Vec<ReviewComment> {
-        self.focused_status()
+        self.review_comments_for(self.focused_session_id.as_deref())
+    }
+
+    pub fn review_comments_for(&self, session_id: Option<&str>) -> Vec<ReviewComment> {
+        self.thread_status(session_id)
             .map(|status| status.review_comment_drafts.clone())
             .unwrap_or_default()
     }
@@ -3259,8 +3310,12 @@ impl WorkspaceStore {
         })
     }
 
-    pub(crate) fn message_byline(&self, entry_id: &str) -> Option<String> {
-        let held = self.focused_thread()?.history.as_ref()?;
+    pub(crate) fn message_byline_for(
+        &self,
+        session_id: Option<&str>,
+        entry_id: &str,
+    ) -> Option<String> {
+        let held = self.thread(session_id)?.history.as_ref()?;
         let attribution = &held.attribution;
         // The lead's messages to a child carry no author: they are no member's.
         if attribution.origins.get(entry_id) == Some(&tcode_core::session::MessageOrigin::Agent) {
@@ -3282,7 +3337,15 @@ impl WorkspaceStore {
     }
 
     pub fn with_active_timeline<R>(&self, read: impl FnOnce(&Timeline) -> R) -> Option<R> {
-        self.focused_timeline().map(read)
+        self.with_timeline_for(self.focused_session_id.as_deref(), read)
+    }
+
+    pub fn with_timeline_for<R>(
+        &self,
+        session_id: Option<&str>,
+        read: impl FnOnce(&Timeline) -> R,
+    ) -> Option<R> {
+        self.thread_timeline(session_id).map(read)
     }
 
     pub(crate) fn pending_chat_turn(&self, session_id: &str) -> Option<usize> {
@@ -3319,11 +3382,12 @@ impl WorkspaceStore {
             .timeline = Some(timeline);
     }
 
-    pub fn with_composer_destination<R>(
+    pub fn with_composer_destination_for<R>(
         &self,
+        session_id: Option<&str>,
         read: impl FnOnce(bool, &str, Option<&str>) -> R,
     ) -> Option<R> {
-        self.focused_status().map(|status| {
+        self.thread_status(session_id).map(|status| {
             read(
                 status.draft,
                 &status.session_id,
@@ -3332,15 +3396,20 @@ impl WorkspaceStore {
         })
     }
 
-    pub(crate) fn native_subagent_readonly(&self) -> bool {
-        self.focused_status()
+    pub(crate) fn native_subagent_readonly_for(&self, session_id: Option<&str>) -> bool {
+        self.thread_status(session_id)
             .is_some_and(|status| status.conversation_read_only)
     }
 
     pub fn composer_state(&self) -> ComposerState {
+        self.composer_state_for(self.focused_session_id.as_deref())
+    }
+
+    /// The composer of `session_id`'s thread, or of no thread.
+    pub fn composer_state_for(&self, session_id: Option<&str>) -> ComposerState {
         snapshots::composer_state(
-            self.focused_status(),
-            self.focused_timeline(),
+            self.thread_status(session_id),
+            self.thread_timeline(session_id),
             &self.settings_replica,
             &self.providers_replica,
         )
@@ -3359,18 +3428,19 @@ impl WorkspaceStore {
         cx.notify();
     }
 
-    /// Consume the active session's text from [`Self::append_to_composer`].
-    pub fn take_composer_append(&mut self) -> Option<String> {
-        let active_id = self.focused_status()?.session_id.clone();
-        self.composer_appends.remove(&active_id)
+    /// Consume the thread's text from [`Self::append_to_composer`].
+    pub fn take_composer_append_for(&mut self, session_id: Option<&str>) -> Option<String> {
+        let session_id = self.thread_status(session_id)?.session_id.clone();
+        self.composer_appends.remove(&session_id)
     }
 
-    /// Consume the active session's prefill delivered by `NativeRewindPrefill`.
-    pub fn take_native_rewind_prefill(&mut self) -> Option<String> {
-        let active_id = self.focused_status()?.session_id.clone();
-        let prefill = self.native_rewind_prefills.remove(&active_id)?;
+    /// Consume the thread's prefill delivered by `NativeRewindPrefill`.
+    pub fn take_native_rewind_prefill_for(&mut self, session_id: Option<&str>) -> Option<String> {
+        let session_id = self.thread_status(session_id)?.session_id.clone();
+        let prefill = self.native_rewind_prefills.remove(&session_id)?;
         if let Some(status) = self
-            .focused_thread_mut()
+            .threads
+            .get_mut(&session_id)
             .and_then(|thread| thread.status.as_mut())
         {
             status.native_rewind_prefill_available = false;
@@ -3378,36 +3448,36 @@ impl WorkspaceStore {
         Some(prefill)
     }
 
-    /// The classifier stop the active session is currently showing, if any.
-    pub fn active_fallback_block(&self) -> Option<&FallbackBlock> {
-        let status = self.focused_status()?;
+    /// The classifier stop the thread is currently showing, if any.
+    pub fn fallback_block_for(&self, session_id: Option<&str>) -> Option<&FallbackBlock> {
+        let status = self.thread_status(session_id)?;
         self.fallback_blocks.get(&status.session_id)
     }
 
-    pub fn dismiss_fallback_block(&mut self) {
-        if let Some(status) = self.focused_status() {
+    pub fn dismiss_fallback_block_for(&mut self, session_id: Option<&str>) {
+        if let Some(status) = self.thread_status(session_id) {
             let session_id = status.session_id.clone();
             self.fallback_blocks.remove(&session_id);
         }
     }
 
-    /// The advisory review of the active session's classifier stop, if any.
-    pub fn active_fallback_review(&self) -> Option<&FallbackReview> {
-        let status = self.focused_status()?;
+    /// The advisory review of the thread's classifier stop, if any.
+    pub fn fallback_review_for(&self, session_id: Option<&str>) -> Option<&FallbackReview> {
+        let status = self.thread_status(session_id)?;
         self.fallback_reviews.get(&status.session_id)
     }
 
-    pub fn dismiss_fallback_review(&mut self) {
-        if let Some(status) = self.focused_status() {
+    pub fn dismiss_fallback_review_for(&mut self, session_id: Option<&str>) {
+        if let Some(status) = self.thread_status(session_id) {
             let session_id = status.session_id.clone();
             self.fallback_reviews.remove(&session_id);
         }
     }
 
-    /// The active session's last user message: its turn index and the words the
+    /// The thread's last user message: its turn index and the words the
     /// user actually typed (any injected context prefix stripped).
-    pub fn last_user_message(&self) -> Option<(usize, String)> {
-        self.with_active_timeline(|timeline| {
+    pub fn last_user_message_for(&self, session_id: Option<&str>) -> Option<(usize, String)> {
+        self.with_timeline_for(session_id, |timeline| {
             timeline.entries.iter().rev().find_map(|entry| {
                 let EntryContent::Item(agent::ItemContent::UserMessage {
                     text, context_len, ..
@@ -3426,11 +3496,12 @@ impl WorkspaceStore {
 
     /// Build renderer handles from replicated layout. Local affordances keep
     /// direct PTY/grid access; otherwise the handles wrap client emulators.
-    pub fn with_terminal_workspace<R>(
+    pub fn with_terminal_workspace_for<R>(
         &self,
+        session_id: Option<&str>,
         read: impl FnOnce(&TerminalWorkspace) -> R,
     ) -> Option<R> {
-        let status = self.focused_status()?;
+        let status = self.thread_status(session_id)?;
         let workspace = TerminalWorkspace::from_replica(status, |id| self.client_terminal(id));
         Some(read(&workspace))
     }
@@ -3477,8 +3548,12 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn list_active_workspace(&self, cx: &mut App) -> Task<Vec<PathEntry>> {
-        let session_id = self.active_session_id().unwrap_or_default();
+    pub fn list_workspace_for(
+        &self,
+        session_id: Option<&str>,
+        cx: &mut App,
+    ) -> Task<Vec<PathEntry>> {
+        let session_id = session_id.unwrap_or_default().to_owned();
         let host = self.host.clone();
         cx.spawn(
             async move |_| match host.query(Query::ListActiveWorkspace { session_id }).await {
@@ -3528,21 +3603,35 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn session_loading(&self) -> bool {
-        self.focused_session_id.is_some()
-            && self
-                .focused_thread()
-                .is_none_or(|thread| thread.timeline.is_none() || thread.status.is_none())
+        self.focused_session_id
+            .as_deref()
+            .is_some_and(|id| self.session_loading_for(id))
+    }
+
+    pub(super) fn session_loading_for(&self, session_id: &str) -> bool {
+        self.threads
+            .get(session_id)
+            .is_none_or(|thread| thread.timeline.is_none() || thread.status.is_none())
     }
 
     pub fn chat_active_session(&self) -> Option<(String, PathBuf, bool)> {
-        self.focused_status()
+        self.chat_active_session_for(self.focused_session_id.as_deref())
+    }
+
+    /// The title, working directory and draft flag a conversation showing
+    /// `session_id`, or no thread, draws in its header.
+    pub fn chat_active_session_for(
+        &self,
+        session_id: Option<&str>,
+    ) -> Option<(String, PathBuf, bool)> {
+        self.thread_status(session_id)
             .map(|status| (status.title.clone(), status.cwd.clone(), status.draft))
             .or_else(|| {
-                let focused = self.focused_session_id.as_ref()?;
+                let id = session_id?;
                 self.index_replica
                     .0
                     .iter()
-                    .find(|meta| &meta.id == focused)
+                    .find(|meta| meta.id == id)
                     .map(|meta| (meta.title.clone(), meta.cwd.clone(), false))
             })
             .or_else(|| {
@@ -3556,16 +3645,17 @@ impl WorkspaceStore {
             })
     }
 
-    pub fn chat_requested_model(&self) -> Option<String> {
-        self.focused_status()
+    pub fn chat_requested_model_for(&self, session_id: Option<&str>) -> Option<String> {
+        self.thread_status(session_id)
             .and_then(|status| status.requested_model.clone())
     }
 
-    pub fn chat_turn_changes(
+    pub fn chat_turn_changes_for(
         &self,
+        session_id: Option<&str>,
         turn: usize,
     ) -> (Vec<agent::FileChange>, agent::ChangeCompleteness) {
-        self.with_active_timeline(|timeline| {
+        self.with_timeline_for(session_id, |timeline| {
             timeline
                 .turns
                 .get(turn)
@@ -3576,10 +3666,14 @@ impl WorkspaceStore {
         .unwrap_or((Vec::new(), agent::ChangeCompleteness::Partial))
     }
 
-    pub fn chat_native_rewind_state(&self, turn: usize) -> Option<(bool, bool)> {
-        let status = self.focused_status()?;
+    pub fn chat_native_rewind_state_for(
+        &self,
+        session_id: Option<&str>,
+        turn: usize,
+    ) -> Option<(bool, bool)> {
+        let status = self.thread_status(session_id)?;
         let has_checkpoint = self
-            .with_active_timeline(|timeline| {
+            .with_timeline_for(session_id, |timeline| {
                 timeline
                     .turns
                     .get(turn)
@@ -3590,19 +3684,23 @@ impl WorkspaceStore {
         Some((has_checkpoint, status.native_rewind_blocked))
     }
 
-    pub fn chat_git_controls(&self) -> Option<(QuickAction, Vec<MenuItem>)> {
-        let git = self.focused_git()?;
+    pub fn chat_git_controls_for(
+        &self,
+        session_id: Option<&str>,
+    ) -> Option<(QuickAction, Vec<MenuItem>)> {
+        let git = self.thread_git(session_id)?;
         git.status
             .as_ref()
             .map(|status| (quick_action(status, git.busy), menu_items(status, git.busy)))
     }
 
-    pub fn generate_commit_message(
+    pub fn generate_commit_message_for(
         &self,
+        session_id: Option<&str>,
         included: Option<Vec<String>>,
         cx: &mut App,
     ) -> Task<Result<String, String>> {
-        let session_id = self.active_session_id().unwrap_or_default();
+        let session_id = session_id.unwrap_or_default().to_owned();
         let host = self.host.clone();
         cx.spawn(async move |_| {
             match host
@@ -3619,8 +3717,11 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn absolute_turn(&self, local: usize) -> usize {
-        local + self.focused_thread().map_or(0, |thread| thread.turn_offset)
+    pub fn absolute_turn_for(&self, session_id: Option<&str>, local: usize) -> usize {
+        local
+            + self
+                .thread(session_id)
+                .map_or(0, |thread| thread.turn_offset)
     }
 
     pub fn session_plan(&self) -> Option<&SessionPlan> {
@@ -3629,6 +3730,10 @@ impl WorkspaceStore {
 
     pub fn session_status(&self) -> Option<&SessionStatus> {
         self.focused_status()
+    }
+
+    pub fn session_status_for(&self, session_id: Option<&str>) -> Option<&SessionStatus> {
+        self.thread_status(session_id)
     }
 
     /// How many threads deleting `session_id` removes (the host deletes every
@@ -4474,7 +4579,11 @@ pub(crate) mod tests {
         crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
         store.update(cx, |store, _| {
             store.focus_thread_for_test("scripted", None);
-            store.send_turn("hello".into(), Vec::new());
+            store.send_turn_for(
+                store.active_session_id().unwrap_or_default(),
+                "hello".into(),
+                Vec::new(),
+            );
         });
         let request = loop {
             let request =
@@ -4600,7 +4709,13 @@ pub(crate) mod tests {
             store.focus_thread_for_test("scripted", None);
             assert!(store.delivery_messages().is_empty());
         });
-        store.update(cx, |store, _| store.send_turn("hello".into(), Vec::new()));
+        store.update(cx, |store, _| {
+            store.send_turn_for(
+                store.active_session_id().unwrap_or_default(),
+                "hello".into(),
+                Vec::new(),
+            )
+        });
         let early = tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
         let early_key = early.key.unwrap();
         store.update(cx, |store, cx| {
@@ -4636,7 +4751,11 @@ pub(crate) mod tests {
             "a replica received before its Ack must stay adopted"
         );
         store.update(cx, |store, _| {
-            store.send_turn("discard me".into(), Vec::new())
+            store.send_turn_for(
+                store.active_session_id().unwrap_or_default(),
+                "discard me".into(),
+                Vec::new(),
+            )
         });
         let request =
             tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
@@ -4916,7 +5035,11 @@ pub(crate) mod tests {
             reason: None,
         });
         workspace.update(cx, |store, _| {
-            store.send_turn("keep my failed send".into(), Vec::new())
+            store.send_turn_for(
+                store.active_session_id().unwrap_or_default(),
+                "keep my failed send".into(),
+                Vec::new(),
+            )
         });
         smol::block_on(
             host.update_state_for_test(|state, cx| state.delete_session("deleted", false, cx)),
@@ -5219,7 +5342,11 @@ pub(crate) mod tests {
                 Some(2000)
             );
             while outgoing.try_recv().is_ok() {}
-            store.rewind_turn(2, agent::RewindMode::Conversation);
+            store.rewind_turn_for(
+                store.active_session_id().unwrap_or_default(),
+                2,
+                agent::RewindMode::Conversation,
+            );
             let command =
                 tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
             assert!(matches!(
@@ -5425,7 +5552,10 @@ pub(crate) mod tests {
         workspace.update(cx, |store, cx| {
             store.focus_thread_for_test("shared", None);
             store.apply_domain_event(&snapshot(vec![message("owner", None)]), cx);
-            assert_eq!(store.message_byline("owner"), None);
+            assert_eq!(
+                store.message_byline_for(store.active_session_id().as_deref(), "owner"),
+                None
+            );
 
             let member = Author {
                 device_id: "member-device".into(),
@@ -5433,7 +5563,9 @@ pub(crate) mod tests {
             };
             store.apply_domain_event(&snapshot(vec![message("member", Some(member))]), cx);
             assert_eq!(
-                store.message_byline("member").as_deref(),
+                store
+                    .message_byline_for(store.active_session_id().as_deref(), "member")
+                    .as_deref(),
                 Some("Alex's laptop")
             );
             store.apply_domain_event(
@@ -5447,11 +5579,15 @@ pub(crate) mod tests {
                 cx,
             );
             assert_eq!(
-                store.message_byline("owner").as_deref(),
+                store
+                    .message_byline_for(store.active_session_id().as_deref(), "owner")
+                    .as_deref(),
                 Some(crate::tr!("member.owner").as_ref())
             );
             assert_eq!(
-                store.message_byline("member").as_deref(),
+                store
+                    .message_byline_for(store.active_session_id().as_deref(), "member")
+                    .as_deref(),
                 Some("Alex's laptop")
             );
 
@@ -5469,7 +5605,9 @@ pub(crate) mod tests {
                 cx,
             );
             assert_eq!(
-                store.message_byline("lead").as_deref(),
+                store
+                    .message_byline_for(store.active_session_id().as_deref(), "lead")
+                    .as_deref(),
                 Some(crate::tr!("chat.from_orchestrator").as_ref())
             );
         });
@@ -5597,7 +5735,9 @@ pub(crate) mod tests {
             );
         });
         while outgoing.try_recv().is_ok() {}
-        workspace.update(cx, |store, cx| store.update_history_window(1., true, cx));
+        workspace.update(cx, |store, cx| {
+            store.update_history_window_for(store.active_session_id().as_deref(), 1., true, cx)
+        });
         cx.run_until_parked();
         let mut request =
             tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
@@ -5610,7 +5750,7 @@ pub(crate) mod tests {
             })
         ));
         workspace.update(cx, |store, cx| {
-            assert!(store.history_loading());
+            assert!(store.history_loading_for(store.active_session_id().as_deref()));
             store.load_earlier_messages(cx);
         });
         cx.run_until_parked();
@@ -5630,7 +5770,10 @@ pub(crate) mod tests {
             .unwrap();
         cx.run_until_parked();
         workspace.update(cx, |store, cx| {
-            assert!(!store.history_loading(), "failed pages hide activity");
+            assert!(
+                !store.history_loading_for(store.active_session_id().as_deref()),
+                "failed pages hide activity"
+            );
             store.load_earlier_messages(cx);
         });
         cx.executor()
@@ -5653,7 +5796,7 @@ pub(crate) mod tests {
         );
         request = retry;
         workspace.update(cx, |store, cx| {
-            assert!(store.history_loading());
+            assert!(store.history_loading_for(store.active_session_id().as_deref()));
             store.load_earlier_messages(cx);
         });
         cx.run_until_parked();
@@ -5716,7 +5859,12 @@ pub(crate) mod tests {
                 .advance_clock(std::time::Duration::from_millis(250));
             cx.run_until_parked();
             workspace.update(cx, |store, cx| {
-                store.update_history_window(if page < 3 { 2. + page as f32 } else { 6. }, true, cx);
+                store.update_history_window_for(
+                    store.active_session_id().as_deref(),
+                    if page < 3 { 2. + page as f32 } else { 6. },
+                    true,
+                    cx,
+                );
             });
             cx.run_until_parked();
             if page < 3 {
@@ -5734,7 +5882,7 @@ pub(crate) mod tests {
         workspace.read_with(cx, |store, _| {
             assert_eq!(held_history(store, "large").from, 1000);
             assert_eq!(held_history(store, "large").records.len(), 1000);
-            assert!(!store.history_loading());
+            assert!(!store.history_loading_for(store.active_session_id().as_deref()));
         });
     }
 
@@ -5934,6 +6082,70 @@ pub(crate) mod tests {
             assert_eq!(live_turn(&workspace, cx), None);
             assert_eq!(open_question(cx), None);
         }
+    }
+
+    #[gpui::test]
+    fn open_threads_each_read_their_own_replica_whichever_is_focused(cx: &mut TestAppContext) {
+        let a = draft_status();
+        let mut b = with_running_turn(&a, None, Some(question()));
+        b.session_id = "thread-b".into();
+        let status = |status: &tcode_protocol::SessionStatus| EventEnvelope {
+            request_id: None,
+            topic: Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            event: ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+        };
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        crate::store::tests::seed_full_scope(&workspace, &incoming, deferred, cx);
+        workspace.update(cx, |store, cx| {
+            store.select_session(a.session_id.clone());
+            store.open_thread(&b.session_id);
+            store.apply_domain_event(&status(&a), cx);
+            store.apply_domain_event(&session_snapshot(&a.session_id, 0, vec![reply(1)]), cx);
+            store.apply_domain_event(&status(&b), cx);
+            store.apply_domain_event(&session_snapshot(&b.session_id, 0, vec![reply(2)]), cx);
+        });
+        let shown = |store: &WorkspaceStore, id: &str| {
+            (
+                store
+                    .composer_state_for(Some(id))
+                    .pending_user_input
+                    .map(|pending| pending.request_id),
+                store.with_timeline_for(Some(id), |timeline| {
+                    timeline
+                        .entries
+                        .iter()
+                        .map(|entry| entry.id.clone())
+                        .collect::<Vec<_>>()
+                }),
+            )
+        };
+        let a_shows = (None, Some(vec!["reply-1".to_string()]));
+        let b_shows = (Some("ask".to_string()), Some(vec!["reply-2".to_string()]));
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id(), Some(a.session_id.clone()));
+            assert_eq!(shown(store, &a.session_id), a_shows);
+            assert_eq!(shown(store, &b.session_id), b_shows);
+        });
+
+        // Selecting the thread another pane shows moves the focus and closes
+        // nothing: the thread left keeps receiving its events.
+        workspace.update(cx, |store, cx| {
+            store.select_session(b.session_id.clone());
+            store.apply_domain_event(&status(&with_running_turn(&a, None, Some(question()))), cx);
+        });
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id(), Some(b.session_id.clone()));
+            assert_eq!(shown(store, &a.session_id), (b_shows.0.clone(), a_shows.1));
+            assert_eq!(shown(store, &b.session_id), b_shows);
+        });
     }
 
     #[gpui::test]
@@ -7708,7 +7920,8 @@ pub(crate) mod tests {
         });
 
         assert_eq!(
-            workspace.update(cx, |store, _cx| store.take_native_rewind_prefill()),
+            workspace.update(cx, |store, _cx| store
+                .take_native_rewind_prefill_for(store.active_session_id().as_deref())),
             Some("first parked prefill".into())
         );
         workspace.update(cx, |store, _| store.select_session(second.id.clone()));
@@ -7720,7 +7933,8 @@ pub(crate) mod tests {
             })
         });
         assert_eq!(
-            workspace.update(cx, |store, _cx| store.take_native_rewind_prefill()),
+            workspace.update(cx, |store, _cx| store
+                .take_native_rewind_prefill_for(store.active_session_id().as_deref())),
             Some("second parked prefill".into())
         );
 
@@ -7762,7 +7976,11 @@ pub(crate) mod tests {
             }));
         });
         driver.wait_until(cx, &workspace, "classifier block", |cx| {
-            workspace.read_with(cx, |store, _| store.active_fallback_block().is_some())
+            workspace.read_with(cx, |store, _| {
+                store
+                    .fallback_block_for(store.active_session_id().as_deref())
+                    .is_some()
+            })
         });
 
         let session_id = meta.id.clone();
@@ -7780,14 +7998,22 @@ pub(crate) mod tests {
             }));
         });
         driver.wait_until(cx, &workspace, "review ready", |cx| {
-            workspace.read_with(cx, |store, _| store.active_fallback_review().is_some())
+            workspace.read_with(cx, |store, _| {
+                store
+                    .fallback_review_for(store.active_session_id().as_deref())
+                    .is_some()
+            })
         });
         workspace.read_with(cx, |store, _| {
-            let block = store.active_fallback_block().unwrap();
+            let block = store
+                .fallback_block_for(store.active_session_id().as_deref())
+                .unwrap();
             assert_eq!(block.category, Some(agent::ClassifierCategory::Cyber));
             assert_eq!(block.model.as_deref(), Some("claude-sonnet-4-5"));
             assert_eq!(block.detail, "request blocked by classifier");
-            let review = store.active_fallback_review().unwrap();
+            let review = store
+                .fallback_review_for(store.active_session_id().as_deref())
+                .unwrap();
             assert_eq!(review.assessment, "looks like a false positive");
             assert_eq!(review.draft, "I am auditing my own service.");
         });
@@ -7809,8 +8035,12 @@ pub(crate) mod tests {
             "block and review cleared by the next turn",
             |cx| {
                 workspace.read_with(cx, |store, _| {
-                    store.active_fallback_block().is_none()
-                        && store.active_fallback_review().is_none()
+                    store
+                        .fallback_block_for(store.active_session_id().as_deref())
+                        .is_none()
+                        && store
+                            .fallback_review_for(store.active_session_id().as_deref())
+                            .is_none()
                 })
             },
         );
