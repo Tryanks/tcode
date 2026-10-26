@@ -707,14 +707,12 @@ pub(super) fn map_selector(
     };
     popover
         .content(move |_, window, cx| {
-            let popover = cx.entity();
             map_content(
                 &view,
                 &offer,
                 target.as_ref(),
                 action.as_ref(),
                 compact,
-                popover,
                 window,
                 cx,
             )
@@ -728,10 +726,10 @@ fn map_content(
     target: Option<&Target>,
     action: Option<&PullRequestActionState>,
     compact: bool,
-    popover: Entity<gpui_base::PopoverState>,
     window: &mut Window,
     cx: &mut Context<gpui_base::PopoverState>,
 ) -> AnyElement {
+    let popover = cx.entity();
     let map = offer.map();
     let theme = cx.theme().clone();
     let muted = theme.muted_foreground;
