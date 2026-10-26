@@ -64,6 +64,8 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     (qi == q.len()).then_some(score)
 }
 
+type PaneAction = fn() -> Box<dyn gpui::Action>;
+
 /// A concrete action a palette row triggers.
 #[derive(Clone)]
 enum Action {
@@ -91,6 +93,8 @@ enum Action {
         session_id: String,
         turn: Option<usize>,
     },
+    /// A pane command, which the shell answers.
+    Pane(PaneAction),
 }
 
 /// One rendered palette row.
@@ -273,13 +277,13 @@ impl CommandPalette {
         cx.notify();
     }
 
-    fn results(&mut self, cx: &Context<Self>) -> Rc<Results> {
+    fn results(&mut self, window: &Window, cx: &Context<Self>) -> Rc<Results> {
         if let Some(results) = &self.results {
             return results.clone();
         }
         let mut rows = Vec::new();
         let mut items = Vec::new();
-        for group in self.groups(cx) {
+        for group in self.groups(window, cx) {
             rows.push(Row::Caption(group.label));
             for item in group.items {
                 rows.push(Row::Item(items.len()));
@@ -304,7 +308,7 @@ impl CommandPalette {
 
     /// Build the grouped result list for the current query. A leading `>`
     /// restricts results to Actions.
-    fn groups(&self, cx: &Context<Self>) -> Vec<Group> {
+    fn groups(&self, window: &Window, cx: &Context<Self>) -> Vec<Group> {
         let raw = self.query.read(cx).value().to_string();
         let actions_only = raw.trim_start().starts_with('>');
         // Strip the `>` prefix so the remainder still fuzzy-matches action labels.
@@ -384,6 +388,73 @@ impl CommandPalette {
                 IconName::Globe,
                 Action::OpenPreview,
             );
+        }
+        if let Some(panes) = crate::shell::pane_controls(None, window, cx) {
+            use crate::panes::{ClosePane, FocusPane, SplitDown, SplitRight, ZoomPane};
+            if panes.split_right {
+                push_action(
+                    crate::tr!("panes.split_right").into_owned(),
+                    IconName::Columns2,
+                    Action::Pane(|| Box::new(SplitRight)),
+                );
+            }
+            if panes.split_down {
+                push_action(
+                    crate::tr!("panes.split_down").into_owned(),
+                    IconName::Rows2,
+                    Action::Pane(|| Box::new(SplitDown)),
+                );
+            }
+            if panes.close {
+                push_action(
+                    crate::tr!("panes.close").into_owned(),
+                    IconName::Close,
+                    Action::Pane(|| Box::new(ClosePane)),
+                );
+            }
+            if panes.zoom {
+                let (label, icon) = if panes.zoomed {
+                    (crate::tr!("panes.unzoom"), IconName::Minimize2)
+                } else {
+                    (crate::tr!("panes.zoom"), IconName::Maximize2)
+                };
+                push_action(
+                    label.into_owned(),
+                    icon,
+                    Action::Pane(|| Box::new(ZoomPane)),
+                );
+            }
+            if panes.zoom && !panes.zoomed {
+                let moves: [(_, _, PaneAction); 6] = [
+                    (crate::tr!("panes.focus_left"), IconName::ArrowLeft, || {
+                        Box::new(FocusPane::Left)
+                    }),
+                    (
+                        crate::tr!("panes.focus_right"),
+                        IconName::ArrowRight,
+                        || Box::new(FocusPane::Right),
+                    ),
+                    (crate::tr!("panes.focus_up"), IconName::ArrowUp, || {
+                        Box::new(FocusPane::Up)
+                    }),
+                    (crate::tr!("panes.focus_down"), IconName::ArrowDown, || {
+                        Box::new(FocusPane::Down)
+                    }),
+                    (
+                        crate::tr!("panes.focus_next"),
+                        IconName::ChevronRight,
+                        || Box::new(FocusPane::Next),
+                    ),
+                    (
+                        crate::tr!("panes.focus_previous"),
+                        IconName::ChevronLeft,
+                        || Box::new(FocusPane::Previous),
+                    ),
+                ];
+                for (label, icon, action) in moves {
+                    push_action(label.into_owned(), icon, Action::Pane(action));
+                }
+            }
         }
         if store.scope().is_full() {
             push_action(
@@ -499,7 +570,7 @@ impl CommandPalette {
     }
 
     fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let results = self.results(cx);
+        let results = self.results(window, cx);
         if let Some(item) = results.items.get(self.selected) {
             self.activate(item.action.clone(), window, cx);
         }
@@ -586,13 +657,16 @@ impl CommandPalette {
                     cx,
                 );
             }
+            Action::Pane(action) => {
+                self.close(cx);
+                window.dispatch_action(action(), cx);
+            }
             Action::OpenThread { session_id, turn } => {
                 self.store.update(cx, |store, cx| {
                     if let Some(turn) = turn {
-                        store.select_session_at_turn(session_id, turn);
-                        cx.notify();
+                        store.select_session_at_turn(session_id, turn, cx);
                     } else {
-                        store.select_session(session_id);
+                        store.select_session(session_id, cx);
                     }
                 });
                 self.close(cx);
@@ -602,8 +676,8 @@ impl CommandPalette {
         }
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let results = self.results(cx);
+    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let results = self.results(window, cx);
         let total = results.items.len();
         let selected = match ev.keystroke.key.as_str() {
             "down" if total > 0 => (self.selected + 1).min(total - 1),
@@ -760,7 +834,7 @@ impl Render for CommandPalette {
             return div().into_any_element();
         }
         let exiting = !open;
-        let results = self.results(cx);
+        let results = self.results(window, cx);
         let total = results.items.len();
         if total > 0 && self.selected >= total {
             self.selected = total - 1;
@@ -1099,10 +1173,10 @@ mod tests {
             query.read(cx).focus_handle(cx).focus(window, cx);
         });
 
-        cx.update(|_, cx| {
+        cx.update(|window, cx| {
             palette.update(cx, |palette, cx| {
                 assert!(palette.query.read(cx).value().is_empty());
-                let items = &palette.results(cx).items;
+                let items = &palette.results(window, cx).items;
                 assert!(
                     items
                         .iter()
@@ -1137,8 +1211,8 @@ mod tests {
         for _ in 0..10 {
             dispatch_palette_key(&palette, cx, "down");
         }
-        cx.update(|_, cx| {
-            let total = palette.update(cx, |palette, cx| palette.results(cx).items.len());
+        cx.update(|window, cx| {
+            let total = palette.update(cx, |palette, cx| palette.results(window, cx).items.len());
             assert_eq!(palette.read(cx).selected, total - 1);
         });
 
@@ -1360,7 +1434,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("thread-0".into()));
+        store.update(cx, |store, cx| store.select_session("thread-0".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         window_state.update(cx, |state, cx| state.open_palette(cx));
         let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {
@@ -1389,7 +1463,9 @@ mod tests {
             });
             draw(cx);
         }
-        let last = palette.update(cx, |palette, cx| palette.results(cx).items.len() - 1);
+        let last = palette.update_in(cx, |palette, window, cx| {
+            palette.results(window, cx).items.len() - 1
+        });
         assert!(
             cx.debug_bounds(format!("palette-row-{last}").leak())
                 .is_some()

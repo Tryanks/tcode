@@ -580,7 +580,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         let (drawer, cx) = cx.add_window_view(|window, cx| {
             crate::terminal_drawer::TerminalDrawer::new(store.clone(), window, cx)
         });

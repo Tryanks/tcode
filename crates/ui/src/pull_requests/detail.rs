@@ -2559,7 +2559,7 @@ mod tests {
             .unwrap();
         settle(cx);
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        store.update(cx, |store, _| store.select_session("session".into()));
+        store.update(cx, |store, cx| store.select_session("session".into(), cx));
         view.update(cx, |view, cx| {
             view.window_state
                 .update(cx, |state, cx| state.set_compact(true, cx))

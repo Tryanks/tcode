@@ -510,7 +510,7 @@ mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.chat_loading()

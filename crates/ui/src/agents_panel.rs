@@ -301,7 +301,7 @@ fn detail(provider: Option<ProviderKind>, model: Option<&str>) -> String {
 /// Open a thread reached from its lead. An archived agent is reached the way
 /// Settings → Archived Threads reaches every archived thread: unarchived.
 pub(crate) fn open_agent(store: &Entity<WorkspaceStore>, id: String, cx: &mut App) {
-    store.update(cx, |store, _| {
+    store.update(cx, |store, cx| {
         if store
             .archived_sessions()
             .iter()
@@ -309,7 +309,7 @@ pub(crate) fn open_agent(store: &Entity<WorkspaceStore>, id: String, cx: &mut Ap
         {
             store.unarchive_session(id.clone());
         }
-        store.select_session(id);
+        store.select_session(id, cx);
     });
 }
 
@@ -1095,7 +1095,7 @@ mod tests {
         driver.wait_until(cx, &store, "child status", |cx| {
             store.read_with(cx, |store, _| store.agent_status("finished").is_some())
         });
-        store.update(cx, |store, _| store.select_session("lead".into()));
+        store.update(cx, |store, cx| store.select_session("lead".into(), cx));
         let (_, cx) = cx.add_window_view(|window, cx| {
             let panel = cx.new(|cx| super::AgentsPanel::for_sheet(store.clone(), cx));
             gpui_base::Root::new(panel, window, cx)
