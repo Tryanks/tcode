@@ -2204,39 +2204,28 @@ impl PullRequestView {
             .as_ref()
             .map(|(_, key)| key.number)
             .unwrap_or_default();
-        let skeleton = gpui_base::motion::transition(
+        let fade = crate::motion::CrossFade::new(
             SharedString::from(format!("pr-detail-{number}-{part}-loading")),
-            if loading { 1. } else { 0. },
-            crate::motion::settle(),
+            usize::from(!loading),
+            2,
             window,
             cx,
-        );
-        div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .opacity(if loading { skeleton } else { 1. - skeleton })
-                    .child(body),
-            )
-            .when(!loading && skeleton > 0., |slot| {
-                slot.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .overflow_hidden()
-                        .opacity(skeleton)
-                        .child(material::loading_skeleton(cx)),
-                )
-            })
-            .into_any_element()
+        )
+        .fill();
+        let column = |body: AnyElement| {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(body)
+                .into_any_element()
+        };
+        let mut layers = vec![(usize::from(!loading), column(body))];
+        if !loading && fade.shows(0) {
+            layers.push((0, column(material::loading_skeleton(cx))));
+        }
+        fade.render(layers).flex_1().min_h_0().into_any_element()
     }
 
     /// The body when nothing could be read at all.
@@ -2357,40 +2346,26 @@ impl Render for PullRequestView {
             .as_ref()
             .map(|(_, key)| key.number)
             .unwrap_or_default();
-        // Files and Conversation cross-fade; the one leaving takes no input.
-        let conversation = gpui_base::motion::transition(
+        // Files and Conversation cross-fade, each in its own layer; the leaving one is inert.
+        let fade = crate::motion::CrossFade::new(
             SharedString::from(format!("pr-detail-{number}-tab")),
-            if tab == Tab::Conversation { 1. } else { 0. },
-            crate::motion::settle(),
+            usize::from(tab == Tab::Conversation),
+            2,
             window,
             cx,
-        );
-        let layer = |body: AnyElement, opacity: f32, leaving: bool| {
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .opacity(opacity)
-                .child(body)
-                .when(leaving, |layer| {
-                    layer.child(div().absolute().inset_0().occlude())
-                })
-        };
-        let files = (conversation < 1.).then(|| {
-            layer(
-                self.render_files(window, cx),
-                1. - conversation,
-                tab != Tab::Files,
-            )
-        });
-        let conversation = (conversation > 0.).then(|| {
-            layer(
-                self.render_conversation(window, cx),
-                conversation,
-                tab != Tab::Conversation,
-            )
-        });
+        )
+        .fill();
+        let column = |body: AnyElement| div().size_full().flex().flex_col().child(body);
+        let mut layers = Vec::new();
+        if fade.shows(0) {
+            layers.push((0, column(self.render_files(window, cx)).into_any_element()));
+        }
+        if fade.shows(1) {
+            layers.push((
+                1,
+                column(self.render_conversation(window, cx)).into_any_element(),
+            ));
+        }
         // Another pull request, a stack layer chosen from the map, fades in in this one's place.
         let page = crate::motion::appear(
             SharedString::from(format!("pr-detail-page-{}", key_id(self.current.as_ref()))),
@@ -2421,14 +2396,7 @@ impl Render for PullRequestView {
             })
             .children(self.notices(window, cx))
             .child(self.switch(window, cx))
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .children(files)
-                    .children(conversation),
-            )
+            .child(fade.render(layers).flex_1().min_h_0())
             .into_any_element()
     }
 }
