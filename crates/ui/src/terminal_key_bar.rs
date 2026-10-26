@@ -623,9 +623,10 @@ mod tests {
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         assert_eq!(
-            store.read_with(cx, |store, _| store.with_terminal_workspace(|workspace| {
-                workspace.active().map(|entry| entry.id)
-            })),
+            store.read_with(cx, |store, _| store.with_terminal_workspace_for(
+                store.active_session_id().as_deref(),
+                |workspace| { workspace.active().map(|entry| entry.id) }
+            )),
             Some(Some(7)),
             "the drawer must have a replicated active terminal before focus is tested"
         );

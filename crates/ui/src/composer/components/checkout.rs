@@ -5,7 +5,11 @@ impl Composer {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let checkout = self.workspace_store.read(cx).composer_state().checkout?;
+        let checkout = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref())
+            .checkout?;
         let branch = checkout.branch;
         let branches: Rc<[String]> = checkout.branches.into();
         let checkout_blocked = checkout.checkout_blocked;
@@ -37,6 +41,8 @@ impl Composer {
         } else {
             let store_open = self.workspace_store.clone();
             let store_content = self.workspace_store.clone();
+            let open_session = self.session_id.clone();
+            let session_id = self.session_id.clone();
             let current: Rc<str> = picker_current.as_str().into();
             let compact = self.compact;
             let trigger = Button::new("branch-picker")
@@ -57,7 +63,9 @@ impl Composer {
                 .trigger(trigger)
                 .on_open_change(move |open, _window, cx| {
                     if *open {
-                        store_open.update(cx, |store, _cx| store.load_branches());
+                        store_open.update(cx, |store, _cx| {
+                            store.load_branches_for(open_session.clone().unwrap_or_default())
+                        });
                     }
                 })
                 .content(move |_state, _window, cx| {
@@ -104,6 +112,7 @@ impl Composer {
                                 range
                                     .map(|index| {
                                         let store = store.clone();
+                                        let session_id = session_id.clone();
                                         let popover = popover.clone();
                                         branch_row(
                                             index,
@@ -113,13 +122,17 @@ impl Composer {
                                             move |branch_name, window, cx| {
                                                 store.update(cx, |store, _cx| {
                                                     if worktree_mode {
-                                                        store.set_draft_workspace(
+                                                        store.set_draft_workspace_for(
+                                                            session_id.clone().unwrap_or_default(),
                                                             WorkspaceMode::NewWorktree {
                                                                 base: branch_name,
                                                             },
                                                         );
                                                     } else {
-                                                        store.checkout_branch(branch_name);
+                                                        store.checkout_branch_for(
+                                                            session_id.clone().unwrap_or_default(),
+                                                            branch_name,
+                                                        );
                                                     }
                                                 });
                                                 popover.update(cx, |st, cx| st.dismiss(window, cx));
@@ -183,6 +196,7 @@ impl Composer {
         }
 
         let store_content = self.workspace_store.clone();
+        let session_id = self.session_id.clone();
         let base_default = base_default.to_string();
         let compact = self.compact;
         let trigger = Button::new("workspace-picker")
@@ -205,6 +219,8 @@ impl Composer {
                 let popover = cx.entity();
                 let store_local = store_content.clone();
                 let store_worktree = store_content.clone();
+                let local_session = session_id.clone();
+                let worktree_session = session_id.clone();
                 let pop_local = popover.clone();
                 let pop_worktree = popover.clone();
                 let base = base_default.clone();
@@ -243,7 +259,10 @@ impl Composer {
                         .id("workspace-local")
                         .on_click(move |_, window, cx| {
                             store_local.update(cx, |store, _cx| {
-                                store.set_draft_workspace(WorkspaceMode::LocalCheckout);
+                                store.set_draft_workspace_for(
+                                    local_session.clone().unwrap_or_default(),
+                                    WorkspaceMode::LocalCheckout,
+                                );
                             });
                             pop_local.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
@@ -258,7 +277,10 @@ impl Composer {
                         .on_click(move |_, window, cx| {
                             let base = base.clone();
                             store_worktree.update(cx, |store, _cx| {
-                                store.set_draft_workspace(WorkspaceMode::NewWorktree { base });
+                                store.set_draft_workspace_for(
+                                    worktree_session.clone().unwrap_or_default(),
+                                    WorkspaceMode::NewWorktree { base },
+                                );
                             });
                             pop_worktree.update(cx, |st, cx| st.dismiss(window, cx));
                         }),

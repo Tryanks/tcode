@@ -36,6 +36,16 @@ impl ThreadPanel {
             _focus: focus,
         }
     }
+
+    /// The thread the pane shows.
+    pub(crate) fn session_id<'a>(&self, cx: &'a App) -> Option<&'a str> {
+        self.chat.read(cx).session_id()
+    }
+
+    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        self.chat
+            .update(cx, |chat, cx| chat.set_session(session_id, cx));
+    }
 }
 
 impl EventEmitter<PanelEvent> for ThreadPanel {}

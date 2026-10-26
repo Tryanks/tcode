@@ -131,21 +131,19 @@ impl HeldHistory {
 }
 
 impl WorkspaceStore {
-    fn focused_history(&self) -> Option<&HeldHistory> {
-        self.focused_thread()?.history.as_ref()
+    pub(crate) fn history_available_for(&self, session_id: Option<&str>) -> bool {
+        self.thread(session_id)
+            .and_then(|thread| thread.history.as_ref())
+            .is_some_and(|held| held.from > 0)
     }
 
-    pub(crate) fn history_available(&self) -> bool {
-        self.focused_history().is_some_and(|held| held.from > 0)
-    }
-
-    pub(crate) fn history_loading(&self) -> bool {
-        self.focused_thread()
+    pub(crate) fn history_loading_for(&self, session_id: Option<&str>) -> bool {
+        self.thread(session_id)
             .is_some_and(|thread| thread.history_task.is_some() && thread.history_error.is_none())
     }
 
-    pub(crate) fn history_error(&self) -> Option<&str> {
-        self.focused_thread()?.history_error.as_deref()
+    pub(crate) fn history_error_for(&self, session_id: Option<&str>) -> Option<&str> {
+        self.thread(session_id)?.history_error.as_deref()
     }
 
     /// Chat tests that run frame callbacks would otherwise request a page from
@@ -173,15 +171,19 @@ impl WorkspaceStore {
     /// Whether a report of the history window would change anything. One
     /// that would not is not made: an update of the store builds every view
     /// that reads it again.
-    pub(crate) fn history_window_changes(&self, screens: f32, following_tail: bool) -> bool {
-        if self.session_loading() || !screens.is_finite() {
+    pub(crate) fn history_window_changes_for(
+        &self,
+        session_id: Option<&str>,
+        screens: f32,
+        following_tail: bool,
+    ) -> bool {
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        if self.session_loading_for(session_id) || !screens.is_finite() {
             return false;
         }
-        let Some((session_id, thread)) = self
-            .focused_session_id
-            .as_ref()
-            .and_then(|id| Some((id, self.threads.get(id)?)))
-        else {
+        let Some(thread) = self.threads.get(session_id) else {
             return false;
         };
         let records = thread.history.as_ref().map_or(0, |held| held.records.len());
@@ -215,18 +217,20 @@ impl WorkspaceStore {
 
     /// Geometry is reported after layout, including the first frame on restore.
     /// Event counts cannot predict the height of folded turns.
-    pub(crate) fn update_history_window(
+    pub(crate) fn update_history_window_for(
         &mut self,
+        session_id: Option<&str>,
         screens: f32,
         following_tail: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.session_loading() || !screens.is_finite() {
-            return;
-        }
-        let Some(session_id) = self.focused_session_id.clone() else {
+        let Some(session_id) = session_id else {
             return;
         };
+        if self.session_loading_for(session_id) || !screens.is_finite() {
+            return;
+        }
+        let session_id = session_id.to_owned();
         let wants_page = self.wants_history_page(&session_id, screens);
         let Some(thread) = self.threads.get_mut(&session_id) else {
             return;
