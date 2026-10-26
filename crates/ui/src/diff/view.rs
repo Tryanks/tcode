@@ -1060,7 +1060,8 @@ impl DiffPanel {
                         .children(turn_rows)
                 });
 
-        let base_selector = (selected_scope == Some(DiffScope::Branch)).then(|| {
+        let branch_scope = selected_scope == Some(DiffScope::Branch);
+        let base_selector = {
             let mut branches: Rc<[String]> = self
                 .git_preview
                 .as_ref()
@@ -1159,6 +1160,15 @@ impl DiffPanel {
                         )
                 })
                 .into_any_element()
+        };
+        // The base picker fades in beside the scope picker when Branch is chosen, and out.
+        let base_selector = crate::motion::Sampled::new(move |window, cx| {
+            match crate::motion::shown("diff-base-selector", branch_scope.then_some(()), window, cx)
+            {
+                Some(shown) => shown.fade(base_selector),
+                // Out of flow, so an absent picker takes no gap in the toolbar.
+                None => div().absolute().into_any_element(),
+            }
         });
 
         let wrap_on = self.workspace_store.read(cx).diff_word_wrap();
@@ -1205,7 +1215,7 @@ impl DiffPanel {
         if compact {
             // The scope and base pickers are the row; everything else is one
             // overflow menu, so a 393pt page never has to choose what to clip.
-            toolbar = toolbar.children(base_selector).child(div().flex_1()).child(
+            toolbar = toolbar.child(base_selector).child(div().flex_1()).child(
                 material::toolbar_icon_button(
                     "diff-view-options",
                     IconName::Ellipsis,
@@ -1230,7 +1240,7 @@ impl DiffPanel {
                         ),
                 );
             }
-            toolbar = toolbar.children(base_selector);
+            toolbar = toolbar.child(base_selector);
         }
         toolbar.into_any_element()
     }
@@ -1322,7 +1332,46 @@ impl DiffPanel {
         cx.notify();
     }
 
+    /// The diff, cross-fading over the Loading line it replaces.
     fn render_body(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let loading = self.cache.is_none()
+            && (self.loading_key.is_some() || self.render_loading_key.is_some());
+        let reading = gpui_base::motion::transition(
+            "diff-loading",
+            if loading { 1. } else { 0. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        let body = self.render_loaded(window, cx);
+        div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .opacity(if loading { reading } else { 1. - reading })
+                    .child(body),
+            )
+            .when(!loading && reading > 0., |slot| {
+                slot.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .flex_col()
+                        .opacity(reading)
+                        .child(self.render_status(crate::tr!("diff.loading").into_owned(), cx)),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_loaded(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(cache) = self.cache.as_ref() else {
             if self.loading_key.is_some() || self.render_loading_key.is_some() {
                 return self.render_status(crate::tr!("diff.loading").into_owned(), cx);
@@ -1347,17 +1396,18 @@ impl DiffPanel {
             })
             .child(viewport);
 
-        if let Some(preview) = self
+        let preview = self
             .git_preview
             .as_ref()
-            .filter(|preview| preview.session == cache.session && preview.scope == cache.scope)
-        {
-            if preview.result.truncated {
-                content =
-                    content.child(render_notice(crate::tr!("diff.truncated").into_owned(), cx));
-            }
-            if let Some(error) = &preview.result.error {
-                content = content.child(render_notice(error.clone(), cx));
+            .filter(|preview| preview.session == cache.session && preview.scope == cache.scope);
+        // The truncated and error notices fold in under the diff and out when they clear.
+        let truncated = preview
+            .is_some_and(|preview| preview.result.truncated)
+            .then(|| crate::tr!("diff.truncated").into_owned());
+        let error = preview.and_then(|preview| preview.result.error.clone());
+        for (id, notice) in [("diff-truncated", truncated), ("diff-error", error)] {
+            if let Some(shown) = crate::motion::shown(id, notice, window, cx) {
+                content = content.child(shown.fold(render_notice(shown.value.clone(), cx)));
             }
         }
 
@@ -1654,7 +1704,7 @@ impl Render for DiffPanel {
         // expand / split / close cluster are wide-layout affordances, so the
         // whole strip stays unbuilt rather than being drawn and ignored.
         let compact = self.compact(cx);
-        let mut root = v_flex()
+        let root = v_flex()
             .size_full()
             .min_w_0()
             .text_color(cx.theme().foreground)
@@ -1663,18 +1713,25 @@ impl Render for DiffPanel {
             .when(!compact, |root| {
                 root.child(self.render_tab_strip(window, cx))
             });
-        root = match tab {
+        // A tab's body fades in in place of the one before it, which is another view and goes
+        // at once.
+        let shown = crate::motion::appear(
+            gpui::SharedString::from(format!("right-tab-body-{tab:?}")),
+            true,
+            window,
+            cx,
+        )
+        .progress;
+        let body = v_flex().flex_1().min_h_0().opacity(shown);
+        root.child(match tab {
             // AppShell mounts Preview separately; this container handles Diff/Plan.
-            RightTab::Diff | RightTab::Preview => root
+            RightTab::Diff | RightTab::Preview => body
                 .child(self.render_toolbar(cx))
                 .child(self.render_body(window, cx)),
-            RightTab::PullRequests => {
-                root.child(div().flex_1().min_h_0().child(self.pull_requests.clone()))
-            }
-            RightTab::Plan => root.child(div().flex_1().min_h_0().child(self.plan.clone())),
-            RightTab::Agents => root.child(div().flex_1().min_h_0().child(self.agents.clone())),
-        };
-        root
+            RightTab::PullRequests => body.child(self.pull_requests.clone()),
+            RightTab::Plan => body.child(self.plan.clone()),
+            RightTab::Agents => body.child(self.agents.clone()),
+        })
     }
 }
 
