@@ -1,15 +1,17 @@
 use crate::material;
+use crate::motion::PresencePhase;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::{Button, ButtonVariants as _};
 use gpui::{
-    Anchor, AnyElement, App, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
+    Anchor, AnyElement, App, Bounds, Context, ElementId, FocusHandle, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, StyleRefinement, Styled, Window,
     prelude::FluentBuilder as _,
 };
 use gpui::{Focusable as _, Role, SharedString, StatefulInteractiveElement, deferred, div, px};
 use gpui_base::StyledExt as _;
+use std::cell::Cell;
 use std::rc::Rc;
 
 pub use gpui_base::PopoverState;
@@ -152,12 +154,68 @@ impl RenderOnce for Popover {
         let release = dismissal.clone();
         let closable = self.overlay_closable;
         let appearance = self.appearance;
-        let content = self.content;
-        let children = self.children;
-        let style = self.style;
         let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| {
             PopoverState::new(self.default_open, cx)
         });
+        state.update(cx, |state, cx| {
+            state.track_focus(self.tracked_focus.clone());
+            state.set_on_open_change(self.on_open_change.clone());
+            if let Some(open) = self.open {
+                state.sync_open(open, window, cx);
+            }
+        });
+        let open = state.read(cx).is_open();
+        // Where the open content last landed, to draw it there while it
+        // leaves: gpui-base's Popover mounts content only while open and has
+        // no exit of its own.
+        let landed = window
+            .use_keyed_state((self.id.clone(), "landed"), cx, |_, _| {
+                Rc::new(Cell::new(None::<Bounds<Pixels>>))
+            })
+            .read(cx)
+            .clone();
+        // A popover that has not opened since it last left samples nothing,
+        // so a mounted, closed trigger asks for no frames.
+        let presence = (open || landed.get().is_some())
+            .then(|| crate::motion::appear((self.id.clone(), "presence"), open, window, cx));
+        if !open && presence.is_none_or(|presence| presence.phase == PresencePhase::Absent) {
+            landed.set(None);
+        }
+        let progress = presence.map_or(1., |presence| presence.progress);
+        let mut content = self.content;
+        let mut children = self.children;
+        let style = self.style;
+        let leaving = match (open, landed.get()) {
+            (false, Some(bounds)) => {
+                let content = content
+                    .take()
+                    .map(|builder| state.update(cx, |state, cx| builder(state, window, cx)));
+                let surface = surface(appearance, progress, cx)
+                    .children(content)
+                    .children(std::mem::take(&mut children))
+                    .refine_style(&style)
+                    // Above the content: a leaving surface takes no hover or
+                    // press for its own controls.
+                    .child(div().absolute().inset_0().occlude());
+                Some(
+                    deferred(
+                        gpui_base::Positioner::corner(Anchor::TopLeft, bounds.origin)
+                            // The window margin base's own Popup keeps, which
+                            // it does not export.
+                            .margin(px(8.))
+                            .occlude()
+                            // The id base gives the open content, so element
+                            // state inside it carries over.
+                            .child(div().id("content").child(surface)),
+                    )
+                    .with_priority(gpui_base::POPUP_PRIORITY),
+                )
+            }
+            _ => None,
+        };
+        // Content that dismisses its popover while it is built (an empty
+        // menu) leaves at once rather than fading out.
+        let withdrawn = Rc::new(Cell::new(false));
         gpui_base::Popover::new(self.id)
             .anchor(self.anchor)
             .mouse_button(self.mouse_button)
@@ -165,6 +223,14 @@ impl RenderOnce for Popover {
             .overlay_closable(false)
             .when_some(self.open, |base, open| base.open(open))
             .when_some(self.tracked_focus, |base, focus| base.track_focus(&focus))
+            .on_position({
+                let withdrawn = withdrawn.clone();
+                move |position, _| {
+                    if !withdrawn.get() {
+                        landed.set(Some(position.bounds));
+                    }
+                }
+            })
             .when_some(self.trigger, |base, trigger| {
                 base.trigger_with(move |open, window, cx| {
                     let parent = window.current_view();
@@ -177,6 +243,7 @@ impl RenderOnce for Popover {
                     div()
                         .child(trigger(open, Some(toggle), window, cx))
                         .child(release.release_listener())
+                        .children(leaving)
                         .into_any_element()
                 })
             })
@@ -186,13 +253,9 @@ impl RenderOnce for Popover {
             .content(move |state, window, cx| {
                 let popover = cx.entity();
                 let parent = window.current_view();
-                gpui_base::v_flex()
-                    .when(appearance, |el| {
-                        material::overlay_contour(el, cx)
-                            .p_1()
-                            .rounded(material::radius_overlay(cx))
-                    })
-                    .id("tcode-popover-content")
+                let content = content.map(|builder| builder(state, window, cx));
+                withdrawn.set(!state.is_open());
+                surface(appearance, progress, cx)
                     .when(closable, |el| {
                         el.on_mouse_down_out(move |_, window, cx| {
                             dismissal.consume(window, cx);
@@ -200,8 +263,7 @@ impl RenderOnce for Popover {
                             cx.notify(parent);
                         })
                     })
-                    .occlude()
-                    .when_some(content, |el, builder| el.child(builder(state, window, cx)))
+                    .children(content)
                     .children(children)
                     .refine_style(&style)
             })
@@ -210,6 +272,20 @@ impl RenderOnce for Popover {
             .render(window, cx)
             .into_any_element()
     }
+}
+
+/// The desktop popover's surface at `progress` of its appear motion.
+fn surface(appearance: bool, progress: f32, cx: &App) -> gpui::Stateful<gpui::Div> {
+    gpui_base::v_flex()
+        .when(appearance, |el| {
+            material::overlay_contour(el, cx)
+                .p_1()
+                .rounded(material::radius_overlay(cx))
+        })
+        .id("tcode-popover-content")
+        .occlude()
+        .opacity(progress)
+        .top(crate::motion::lift(progress))
 }
 
 impl Popover {
@@ -617,6 +693,63 @@ mod tests {
         let position = cx.debug_bounds("outside-target").unwrap().center();
         cx.simulate_click(position, Default::default());
         assert_eq!((clicks.get(), releases.get()), (1, 1));
+    }
+
+    struct LeavingHarness(Rc<Cell<usize>>);
+    impl Render for LeavingHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let chosen = self.0.clone();
+            div().size_full().child(
+                Popover::new("leaving-popover")
+                    .trigger(
+                        crate::widgets::Button::new("open")
+                            .label("Open")
+                            .debug_selector(|| "leaving-trigger".into()),
+                    )
+                    .content(move |_, _, _| {
+                        div()
+                            .id("leaving-option")
+                            .debug_selector(|| "leaving-option".into())
+                            .size(px(60.))
+                            .on_click(move |_, _, _| chosen.set(chosen.get() + 1))
+                    }),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_dismissed_popover_leaves_inert_then_unmounts(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let chosen = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let chosen = chosen.clone();
+            move |_, _| LeavingHarness(chosen)
+        });
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = cx.debug_bounds("leaving-trigger").unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx)
+        });
+        let option = cx.debug_bounds("leaving-option").unwrap();
+
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let leaving = cx.debug_bounds("leaving-option").expect("still drawn");
+        assert_eq!(leaving.origin.x, option.origin.x);
+        cx.simulate_click(leaving.center(), Default::default());
+        assert_eq!(chosen.get(), 0, "a leaving popover takes no press");
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx)
+        });
+        assert!(cx.debug_bounds("leaving-option").is_none());
     }
 
     #[gpui::test]
