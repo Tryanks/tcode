@@ -365,6 +365,9 @@ impl RenderOnce for Button {
         // A caller that colours the button's text (a muted disclosure label)
         // keeps that colour; the variant supplies the default.
         let fg = self.base.style().text.color.unwrap_or(fg);
+        // A caller's opacity (a control that shows on row hover) is the
+        // button's, dimmed further while disabled or loading.
+        let dimmed = self.base.style().opacity.unwrap_or(1.) * dimmed;
         let (bg, border) = match (is_hovered, self.selected) {
             (true, _) => (hover, border),
             (false, true) => (theme.muted, theme.primary),
