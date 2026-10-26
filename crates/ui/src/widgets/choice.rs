@@ -8,7 +8,7 @@ use crate::{
     typography::TextRole as _,
     widgets::{
         Tooltip,
-        tabs::{segment, segmented_track},
+        tabs::{Glide, label_color, segment, segmented_track},
     },
 };
 use gpui::{
@@ -112,7 +112,7 @@ impl Styled for ChoiceGroup {
 }
 
 impl RenderOnce for ChoiceGroup {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self {
             id,
             compact,
@@ -121,21 +121,36 @@ impl RenderOnce for ChoiceGroup {
             style,
         } = self;
         let count = choices.len();
-        let radios = choices
+        let selected = choices.iter().position(|choice| choice.selected);
+        let dim = selected.is_some_and(|ix| choices[ix].disabled);
+        let glide = Glide::new(&id, count, selected, window, cx);
+        let radios: Vec<_> = choices
             .into_iter()
             .enumerate()
-            .map(|(ix, choice)| render_choice(choice, ix, count, compact, cx));
+            .map(|(ix, choice)| render_choice(choice, ix, count, compact, &glide, window, cx))
+            .collect();
         let group = RadioGroup::new(id.clone())
             .axis(Axis::Horizontal)
             .when_some(aria_label, |this, label| this.aria_label(label))
-            .children(radios);
+            .children(glide.pill(dim, cx))
+            .children(radios)
+            .relative();
+        let group = glide.observe(group);
         segmented_track(id.clone(), group, compact, cx)
             .debug_selector(|| id.to_string())
             .refine_style(&style)
     }
 }
 
-fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &App) -> Radio {
+fn render_choice(
+    choice: Choice,
+    ix: usize,
+    count: usize,
+    compact: bool,
+    glide: &Glide,
+    window: &mut Window,
+    cx: &mut App,
+) -> Radio {
     let Choice {
         id,
         label,
@@ -144,7 +159,12 @@ fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &Ap
         recommended,
         on_select,
     } = choice;
-    let theme = cx.theme();
+    let target = if selected {
+        cx.theme().foreground
+    } else {
+        cx.theme().muted_foreground
+    };
+    let fg = label_color(&id, "fg", target, window, cx);
     let ring = focus_ring(cx);
     let accessible: SharedString = if recommended {
         crate::tr!("choice.recommended_option", label = label.clone())
@@ -168,7 +188,7 @@ fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &Ap
         .text_body(compact, cx)
         .font_medium()
         .whitespace_nowrap()
-        .text_color(theme.muted_foreground)
+        .text_color(fg)
         .when(!disabled, |this| this.cursor_pointer())
         .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
         .when_some(on_select.filter(|_| !disabled), |this, handler| {
@@ -181,5 +201,6 @@ fn render_choice(choice: Choice, ix: usize, count: usize, compact: bool, cx: &Ap
                     Tooltip::new(crate::tr!("choice.recommended")).build(window, cx)
                 })
         });
-    segment(radio, selected, !disabled, compact, cx)
+    let pill = selected && !glide.drawn();
+    glide.measure(ix, segment(radio, selected, pill, !disabled, compact, cx))
 }
