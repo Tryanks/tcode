@@ -120,7 +120,7 @@ pub fn row_labels(
 /// only while `overridden` — a row showing its factory value has nothing to
 /// restore, so the affordance would just be noise.
 pub fn reset_action(
-    id: &'static str,
+    id: impl Into<gpui::ElementId>,
     overridden: bool,
     on_reset: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Option<AnyElement> {
