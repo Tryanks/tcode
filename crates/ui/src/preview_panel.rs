@@ -505,12 +505,15 @@ impl Render for PreviewPanel {
         }
 
         let body = self.render_body(active.as_deref(), window, cx);
-        v_flex()
+        let panel = v_flex()
             .size_full()
             .on_action(cx.listener(Self::on_preview_action))
             .child(self.render_chrome(window, cx))
             .children(self.render_port_row(cx))
-            .child(body)
+            .child(body);
+        #[cfg(all(preview_backend, not(target_os = "android")))]
+        let panel = panel.child(self.yield_to_resize_handles(active.as_deref(), cx));
+        panel
     }
 }
 
