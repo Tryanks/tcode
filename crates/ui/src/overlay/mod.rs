@@ -78,6 +78,7 @@ impl OutsideDismissal {
 /// modal and toast layers.
 pub(crate) struct Overlays {
     dialogs: Vec<ActiveDialog>,
+    next_dialog_id: usize,
     sheets: Vec<gpui::WeakEntity<SheetBack>>,
     notifications: Entity<NotificationList>,
 }
@@ -91,6 +92,7 @@ impl Overlays {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             dialogs: Vec::new(),
+            next_dialog_id: 0,
             sheets: Vec::new(),
             notifications: cx.new(|cx| NotificationList::new(window, cx)),
         }
@@ -107,11 +109,15 @@ impl Overlays {
         overlays.update(cx, |overlays, cx| f(overlays, window, cx))
     }
 
+    /// Closing marks a dialog to leave rather than removing it: it stays in
+    /// the stack, inert, until its exit has played, and `render` drops it.
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(dialog) = self.dialogs.pop() {
+        if let Some(dialog) = self.dialogs.iter_mut().rev().find(|dialog| !dialog.closing) {
+            dialog.closing = true;
             if dialog.focus_handle.contains_focused(window, cx)
                 && let Some(previous) = dialog
                     .previous_focus_handle
+                    .as_ref()
                     .and_then(|focus| focus.upgrade())
             {
                 previous.focus(window, cx);
@@ -123,14 +129,21 @@ impl Overlays {
     fn close_all_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous = self
             .dialogs
-            .first()
+            .iter()
+            .find(|dialog| !dialog.closing)
             .and_then(|dialog| dialog.previous_focus_handle.clone())
             .and_then(|focus| focus.upgrade());
-        self.dialogs.clear();
+        for dialog in &mut self.dialogs {
+            dialog.closing = true;
+        }
         if let Some(previous) = previous {
             previous.focus(window, cx);
         }
         cx.notify();
+    }
+
+    fn open_dialogs(&self) -> usize {
+        self.dialogs.iter().filter(|dialog| !dialog.closing).count()
     }
 }
 
@@ -147,16 +160,46 @@ impl gpui_base::RootPlugin for Overlays {
 
 impl Render for Overlays {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dialog_count = self.dialogs.len();
+        let mut samples = self
+            .dialogs
+            .iter()
+            .map(|active| {
+                crate::motion::appear(
+                    ElementId::from(("tcode-dialog", active.id)),
+                    !active.closing,
+                    window,
+                    cx,
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter();
+        let mut presences = Vec::with_capacity(self.dialogs.len());
+        self.dialogs.retain(|_| {
+            let sample = samples.next().expect("one sample per dialog");
+            let keep = sample.should_render();
+            if keep {
+                presences.push(sample);
+            }
+            keep
+        });
+        let topmost = self.dialogs.iter().rposition(|active| !active.closing);
+        // A dialog's layer counts the open dialogs below it, so one opened as
+        // another leaves keeps its offset when the leaving one is dropped.
+        let mut open_below = 0;
         let dialogs = self
             .dialogs
             .iter()
+            .zip(presences)
             .enumerate()
-            .map(|(index, active)| {
-                let dialog = (active.builder)(Dialog::new(cx), window, cx);
-                dialog
-                    .layer(index, index + 1 == dialog_count)
+            .map(|(index, (active, presence))| {
+                let dialog = (active.builder)(Dialog::new(cx), window, cx)
+                    .layer(open_below, topmost == Some(index))
                     .focus_handle(active.focus_handle.clone())
+                    .presence(active.id, presence);
+                if !active.closing {
+                    open_below += 1;
+                }
+                dialog
             })
             .collect::<Vec<_>>();
 
@@ -242,7 +285,11 @@ impl OverlayExt for Window {
             let focus_handle = cx.focus_handle();
             let previous_focus_handle = window.focused(cx).map(|focus| focus.downgrade());
             focus_handle.focus(window, cx);
+            let id = host.next_dialog_id;
+            host.next_dialog_id += 1;
             host.dialogs.push(ActiveDialog {
+                id,
+                closing: false,
                 focus_handle,
                 previous_focus_handle,
                 builder: Rc::new(build),
@@ -380,7 +427,7 @@ pub(crate) fn dialog_open(window: &Window, cx: &App) -> bool {
         .root::<gpui_base::Root>()
         .flatten()
         .and_then(|root| root.read(cx).plugin::<Overlays>())
-        .is_some_and(|overlays| !overlays.read(cx).dialogs.is_empty())
+        .is_some_and(|overlays| overlays.read(cx).open_dialogs() > 0)
 }
 
 pub(crate) fn active_sheet(window: &Window, cx: &App) -> Option<Entity<SheetBack>> {
@@ -558,7 +605,7 @@ mod tests {
         cx.simulate_keystrokes("enter");
         draw(cx);
         assert_eq!(
-            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            overlays(&root, cx).read_with(cx, |host, _| host.open_dialogs()),
             1,
             "Enter must leave the dialog open until the action succeeds"
         );
@@ -610,7 +657,7 @@ mod tests {
         );
         if kind == "create" {
             assert_eq!(
-                overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+                overlays(&root, cx).read_with(cx, |host, _| host.open_dialogs()),
                 1,
                 "creation waits until the project appears in the host index"
             );
@@ -618,10 +665,61 @@ mod tests {
         }
         draw(cx);
         assert_eq!(
-            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            overlays(&root, cx).read_with(cx, |host, _| host.open_dialogs()),
             0,
             "a successful action closes the dialog"
         );
+    }
+
+    #[gpui::test]
+    fn closed_dialog_leaves_inert_then_unmounts(cx: &mut TestAppContext) {
+        use gpui::StatefulInteractiveElement as _;
+        cx.update(crate::theme::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        let clicks = Rc::new(std::cell::Cell::new(0));
+        cx.update(|window, cx| {
+            let clicks = clicks.clone();
+            window.open_dialog(cx, move |dialog, _, _| {
+                let clicks = clicks.clone();
+                dialog.child(
+                    div()
+                        .id("probe")
+                        .debug_selector(|| "dialog-probe".into())
+                        .size_10()
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                )
+            });
+        });
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let probe = cx.debug_bounds("dialog-probe").expect("open dialog");
+        cx.simulate_click(probe.center(), Default::default());
+        assert_eq!(clicks.get(), 1, "an open dialog takes clicks");
+
+        cx.update(|window, cx| window.close_dialog(cx));
+        assert!(!cx.update(|window, cx| dialog_open(window, cx)));
+        draw(cx);
+        assert_eq!(
+            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            1,
+            "a closed dialog stays mounted while it leaves"
+        );
+        let leaving = cx.debug_bounds("dialog-probe").expect("leaving dialog");
+        cx.simulate_click(leaving.center(), Default::default());
+        assert_eq!(clicks.get(), 1, "a leaving dialog takes no clicks");
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            overlays(&root, cx).read_with(cx, |host, _| host.dialogs.len()),
+            0,
+            "the dialog unmounts once its exit has played"
+        );
+        assert!(cx.debug_bounds("dialog-probe").is_none());
     }
 
     #[gpui::test]
