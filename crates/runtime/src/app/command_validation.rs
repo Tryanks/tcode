@@ -390,9 +390,13 @@ impl AppState {
                     "This question is no longer pending.",
                 ));
             }
-            Command::SteerQueued { id, .. } | Command::DropQueued { id, .. }
+            Command::SteerQueued { id, .. }
+            | Command::DropQueued { id, .. }
+            | Command::MoveQueued { id, .. }
                 if !active.queue.iter().any(|message| message.id == *id)
-                    || !Self::queued_message_editable(active, *id) =>
+                    || !Self::queued_message_editable(active, *id)
+                    || matches!(command, Command::MoveQueued { before: Some(before), .. }
+                        if !active.queue.iter().any(|message| message.id == *before)) =>
             {
                 return Err(error(
                     "unknown_queued_message",

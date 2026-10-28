@@ -637,6 +637,13 @@ impl WorkspaceStore {
             id,
         });
     }
+    pub fn move_queued(&mut self, id: u64, before: Option<u64>) {
+        self.dispatch(Command::MoveQueued {
+            session_id: self.active_session_id().unwrap_or_default(),
+            id,
+            before,
+        });
+    }
     pub fn retry_turn(&mut self, turn_id: String) {
         self.dispatch(Command::RetryTurn {
             session_id: self.active_session_id().unwrap_or_default(),

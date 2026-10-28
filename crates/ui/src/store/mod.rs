@@ -46,8 +46,8 @@ pub(crate) use images::{
 };
 mod snapshots;
 
-pub use snapshots::ComposerState;
 pub(crate) use snapshots::PanelState;
+pub use snapshots::{ComposerQueue, ComposerState};
 pub use tcode_protocol::ForkAvailability;
 
 /// Payload-free topic discriminant used by views to subscribe only to the

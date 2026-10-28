@@ -783,6 +783,14 @@ impl AppState {
         self.evaluate_thread_settlement(target_id, cx);
     }
 
+    /// Queue strip: reorder by dragging a row. Dispatch takes eligible
+    /// entries in queue order, so this is the order they are sent in.
+    pub fn move_queued(&mut self, target_id: &str, id: u64, before: Option<u64>) {
+        if let Some(active) = self.resident_mut(target_id) {
+            active.move_queued(id, before);
+        }
+    }
+
     pub fn retry_turn(
         &mut self,
         target_id: &str,
