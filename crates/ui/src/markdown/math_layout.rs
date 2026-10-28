@@ -1,5 +1,6 @@
 use super::{
     inline::{Inline, InlineState},
+    selection::RunOrigin,
     state::MarkdownState,
 };
 #[cfg(test)]
@@ -30,54 +31,18 @@ impl FormulaSelection {
                 .collect()
         })
     }
-    pub(super) fn selected_text(&self) -> Option<String> {
-        let data = self.0.lock().unwrap();
-        data.active.then(|| {
-            data.glyphs
-                .iter()
-                .filter_map(|state| {
-                    let state = state.lock().unwrap();
-                    state
-                        .selection
-                        .as_ref()
-                        .and_then(|range| state.text.get(range.clone()))
-                        .map(str::to_string)
-                })
-                .collect()
-        })
-    }
-    pub(super) fn clear(&self) {
-        for state in &self.0.lock().unwrap().glyphs {
-            state.lock().unwrap().selection = None;
-        }
-    }
-    pub(super) fn offset_of(
-        &self,
-        state: &Arc<Mutex<InlineState>>,
-        offset: usize,
-    ) -> Option<usize> {
-        let data = self.0.lock().unwrap();
-        if !data.active {
-            return None;
-        }
-        let mut start = 0;
-        for glyph in &data.glyphs {
-            if Arc::ptr_eq(glyph, state) {
-                return Some(start + offset);
-            }
-            start += glyph.lock().unwrap().text.len();
-        }
-        None
-    }
 }
 
 pub(super) fn em(dim: &Dim) -> f32 {
     f32::from_bits(dim.to_ieee32_bits())
 }
 
+/// Lay out a formula; `origin` is where its glyphs' text starts in the
+/// document, when it is selectable.
 pub(super) fn render(
     tree: &MathBox,
     selection: &FormulaSelection,
+    origin: Option<RunOrigin>,
     view: &Entity<MarkdownState>,
     cx: &App,
 ) -> AnyElement {
@@ -94,6 +59,7 @@ pub(super) fn render(
         &data.glyphs,
         &mut glyphs,
         &mut elements,
+        (&origin, &mut 0),
         view,
     );
     data.glyphs = glyphs;
@@ -115,6 +81,7 @@ fn emit(
     previous: &[Arc<Mutex<InlineState>>],
     glyphs: &mut Vec<Arc<Mutex<InlineState>>>,
     elements: &mut Vec<AnyElement>,
+    (origin, offset): (&Option<RunOrigin>, &mut usize),
     view: &Entity<MarkdownState>,
 ) {
     let baseline = parent_baseline - em(&bx.shift);
@@ -140,6 +107,7 @@ fn emit(
         } => {
             let ix = glyphs.len();
             let text = ch.to_string();
+            let text_len = text.len();
             let state = previous
                 .get(ix)
                 .filter(|state| state.lock().unwrap().text.as_ref() == text)
@@ -154,7 +122,9 @@ fn emit(
                 Vec::new(),
                 Vec::new(),
             )
+            .origin(origin.clone().map(|origin| origin.offset(*offset)))
             .math_glyph(GlyphId(*glyph_id as u32), px(em(&bx.height) * 16.));
+            *offset += text_len;
             let element = div()
                 .absolute()
                 .left(px(x * 16.))
@@ -175,13 +145,33 @@ fn emit(
         BoxContent::HList(children) => {
             let mut x = x;
             for child in children {
-                emit(child, x, baseline, color, previous, glyphs, elements, view);
+                emit(
+                    child,
+                    x,
+                    baseline,
+                    color,
+                    previous,
+                    glyphs,
+                    elements,
+                    (origin, &mut *offset),
+                    view,
+                );
                 x += em(&child.width);
             }
         }
         BoxContent::VList(children) => {
             if let Some(first) = children.first() {
-                emit(first, x, baseline, color, previous, glyphs, elements, view);
+                emit(
+                    first,
+                    x,
+                    baseline,
+                    color,
+                    previous,
+                    glyphs,
+                    elements,
+                    (origin, &mut *offset),
+                    view,
+                );
                 let mut below = em(&first.depth);
                 for child in &children[1..] {
                     emit(
@@ -192,6 +182,7 @@ fn emit(
                         previous,
                         glyphs,
                         elements,
+                        (origin, &mut *offset),
                         view,
                     );
                     below += em(&(&child.height + &child.depth));
@@ -200,7 +191,17 @@ fn emit(
         }
         BoxContent::Overlap(children) => {
             for child in children {
-                emit(child, x, baseline, color, previous, glyphs, elements, view);
+                emit(
+                    child,
+                    x,
+                    baseline,
+                    color,
+                    previous,
+                    glyphs,
+                    elements,
+                    (origin, &mut *offset),
+                    view,
+                );
             }
         }
         BoxContent::Color(c, child) => emit(
@@ -211,11 +212,22 @@ fn emit(
             previous,
             glyphs,
             elements,
+            (origin, &mut *offset),
             view,
         ),
         BoxContent::BackColor(c, child) => {
             elements.push(rect(to_color(*c)).into_any_element());
-            emit(child, x, baseline, color, previous, glyphs, elements, view);
+            emit(
+                child,
+                x,
+                baseline,
+                color,
+                previous,
+                glyphs,
+                elements,
+                (origin, &mut *offset),
+                view,
+            );
         }
         BoxContent::Frame {
             thickness,
@@ -233,7 +245,17 @@ fn emit(
                     .border_color(stroke.map(to_color).unwrap_or(color))
                     .into_any_element(),
             );
-            emit(inner, x, baseline, color, previous, glyphs, elements, view);
+            emit(
+                inner,
+                x,
+                baseline,
+                color,
+                previous,
+                glyphs,
+                elements,
+                (origin, &mut *offset),
+                view,
+            );
         }
         BoxContent::Line {
             x1,

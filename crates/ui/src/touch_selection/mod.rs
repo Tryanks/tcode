@@ -1,39 +1,79 @@
 //! Touch selection: the grab handles and the edit menu a long press leaves
-//! behind, drawn over an [`crate::widgets::input::Input`] or over the window
-//! text selection that [`crate::markdown::MarkdownView`] takes part in.
+//! behind, drawn over an [`crate::widgets::input::Input`], whose gesture
+//! gpui-base owns, or over the selection of a Markdown document, whose
+//! gesture [`crate::markdown::SelectionDocument`] owns.
 //!
-//! Base owns the gesture and the drag; see [`gpui_base::TouchSelectionSnapshot`].
-//! This module draws what Base laid out: a handle at each end of the
+//! This module draws what the owner laid out: a handle at each end of the
 //! selection, and a row of commands above it. Adapted from gpui-component's
 //! Apache-2.0 `touch_selection` module, styled with tcode's own tokens.
 
 mod edit_menu;
 mod handle;
-mod window_overlay;
 
 use std::rc::Rc;
 
-use gpui::{
-    Action, AnyElement, App, Bounds, ElementId, IntoElement, Pixels, Point, TouchPhase, Window,
-};
+use gpui::{AnyElement, App, Bounds, ElementId, IntoElement, Pixels, Point, TouchPhase, Window};
 use gpui_base::{SelectionEdge, TouchHandle, TouchSelectionSnapshot};
-use serde::Deserialize;
 
 pub(crate) use edit_menu::{EditMenu, EditMenuItem};
-pub(crate) use handle::{DragHandler, SelectionHandles, SnapshotSource, SurfaceHandler};
-pub(crate) use window_overlay::WindowTouchSelectionOverlay;
+pub(crate) use handle::{DragHandler, SelectionHandles, SnapshotSource};
 
-/// Select All, as the window selection's edit menu asks for it: everything
-/// the participant the touch selection started in shows, past its viewport,
-/// keeping the handles and the menu over the result.
-///
-/// Dispatched on the focused element — the engine focuses the participant a
-/// long press starts in — so the participant that holds the selection
-/// answers it. The keyboard's `SelectAll` replaces the window selection
-/// instead, which would drop the handles.
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_touch_selection, no_json)]
-pub(crate) struct SelectAllTouched;
+/// A touch selection as its owner laid it out: the carets at its ends,
+/// whether each is in view, and the state of its menu and handles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TouchSelectionLayout {
+    pub(crate) start: Bounds<Pixels>,
+    pub(crate) end: Bounds<Pixels>,
+    pub(crate) start_visible: bool,
+    pub(crate) end_visible: bool,
+    pub(crate) menu_open: bool,
+    pub(crate) dragging: Option<SelectionEdge>,
+}
+
+impl TouchSelectionLayout {
+    pub(crate) fn edge(&self, edge: SelectionEdge) -> Bounds<Pixels> {
+        match edge {
+            SelectionEdge::Start => self.start,
+            SelectionEdge::End => self.end,
+        }
+    }
+
+    pub(crate) fn is_edge_visible(&self, edge: SelectionEdge) -> bool {
+        match edge {
+            SelectionEdge::Start => self.start_visible,
+            SelectionEdge::End => self.end_visible,
+        }
+    }
+
+    /// Whether the selection is a bare caret, which gets a menu but no
+    /// handles.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// The smallest box holding the ends in view, for anchoring the menu.
+    pub(crate) fn bounds(&self) -> Option<Bounds<Pixels>> {
+        match (self.start_visible, self.end_visible) {
+            (true, true) => Some(self.start.union(&self.end)),
+            (true, false) => Some(self.start),
+            (false, true) => Some(self.end),
+            (false, false) => None,
+        }
+    }
+}
+
+impl From<TouchSelectionSnapshot> for TouchSelectionLayout {
+    fn from(snapshot: TouchSelectionSnapshot) -> Self {
+        Self {
+            start: snapshot.start(),
+            end: snapshot.end(),
+            start_visible: snapshot.is_edge_visible(SelectionEdge::Start),
+            end_visible: snapshot.is_edge_visible(SelectionEdge::End),
+            menu_open: snapshot.is_menu_open(),
+            dragging: snapshot.dragging(),
+        }
+    }
+}
 
 /// Draws one touch selection: its handles and, when open, its edit menu.
 ///
@@ -46,20 +86,18 @@ pub(crate) struct TouchSelectionOverlay {
     source: SnapshotSource,
     items: Vec<EditMenuItem>,
     on_drag: Option<DragHandler>,
-    on_paint: Option<SurfaceHandler>,
 }
 
 impl TouchSelectionOverlay {
     pub(crate) fn new(
         id: impl Into<ElementId>,
-        source: impl Fn(&Window, &App) -> Option<TouchSelectionSnapshot> + 'static,
+        source: impl Fn(&Window, &App) -> Option<TouchSelectionLayout> + 'static,
     ) -> Self {
         Self {
             id: id.into(),
             source: Rc::new(source),
             items: Vec::new(),
             on_drag: None,
-            on_paint: None,
         }
     }
 
@@ -79,16 +117,6 @@ impl TouchSelectionOverlay {
         self
     }
 
-    /// Called with every surface's bounds as it paints, for an owner whose
-    /// press handling must leave those surfaces alone.
-    pub(crate) fn on_paint(
-        mut self,
-        on_paint: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_paint = Some(Rc::new(on_paint));
-        self
-    }
-
     /// The elements to add to the owner: the handles, and the menu when it
     /// is open. Each floats in window coordinates.
     pub(crate) fn into_elements(self, window: &Window, cx: &App) -> Vec<AnyElement> {
@@ -97,17 +125,12 @@ impl TouchSelectionOverlay {
         };
         let mut elements = Vec::with_capacity(2);
         if let Some(on_drag) = self.on_drag {
-            let handles = SelectionHandles::new(self.source, on_drag);
-            let handles = match self.on_paint.clone() {
-                Some(on_paint) => handles.on_paint(on_paint),
-                None => handles,
-            };
-            elements.push(handles.into_any_element());
+            elements.push(SelectionHandles::new(self.source, on_drag).into_any_element());
         }
 
         if let Some(mut anchor) = snapshot
             .bounds()
-            .filter(|_| snapshot.is_menu_open() && !self.items.is_empty())
+            .filter(|_| snapshot.menu_open && !self.items.is_empty())
         {
             // Leave the knobs uncovered: the menu anchors to the selection
             // plus the room its handles take above and below.
@@ -115,12 +138,11 @@ impl TouchSelectionOverlay {
                 anchor.origin.y -= TouchHandle::EXTENT;
                 anchor.size.height += TouchHandle::EXTENT * 2.;
             }
-            let menu = EditMenu::new(self.id, anchor).items(self.items);
-            let menu = match self.on_paint {
-                Some(on_paint) => menu.on_paint(on_paint),
-                None => menu,
-            };
-            elements.push(menu.into_any_element());
+            elements.push(
+                EditMenu::new(self.id, anchor)
+                    .items(self.items)
+                    .into_any_element(),
+            );
         }
         elements
     }

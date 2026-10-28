@@ -27,8 +27,6 @@ pub(super) struct ResidencyInput<'a> {
     pub entries: &'a [MarkdownEntry],
     pub stream_running: bool,
     pub resident_ids: &'a HashSet<String>,
-    pub selection_participants: &'a HashSet<String>,
-    pub selection_drag_active: bool,
 }
 
 /// Row-only superset of entries that can affect [`decide`].
@@ -93,22 +91,18 @@ pub(super) fn decide(input: ResidencyInput<'_>) -> ResidencyDecisions {
         .filter(|entry| scope.build_rows.contains(&entry.row) || scope.pinned(entry.row))
         .map(|entry| entry.id.clone())
         .collect();
-    let evict = if input.selection_drag_active {
-        HashSet::new()
-    } else {
-        let keep = input
-            .entries
-            .iter()
-            .filter(|entry| scope.includes(entry.row))
-            .map(|entry| entry.id.as_str())
-            .collect::<HashSet<_>>();
-        input
-            .resident_ids
-            .iter()
-            .filter(|id| !keep.contains(id.as_str()) && !input.selection_participants.contains(*id))
-            .cloned()
-            .collect()
-    };
+    let keep = input
+        .entries
+        .iter()
+        .filter(|entry| scope.includes(entry.row))
+        .map(|entry| entry.id.as_str())
+        .collect::<HashSet<_>>();
+    let evict = input
+        .resident_ids
+        .iter()
+        .filter(|id| !keep.contains(id.as_str()))
+        .cloned()
+        .collect();
 
     ResidencyDecisions { build, evict }
 }
@@ -157,12 +151,9 @@ mod tests {
     }
 
     #[test]
-    fn running_tail_and_selection_pins_are_honored() {
+    fn the_running_tail_stays_resident() {
         let entries = entries(240);
-        let residents = ["assistant-7".to_string(), "assistant-150".to_string()]
-            .into_iter()
-            .collect();
-        let selection_participants = ["assistant-7".to_string()].into_iter().collect();
+        let residents = ["assistant-150".to_string()].into_iter().collect();
         let decisions = decide(ResidencyInput {
             row_count: 240,
             visible_rows: 40..48,
@@ -170,14 +161,11 @@ mod tests {
             entries: &entries,
             stream_running: true,
             resident_ids: &residents,
-            selection_participants: &selection_participants,
-            selection_drag_active: false,
         });
 
         assert!(!decisions.build.contains("assistant-5"));
         assert!(decisions.build.contains("assistant-238"));
         assert!(decisions.build.contains("assistant-239"));
-        assert!(!decisions.evict.contains("assistant-7"));
         assert!(decisions.evict.contains("assistant-150"));
     }
 
@@ -204,8 +192,6 @@ mod tests {
             entries,
             stream_running: false,
             resident_ids,
-            selection_participants: &HashSet::new(),
-            selection_drag_active: false,
         })
     }
 

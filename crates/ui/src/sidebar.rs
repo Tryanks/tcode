@@ -2145,8 +2145,8 @@ impl SessionsSidebar {
                 .opacity(0.)
                 .group_hover(group_key.clone(), |button| button.opacity(1.))
                 .focus_visible(|button| button.opacity(1.))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    crate::widgets::stop_click_propagation(window, cx);
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
                     let cwd = plus_cwd.clone();
                     let project_id = plus_project_id.clone();
                     this.store.update(cx, |store, cx| {
@@ -2498,7 +2498,7 @@ impl SessionsSidebar {
                         .group_hover(row_key.to_owned(), |button| button.opacity(1.))
                         .focus_visible(|button| button.opacity(1.))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            crate::widgets::stop_click_propagation(window, cx);
+                            cx.stop_propagation();
                             this.unpin_thread(&id, window, cx);
                         })),
                 ),
@@ -2925,7 +2925,7 @@ impl SessionsSidebar {
                     .group_hover(row_key, |button| button.opacity(1.))
                     .focus_visible(|button| button.opacity(1.))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        crate::widgets::stop_click_propagation(window, cx);
+                        cx.stop_propagation();
                         if settled {
                             this.on_make_active(&ThreadMakeActive(action_id.clone()), window, cx);
                         } else {

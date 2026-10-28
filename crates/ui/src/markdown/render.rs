@@ -7,7 +7,7 @@ use std::{
     hash::Hash,
     ops::Range,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use crate::highlight::HighlightTheme;
@@ -33,6 +33,7 @@ use super::{
     inline_flow::{InlineCodeStyle, InlineFlow, InlineFlowItem},
     mermaid,
     nodes::{BlockNode, CodeBlock, ColumnumnAlign, Paragraph, Table, TextMark},
+    selection::RunOrigin,
     state::{MarkdownState, PendingContextTarget},
     utils::list_item_prefix,
 };
@@ -282,45 +283,6 @@ pub(super) fn item_renders_alike(
                 && old_items.get(span.clone()) == new_items.get(span)
         }
         _ => false,
-    }
-}
-
-/// The part of `block` from line or list item `start` to `end`, sharing its
-/// selection state, for extracting the text selected across root items.
-pub(super) fn block_span(block: &BlockNode, start: Option<usize>, end: Option<usize>) -> BlockNode {
-    if start.is_none() && end.is_none() {
-        return block.clone();
-    }
-    match block {
-        BlockNode::CodeBlock(code) => {
-            let lines = code_lines(&code.code);
-            let span = start.unwrap_or(0)..end.unwrap_or(lines.len());
-            let states = code
-                .line_states
-                .lock()
-                .ok()
-                .and_then(|states| states.get(span.clone()).map(<[_]>::to_vec))
-                .unwrap_or_default();
-            BlockNode::CodeBlock(CodeBlock {
-                code: lines.get(span).unwrap_or_default().join("\n").into(),
-                lang: code.lang.clone(),
-                line_states: Arc::new(Mutex::new(states)),
-                formula: Default::default(),
-                prepared: Default::default(),
-            })
-        }
-        BlockNode::List {
-            children,
-            ordered,
-            start: list_start,
-        } => BlockNode::List {
-            children: children
-                .get(start.unwrap_or(0)..end.unwrap_or(children.len()))
-                .map_or_else(Vec::new, <[_]>::to_vec),
-            ordered: *ordered,
-            start: *list_start,
-        },
-        _ => block.clone(),
     }
 }
 
@@ -918,6 +880,7 @@ fn render_paragraph(
     {
         return InlineFlow::new(
             id.to_string(),
+            super::selection::render_path(id),
             view.clone(),
             inline_flow_items(paragraph, id, cx),
         )
@@ -978,7 +941,7 @@ fn render_paragraph(
                             });
                         })
                         .on_click(move |_, window, cx| {
-                            crate::widgets::stop_click_propagation(window, cx);
+                            cx.stop_propagation();
                             if let Some(link) = &link {
                                 view.read(cx).resolve_link(&link.url).open(window, cx);
                             } else {
@@ -1007,6 +970,7 @@ fn render_paragraph(
         highlights,
         fonts,
     )
+    .origin(Some(RunOrigin::new(super::selection::render_path(id))))
     .into_any_element()
 }
 
@@ -1069,32 +1033,39 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
     let mut highlights = Vec::new();
     let mut fonts = Vec::new();
     let mut segment_state: Option<Arc<std::sync::Mutex<InlineState>>> = None;
-    let flush_text =
-        |items: &mut Vec<InlineFlowItem>,
-         text: &mut String,
-         links: &mut Vec<(Range<usize>, super::nodes::LinkMark)>,
-         highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
-         fonts: &mut Vec<(Range<usize>, SharedString)>,
-         segment_state: &mut Option<Arc<std::sync::Mutex<InlineState>>>| {
-            if text.is_empty() {
-                return;
-            }
-            let state = segment_state
-                .take()
-                .unwrap_or_else(|| paragraph.state.clone());
-            if let Ok(mut inline_state) = state.lock() {
-                inline_state.set_text(text.clone().into());
-            }
-            items.push(InlineFlowItem::Text {
-                state,
-                text: std::mem::take(text).into(),
-                links: std::mem::take(links),
-                highlights: std::mem::take(highlights),
-                font_overrides: std::mem::take(fonts),
-                code_style: None,
-            });
-        };
+    // Where each child starts in the paragraph's text, and where the text
+    // being gathered into one segment started.
+    let mut child_end = 0;
+    let mut segment_base = 0;
+    let flush_text = |items: &mut Vec<InlineFlowItem>,
+                      text: &mut String,
+                      links: &mut Vec<(Range<usize>, super::nodes::LinkMark)>,
+                      highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
+                      fonts: &mut Vec<(Range<usize>, SharedString)>,
+                      segment_state: &mut Option<Arc<std::sync::Mutex<InlineState>>>,
+                      base: usize| {
+        if text.is_empty() {
+            return;
+        }
+        let state = segment_state
+            .take()
+            .unwrap_or_else(|| paragraph.state.clone());
+        if let Ok(mut inline_state) = state.lock() {
+            inline_state.set_text(text.clone().into());
+        }
+        items.push(InlineFlowItem::Text {
+            state,
+            base,
+            text: std::mem::take(text).into(),
+            links: std::mem::take(links),
+            highlights: std::mem::take(highlights),
+            font_overrides: std::mem::take(fonts),
+            code_style: None,
+        });
+    };
     for (ix, child) in paragraph.children.iter().enumerate() {
+        let child_start = child_end;
+        child_end += child.rendered_text().len();
         if let Some(math) = &child.math {
             flush_text(
                 &mut items,
@@ -1103,10 +1074,12 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
                 &mut highlights,
                 &mut fonts,
                 &mut segment_state,
+                segment_base,
             );
             items.push(InlineFlowItem::Math {
                 math: math.clone(),
                 state: child.state.clone(),
+                base: child_start,
                 path: format!("{id}-math-{ix}"),
             });
             continue;
@@ -1119,6 +1092,7 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
                 &mut highlights,
                 &mut fonts,
                 &mut segment_state,
+                segment_base,
             );
             items.push(InlineFlowItem::ImageLink {
                 url: link.url.clone(),
@@ -1134,6 +1108,7 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
                 &mut highlights,
                 &mut fonts,
                 &mut segment_state,
+                segment_base,
             );
             items.push(InlineFlowItem::Image {
                 url: image.url.clone(),
@@ -1152,6 +1127,7 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
                 &mut highlights,
                 &mut fonts,
                 &mut segment_state,
+                segment_base,
             );
             let (code_links, code_highlights, code_fonts) = marks_for_node(&child.marks, 0, cx);
             if let Ok(mut inline_state) = child.state.lock() {
@@ -1159,6 +1135,7 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
             }
             items.push(InlineFlowItem::Text {
                 state: child.state.clone(),
+                base: child_start,
                 text: child.text.clone(),
                 links: code_links,
                 highlights: code_highlights,
@@ -1175,6 +1152,7 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
 
         if text.is_empty() {
             segment_state = Some(child.state.clone());
+            segment_base = child_start;
         }
         let offset = text.len();
         text.push_str(&child.text);
@@ -1190,6 +1168,7 @@ fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<Inlin
         &mut highlights,
         &mut fonts,
         &mut segment_state,
+        segment_base,
     );
     items
 }
@@ -1381,23 +1360,14 @@ fn cached_highlights(code: &CodeBlock, theme: &HighlightTheme) -> SharedHighligh
     runs
 }
 
-/// Split code content into display lines. The fence's single terminating
-/// newline is a delimiter, not content; genuine trailing blank lines survive
-/// (`"a\n\n"` → `["a", ""]`).
-fn code_lines(code: &str) -> Vec<&str> {
-    let mut lines = code.split('\n').collect::<Vec<_>>();
-    if lines.last() == Some(&"") {
-        lines.pop();
-    }
-    lines
-}
-
 fn render_code_lines(
     code: &CodeBlock,
     span: Range<usize>,
+    path: &str,
     view: &Entity<MarkdownState>,
     cx: &mut App,
 ) -> AnyElement {
+    let path = super::selection::render_path(path);
     let prepared = code.prepared();
     let highlighted = cached_highlights(code, &cx.theme().highlight_theme);
     let all_runs = &highlighted.runs;
@@ -1422,14 +1392,10 @@ fn render_code_lines(
             .whitespace_normal()
             .font_family(mono_font_family.clone())
             .text_size(cx.theme().tokens.typography.mono_md.size)
-            .child(Inline::new(
-                ix,
-                view.clone(),
-                line_state,
-                Vec::new(),
-                runs,
-                Vec::new(),
-            ));
+            .child(
+                Inline::new(ix, view.clone(), line_state, Vec::new(), runs, Vec::new())
+                    .origin(Some(RunOrigin::new(path.clone()).line(ix as u32))),
+            );
         #[cfg(test)]
         let line = line.debug_selector(move || format!("markdown-code-line-{ix}"));
         rendered_lines.push(line);
@@ -1447,6 +1413,7 @@ struct CodeSliceMeasure {
     measurement: Rc<RefCell<CodeMeasurement>>,
     code: CodeBlock,
     span: Range<usize>,
+    path: String,
     view: Entity<MarkdownState>,
 }
 
@@ -1498,7 +1465,7 @@ impl Element for CodeSliceMeasure {
             text_layout = Some((text.layout().clone(), end - start));
             text.into_any_element()
         } else {
-            render_code_lines(&self.code, self.span.clone(), &self.view, cx)
+            render_code_lines(&self.code, self.span.clone(), &self.path, &self.view, cx)
         };
         let layout = content.request_layout(window, cx);
         if let Some((text_layout, source_bytes)) = text_layout {
@@ -1568,11 +1535,12 @@ fn render_code_block(
                 measurement: measurement.clone(),
                 code: code.clone(),
                 span: span.clone(),
+                path: options.path.clone(),
                 view: view.clone(),
             })
             .into_any_element()
     } else {
-        render_code_lines(code, span.clone(), view, cx)
+        render_code_lines(code, span.clone(), &options.path, view, cx)
     };
     let radius = crate::material::radius_card(cx);
     // The whole fence, not the painted span: a long block is split across
@@ -1589,8 +1557,8 @@ fn render_code_block(
             &format!("code-{}", options.path),
             copied,
             compact,
-            move |_, window, cx| {
-                crate::widgets::stop_click_propagation(window, cx);
+            move |_, _, cx| {
+                cx.stop_propagation();
                 view.update(cx, |state, cx| {
                     state.copy_code(
                         path.clone(),
@@ -1686,7 +1654,7 @@ fn render_diagram(
     .object_fit(ObjectFit::Contain)
     .cursor_pointer()
     .on_click(move |_, window, cx| {
-        crate::widgets::stop_click_propagation(window, cx);
+        cx.stop_propagation();
         crate::image_viewer::open(
             lightbox_source.clone(),
             lightbox_label.to_string(),

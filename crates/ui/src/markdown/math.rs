@@ -4,6 +4,7 @@ use super::{
     inline::{Inline, InlineState},
     math_layout::{self, FormulaSelection},
     render::RecentCache,
+    selection::RunOrigin,
     state::{MarkdownState, PendingContextTarget},
 };
 use crate::{
@@ -101,9 +102,8 @@ pub(super) fn block(
         let selector = format!("markdown-math-toggle-{path}");
         let button = action_button(format!("math-toggle-{path}"), icon, label.into_owned(), cx)
             .touch(compact)
-            .on_click(move |_, window, cx| {
-                crate::widgets::stop_click_propagation(window, cx);
-                gpui_base::TextSelection::clear(window, cx);
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
                 view.update(cx, |state, cx| {
                     state.set_math_source(&path, !show_source, cx)
                 });
@@ -118,8 +118,8 @@ pub(super) fn block(
             &format!("math-{path}"),
             view.read(cx).copied.is(&path),
             compact,
-            move |_, window, cx| {
-                crate::widgets::stop_click_propagation(window, cx);
+            move |_, _, cx| {
+                cx.stop_propagation();
                 view.update(cx, |state, cx| {
                     state.copy_code(path.clone(), latex.clone(), cx)
                 });
@@ -164,7 +164,13 @@ pub(super) fn block(
             .min_w_0()
             .child(
                 div()
-                    .child(math_layout::render(tree, selection, view, cx))
+                    .child(math_layout::render(
+                        tree,
+                        selection,
+                        Some(RunOrigin::new(super::selection::render_path(path))),
+                        view,
+                        cx,
+                    ))
                     .overflow_x_scroll_area(),
             )
             .into_any_element(),
@@ -203,6 +209,7 @@ pub(super) fn inline(
     math: &super::math_parse::MathSpan,
     raw_state: &Arc<std::sync::Mutex<InlineState>>,
     path: &str,
+    origin: RunOrigin,
     view: &Entity<MarkdownState>,
     _: &mut Window,
     cx: &mut App,
@@ -211,18 +218,21 @@ pub(super) fn inline(
     math.selection.set_active(false);
     let tree = formula(&math.source, false);
     let body = if !show_source && let Some(tree) = &tree {
-        math_layout::render(tree, &math.selection, view, cx)
+        math_layout::render(tree, &math.selection, Some(origin), view, cx)
     } else {
         div()
             .font_family(cx.theme().mono_font_family.clone())
-            .child(Inline::new(
-                "math-source",
-                view.clone(),
-                raw_state.clone(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ))
+            .child(
+                Inline::new(
+                    "math-source",
+                    view.clone(),
+                    raw_state.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .origin(Some(origin)),
+            )
             .into_any_element()
     };
     h_flex()

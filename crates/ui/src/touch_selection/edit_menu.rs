@@ -5,12 +5,10 @@ use std::rc::Rc;
 
 use gpui::{
     App, Bounds, ClickEvent, Corners, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, RenderOnce, SharedString, Styled as _, Window, canvas, deferred,
-    div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Pixels, RenderOnce, SharedString, Styled as _, Window, deferred, div, px,
 };
 use gpui_base::{Placement, Positioner, h_flex};
 
-use super::handle::SurfaceHandler;
 use crate::{
     material,
     sizing::Sizable as _,
@@ -73,7 +71,6 @@ pub(crate) struct EditMenu {
     /// The selection, including the room its handles take.
     anchor: Bounds<Pixels>,
     items: Vec<EditMenuItem>,
-    on_paint: Option<SurfaceHandler>,
 }
 
 impl EditMenu {
@@ -82,17 +79,11 @@ impl EditMenu {
             id: id.into(),
             anchor,
             items: Vec::new(),
-            on_paint: None,
         }
     }
 
     pub(crate) fn items(mut self, items: impl IntoIterator<Item = EditMenuItem>) -> Self {
         self.items.extend(items);
-        self
-    }
-
-    pub(crate) fn on_paint(mut self, on_paint: SurfaceHandler) -> Self {
-        self.on_paint = Some(on_paint);
         self
     }
 }
@@ -129,7 +120,6 @@ fn side(anchor: Bounds<Pixels>, visible: Bounds<Pixels>) -> Placement {
 impl RenderOnce for EditMenu {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id = self.id;
-        let on_paint = self.on_paint;
         // A T3 pill, as iOS draws its edit menu: the overlay contour at the
         // overlay radius, its items filling it edge to edge.
         let radius = material::radius_overlay(cx);
@@ -242,17 +232,7 @@ impl RenderOnce for EditMenu {
                     .rounded(radius)
                     .id(id)
                     .debug_selector(|| "edit-menu".into())
-                    .children(items)
-                    .when_some(on_paint, |this, on_paint| {
-                        this.child(
-                            canvas(
-                                move |bounds, window, cx| on_paint(bounds, window, cx),
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .inset_0(),
-                        )
-                    }),
+                    .children(items),
                 ),
         )
         .with_priority(gpui_base::POPUP_PRIORITY)

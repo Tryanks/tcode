@@ -215,18 +215,11 @@ impl PopupMenu {
             )
         })
     }
-    /// Copy and Select All for read-only text in the window selection. Copy
-    /// is enabled only while something is selected; Select All dispatches to
-    /// the surface that owns the text and is offered when `select_all`.
-    ///
-    /// Copy carries the text selected when the menu opens rather than
-    /// dispatching the root's `Copy`: gpui-base clears the window selection
-    /// on any left press outside its own touch edit menu, so the press that
-    /// chooses the item has cleared it before the item's action runs.
-    pub fn selection_items(self, select_all: bool, window: &mut Window, cx: &mut App) -> Self {
-        let selected = gpui_base::TextSelection::selected_text(window, cx)
-            .trim()
-            .to_string();
+    /// Copy and Select All for read-only text: Copy writes `selected`, and is
+    /// enabled only when something is; Select All dispatches to the surface
+    /// that owns the text and is offered when `select_all`.
+    pub fn selection_items(self, selected: String, select_all: bool) -> Self {
+        let selected = selected.trim().to_string();
         let has_selection = !selected.is_empty();
         self.menu_with_enable(
             crate::tr!("edit_menu.copy").into_owned(),
