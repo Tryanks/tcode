@@ -110,8 +110,8 @@ impl tcode_client::words::WordSegmenter for SystemWords {
                 )?
                 .l()?;
             let array = JIntArray::cast_local(env, array)?;
-            let mut units = vec![0; env.get_array_length(&array)? as usize];
-            env.get_int_array_region(&array, 0, &mut units)?;
+            let mut units = vec![0; array.len(env)?];
+            array.get_region(env, 0, &mut units)?;
             Ok(units)
         });
         match units {
