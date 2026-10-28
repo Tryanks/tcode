@@ -91,6 +91,8 @@ pub struct MarkdownState {
     /// Whether `selection` is the view's own document rather than one an
     /// owner placed it in.
     owns_selection: bool,
+    /// Clears the view's own selection when the focus leaves the view.
+    own_selection_focus_out: Option<gpui::Subscription>,
     /// The runs of text painted last frame, which selection ends hit-test.
     pub(super) runs: Rc<RefCell<Vec<PaintedRun>>>,
     #[cfg(test)]
@@ -141,6 +143,7 @@ impl MarkdownState {
             layout_revision: 0,
             selection: None,
             owns_selection: false,
+            own_selection_focus_out: None,
             runs: Rc::default(),
             #[cfg(test)]
             last_reparse_bytes: text.len(),
@@ -189,7 +192,28 @@ impl MarkdownState {
             entry: 0,
         });
         self.owns_selection = selectable;
+        self.own_selection_focus_out = None;
         cx.notify();
+    }
+
+    /// Clear the view's own selection when the focus leaves the view, as a
+    /// transcript clears its selection when the focus leaves it.
+    pub(super) fn clear_own_selection_on_focus_out(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        if self.own_selection_focus_out.is_some() {
+            return;
+        }
+        let Some(document) = self.own_document() else {
+            return;
+        };
+        self.own_selection_focus_out = Some(window.on_focus_out(
+            &self.focus_handle,
+            cx,
+            move |_, _, cx| document.update(cx, |document, cx| document.clear(cx)),
+        ));
     }
 
     /// Make this view's text entry `entry` of `document`'s selection.
@@ -211,6 +235,7 @@ impl MarkdownState {
             entry,
         });
         self.owns_selection = false;
+        self.own_selection_focus_out = None;
         cx.notify();
     }
 

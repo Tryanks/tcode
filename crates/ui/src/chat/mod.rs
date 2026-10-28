@@ -452,8 +452,12 @@ pub struct ChatView {
     turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
     /// The transcript's one text selection, across its messages; each
-    /// message is the entry at its index in the timeline.
+    /// message is the entry at its index in the timeline. It goes when the
+    /// focus leaves the whole view.
     selection: Entity<SelectionDocument>,
+    /// Holds the focus of everything the view draws, the composer included,
+    /// so the selection knows when the focus has left it.
+    focus_handle: gpui::FocusHandle,
     pending_md_builds: HashMap<String, PendingMarkdownBuild>,
     next_md_build_generation: u64,
     markdown_visible_rows: Range<usize>,
@@ -711,27 +715,31 @@ impl ChatView {
             });
         });
 
-        let subscriptions =
-            vec![
-                cx.observe_in(&workspace_store, window, |this, store, window, cx| {
-                    this.timeline_stale = true;
-                    // Desktop can type immediately after opening the terminal.
-                    // On software-keyboard devices this also runs during restore,
-                    // so wait for a tap on the grid before raising the keyboard.
-                    let open = store.read(cx).panel_state().terminal_open;
-                    if open && !this.terminal_was_open {
-                        let drawer = this.terminal_drawer.clone();
-                        window.defer(cx, move |window, cx| {
-                            if !crate::window_seam::is_mobile(cx) {
-                                gpui::Focusable::focus_handle(drawer.read(cx), cx)
-                                    .focus(window, cx);
-                            }
-                        });
-                    }
-                    this.terminal_was_open = open;
-                    cx.notify();
-                }),
-            ];
+        let selection = transcript_selection(cx.entity().downgrade(), cx);
+        let focus_handle = cx.focus_handle();
+        let subscriptions = vec![
+            cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
+                this.selection
+                    .update(cx, |selection, cx| selection.clear(cx));
+            }),
+            cx.observe_in(&workspace_store, window, |this, store, window, cx| {
+                this.timeline_stale = true;
+                // Desktop can type immediately after opening the terminal.
+                // On software-keyboard devices this also runs during restore,
+                // so wait for a tap on the grid before raising the keyboard.
+                let open = store.read(cx).panel_state().terminal_open;
+                if open && !this.terminal_was_open {
+                    let drawer = this.terminal_drawer.clone();
+                    window.defer(cx, move |window, cx| {
+                        if !crate::window_seam::is_mobile(cx) {
+                            gpui::Focusable::focus_handle(drawer.read(cx), cx).focus(window, cx);
+                        }
+                    });
+                }
+                this.terminal_was_open = open;
+                cx.notify();
+            }),
+        ];
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
         let pull_requests = cx.new(|cx| {
             crate::pull_requests::PullRequestsPanel::new(
@@ -761,7 +769,8 @@ impl ChatView {
             rows: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
             md_states: HashMap::new(),
-            selection: transcript_selection(cx.entity().downgrade(), cx),
+            selection,
+            focus_handle,
             pending_md_builds: HashMap::new(),
             next_md_build_generation: 0,
             markdown_visible_rows: 0..0,
@@ -3803,6 +3812,7 @@ impl Render for ChatView {
         let root = v_flex()
             .size_full()
             .min_w_0()
+            .track_focus(&self.focus_handle)
             .bg(if compact {
                 crate::material::content_surface(cx)
             } else {

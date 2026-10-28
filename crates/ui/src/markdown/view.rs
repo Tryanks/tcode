@@ -145,6 +145,7 @@ impl Element for MarkdownView {
             } else if let Some(selectable) = self.selectable {
                 state.set_selectable(selectable, cx);
             }
+            state.clear_own_selection_on_focus_out(window, cx);
             if let Some(compact) = self.compact_headings {
                 state.set_compact_headings(compact, cx);
             }
@@ -1250,6 +1251,78 @@ mod tests {
         cx.simulate_mouse_move(point(px(90.), px(60.)), None, Modifiers::default());
         cx.update(|window, cx| _ = window.draw(cx));
         let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+        assert_eq!(selected_in(&markdown, cx), "");
+    }
+
+    /// Text above a plain strip and a control that takes the focus.
+    struct FocusRoot {
+        markdown: Entity<MarkdownState>,
+        control: gpui::FocusHandle,
+    }
+
+    impl Render for FocusRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .h(px(40.))
+                        .child(MarkdownView::new(&self.markdown).selectable(true)),
+                )
+                .child(div().id("plain-strip").w_full().h(px(40.)))
+                .child(
+                    div()
+                        .id("focusable-control")
+                        .w_full()
+                        .h(px(40.))
+                        .track_focus(&self.control),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn the_selection_goes_when_the_focus_leaves_the_text(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (view, cx) = cx.add_window_view(|_, cx| FocusRoot {
+            markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
+            control: cx.focus_handle(),
+        });
+        let cx: &mut VisualTestContext = cx;
+        // Focus moves are reported only in the window that has the focus.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+
+        cx.simulate_mouse_down(
+            point(px(1.), px(10.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(300.), px(10.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| _ = window.draw(cx));
+        cx.simulate_mouse_up(
+            point(px(300.), px(10.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert_eq!(selected_in(&markdown, cx), "Hello world");
+
+        // A press on something that takes no focus leaves it.
+        cx.simulate_click(point(px(10.), px(60.)), Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert_eq!(selected_in(&markdown, cx), "Hello world");
+
+        // One on a control that takes the focus puts it away.
+        cx.simulate_click(point(px(10.), px(100.)), Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
         assert_eq!(selected_in(&markdown, cx), "");
     }
 
