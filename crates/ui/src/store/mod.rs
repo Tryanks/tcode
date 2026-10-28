@@ -219,11 +219,11 @@ pub struct WorkspaceStore {
     providers_replica: ProvidersStatus,
     git_status_replica: GitStatusStatus,
     active_destination: Option<ConversationDestination>,
-    /// One-shot turn navigation requested by a cross-session content search.
+    /// One-shot turn navigation requested by a content-search hit or an
+    /// anchor link.
     pending_chat_turn: Option<(String, usize)>,
-    /// A thread and the event position an anchor link named, until the
-    /// thread's held history covers it.
-    pending_chat_anchor: Option<(String, u64)>,
+    /// The host resolving an anchor link's position to the turn it opens at.
+    anchor_turn_task: Option<Task<()>>,
     native_rewind_prefills: HashMap<String, String>,
     /// Text a pull request action put into a thread's composer for the user to edit and send.
     composer_appends: HashMap<String, String>,
@@ -420,7 +420,7 @@ impl WorkspaceStore {
             git_status_replica: GitStatusStatus::default(),
             active_destination: None,
             pending_chat_turn: None,
-            pending_chat_anchor: None,
+            anchor_turn_task: None,
             native_rewind_prefills: HashMap::new(),
             composer_appends: HashMap::new(),
             fallback_blocks: HashMap::new(),
@@ -3360,37 +3360,13 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn pending_chat_turn(&self, session_id: &str) -> Option<usize> {
-        if let Some(turn) = self
-            .pending_chat_turn
+        self.pending_chat_turn
             .as_ref()
             .filter(|(id, _)| id == session_id)
             .and_then(|(_, turn)| turn.checked_sub(self.session_turn_offset))
-        {
-            return Some(turn);
-        }
-        let (_, position) = self
-            .pending_chat_anchor
-            .as_ref()
-            .filter(|(id, _)| id == session_id)?;
-        let held = self.threads.get(session_id)?.history.as_ref()?;
-        let index = usize::try_from(position.checked_sub(held.from)?).ok()?;
-        let records = held.records.get(..=index)?;
-        Some(
-            Timeline::fold_stored(records.iter())
-                .turns
-                .len()
-                .saturating_sub(1),
-        )
     }
 
     pub(crate) fn take_pending_chat_turn(&mut self, session_id: &str, turn: usize) {
-        if self
-            .pending_chat_anchor
-            .as_ref()
-            .is_some_and(|(id, _)| id == session_id)
-        {
-            self.pending_chat_anchor = None;
-        }
         if self.pending_chat_turn.as_ref()
             == Some(&(session_id.to_string(), turn + self.session_turn_offset))
         {

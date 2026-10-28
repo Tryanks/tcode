@@ -1534,7 +1534,7 @@ impl AppShell {
         let anchor = anchor.clone();
         store.update(cx, |store, cx| {
             match anchor.position {
-                Some(position) => store.select_session_at_position(anchor.thread_id, position),
+                Some(position) => store.select_session_at_position(anchor.thread_id, position, cx),
                 None => store.select_session(anchor.thread_id),
             }
             cx.notify();

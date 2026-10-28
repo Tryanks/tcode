@@ -232,7 +232,8 @@ pub use wire::{
 // the subagent that asked, and SessionStatus carries pending approvals and
 // input while the provider is live, not only during a turn.
 //
-// Unreleased: the protocol adds the MoveQueued command.
+// Unreleased: the protocol adds the MoveQueued command and the
+// ThreadAnchorTurn query.
 pub const PROTOCOL_VERSION: u32 = 21;
 
 #[cfg(test)]

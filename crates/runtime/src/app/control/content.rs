@@ -373,6 +373,37 @@ impl AppState {
         }))
     }
 
+    /// The turn a cited anchor opens at, read from the index that gave the anchor its
+    /// position.
+    pub(crate) fn thread_anchor_turn(
+        &mut self,
+        thread_id: &str,
+        position: u64,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<tcode_protocol::QueryResponse, tcode_protocol::ProtocolError>> {
+        let turn = move |logs: &[IndexedLog]| {
+            tcode_protocol::QueryResponse::ThreadAnchorTurn(
+                logs[0]
+                    .entries()
+                    .filter(|(at, _)| *at <= position)
+                    .max_by_key(|(at, _)| *at)
+                    .map(|(_, entry)| entry.turn),
+            )
+        };
+        let logs = self.indexed_logs(&[thread_id], cx);
+        cx.spawn_background(async move {
+            match logs {
+                Logs::Ready(logs) => Ok(turn(&logs)),
+                Logs::Reading(task) => task.await.map(|logs| turn(&logs)).map_err(|message| {
+                    tcode_protocol::ProtocolError {
+                        code: "thread_anchor_unreadable".into(),
+                        message,
+                    }
+                }),
+            }
+        })
+    }
+
     fn content_meta(&self, thread_id: &str) -> Result<SessionMeta, String> {
         self.find_meta(thread_id)
             .ok_or_else(|| format!("unknown thread: {thread_id}"))

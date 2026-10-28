@@ -1216,6 +1216,10 @@ fn dispatch_query(
             session_id,
             item_id,
         } => app.item_output(&session_id, item_id, cx),
+        Query::ThreadAnchorTurn {
+            session_id,
+            position,
+        } => app.thread_anchor_turn(&session_id, position, cx),
         Query::ReadItemImage {
             session_id,
             item_id,

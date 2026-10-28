@@ -90,6 +90,14 @@ pub enum Query {
         session_id: String,
         item_id: String,
     },
+    /// The turn of the entry a `tcode_control` anchor names: the last one the
+    /// log first recorded at or before `position`, counted among every turn
+    /// the whole log folds to. Only the host knows the row of each record, as
+    /// windows merge them.
+    ThreadAnchorTurn {
+        session_id: String,
+        position: u64,
+    },
     /// Image bytes returned to the model by a read tool; omitted from timeline windows.
     ReadItemImage {
         session_id: String,
@@ -175,6 +183,8 @@ pub enum QueryResponse {
     },
     SessionContentHits(Vec<SessionSearchHit>),
     ItemOutput(String),
+    /// `None` when no entry was recorded at or before the position.
+    ThreadAnchorTurn(Option<usize>),
     ArchivedSessions(crate::ArchivedSessions),
     ControlActivity(Vec<crate::ControlActivityEntry>),
     ReviewRecords(Vec<tcode_core::control::ReviewRecord>),
