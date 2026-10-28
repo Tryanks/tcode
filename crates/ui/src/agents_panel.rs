@@ -668,7 +668,7 @@ impl AgentsPanel {
                                     .focus_visible(|button| button.opacity(1.))
                                     .on_click(
                                         move |_, window, cx| {
-                                            crate::widgets::stop_click_propagation(window, cx);
+                                            cx.stop_propagation();
                                             window.dispatch_action(action.boxed_clone(), cx);
                                         },
                                     )

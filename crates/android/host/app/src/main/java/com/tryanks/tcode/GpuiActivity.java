@@ -502,6 +502,20 @@ public final class GpuiActivity extends NativeActivity {
         }
     }
 
+    /** Where {@code text}'s words begin and end, in UTF-16 units, for a double-tapped word. */
+    public int[] gpuiWordBreaks(String text) {
+        android.icu.text.BreakIterator iterator = android.icu.text.BreakIterator.getWordInstance();
+        iterator.setText(text);
+        int[] breaks = new int[text.length() + 1];
+        int count = 0;
+        for (int boundary = iterator.first();
+                boundary != android.icu.text.BreakIterator.DONE && count < breaks.length;
+                boundary = iterator.next()) {
+            breaks[count++] = boundary;
+        }
+        return java.util.Arrays.copyOf(breaks, count);
+    }
+
     /** Snapshot used by the Rust shell at startup; restart after changing the OS language. */
     @SuppressWarnings("deprecation")
     public String gpuiSystemLocale() {

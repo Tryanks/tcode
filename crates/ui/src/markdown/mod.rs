@@ -1,4 +1,4 @@
-//! Rushdown-backed Markdown rendering and window-level selection.
+//! Rushdown-backed Markdown rendering and document text selection.
 //!
 //! The GPUI element architecture is adapted from gpui-component's Apache-2.0
 //! `crates/ui/src/text` implementation. Parsing and highlighting use tcode's
@@ -16,7 +16,7 @@ mod mermaid;
 pub(crate) mod nodes;
 pub(crate) mod parse;
 mod render;
-mod selection_adapter;
+mod selection;
 mod state;
 mod utils;
 mod view;
@@ -27,13 +27,13 @@ use gpui_base::input::SelectAll;
 pub use link_target::OpenThreadAnchor;
 #[cfg(test)]
 pub(crate) use parse::parse;
+pub use selection::{SelectionArea, SelectionDocument};
 pub use state::{ImageResolver, MarkdownState};
 pub use view::{MarkdownView, MenuExtension};
 
 pub(super) const CONTEXT: &str = "MarkdownView";
 
-/// Register Markdown select-all bindings. Copying the window selection is
-/// the window root's.
+/// Register Markdown select-all bindings. Copying is the selection area's.
 pub fn init(cx: &mut App) {
     cx.text_system()
         .add_fonts(vec![std::borrow::Cow::Borrowed(

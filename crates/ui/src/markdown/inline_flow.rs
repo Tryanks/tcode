@@ -3,6 +3,7 @@
 
 use std::{
     ops::Range,
+    rc::Rc,
     sync::{Arc, Mutex},
 };
 
@@ -19,6 +20,7 @@ use gpui::{
 use super::{
     inline::{Inline, InlineState},
     nodes::LinkMark,
+    selection::RunOrigin,
     state::{MarkdownState, PendingContextTarget},
 };
 
@@ -42,6 +44,8 @@ impl InlineCodeStyle {
 
 pub(super) struct InlineFlow {
     id: ElementId,
+    /// The paragraph's render path, which its runs' origins are in.
+    path: Rc<[u32]>,
     view: Entity<MarkdownState>,
     items: Vec<InlineFlowItem>,
 }
@@ -50,10 +54,14 @@ pub(super) enum InlineFlowItem {
     Math {
         math: super::math_parse::MathSpan,
         state: Arc<Mutex<InlineState>>,
+        /// Where the formula starts in the paragraph's text.
+        base: usize,
         path: String,
     },
     Text {
         state: Arc<Mutex<InlineState>>,
+        /// Where the text starts in the paragraph's text.
+        base: usize,
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
@@ -135,11 +143,13 @@ enum LineFragmentKind {
 impl InlineFlow {
     pub(super) fn new(
         id: impl Into<ElementId>,
+        path: Rc<[u32]>,
         view: Entity<MarkdownState>,
         items: Vec<InlineFlowItem>,
     ) -> Self {
         Self {
             id: id.into(),
+            path,
             view,
             items,
         }
@@ -198,7 +208,7 @@ impl InlineFlow {
                 });
             })
             .on_click(move |_, window, cx| {
-                crate::widgets::stop_click_propagation(window, cx);
+                cx.stop_propagation();
                 if let Some(link) = &link {
                     view.read(cx).resolve_link(&link.url).open(window, cx);
                 } else {
@@ -259,9 +269,15 @@ impl Element for InlineFlow {
                     .into_any_element();
                     Some(badge.layout_as_root(AvailableSpace::min_size(), window, cx))
                 }
-                InlineFlowItem::Math { math, state, path } => {
+                InlineFlowItem::Math {
+                    math,
+                    state,
+                    base,
+                    path,
+                } => {
+                    let origin = RunOrigin::new(self.path.clone()).offset(*base);
                     let mut element =
-                        super::math::inline(math, state, path, &self.view, window, cx);
+                        super::math::inline(math, state, path, origin, &self.view, window, cx);
                     Some(element.layout_as_root(AvailableSpace::min_size(), window, cx))
                 }
                 InlineFlowItem::Text { .. } => None,
@@ -339,13 +355,17 @@ impl Element for InlineFlow {
                     font_overrides,
                     code_style,
                 } => {
-                    let state = match &self.items[item_ix] {
+                    let (state, base) = match &self.items[item_ix] {
                         InlineFlowItem::Text {
                             state,
+                            base,
                             text: source,
                             ..
-                        } if source_range == (0..source.len()) => state.clone(),
-                        _ => Arc::new(Mutex::new(InlineState::default())),
+                        } if source_range == (0..source.len()) => (state.clone(), *base),
+                        InlineFlowItem::Text { base, .. } => {
+                            (Arc::new(Mutex::new(InlineState::default())), *base)
+                        }
+                        _ => (Arc::new(Mutex::new(InlineState::default())), 0),
                     };
                     if let Ok(mut state) = state.lock() {
                         state.set_text(text);
@@ -357,7 +377,10 @@ impl Element for InlineFlow {
                         links,
                         highlights,
                         font_overrides,
-                    );
+                    )
+                    .origin(Some(
+                        RunOrigin::new(self.path.clone()).offset(base + source_range.start),
+                    ));
                     let mut element = match code_style {
                         Some(code) => {
                             let line_height = code.line_height();
@@ -412,8 +435,14 @@ impl Element for InlineFlow {
                         .w(fragment_size.width)
                         .h(fragment_size.height)
                         .into_any_element(),
-                        InlineFlowItem::Math { math, state, path } => {
-                            super::math::inline(math, state, path, &self.view, window, cx)
+                        InlineFlowItem::Math {
+                            math,
+                            state,
+                            base,
+                            path,
+                        } => {
+                            let origin = RunOrigin::new(self.path.clone()).offset(*base);
+                            super::math::inline(math, state, path, origin, &self.view, window, cx)
                         }
                         InlineFlowItem::Text { .. } => unreachable!(),
                     };

@@ -8,23 +8,21 @@ use gpui::{
     MouseUpEvent, Pixels, Point, RenderOnce, Styled as _, TouchDragEvent, TouchPhase, Window,
     canvas, deferred,
 };
-use gpui_base::{SelectionEdge, TouchHandle, TouchSelectionSnapshot};
+use gpui_base::{SelectionEdge, TouchHandle};
+
+use super::TouchSelectionLayout;
 
 use crate::theme::ActiveTheme as _;
 
 /// Reads the touch selection as laid out by the time the handles paint.
-pub(crate) type SnapshotSource = Rc<dyn Fn(&Window, &App) -> Option<TouchSelectionSnapshot>>;
+pub(crate) type SnapshotSource = Rc<dyn Fn(&Window, &App) -> Option<TouchSelectionLayout>>;
 /// What a handle's owner gets told as the finger moves it.
 pub(crate) type DragHandler =
     Rc<dyn Fn(SelectionEdge, TouchPhase, Point<Pixels>, &mut Window, &mut App)>;
-/// Where a surface was painted this frame, for owners that must protect it.
-pub(crate) type SurfaceHandler = Rc<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>;
 
 /// The grab handles at the ends of an input's touch selection, floating
-/// above the input: its knobs reach past the field's edge, where the input's
-/// own clip would cut them off. (Markdown that takes part in the window
-/// selection paints its handles itself, in place; see
-/// [`gpui_base::TextSelectionHandle::paint_touch_handles`].)
+/// above the text: its knobs reach past the field's edge, where the field's
+/// own clip would cut them off.
 ///
 /// The handles read the selection's geometry as they paint, after the input
 /// has painted this frame, so they sit on the text as it is now rather than
@@ -38,7 +36,6 @@ pub(crate) type SurfaceHandler = Rc<dyn Fn(Bounds<Pixels>, &mut Window, &mut App
 pub(crate) struct SelectionHandles {
     source: SnapshotSource,
     on_drag: DragHandler,
-    on_paint: Option<SurfaceHandler>,
 }
 
 /// One handle laid out for this frame.
@@ -50,16 +47,7 @@ struct LaidOutHandle {
 
 impl SelectionHandles {
     pub(crate) fn new(source: SnapshotSource, on_drag: DragHandler) -> Self {
-        Self {
-            source,
-            on_drag,
-            on_paint: None,
-        }
-    }
-
-    pub(crate) fn on_paint(mut self, on_paint: SurfaceHandler) -> Self {
-        self.on_paint = Some(on_paint);
-        self
+        Self { source, on_drag }
     }
 
     /// Lays out a handle for each end of a non-empty selection that is in
@@ -152,7 +140,7 @@ impl SelectionHandles {
         // frame painted, and its first moves must not be lost.
         let dragging = {
             let source = source.clone();
-            move |window: &Window, cx: &App| source(window, cx).and_then(|s| s.dragging())
+            move |window: &Window, cx: &App| source(window, cx).and_then(|s| s.dragging)
         };
         window.on_mouse_event({
             let on_drag = on_drag.clone();
@@ -200,7 +188,6 @@ impl RenderOnce for SelectionHandles {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let source = self.source;
         let on_drag = self.on_drag;
-        let on_paint = self.on_paint;
         deferred(
             canvas(
                 {
@@ -210,9 +197,6 @@ impl RenderOnce for SelectionHandles {
                 move |_, handles, window, cx| {
                     for handle in &handles {
                         Self::paint_handle(handle, window, cx);
-                        if let Some(on_paint) = on_paint.as_ref() {
-                            on_paint(handle.hitbox.bounds, window, cx);
-                        }
                     }
                     Self::listen(&handles, &source, &on_drag, window);
                 },

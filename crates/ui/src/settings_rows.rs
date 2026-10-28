@@ -138,7 +138,7 @@ pub fn reset_action(
             .on_click(move |event, window, cx| {
                 // Toggle rows are clickable as a whole; a click that lands
                 // on this button must not also flip the switch.
-                crate::widgets::stop_click_propagation(window, cx);
+                cx.stop_propagation();
                 on_reset(event, window, cx);
             })
             .into_any_element(),

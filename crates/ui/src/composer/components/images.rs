@@ -503,8 +503,8 @@ impl Composer {
                             .xsmall()
                             .icon(IconName::Close)
                             .aria_label(crate::tr!("composer.remove_image"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                crate::widgets::stop_click_propagation(window, cx);
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
                                 this.remove_image(index, cx);
                             })),
                     )

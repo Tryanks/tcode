@@ -10,6 +10,7 @@ pub mod outgoing;
 pub mod pairing;
 pub mod recovery;
 pub mod speech;
+pub mod words;
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;

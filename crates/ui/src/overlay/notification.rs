@@ -349,7 +349,7 @@ impl Render for Notification {
                         .xsmall()
                         .icon(IconName::Close)
                         .on_click(cx.listener(|this, _, window, cx| {
-                            crate::widgets::stop_click_propagation(window, cx);
+                            cx.stop_propagation();
                             this.dismiss(window, cx);
                         })),
                 ),

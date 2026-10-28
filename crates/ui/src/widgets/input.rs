@@ -220,7 +220,7 @@ fn render_touch_selection(state: &State, window: &Window, cx: &App) -> Vec<AnyEl
     let drag_state = state.clone();
     let source_state = state.clone();
     TouchSelectionOverlay::new(("input-touch-selection", entity_id), move |_, cx| {
-        dispatch_state!(&source_state, |base| base.read(cx).touch_selection())
+        dispatch_state!(&source_state, |base| base.read(cx).touch_selection()).map(Into::into)
     })
     .handles(move |edge, phase, position, _, cx| {
         dispatch_state!(&drag_state, |base| base.update(
@@ -407,24 +407,20 @@ impl RenderOnce for Input {
                                     }
                                 });
                             }
-                            // A long press here selects in this field; the
-                            // window selection a message holds goes, as it
-                            // would on a tap. No tap precedes a long press.
-                            // The editor, which bubbles after this, claims
-                            // every press that reaches it here, but opens the
-                            // menu only once the finger lifts; the haptic
-                            // says now that the press has taken.
+                            // A long press here selects in this field. The
+                            // editor, which bubbles after this, claims every
+                            // press that reaches it here, but opens the menu
+                            // only once the finger lifts; the haptic says now
+                            // that the press has taken.
                             window.on_mouse_event(
-                                move |event: &LongPressEvent, phase, window, cx| {
+                                move |event: &LongPressEvent, phase, window, _| {
                                     if phase.bubble()
                                         && event.phase == TouchPhase::Started
                                         && !window.default_prevented()
                                         && bounds.contains(&event.start_position)
+                                        && !disabled
                                     {
-                                        gpui_base::TextSelection::clear(window, cx);
-                                        if !disabled {
-                                            crate::haptics::long_press();
-                                        }
+                                        crate::haptics::long_press();
                                     }
                                 },
                             );

@@ -24,6 +24,7 @@ type MulticastLock = dyn Fn(bool) + Send + Sync;
 /// transport policy.
 pub struct NativeClientHost {
     speech: Option<std::rc::Rc<dyn tcode_client::speech::SpeechRecognizer>>,
+    words: Option<std::rc::Rc<dyn tcode_client::words::WordSegmenter>>,
     data_dir: PathBuf,
     default_device_name: String,
     platform: Option<String>,
@@ -41,6 +42,7 @@ impl NativeClientHost {
     pub fn new(data_dir: PathBuf, device_name: impl Into<String>) -> Self {
         Self {
             speech: None,
+            words: None,
             data_dir,
             default_device_name: device_name.into(),
             platform: default_device_platform(),
@@ -104,6 +106,16 @@ impl NativeClientHost {
         scanner: impl Fn() -> HostFuture<'static, Result<String, String>> + 'static,
     ) -> Self {
         self.qr_scanner = Some(Box::new(scanner));
+        self
+    }
+
+    /// Segment words with `segmenter` instead of what the client finds on
+    /// its own.
+    pub fn with_word_segmenter(
+        mut self,
+        segmenter: impl tcode_client::words::WordSegmenter + 'static,
+    ) -> Self {
+        self.words = Some(std::rc::Rc::new(segmenter));
         self
     }
 
@@ -175,6 +187,10 @@ impl NativeClientHost {
 impl ClientHost for NativeClientHost {
     fn speech_recognizer(&self) -> Option<std::rc::Rc<dyn tcode_client::speech::SpeechRecognizer>> {
         self.speech.clone()
+    }
+
+    fn word_segmenter(&self) -> Option<std::rc::Rc<dyn tcode_client::words::WordSegmenter>> {
+        self.words.clone().or_else(tcode_client::words::system)
     }
 
     fn device_name(&self) -> String {

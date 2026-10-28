@@ -13,27 +13,24 @@ use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
     HighlightStyle, Hitbox, InspectorElementId, InteractiveText, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
-    StyledText, TextLayout, Window, WrappedLineLayout, point, px, quad, size,
+    StyledText, TextLayout, Window, point, px, quad,
 };
 
 use super::{
     nodes::LinkMark,
-    state::{MarkdownState, PendingContextTarget, PendingLinkMenu},
+    selection::RunOrigin,
+    state::{MarkdownState, PaintedRun, PendingContextTarget, PendingLinkMenu},
 };
 
-/// Mutable paint-time data retained by the parsed IR.
+/// The text a run paints, retained by the parsed IR.
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct InlineState {
     pub(super) text: SharedString,
-    pub(super) selection: Option<Range<usize>>,
 }
 
 impl InlineState {
     pub(super) fn shared(text: SharedString) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {
-            text,
-            selection: None,
-        }))
+        Arc::new(Mutex::new(Self { text }))
     }
 
     pub(super) fn set_text(&mut self, text: SharedString) {
@@ -52,7 +49,11 @@ pub(super) struct Inline {
     font_overrides: Vec<(Range<usize>, SharedString)>,
     interactive_text: InteractiveText,
     text_layout: TextLayout,
-    state: Arc<Mutex<InlineState>>,
+    /// Where the text sits in the document; text without one is not
+    /// selectable.
+    origin: Option<RunOrigin>,
+    /// The part of the text selected, as of prepaint.
+    selected: Option<Range<usize>>,
 }
 
 impl Inline {
@@ -81,8 +82,14 @@ impl Inline {
             font_overrides,
             interactive_text: InteractiveText::new(id, styled_text),
             text_layout,
-            state,
+            origin: None,
+            selected: None,
         }
+    }
+
+    pub(super) fn origin(mut self, origin: Option<RunOrigin>) -> Self {
+        self.origin = origin;
+        self
     }
 
     pub(super) fn math_glyph(mut self, glyph: gpui::GlyphId, baseline: Pixels) -> Self {
@@ -108,38 +115,6 @@ impl Inline {
             .iter()
             .find(|(range, _)| range.contains(&offset))
             .map(|(range, link)| (range.clone(), link.clone()))
-    }
-
-    fn text_line_bounds(
-        text_layout: &TextLayout,
-        mask_bounds: Bounds<Pixels>,
-    ) -> Vec<Bounds<Pixels>> {
-        let lines = text_layout.line_layouts();
-        wrapped_line_bounds(
-            lines.iter().map(Arc::as_ref),
-            text_layout.bounds().origin,
-            text_layout.line_height(),
-            mask_bounds,
-        )
-    }
-
-    /// The caret line boxes at the two ends of a painted selection, where the
-    /// touch handles are drawn.
-    fn selection_edges(
-        selection: &Range<usize>,
-        text_layout: &TextLayout,
-    ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
-        let (start, end) = (
-            selection.start.min(selection.end),
-            selection.start.max(selection.end),
-        );
-        let line_height = text_layout.line_height();
-        let caret = |index| {
-            text_layout
-                .position_for_index(index)
-                .map(|position| Bounds::new(position, size(px(0.), line_height)))
-        };
-        Some((caret(start)?, caret(end)?))
     }
 
     fn paint_selection(
@@ -276,8 +251,29 @@ impl Element for Inline {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        self.interactive_text
-            .prepaint(id, inspector_id, bounds, &mut (), window, cx)
+        let hitbox = self
+            .interactive_text
+            .prepaint(id, inspector_id, bounds, &mut (), window, cx);
+        let view = self.view.read(cx);
+        if let (Some(origin), Some(membership)) = (&self.origin, &view.selection) {
+            self.selected = view.selected_range(origin, self.text.len(), cx);
+            if let Some(selected) = &self.selected {
+                membership.document.read(cx).register_edge(
+                    membership.entry,
+                    origin,
+                    selected,
+                    &self.text_layout,
+                    window.content_mask().bounds,
+                );
+            }
+            view.register_run(PaintedRun {
+                origin: origin.clone(),
+                text: self.text.clone(),
+                layout: self.text_layout.clone(),
+                bounds,
+            });
+        }
+        hitbox
     }
 
     fn paint(
@@ -307,40 +303,14 @@ impl Element for Inline {
                 .paint(global_id, None, bounds, &mut (), hitbox, window, cx);
         }
 
-        let adapter = {
-            let view = self.view.read(cx);
-            view.is_selectable().then(|| view.selection_adapter.clone())
-        };
-        let selection = adapter.as_ref().and_then(|adapter| {
-            let text_bounds = Self::text_line_bounds(&text_layout, window.content_mask().bounds);
-            let projection = adapter.update_run(
-                self.text.clone(),
-                text_layout.clone(),
-                bounds,
-                text_bounds,
-                &self.state,
-                cx,
-            );
-            if adapter.selection.has_local_selection(cx) {
-                Some(0..self.text.len())
-            } else {
-                projection
-            }
-        });
-        if let Ok(mut state) = self.state.lock() {
-            state.selection = selection.clone();
-        }
-        if adapter.is_some() {
+        if self.origin.is_some() && self.view.read(cx).is_selectable() {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
         if Self::link_for_position(&text_layout, &self.links, window.mouse_position()).is_some() {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
-        if let (Some(selection), Some(adapter)) = (&selection, &adapter) {
-            Self::paint_selection(selection, &text_layout, bounds, window, cx);
-            if let Some((start, end)) = Self::selection_edges(selection, &text_layout) {
-                adapter.register_selection_edges(start, end);
-            }
+        if let Some(selected) = &self.selected {
+            Self::paint_selection(selected, &text_layout, bounds, window, cx);
         }
 
         window.on_mouse_event({
@@ -429,128 +399,10 @@ impl Element for Inline {
                     return;
                 }
                 if let Some(link) = Self::link_for_position(&layout, &links, event.position) {
-                    crate::widgets::stop_click_propagation(window, cx);
+                    cx.stop_propagation();
                     view.read(cx).resolve_link(&link.url).open(window, cx);
                 }
             }
         });
-    }
-}
-
-/// One rect per visual (wrapped) line, covering that line's text extent. The
-/// selection engine only hit-tests these, so per-character geometry cost
-/// O(chars × glyphs) on every paint and bought nothing.
-///
-/// Mirrors the coordinate model of `TextLayout::position_for_index`: y starts at
-/// `origin.y` and advances by `line_height` per visual line, and every visual
-/// line starts at `origin.x`.
-fn wrapped_line_bounds<'a>(
-    lines: impl IntoIterator<Item = &'a WrappedLineLayout>,
-    origin: Point<Pixels>,
-    line_height: Pixels,
-    mask_bounds: Bounds<Pixels>,
-) -> Vec<Bounds<Pixels>> {
-    let mut rects = Vec::new();
-    let mut y = origin.y;
-    for line in lines {
-        let mut start_x = px(0.);
-        let boundary_xs = line.wrap_boundaries.iter().map(|boundary| {
-            line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix]
-                .position
-                .x
-        });
-        for end_x in boundary_xs.chain([line.unwrapped_layout.width]) {
-            let rect = Bounds::from_corners(
-                point(origin.x, y),
-                point(origin.x + end_x - start_x, y + line_height),
-            )
-            .intersect(&mask_bounds);
-            if rect.size.width > px(0.) && rect.size.height > px(0.) {
-                rects.push(rect);
-            }
-            start_x = end_x;
-            y += line_height;
-        }
-    }
-    rects
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{Render, TestAppContext, TextRun, VisualTestContext, div, size};
-
-    struct Root;
-
-    impl Render for Root {
-        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-            div()
-        }
-    }
-
-    #[gpui::test]
-    fn text_bounds_cover_one_rect_per_visual_line(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| Root);
-        let cx: &mut VisualTestContext = cx;
-
-        let text: SharedString =
-            "the quick brown fox jumps over the lazy dog again and again\nsecond".into();
-        let font_size = px(14.);
-        let wrap_width = px(120.);
-        let line_height = px(20.);
-        let origin = point(px(10.), px(30.));
-
-        let lines = cx.update(|window, _| {
-            let run = TextRun {
-                len: text.len(),
-                font: window.text_style().font(),
-                color: gpui::black(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            window
-                .text_system()
-                .shape_text(text.clone(), font_size, &[run], Some(wrap_width), None)
-                .unwrap()
-        });
-
-        let visual_lines: usize = lines.iter().map(|l| l.wrap_boundaries.len() + 1).sum();
-        assert!(
-            visual_lines > lines.len(),
-            "test needs at least one wrap boundary, got {visual_lines} visual lines \
-             across {} hard lines",
-            lines.len()
-        );
-        assert_eq!(lines.len(), 2, "test needs the '\\n' to split two lines");
-
-        let huge = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(1000.)));
-        let rects =
-            wrapped_line_bounds(lines.iter().map(|line| &***line), origin, line_height, huge);
-        assert_eq!(rects.len(), visual_lines);
-        for (ix, rect) in rects.iter().enumerate() {
-            assert_eq!(rect.origin.x, origin.x);
-            assert_eq!(rect.origin.y, origin.y + line_height * ix as f32);
-            assert_eq!(rect.size.height, line_height);
-            assert!(rect.size.width > px(0.));
-            assert!(rect.size.width <= wrap_width + px(0.5), "{rect:?}");
-        }
-
-        // A mask that excludes the last visual line drops its rect.
-        let clipped = Bounds::new(
-            point(px(0.), px(0.)),
-            size(
-                px(1000.),
-                origin.y + line_height * (visual_lines - 1) as f32,
-            ),
-        );
-        let rects = wrapped_line_bounds(
-            lines.iter().map(|line| &***line),
-            origin,
-            line_height,
-            clipped,
-        );
-        assert_eq!(rects.len(), visual_lines - 1);
     }
 }

@@ -195,7 +195,7 @@ pub(crate) fn activity_row(
 }
 
 /// What the row's context menu copies: the detail's parts are plain text, so
-/// the window selection cannot reach them, and a reader wants the whole
+/// a text selection cannot reach them, and a reader wants the whole
 /// command or output rather than its one-line preview.
 pub(super) fn activity_copy_items(entry: &TimelineEntry) -> Vec<(String, String)> {
     let mut items = Vec::new();

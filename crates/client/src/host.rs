@@ -151,6 +151,11 @@ pub trait ClientHost: 'static {
         None
     }
 
+    /// The platform's word segmentation, for a double-clicked word.
+    fn word_segmenter(&self) -> Option<std::rc::Rc<dyn crate::words::WordSegmenter>> {
+        crate::words::system()
+    }
+
     /// Name this device presents to hosts while pairing and connecting.
     fn device_name(&self) -> String;
 
