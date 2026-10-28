@@ -1581,7 +1581,10 @@ mod tests {
     /// A recorded image opened from a thread a client is reading streams from
     /// the thread's history already in memory: neither its bytes nor the check
     /// that they are still current read the stored log again. Its size is
-    /// known before its bytes, for the viewer to lay out its preview.
+    /// known before its bytes, for the viewer to lay out its preview, and its
+    /// bytes arrive in full 64 KiB blocks: each block is a hand-over to the
+    /// viewer, and the 768-byte reads of the history's base64 once made a
+    /// screenshot hundreds of them.
     #[test]
     fn originals_of_a_subscribed_session_reuse_its_history() {
         use base64::Engine as _;
@@ -1649,6 +1652,7 @@ mod tests {
         assert_eq!(source.metadata.len, bytes.len() as u64);
         assert_eq!(source.metadata.dimensions, Some((1024, 1024)));
         let mut received = Vec::new();
+        let mut block_lens = Vec::new();
         loop {
             let block = source
                 .blocks
@@ -1658,9 +1662,16 @@ mod tests {
             if block.is_empty() {
                 break;
             }
+            block_lens.push(block.len());
             received.extend(block);
         }
         assert_eq!(received, bytes);
+        assert!(
+            block_lens[..block_lens.len() - 1]
+                .iter()
+                .all(|&len| len == 64 * 1024),
+            "every block but the last is full: {block_lens:?}"
+        );
         assert_eq!(
             reader.event_reads(),
             1,

@@ -83,25 +83,6 @@ impl ViewerSource {
     }
 }
 
-// GPUI's public Image::use_render_image drops decode errors; the viewer needs them for Retry.
-struct OriginalImage;
-impl gpui::Asset for OriginalImage {
-    type Source = Arc<gpui::Image>;
-    type Output = Result<Arc<RenderImage>, SharedString>;
-
-    fn load(
-        source: Self::Source,
-        cx: &mut App,
-    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
-        let renderer = cx.svg_renderer();
-        async move {
-            source
-                .to_image_data(renderer)
-                .map_err(|error| error.to_string().into())
-        }
-    }
-}
-
 enum OriginalState {
     Loading { received: u64, total: Option<u64> },
     Cancelled,
@@ -145,6 +126,13 @@ pub(crate) fn open(
                 viewer
             }
         };
+        // A window keeps a drawn image's texture until it is dropped.
+        cx.on_release(|viewer, cx| {
+            if let Some(original) = viewer.original.take() {
+                cx.drop_image(original, None);
+            }
+        })
+        .detach();
         let namespace = cx
             .try_global::<crate::store::images::HostImages>()
             .map(|images| images.namespace);
@@ -278,7 +266,7 @@ pub(crate) struct ImageViewer {
     failed: bool,
     target: Option<tcode_protocol::OriginalTarget>,
     remote_progress: bool,
-    pending_original: Option<Arc<gpui::Image>>,
+    original: Option<Arc<RenderImage>>,
     original_state: Option<OriginalState>,
     transfer: Option<gpui::Task<()>>,
     host_changes: Option<gpui::Subscription>,
@@ -301,7 +289,7 @@ impl ImageViewer {
             failed: false,
             target: None,
             remote_progress: false,
-            pending_original: None,
+            original: None,
             original_state: None,
             transfer: None,
             host_changes: None,
@@ -309,7 +297,6 @@ impl ImageViewer {
     }
 
     fn cancel_original(&mut self, cx: &mut Context<Self>) {
-        self.pending_original = None;
         if self.transfer.take().is_some()
             && matches!(self.original_state, Some(OriginalState::Loading { .. }))
         {
@@ -334,6 +321,7 @@ impl ImageViewer {
         };
         self.remote_progress = host.is_remote();
         let remote = self.remote_progress;
+        let renderer = cx.svg_renderer();
         self.original_state = Some(OriginalState::Loading {
             received: 0,
             total: None,
@@ -380,15 +368,22 @@ impl ImageViewer {
                     .ok()
                     .and_then(|format| gpui::ImageFormat::from_mime_type(format.to_mime_type()))
                     .ok_or_else(|| tcode_client::original::error("unsupported image format"))?;
-                Ok(cx
-                    .background_executor()
-                    .spawn(async move { Arc::new(gpui::Image::from_bytes(format, bytes)) })
-                    .await)
+                cx.background_executor()
+                    .spawn(async move {
+                        gpui::Image::from_bytes(format, bytes)
+                            .to_image_data(renderer)
+                            .map_err(tcode_client::original::error)
+                    })
+                    .await
             }
             .await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(source) => this.pending_original = Some(source),
+                    Ok(original) => {
+                        this.source = ImageSource::Render(original.clone());
+                        this.original = Some(original);
+                        this.original_state = Some(OriginalState::Complete);
+                    }
                     Err(error) => {
                         this.original_state = Some(OriginalState::Failed(error.message.into()))
                     }
@@ -598,18 +593,6 @@ impl ImageViewer {
     }
 
     fn decode(&mut self, window: &mut Window, cx: &mut App) {
-        if let Some(original) = &self.pending_original
-            && let Some(decoded) = window.use_asset::<OriginalImage>(original, cx)
-        {
-            self.pending_original = None;
-            match decoded {
-                Ok(image) => {
-                    self.source = ImageSource::Render(image);
-                    self.original_state = Some(OriginalState::Complete);
-                }
-                Err(error) => self.original_state = Some(OriginalState::Failed(error)),
-            }
-        }
         let decoded = match &self.source {
             ImageSource::Resource(resource) => {
                 window.use_asset::<gpui::ImgResourceLoader>(resource, cx)
@@ -1002,6 +985,81 @@ mod tests {
                     ImageSource::Render(preview),
                 ),
                 "small.png",
+                window,
+                cx,
+            );
+        });
+        draw(cx);
+        assert_eq!(image(cx).size, size(px(400.), px(300.)));
+    }
+
+    /// An original's bytes replace its preview: the decoded original, smaller
+    /// than the frame, is shown at its own size, which neither the preview at
+    /// its own size nor the preview standing in at the frame's size has.
+    #[gpui::test]
+    fn a_delivered_original_replaces_its_preview(cx: &mut TestAppContext) {
+        use tcode_client::original::{
+            OpenedOriginal, OriginalFuture, OriginalOpener, OriginalReader,
+        };
+        struct Bytes(Option<Vec<u8>>);
+        impl OriginalReader for Bytes {
+            fn read(&mut self) -> OriginalFuture<'_, Option<Vec<u8>>> {
+                let block = self.0.take();
+                Box::pin(async move { Ok(block) })
+            }
+            fn cancel(&mut self) {}
+        }
+        struct Delivered(Vec<u8>);
+        impl OriginalOpener for Delivered {
+            fn open(
+                &self,
+                _: tcode_protocol::OriginalTarget,
+            ) -> OriginalFuture<'static, OpenedOriginal> {
+                let bytes = self.0.clone();
+                Box::pin(async move {
+                    Ok(OpenedOriginal {
+                        metadata: tcode_protocol::OriginalMetadata {
+                            len: bytes.len() as u64,
+                            mime: Some("image/png".into()),
+                            dimensions: None,
+                        },
+                        reader: Box::new(Bytes(Some(bytes))),
+                    })
+                })
+            }
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(400, 300, Rgba([0, 0, 255, 255]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("encode the original");
+        let cx = open_viewer(cx, 10, 10);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        let (to_host, _control) = async_channel::unbounded();
+        let (_replies, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new_local(
+            to_host,
+            from_host,
+            Some(Arc::new(Delivered(png.into_inner()))),
+        );
+        cx.update(|window, cx| {
+            cx.set_global(crate::store::images::HostImages {
+                link: Some(link),
+                namespace: 1,
+            });
+            let preview = Arc::new(RenderImage::new(vec![Frame::new(ImageBuffer::from_pixel(
+                120,
+                90,
+                Rgba([255, 0, 0, 255]),
+            ))]));
+            open(
+                ViewerSource::original(
+                    tcode_protocol::OriginalTarget::File {
+                        path: "/host/delivered.png".into(),
+                    },
+                    ImageSource::Render(preview),
+                ),
+                "delivered.png",
                 window,
                 cx,
             );
