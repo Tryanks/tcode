@@ -349,7 +349,7 @@ impl Composer {
             input_subscription,
             model_search,
             picker_rail: None,
-            approval_expanded: compact,
+            approval_expanded: true,
             ui_request_id: None,
             ui_question_index: 0,
             ui_selections: std::collections::HashMap::new(),
