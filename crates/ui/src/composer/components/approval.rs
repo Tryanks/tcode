@@ -268,9 +268,11 @@ mod tests {
     use super::*;
     use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, size};
 
-    /// A phone composer whose session awaits approval of a patch to `paths`.
-    fn phone_composer_with_patch(
+    /// A composer, phone or desktop, whose session awaits approval of a patch
+    /// to `paths`.
+    fn composer_with_patch(
         cx: &mut TestAppContext,
+        compact: bool,
         paths: impl Iterator<Item = String>,
     ) -> &mut VisualTestContext {
         cx.update(crate::theme::init);
@@ -335,9 +337,13 @@ mod tests {
             store.set_session_replica_for_test(session_id, timeline, cx);
         });
         let (_composer, cx) = cx.add_window_view(|window, cx| {
-            Composer::new_with_layout(store.clone(), true, window, cx)
+            Composer::new_with_layout(store.clone(), compact, window, cx)
         });
-        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.simulate_resize(if compact {
+            size(px(393.), px(852.))
+        } else {
+            size(px(1280.), px(800.))
+        });
         cx.update(|window, cx| _ = window.draw(cx));
         // The first layout finds the list's width; the next frame lays out
         // rows at it.
@@ -350,8 +356,11 @@ mod tests {
 
     #[gpui::test]
     fn a_long_file_change_request_lays_out_only_the_visible_files(cx: &mut TestAppContext) {
-        let cx =
-            phone_composer_with_patch(cx, (0..300).map(|index| format!("src/file-{index}.rs")));
+        let cx = composer_with_patch(
+            cx,
+            true,
+            (0..300).map(|index| format!("src/file-{index}.rs")),
+        );
         let first = cx
             .debug_bounds("approval-change-0")
             .expect("first change row");
@@ -376,8 +385,9 @@ mod tests {
 
     #[gpui::test]
     fn a_short_request_shows_every_wrapped_path(cx: &mut TestAppContext) {
-        let cx = phone_composer_with_patch(
+        let cx = composer_with_patch(
             cx,
+            true,
             (0..2).map(|index| format!("src/{}file-{index}.rs", "deeply/nested/".repeat(6))),
         );
         let detail = cx.debug_bounds("approval-detail").expect("detail box");
@@ -388,6 +398,15 @@ mod tests {
         assert!(
             second.bottom() <= detail.bottom(),
             "a short list grows to show every path"
+        );
+    }
+
+    #[gpui::test]
+    fn a_desktop_request_opens_with_what_it_asks_to_do(cx: &mut TestAppContext) {
+        let cx = composer_with_patch(cx, false, std::iter::once("src/main.rs".to_owned()));
+        assert!(
+            cx.debug_bounds("approval-change-0").is_some(),
+            "the request's detail is shown before anyone clicks its header"
         );
     }
 }
