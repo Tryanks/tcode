@@ -1583,6 +1583,51 @@ mod tests {
     }
 
     #[gpui::test]
+    fn copy_from_the_menu_of_a_right_click_on_the_selection_copies_it(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        cx.update(crate::widgets::menu::init);
+        let (view, cx) = right_click_window(cx);
+        view.update(cx, |root, cx| {
+            root.markdown.update(cx, |md, cx| {
+                md.set_text("```text\nfirst line\nsecond\n```", cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        let line = cx.debug_bounds("markdown-code-line-0").unwrap();
+        let (start, end) = (
+            point(line.left() + px(1.), line.center().y),
+            point(line.right() - px(1.), line.center().y),
+        );
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert_eq!(
+            cx.update(gpui_base::TextSelection::selected_text),
+            "first line"
+        );
+
+        let inside = point(line.left() + px(20.), line.center().y);
+        cx.simulate_mouse_down(inside, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(inside, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        let copy = cx.debug_bounds("menu-item-0").expect("menu opens").center();
+        cx.simulate_click(copy, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("first line")
+        );
+    }
+
+    #[gpui::test]
     fn inline_formula_menu_copies_latex_and_switches_to_source(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
