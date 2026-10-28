@@ -561,23 +561,20 @@ impl MarkdownState {
         BlockNode::Root { children }.selected_text()
     }
 
-    /// The text position under a content point, from the text painted in
-    /// the last frame.
+    /// The text position a selection end at a content point falls on, in
+    /// the block under it, from the text painted in the last frame.
     pub(super) fn text_position_at(&self, content_point: Point<Pixels>) -> Option<TextPosition> {
         let BlockNode::Root { children } = &*self.parsed else {
             return None;
         };
+        let block = self.items.get(self.item_ix_at(content_point.y)?)?.block;
+        let node = children.get(block)?;
         let window_point =
             content_point + self.list_state.scroll_px_offset_for_scrollbar() + self.bounds.origin;
         self.selection_adapter
             .runs_at(window_point)
             .into_iter()
-            .find_map(|(state, offset)| {
-                children
-                    .iter()
-                    .enumerate()
-                    .find_map(|(block, node)| node.position_of(block, &state, offset))
-            })
+            .find_map(|(state, offset)| node.position_of(block, &state, offset))
     }
 
     pub(super) fn item_ix_at(&self, content_y: Pixels) -> Option<usize> {
@@ -703,12 +700,10 @@ mod tests {
 
     impl Render for SelectAllRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().child(TextSelectionLayer).child(
-                div()
-                    .h(px(24.))
-                    .overflow_hidden()
-                    .child(super::super::MarkdownView::new(&self.markdown).selectable(true)),
-            )
+            div()
+                .w(px(400.))
+                .child(TextSelectionLayer)
+                .child(super::super::MarkdownView::new(&self.markdown).selectable(true))
         }
     }
 
@@ -867,5 +862,44 @@ mod tests {
             let copied = cx.update(gpui_base::TextSelection::selected_text);
             assert_eq!(copied, highlighted, "drag to x = {x}");
         }
+    }
+
+    #[gpui::test]
+    fn a_drag_ending_off_the_code_lines_copies_what_it_highlights(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, MouseButton, point};
+
+        cx.update(crate::theme::init);
+        cx.update(super::super::init);
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            SelectAllRoot::new("```text\nalpha beta gamma\nsecond line\n```", cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| _ = window.draw(cx));
+        let first = cx.debug_bounds("markdown-code-line-0").unwrap();
+        let last = cx.debug_bounds("markdown-code-line-1").unwrap();
+        let drag = |start, end, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+            cx.update(|window, cx| _ = window.draw(cx));
+            cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+            cx.update(|window, cx| _ = window.draw(cx));
+            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+            cx.update(|window, cx| _ = window.draw(cx));
+            cx.update(gpui_base::TextSelection::selected_text)
+        };
+
+        // Into the block's padding below its last line, and above its first.
+        let below = point(last.right() - px(4.), last.bottom() + px(4.));
+        let above = point(first.left() + px(4.), first.top() - px(4.));
+        for (from, end) in [(first, below), (last, above)] {
+            for x in (1..120).step_by(7) {
+                let start = point(from.left() + px(x as f32), from.center().y);
+                let copied = drag(start, end, cx);
+                let highlighted =
+                    view.read_with(cx, |root, cx| root.markdown.read(cx).parsed.selected_text());
+                assert_eq!(copied, highlighted, "drag from {start:?} to {end:?}");
+            }
+        }
+        let start = point(first.left() + px(1.), first.center().y);
+        assert_eq!(drag(start, below, cx), "alpha beta gamma\nsecond line");
     }
 }

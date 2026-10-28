@@ -354,33 +354,52 @@ impl MarkdownSelectionAdapter {
             .flatten()
     }
 
-    /// The inline states painted last frame in rows at `window_point`'s
-    /// height, with the character boundary nearest to it in each.
+    /// The inline states painted last frame, with the character boundary in
+    /// each that a selection end at `window_point` falls on: first the runs
+    /// with a row at its height, then, for a point between rows, the runs
+    /// above it from their end and the runs below it from their start.
+    ///
+    /// gpui-base selects every character of a row a selection's band passes,
+    /// so an end between rows, such as in a code block's padding or between
+    /// lines shorter than their row, ends where the row above it ends.
     pub(super) fn runs_at(
         &self,
         window_point: Point<Pixels>,
     ) -> Vec<(Arc<Mutex<InlineState>>, usize)> {
         let frame = self.frame.borrow();
-        let mut runs = frame
-            .runs
-            .iter()
-            .zip(&frame.run_states)
-            .filter(|(run, _)| {
-                let bounds = run.bounds();
-                bounds.top() <= window_point.y && window_point.y < bounds.bottom()
-            })
+        let runs = frame.runs.iter().zip(&frame.run_states);
+        let y = window_point.y;
+        let mut on_row = runs
+            .clone()
+            .filter(|(run, _)| run.bounds().top() <= y && y < run.bounds().bottom())
             .collect::<Vec<_>>();
         // A formula and mixed inline content have several runs on the same
         // row; the endpoint belongs to the closest run, not the first one.
-        runs.sort_by_key(|(run, _)| {
+        on_row.sort_by_key(|(run, _)| {
             let bounds = run.bounds();
             let distance = (bounds.left() - window_point.x)
                 .max(window_point.x - bounds.right())
                 .max(px(0.));
             distance.as_f32().to_bits()
         });
-        runs.into_iter()
+        let mut above = runs
+            .clone()
+            .filter(|(run, _)| run.bounds().bottom() <= y)
+            .collect::<Vec<_>>();
+        above.sort_by_key(|(run, _)| (y - run.bounds().bottom()).as_f32().to_bits());
+        let mut below = runs
+            .filter(|(run, _)| y < run.bounds().top())
+            .collect::<Vec<_>>();
+        below.sort_by_key(|(run, _)| (run.bounds().top() - y).as_f32().to_bits());
+        on_row
+            .into_iter()
             .map(|(run, state)| (state.clone(), nearest_boundary(run, window_point)))
+            .chain(
+                above
+                    .into_iter()
+                    .map(|(run, state)| (state.clone(), run.text().len())),
+            )
+            .chain(below.into_iter().map(|(_, state)| (state.clone(), 0)))
             .collect()
     }
 
