@@ -12,14 +12,30 @@ use gpui::{SharedString, SharedUri};
 
 use super::inline::InlineState;
 
-/// A text offset in a leaf of a root block: its index among the block's text
-/// leaves and, in a code block, the line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct TextPosition {
-    pub(super) block: usize,
-    pub(super) leaf: usize,
-    pub(super) line: usize,
-    pub(super) offset: usize,
+/// A place in a document's text: the segment at render `path` (a paragraph,
+/// heading, table cell or code block), the `line` of a code block, and the
+/// byte `offset` in that segment. Paths number children as the renderer
+/// does, so ordering positions orders them as the document reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct TextPosition {
+    pub(crate) path: Vec<u32>,
+    pub(crate) line: u32,
+    pub(crate) offset: usize,
+}
+
+impl TextPosition {
+    /// Before every segment.
+    pub(crate) fn start() -> Self {
+        Self::default()
+    }
+
+    /// After every segment.
+    pub(crate) fn end() -> Self {
+        Self {
+            path: vec![u32::MAX],
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,282 +132,151 @@ impl BlockNode {
         }
     }
 
-    pub(super) fn selected_text(&self) -> String {
-        // Paint-time ranges are authoritative at the two drag boundaries, but
-        // an intervening leaf may be clipped or virtualized and have no range.
-        // Recover those leaves from the render IR in document order.
-        let mut leaves = Vec::new();
-        self.collect_text_leaves(&mut leaves);
-        let selections = leaves
-            .iter()
-            .map(|leaf| leaf.selected_leaf_text())
-            .collect::<Vec<_>>();
-        let Some(first) = selections.iter().position(|text| !text.is_empty()) else {
-            return String::new();
-        };
-        let last = selections
-            .iter()
-            .rposition(|text| !text.is_empty())
-            .unwrap_or(first);
-
-        (first..=last)
-            .map(|ix| {
-                if ix == first || ix == last {
-                    selections[ix].clone()
-                } else {
-                    leaves[ix].text()
-                }
-            })
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// Every selectable segment in document order, with its render path:
+    /// each paragraph, heading and table cell, and each line of a code block
+    /// (a laid-out display formula is one line).
+    pub(crate) fn for_each_segment(&self, f: &mut SegmentVisitor<'_>) {
+        self.walk_segments(&mut Vec::new(), f);
     }
 
-    /// The position in this block of `state`, painted at `offset`, when it is
-    /// the whole text of a paragraph, heading or code line of the block.
-    pub(super) fn position_of(
-        &self,
-        block: usize,
-        state: &Arc<Mutex<InlineState>>,
-        offset: usize,
-    ) -> Option<TextPosition> {
-        let mut leaves = Vec::new();
-        self.collect_text_leaves(&mut leaves);
-        leaves.iter().enumerate().find_map(|(leaf, node)| {
-            let (line, offset) = match node {
-                Self::Paragraph(paragraph)
-                | Self::Heading {
-                    children: paragraph,
-                    ..
-                } => (0, paragraph.offset_of(state, offset)?),
-                Self::CodeBlock(code) => {
-                    if let Some(offset) = code.formula.offset_of(state, offset) {
-                        (0, offset)
-                    } else {
-                        (
-                            code.line_states
-                                .lock()
-                                .ok()?
-                                .iter()
-                                .position(|line| Arc::ptr_eq(line, state))?,
-                            offset,
-                        )
+    fn walk_segments(&self, path: &mut Vec<u32>, f: &mut SegmentVisitor<'_>) {
+        match self {
+            Self::Root { children }
+            | Self::Blockquote { children }
+            | Self::List { children, .. }
+            | Self::ListItem { children, .. } => {
+                for (ix, child) in children.iter().enumerate() {
+                    path.push(ix as u32);
+                    child.walk_segments(path, f);
+                    path.pop();
+                }
+            }
+            Self::Paragraph(paragraph) => f(path, 0, &paragraph.text(), SegmentKind::Prose),
+            Self::Heading { children, .. } => f(path, 0, &children.text(), SegmentKind::Prose),
+            Self::CodeBlock(code) => match code.formula.text() {
+                Some(formula) => f(path, 0, &formula, SegmentKind::Code),
+                None => {
+                    let prepared = code.prepared();
+                    for ix in 0..prepared.lines.len() {
+                        f(path, ix as u32, prepared.line(ix), SegmentKind::Code);
                     }
                 }
-                _ => return None,
-            };
-            Some(TextPosition {
-                block,
-                leaf,
+            },
+            Self::Table(table) => {
+                for (row_ix, row) in table.children.iter().enumerate() {
+                    for (ix, cell) in row.children.iter().enumerate() {
+                        path.extend([row_ix as u32, ix as u32]);
+                        f(path, 0, &cell.children.text(), SegmentKind::Cell);
+                        path.truncate(path.len() - 2);
+                    }
+                }
+            }
+            Self::HorizontalRule | Self::Unknown => {}
+        }
+    }
+
+    /// The text of the segment at `path` and `line`.
+    pub(crate) fn segment_text(&self, path: &[u32], line: u32) -> Option<String> {
+        let mut found = None;
+        self.for_each_segment(&mut |at, at_line, text, _| {
+            if found.is_none() && at == path && at_line == line {
+                found = Some(text.to_string());
+            }
+        });
+        found
+    }
+
+    /// The positions before the first character of this document and after
+    /// its last.
+    pub(crate) fn extent(&self) -> Option<(TextPosition, TextPosition)> {
+        let mut extent: Option<(TextPosition, TextPosition)> = None;
+        self.for_each_segment(&mut |path, line, text, _| {
+            let start = TextPosition {
+                path: path.to_vec(),
                 line,
-                offset,
-            })
-        })
-    }
-
-    /// A copy of this block with fresh selection state holding exactly the
-    /// text from `start` to `end`; a missing end is the block's own. The
-    /// copy's text does not depend on which of its leaves were painted.
-    pub(super) fn selected_between(
-        &self,
-        start: Option<TextPosition>,
-        end: Option<TextPosition>,
-    ) -> BlockNode {
-        let detached = self.detached();
-        let mut leaves = Vec::new();
-        detached.collect_text_leaves(&mut leaves);
-        for (ix, leaf) in leaves.into_iter().enumerate() {
-            if start.is_some_and(|start| ix < start.leaf) || end.is_some_and(|end| ix > end.leaf) {
-                continue;
-            }
-            let at = |position: Option<TextPosition>| {
-                position
-                    .filter(|position| position.leaf == ix)
-                    .map(|position| (position.line, position.offset))
+                offset: 0,
             };
-            leaf.select_leaf(at(start), at(end));
-        }
-        detached
-    }
-
-    fn detached(&self) -> BlockNode {
-        let children = |children: &[BlockNode]| children.iter().map(Self::detached).collect();
-        match self {
-            Self::Root { children: nodes } => Self::Root {
-                children: children(nodes),
-            },
-            Self::Blockquote { children: nodes } => Self::Blockquote {
-                children: children(nodes),
-            },
-            Self::List {
-                children: nodes,
-                ordered,
-                start,
-            } => Self::List {
-                children: children(nodes),
-                ordered: *ordered,
-                start: *start,
-            },
-            Self::ListItem {
-                children: nodes,
-                spread,
-                checked,
-            } => Self::ListItem {
-                children: children(nodes),
-                spread: *spread,
-                checked: *checked,
-            },
-            Self::Paragraph(paragraph) => Self::Paragraph(paragraph.detached()),
-            Self::Heading { level, children } => Self::Heading {
-                level: *level,
-                children: children.detached(),
-            },
-            Self::CodeBlock(code) => Self::CodeBlock(CodeBlock {
-                code: code
-                    .formula
-                    .text()
-                    .map(Into::into)
-                    .unwrap_or_else(|| code.code.clone()),
-                formula: Default::default(),
-                prepared: Default::default(),
-                lang: code.lang.clone(),
-                line_states: Arc::new(Mutex::new(
-                    code.formula
-                        .text()
-                        .unwrap_or_else(|| rendered_code_text(&code.code))
-                        .split('\n')
-                        .map(|line| InlineState::shared(line.to_string().into()))
-                        .collect(),
-                )),
-            }),
-            Self::Table(table) => Self::Table(Table {
-                children: table
-                    .children
-                    .iter()
-                    .map(|row| TableRow {
-                        children: row
-                            .children
-                            .iter()
-                            .map(|cell| TableCell {
-                                children: cell.children.detached(),
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-                column_aligns: table.column_aligns.clone(),
-            }),
-            Self::HorizontalRule => Self::HorizontalRule,
-            Self::Unknown => Self::Unknown,
-        }
-    }
-
-    /// Select a detached leaf from `(line, offset)` `from` to `to`, or from
-    /// its start or to its end when they are missing.
-    fn select_leaf(&self, from: Option<(usize, usize)>, to: Option<(usize, usize)>) {
-        match self {
-            Self::Paragraph(paragraph)
-            | Self::Heading {
-                children: paragraph,
-                ..
-            } => {
-                select_inline(&paragraph.state, from.map(|from| from.1), to.map(|to| to.1));
+            let end = TextPosition {
+                offset: text.len(),
+                ..start.clone()
+            };
+            match &mut extent {
+                Some((_, last)) => *last = end,
+                None => extent = Some((start, end)),
             }
-            Self::CodeBlock(code) => {
-                let Ok(states) = code.line_states.lock() else {
-                    return;
-                };
-                let (first, last) = (
-                    from.map_or(0, |from| from.0),
-                    to.map_or(states.len(), |to| to.0),
-                );
-                for (ix, state) in states.iter().enumerate() {
-                    if (first..=last).contains(&ix) {
-                        select_inline(
-                            state,
-                            from.filter(|from| from.0 == ix).map(|from| from.1),
-                            to.filter(|to| to.0 == ix).map(|to| to.1),
-                        );
-                    }
+        });
+        extent
+    }
+
+    /// The text from `start` to `end` as a reader would paste it: segments
+    /// on their own lines, the cells of a table row separated by tabs. A
+    /// segment the range only touches at an edge adds nothing.
+    pub(crate) fn text_between(&self, start: &TextPosition, end: &TextPosition) -> String {
+        struct Piece {
+            text: String,
+            row: Option<Vec<u32>>,
+        }
+        let mut pieces: Vec<Piece> = Vec::new();
+        self.for_each_segment(&mut |path, line, text, kind| {
+            let first = TextPosition {
+                path: path.to_vec(),
+                line,
+                offset: 0,
+            };
+            let last = TextPosition {
+                offset: text.len(),
+                ..first.clone()
+            };
+            if *end <= first || *start >= last {
+                return;
+            }
+            let at = |position: &TextPosition, default: usize| {
+                if position.path == path && position.line == line {
+                    floor_char_boundary(text, position.offset)
+                } else {
+                    default
                 }
+            };
+            let (from, to) = (at(start, 0), at(end, text.len()));
+            let piece = text.get(from..to.max(from)).unwrap_or_default();
+            if piece.is_empty() && kind == SegmentKind::Prose {
+                return;
             }
-            Self::Table(table) => {
-                for cell in table.children.iter().flat_map(|row| &row.children) {
-                    select_inline(&cell.children.state, None, None);
-                }
+            pieces.push(Piece {
+                text: piece.to_string(),
+                row: (kind == SegmentKind::Cell).then(|| path[..path.len() - 1].to_vec()),
+            });
+        });
+        let mut text = String::new();
+        for (ix, piece) in pieces.iter().enumerate() {
+            if ix > 0 {
+                let same_row = piece.row.is_some() && piece.row == pieces[ix - 1].row;
+                text.push(if same_row { '\t' } else { '\n' });
             }
-            _ => {}
+            text.push_str(&piece.text);
         }
+        text
     }
+}
 
-    fn collect_text_leaves<'a>(&'a self, leaves: &mut Vec<&'a BlockNode>) {
-        match self {
-            Self::Root { children, .. }
-            | Self::Blockquote { children, .. }
-            | Self::List { children, .. }
-            | Self::ListItem { children, .. } => {
-                for child in children {
-                    child.collect_text_leaves(leaves);
-                }
-            }
-            Self::Paragraph(_) | Self::Heading { .. } | Self::CodeBlock(_) | Self::Table(_) => {
-                leaves.push(self)
-            }
-            Self::HorizontalRule | Self::Unknown => {}
-        }
-    }
+/// Called with each segment's render path, line, text and kind.
+pub(crate) type SegmentVisitor<'a> = dyn FnMut(&[u32], u32, &str, SegmentKind) + 'a;
 
-    fn selected_leaf_text(&self) -> String {
-        match self {
-            Self::Paragraph(paragraph) => paragraph.selected_text(),
-            Self::Heading { children, .. } => children.selected_text(),
-            Self::CodeBlock(code) => code.selected_text(),
-            Self::Table(table) => table
-                .children
-                .iter()
-                .filter_map(|row| {
-                    let text = row
-                        .children
-                        .iter()
-                        .filter_map(|cell| {
-                            let text = cell.children.selected_text();
-                            (!text.is_empty()).then_some(text)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    (!text.is_empty()).then_some(text)
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Self::Root { .. }
-            | Self::Blockquote { .. }
-            | Self::List { .. }
-            | Self::ListItem { .. }
-            | Self::HorizontalRule
-            | Self::Unknown => String::new(),
-        }
-    }
+/// What kind of text a segment is, which decides how a copy joins it to its
+/// neighbours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SegmentKind {
+    Prose,
+    Code,
+    Cell,
+}
 
-    pub(super) fn clear_selection(&self) {
-        match self {
-            Self::Root { children, .. }
-            | Self::Blockquote { children, .. }
-            | Self::List { children, .. }
-            | Self::ListItem { children, .. } => {
-                children.iter().for_each(Self::clear_selection);
-            }
-            Self::Paragraph(paragraph) => paragraph.clear_selection(),
-            Self::Heading { children, .. } => children.clear_selection(),
-            Self::CodeBlock(code) => code.clear_selection(),
-            Self::Table(table) => {
-                for row in &table.children {
-                    for cell in &row.children {
-                        cell.children.clear_selection();
-                    }
-                }
-            }
-            Self::HorizontalRule | Self::Unknown => {}
-        }
+fn floor_char_boundary(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
     }
+    offset
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -491,7 +376,7 @@ impl PartialEq for InlineNode {
 }
 
 impl InlineNode {
-    fn rendered_text(&self) -> String {
+    pub(super) fn rendered_text(&self) -> String {
         self.math
             .as_ref()
             .and_then(|math| math.selection.text())
@@ -534,76 +419,11 @@ impl PartialEq for Paragraph {
 }
 
 impl Paragraph {
-    fn offset_of(&self, state: &Arc<Mutex<InlineState>>, offset: usize) -> Option<usize> {
-        if Arc::ptr_eq(&self.state, state) {
-            return Some(offset);
-        }
-        let mut start = 0;
-        for child in &self.children {
-            if let Some(offset) = child
-                .math
-                .as_ref()
-                .and_then(|math| math.selection.offset_of(state, offset))
-            {
-                return Some(start + offset);
-            }
-            if Arc::ptr_eq(&child.state, state) {
-                return Some(start + offset);
-            }
-            start += child.rendered_text().len();
-        }
-        None
-    }
-
-    /// A copy with fresh selection state, the whole text in `state`.
-    fn detached(&self) -> Self {
-        Self {
-            children: self
-                .children
-                .iter()
-                .map(|child| InlineNode {
-                    text: child.rendered_text().into(),
-                    state: InlineState::shared(child.rendered_text().into()),
-                    math: None,
-                    ..child.clone()
-                })
-                .collect(),
-            state: InlineState::shared(self.text().into()),
-        }
-    }
-
     pub(crate) fn text(&self) -> String {
         self.children
             .iter()
             .map(|node| node.rendered_text())
             .collect()
-    }
-
-    pub(super) fn selected_text(&self) -> String {
-        let mut text = String::new();
-        for child in &self.children {
-            if let Some(selected) = child
-                .math
-                .as_ref()
-                .and_then(|math| math.selection.selected_text())
-            {
-                text.push_str(&selected);
-            } else {
-                append_selection(&mut text, &child.state);
-            }
-        }
-        append_selection(&mut text, &self.state);
-        text
-    }
-
-    pub(super) fn clear_selection(&self) {
-        for child in &self.children {
-            if let Some(math) = &child.math {
-                math.selection.clear();
-            }
-            clear_inline_selection(&child.state);
-        }
-        clear_inline_selection(&self.state);
     }
 }
 
@@ -690,46 +510,6 @@ impl CodeBlock {
         }
         states[span].to_vec()
     }
-
-    fn selected_text(&self) -> String {
-        if let Some(text) = self.formula.selected_text() {
-            return text;
-        }
-        let Ok(states) = self.line_states.lock() else {
-            return String::new();
-        };
-        let (Some(first), Some(last)) = (
-            states
-                .iter()
-                .position(|state| selected_inline_text(state).is_some()),
-            states
-                .iter()
-                .rposition(|state| selected_inline_text(state).is_some()),
-        ) else {
-            return String::new();
-        };
-        // A selection is contiguous, so the lines between its ends are whole,
-        // including lines that were not painted while it grew.
-        (first..=last)
-            .map(|ix| {
-                if ix == first || ix == last {
-                    selected_inline_text(&states[ix]).unwrap_or_default()
-                } else {
-                    states[ix]
-                        .lock()
-                        .map_or_else(|_| String::new(), |state| state.text.to_string())
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn clear_selection(&self) {
-        self.formula.clear();
-        if let Ok(states) = self.line_states.lock() {
-            states.iter().for_each(clear_inline_selection);
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -762,36 +542,6 @@ pub(crate) struct TableCell {
     pub(crate) children: Paragraph,
 }
 
-fn selected_inline_text(state: &Arc<Mutex<InlineState>>) -> Option<String> {
-    let state = state.lock().ok()?;
-    let selection = state.selection.as_ref()?;
-    state
-        .text
-        .get(selection.clone())
-        .filter(|text| !text.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn append_selection(text: &mut String, state: &Arc<Mutex<InlineState>>) {
-    if let Some(selected) = selected_inline_text(state) {
-        text.push_str(&selected);
-    }
-}
-
-fn clear_inline_selection(state: &Arc<Mutex<InlineState>>) {
-    if let Ok(mut state) = state.lock() {
-        state.selection = None;
-    }
-}
-
-fn select_inline(state: &Arc<Mutex<InlineState>>, from: Option<usize>, to: Option<usize>) {
-    if let Ok(mut state) = state.lock() {
-        let len = state.text.len();
-        let from = from.unwrap_or(0).min(len);
-        state.selection = Some(from..to.unwrap_or(len).clamp(from, len));
-    }
-}
-
 fn rendered_code_text(code: &str) -> String {
     let mut text = code.replace("\r\n", "\n");
     if text.ends_with('\n') {
@@ -804,68 +554,57 @@ fn rendered_code_text(code: &str) -> String {
 mod tests {
     use super::*;
 
-    fn select(state: &Arc<Mutex<InlineState>>, range: Range<usize>) {
-        state.lock().unwrap().selection = Some(range);
-    }
-
-    fn select_paragraph(paragraph: &Paragraph, range: Range<usize>) {
-        let mut state = paragraph.state.lock().unwrap();
-        state.set_text(paragraph.text().into());
-        state.selection = Some(range);
-    }
-
-    #[test]
-    fn extraction_includes_unpainted_blocks_between_selected_boundaries() {
-        let document = super::super::parse(
-            "intro text\n\n```text\nfirst code line\nsecond code line\n```\n\n| name | value |\n| --- | --- |\n| alpha | beta |",
-        );
-        let mut leaves = Vec::new();
-        document.collect_text_leaves(&mut leaves);
-
-        let BlockNode::Paragraph(paragraph) = leaves[0] else {
-            panic!("expected paragraph");
-        };
-        select_paragraph(paragraph, 0..paragraph.text().len());
-        assert_eq!(paragraph.selected_text(), "intro text");
-
-        let BlockNode::Table(table) = leaves[2] else {
-            panic!("expected table");
-        };
-        for row in &table.children {
-            for cell in &row.children {
-                select_paragraph(&cell.children, 0..cell.children.text().len());
-            }
+    fn at(path: &[u32], line: u32, offset: usize) -> TextPosition {
+        TextPosition {
+            path: path.to_vec(),
+            line,
+            offset,
         }
+    }
 
+    const DOCUMENT: &str = "intro text\n\n```text\nfirst code line\nsecond code line\n```\n\n\
+                            | name | value |\n| --- | --- |\n| alpha | beta |\n\n- one\n- two";
+
+    #[test]
+    fn a_copy_reads_segments_in_document_order_from_the_middle_of_one_to_another() {
+        let document = super::super::parse(DOCUMENT);
         assert_eq!(
-            document.selected_text(),
-            "intro text\nfirst code line\nsecond code line\nname value\nalpha beta"
+            document.text_between(&at(&[1], 0, 6), &at(&[1], 1, 6)),
+            "code line\nsecond"
+        );
+        assert_eq!(
+            document.text_between(&TextPosition::start(), &TextPosition::end()),
+            "intro text\nfirst code line\nsecond code line\nname\tvalue\nalpha\tbeta\none\ntwo"
+        );
+        assert_eq!(
+            document.text_between(&at(&[3, 0, 0], 0, 1), &TextPosition::end()),
+            "ne\ntwo"
         );
     }
 
     #[test]
-    fn extraction_preserves_partial_code_and_table_boundaries() {
-        let document = super::super::parse(
-            "intro text\n\n```text\nfirst code line\nsecond code line\n```\n\n| name | value |\n| --- | --- |\n| alpha | beta |",
+    fn a_table_is_read_cell_by_cell_along_each_row() {
+        let document = super::super::parse(DOCUMENT);
+        assert_eq!(
+            document.text_between(&at(&[2, 0, 0], 0, 2), &at(&[2, 1, 0], 0, 3)),
+            "me\tvalue\nalp"
         );
-        let mut leaves = Vec::new();
-        document.collect_text_leaves(&mut leaves);
+        assert_eq!(
+            document.text_between(&at(&[2, 0, 1], 0, 0), &at(&[2, 0, 1], 0, 3)),
+            "val"
+        );
+    }
 
-        let BlockNode::CodeBlock(code) = leaves[1] else {
-            panic!("expected code block");
-        };
-        let states = code.states_for_lines(code.prepared(), 0..2);
-        select(&states[0], 6..10);
-        select(&states[1], 0..6);
-
-        let BlockNode::Table(table) = leaves[2] else {
-            panic!("expected table");
-        };
-        let first_cell = &table.children[0].children[0].children;
-        let second_cell = &table.children[0].children[1].children;
-        select_paragraph(first_cell, 1..4);
-        select_paragraph(second_cell, 0..3);
-
-        assert_eq!(document.selected_text(), "code\nsecond\name val");
+    #[test]
+    fn a_range_touching_a_segment_only_at_its_edge_adds_nothing_of_it() {
+        let document = super::super::parse(DOCUMENT);
+        assert_eq!(
+            document.text_between(&at(&[1], 0, 15), &at(&[1], 1, 6)),
+            "second"
+        );
+        assert_eq!(
+            document.text_between(&at(&[1], 0, 6), &at(&[1], 1, 0)),
+            "code line"
+        );
     }
 }

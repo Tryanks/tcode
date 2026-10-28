@@ -16,6 +16,7 @@ pub(crate) mod model;
 pub(crate) use model::format_duration;
 mod residency;
 
+use crate::markdown::{SelectionArea, SelectionDocument};
 use crate::overlay::OverlayExt as _;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
@@ -450,6 +451,13 @@ pub struct ChatView {
     rows: Vec<TimelineRow>,
     turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
+    /// The transcript's one text selection, across its messages; each
+    /// message is the entry at its index in the timeline. It goes when the
+    /// focus leaves the whole view.
+    selection: Entity<SelectionDocument>,
+    /// Holds the focus of everything the view draws, the composer included,
+    /// so the selection knows when the focus has left it.
+    focus_handle: gpui::FocusHandle,
     pending_md_builds: HashMap<String, PendingMarkdownBuild>,
     next_md_build_generation: u64,
     markdown_visible_rows: Range<usize>,
@@ -707,27 +715,31 @@ impl ChatView {
             });
         });
 
-        let subscriptions =
-            vec![
-                cx.observe_in(&workspace_store, window, |this, store, window, cx| {
-                    this.timeline_stale = true;
-                    // Desktop can type immediately after opening the terminal.
-                    // On software-keyboard devices this also runs during restore,
-                    // so wait for a tap on the grid before raising the keyboard.
-                    let open = store.read(cx).panel_state().terminal_open;
-                    if open && !this.terminal_was_open {
-                        let drawer = this.terminal_drawer.clone();
-                        window.defer(cx, move |window, cx| {
-                            if !crate::window_seam::is_mobile(cx) {
-                                gpui::Focusable::focus_handle(drawer.read(cx), cx)
-                                    .focus(window, cx);
-                            }
-                        });
-                    }
-                    this.terminal_was_open = open;
-                    cx.notify();
-                }),
-            ];
+        let selection = transcript_selection(cx.entity().downgrade(), cx);
+        let focus_handle = cx.focus_handle();
+        let subscriptions = vec![
+            cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
+                this.selection
+                    .update(cx, |selection, cx| selection.clear(cx));
+            }),
+            cx.observe_in(&workspace_store, window, |this, store, window, cx| {
+                this.timeline_stale = true;
+                // Desktop can type immediately after opening the terminal.
+                // On software-keyboard devices this also runs during restore,
+                // so wait for a tap on the grid before raising the keyboard.
+                let open = store.read(cx).panel_state().terminal_open;
+                if open && !this.terminal_was_open {
+                    let drawer = this.terminal_drawer.clone();
+                    window.defer(cx, move |window, cx| {
+                        if !crate::window_seam::is_mobile(cx) {
+                            gpui::Focusable::focus_handle(drawer.read(cx), cx).focus(window, cx);
+                        }
+                    });
+                }
+                this.terminal_was_open = open;
+                cx.notify();
+            }),
+        ];
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
         let pull_requests = cx.new(|cx| {
             crate::pull_requests::PullRequestsPanel::new(
@@ -757,6 +769,8 @@ impl ChatView {
             rows: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
             md_states: HashMap::new(),
+            selection,
+            focus_handle,
             pending_md_builds: HashMap::new(),
             next_md_build_generation: 0,
             markdown_visible_rows: 0..0,
@@ -842,6 +856,8 @@ impl ChatView {
             .and_then(|session_id| self.workspace_store.read(cx).pending_chat_turn(session_id));
         if session_changed {
             self.md_states.clear();
+            self.selection
+                .update(cx, |selection, cx| selection.clear(cx));
             self.pending_md_builds.clear();
             self.command_panels.borrow_mut().clear();
             self.inline_diffs.clear();
@@ -1014,22 +1030,6 @@ impl ChatView {
     ) {
         let running = self.workspace_store.read(cx).composer_state().turn_running;
         let row_count = self.rows.len();
-        // Auto-scroll can move many rows during a drag. Do not retire any
-        // participant until mouse-up; completed-selection participants remain
-        // pinned individually below so copy keeps its full projection.
-        let mut selection_drag_active = false;
-        let mut selection_participants = HashSet::new();
-        for (id, md) in &self.md_states {
-            let state = md.state.read(cx);
-            let selection = state.selection_handle();
-            let snapshot = selection.snapshot(cx);
-            selection_drag_active |= snapshot
-                .as_ref()
-                .is_some_and(|selection| selection.is_selecting());
-            if snapshot.is_some() || selection.has_local_selection(cx) {
-                selection_participants.insert(id.clone());
-            }
-        }
         let resident_ids = self.md_states.keys().cloned().collect();
         let (texts, decisions) = self
             .workspace_store
@@ -1049,8 +1049,6 @@ impl ChatView {
                     entries: &entries,
                     stream_running: running,
                     resident_ids: &resident_ids,
-                    selection_participants: &selection_participants,
-                    selection_drag_active,
                 });
                 let mut texts = Vec::new();
                 for (index, entry) in timeline.entries.iter().enumerate() {
@@ -1058,20 +1056,8 @@ impl ChatView {
                         continue;
                     }
                     let row = row_of_entry(&self.rows, index, entry.turn);
-                    match &entry.content {
-                        EntryContent::Item(ItemContent::AssistantMessage { text }) => {
-                            texts.push((row, entry.id.clone(), text.clone()));
-                        }
-                        content => {
-                            let Some((text, _, context_len, _)) = user_content(content) else {
-                                continue;
-                            };
-                            texts.push((
-                                row,
-                                entry.id.clone(),
-                                plain_text_as_markdown(user_visible_text(text, context_len)),
-                            ));
-                        }
+                    if let Some(text) = entry_markdown(entry) {
+                        texts.push((row, entry.id.clone(), text));
                     }
                 }
                 (texts, decisions)
@@ -1101,6 +1087,7 @@ impl ChatView {
                 }
             }
         }
+        self.place_messages_in_selection(cx);
         let mut rebuilt_rows = rebuilt_rows
             .into_iter()
             .filter(|row| *row < self.rows.len())
@@ -1122,6 +1109,31 @@ impl ChatView {
             }
         }
         self.remeasure_markdown_rows(range);
+    }
+
+    /// Make each resident message the selection entry at its index in the
+    /// timeline.
+    fn place_messages_in_selection(&self, cx: &mut Context<Self>) {
+        let places = self
+            .workspace_store
+            .read(cx)
+            .with_active_timeline(|timeline| {
+                timeline
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        let md = self.md_states.get(&entry.id)?;
+                        Some((md.state.clone(), index as u64))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (state, entry) in places {
+            state.update(cx, |state, cx| {
+                state.set_selection_entry(&self.selection, entry, cx)
+            });
+        }
     }
 
     fn markdown_row(&self, id: &str, cx: &App) -> Option<usize> {
@@ -1192,6 +1204,7 @@ impl ChatView {
         }
         let row = self.markdown_row(&id, cx);
         self.md_states.insert(id, state);
+        self.place_messages_in_selection(cx);
         if let Some(row) = row.filter(|row| *row < self.rows.len()) {
             self.remeasure_markdown_rows(row..row + 1);
         }
@@ -3584,6 +3597,58 @@ fn floating_backing(radius: gpui::Pixels, cx: &App) -> gpui::Div {
         .shadow_md()
 }
 
+/// The Markdown a message renders: an assistant message's text, or a user
+/// message's visible text.
+fn entry_markdown(entry: &TimelineEntry) -> Option<String> {
+    match &entry.content {
+        EntryContent::Item(ItemContent::AssistantMessage { text }) => Some(text.clone()),
+        content => {
+            let (text, _, context_len, _) = user_content(content)?;
+            Some(plain_text_as_markdown(user_visible_text(text, context_len)))
+        }
+    }
+}
+
+/// The transcript's selection document: its entries are the messages at
+/// their timeline indices, read from their resident Markdown when they have
+/// one and parsed from the timeline when they are not resident.
+fn transcript_selection(
+    chat: gpui::WeakEntity<ChatView>,
+    cx: &mut App,
+) -> Entity<SelectionDocument> {
+    cx.new(|_| {
+        SelectionDocument::new(Rc::new(move |range, cx| {
+            let Some(chat) = chat.upgrade() else {
+                return Vec::new();
+            };
+            let chat = chat.read(cx);
+            chat.workspace_store
+                .read(cx)
+                .with_active_timeline(|timeline| {
+                    let (start, end) = (*range.start() as usize, *range.end() as usize);
+                    timeline
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .skip(start)
+                        .take(end.saturating_sub(start) + 1)
+                        .filter_map(|(index, entry)| {
+                            let root = match chat.md_states.get(&entry.id) {
+                                Some(md) => md.state.read(cx).parsed_root(),
+                                None => Rc::new(
+                                    crate::markdown::parse::parse_document(&entry_markdown(entry)?)
+                                        .root,
+                                ),
+                            };
+                            Some((index as u64, root))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }))
+    })
+}
+
 fn markdown_entries_for_residency(
     timeline: &Timeline,
     rows: &[TimelineRow],
@@ -3747,6 +3812,7 @@ impl Render for ChatView {
         let root = v_flex()
             .size_full()
             .min_w_0()
+            .track_focus(&self.focus_handle)
             .bg(if compact {
                 crate::material::content_surface(cx)
             } else {
@@ -3982,7 +4048,11 @@ impl Render for ChatView {
                 .child(crate::scroll::page_viewport(
                     "timeline-bounce",
                     &self.list_state,
-                    timeline,
+                    SelectionArea::new(&self.selection, timeline)
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0(),
                 ))
                 .when(!window.is_inspector_picking(cx), |timeline| {
                     timeline.child(Scrollbar::vertical(&self.list_state).id("timeline-scrollbar"))

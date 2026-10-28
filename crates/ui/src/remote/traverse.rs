@@ -500,10 +500,10 @@ fn status_chip(
     } else {
         IconName::ChevronDown
     }))
-    .on_click(cx.listener(move |this, _, window, cx| {
+    .on_click(cx.listener(move |this, _, _, cx| {
         // The official source's row is its switch; expanding the status
         // must not also flip it.
-        crate::widgets::stop_click_propagation(window, cx);
+        cx.stop_propagation();
         this.toggle_detail(index, cx);
     }))
     .into_any_element()

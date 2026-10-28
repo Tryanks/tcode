@@ -268,7 +268,7 @@ impl Popover {
             .on_click({
                 let toggle = toggle.clone();
                 move |_, window, cx| {
-                    crate::widgets::stop_click_propagation(window, cx);
+                    cx.stop_propagation();
                     toggle(window, cx)
                 }
             })

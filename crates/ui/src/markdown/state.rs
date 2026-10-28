@@ -4,7 +4,7 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
-    ops::{Range, RangeInclusive},
+    ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -21,7 +21,7 @@ use super::{
     link_target::{LinkTarget, LinkTargetCache},
     nodes::{BlockNode, TextPosition},
     render::{self, RootItem},
-    selection_adapter::MarkdownSelectionAdapter,
+    selection::{Membership, RunOrigin, SelectionDocument},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,7 +66,6 @@ pub struct ImageResolver {
 pub struct MarkdownState {
     pub(super) focus_handle: FocusHandle,
     pub(super) bounds: Bounds<Pixels>,
-    pub(super) selectable: bool,
     pub(super) compact_headings: bool,
     pub(super) base_dir: Option<PathBuf>,
     pub(super) image_resolver: Option<ImageResolver>,
@@ -78,7 +77,6 @@ pub struct MarkdownState {
     /// Window position of the last left mouse-down that landed on a link;
     /// a mouse-up nearby is a click, anything farther is a drag-selection.
     pub(super) link_press_origin: Option<Point<Pixels>>,
-    pub(super) is_selecting: bool,
     text: String,
     parsed: Rc<BlockNode>,
     items: Rc<[RootItem]>,
@@ -87,8 +85,16 @@ pub struct MarkdownState {
     pub(super) list_state: ListState,
     item_heights: Rc<RefCell<render::ItemHeights>>,
     image_sizes: HashMap<String, Size<Pixels>>,
-    selection_revision: usize,
-    pub(super) selection_adapter: MarkdownSelectionAdapter,
+    layout_revision: usize,
+    /// The document this view's text is selected in, when it is selectable.
+    pub(super) selection: Option<Membership>,
+    /// Whether `selection` is the view's own document rather than one an
+    /// owner placed it in.
+    owns_selection: bool,
+    /// Clears the view's own selection when the focus leaves the view.
+    own_selection_focus_out: Option<gpui::Subscription>,
+    /// The runs of text painted last frame, which selection ends hit-test.
+    pub(super) runs: Rc<RefCell<Vec<PaintedRun>>>,
     #[cfg(test)]
     last_reparse_bytes: usize,
 }
@@ -111,11 +117,9 @@ impl MarkdownState {
             .detach();
         let parsed = parsed_document.root;
         let items = root_items(&parsed);
-        let selection_adapter = MarkdownSelectionAdapter::new(cx.entity().downgrade(), cx);
         Self {
             focus_handle: cx.focus_handle(),
             bounds: Bounds::default(),
-            selectable: false,
             compact_headings: false,
             base_dir: None,
             image_resolver: None,
@@ -124,7 +128,6 @@ impl MarkdownState {
             copied: CopiedMark::default(),
             math_sources: Default::default(),
             link_press_origin: None,
-            is_selecting: false,
             text: text.to_string(),
             parsed: Rc::new(parsed),
             root_block_starts: parsed_document.root_starts,
@@ -137,8 +140,11 @@ impl MarkdownState {
             item_heights: Rc::new(RefCell::new(render::ItemHeights::new(items.len()))),
             items,
             image_sizes: HashMap::new(),
-            selection_revision: 0,
-            selection_adapter,
+            layout_revision: 0,
+            selection: None,
+            owns_selection: false,
+            own_selection_focus_out: None,
+            runs: Rc::default(),
             #[cfg(test)]
             last_reparse_bytes: text.len(),
         }
@@ -174,24 +180,75 @@ impl MarkdownState {
         with_trailing_newline(self.parsed.text())
     }
 
-    /// The native window-selection participant owned by this renderer.
-    pub fn selection_handle(&self) -> &gpui_base::TextSelectionHandle {
-        &self.selection_adapter.selection
-    }
-
-    /// Enable or disable selection for this state.
+    /// Enable or disable selection of this view's text in a document of
+    /// its own.
     pub fn set_selectable(&mut self, selectable: bool, cx: &mut Context<Self>) {
-        if self.selectable == selectable {
+        // A view an owner placed in its document stays there.
+        if selectable == self.selection.is_some() {
             return;
         }
-        self.selectable = selectable;
-        if !selectable {
-            self.reset_selection_projection();
-            self.selection_adapter
-                .selection
-                .set_local_selection(false, cx);
-        }
+        self.selection = selectable.then(|| Membership {
+            document: super::selection::own_document(cx.entity().downgrade(), cx),
+            entry: 0,
+        });
+        self.owns_selection = selectable;
+        self.own_selection_focus_out = None;
         cx.notify();
+    }
+
+    /// Clear the view's own selection when the focus leaves the view, as a
+    /// transcript clears its selection when the focus leaves it.
+    pub(super) fn clear_own_selection_on_focus_out(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        if self.own_selection_focus_out.is_some() {
+            return;
+        }
+        let Some(document) = self.own_document() else {
+            return;
+        };
+        self.own_selection_focus_out = Some(window.on_focus_out(
+            &self.focus_handle,
+            cx,
+            move |_, _, cx| document.update(cx, |document, cx| document.clear(cx)),
+        ));
+    }
+
+    /// Make this view's text entry `entry` of `document`'s selection.
+    pub fn set_selection_entry(
+        &mut self,
+        document: &gpui::Entity<SelectionDocument>,
+        entry: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .selection
+            .as_ref()
+            .is_some_and(|m| m.document == *document && m.entry == entry)
+        {
+            return;
+        }
+        self.selection = Some(Membership {
+            document: document.clone(),
+            entry,
+        });
+        self.owns_selection = false;
+        self.own_selection_focus_out = None;
+        cx.notify();
+    }
+
+    /// The selection document this view wraps itself in, when it selects on
+    /// its own.
+    pub(super) fn own_document(&self) -> Option<gpui::Entity<SelectionDocument>> {
+        self.owns_selection
+            .then(|| self.selection.as_ref().map(|m| m.document.clone()))
+            .flatten()
+    }
+
+    pub(crate) fn parsed_root(&self) -> Rc<BlockNode> {
+        self.parsed.clone()
     }
 
     /// Scale headings for a chat message instead of a document. Document scale
@@ -288,7 +345,7 @@ impl MarkdownState {
     }
 
     pub(super) fn image_layout(&self, path: &str) -> (usize, Option<Size<Pixels>>) {
-        (self.selection_revision, self.image_sizes.get(path).copied())
+        (self.layout_revision, self.image_sizes.get(path).copied())
     }
 
     pub(super) fn image_resized(
@@ -298,7 +355,7 @@ impl MarkdownState {
         size: Size<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if revision != self.selection_revision {
+        if revision != self.layout_revision {
             return;
         }
         let items = self.items_of(&path);
@@ -314,8 +371,15 @@ impl MarkdownState {
     }
 
     pub(super) fn set_math_source(&mut self, path: &str, source: bool, cx: &mut Context<Self>) {
-        self.prepare_reparse(cx);
-        self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.prepare_reparse();
+        // The formula's text becomes its source or its glyphs, so a
+        // selection's offsets in it would land elsewhere.
+        if let Some(membership) = &self.selection {
+            membership
+                .document
+                .update(cx, |document, cx| document.clear(cx));
+        }
+        self.layout_revision = self.layout_revision.wrapping_add(1);
         if source {
             self.math_sources.insert(path.into());
         } else {
@@ -337,10 +401,6 @@ impl MarkdownState {
 
     /// Measure `items` again; the blocks after them move.
     fn remeasure(&mut self, items: Range<usize>, cx: &mut Context<Self>) {
-        self.selection_adapter
-            .virtual_blocks
-            .borrow_mut()
-            .forget_positions();
         self.item_heights.borrow_mut().invalidate(items.clone());
         self.list_state.remeasure_items(items);
         cx.notify();
@@ -363,20 +423,12 @@ impl MarkdownState {
         cx.notify();
     }
 
-    fn prepare_reparse(&mut self, cx: &mut Context<Self>) {
+    fn prepare_reparse(&mut self) {
         self.link_targets.clear();
-        // Don't interrupt an active drag-selection; the window-level endpoints
-        // stay valid for append-only growth and per-inline ranges repaint.
-        if !self.is_selecting {
-            self.reset_selection_projection();
-            self.selection_adapter
-                .selection
-                .set_local_selection(false, cx);
-        }
     }
 
     fn reparse_append(&mut self, cx: &mut Context<Self>) {
-        self.prepare_reparse(cx);
+        self.prepare_reparse();
         let reparse_start = self.incremental_reparse_start();
         let parsed_document = super::parse::parse_document(&self.text[reparse_start..]);
         #[cfg(test)]
@@ -459,7 +511,7 @@ impl MarkdownState {
         let old_item_count = self.items.len();
         self.parsed = Rc::new(BlockNode::Root { children: blocks });
         self.items = items.into();
-        self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.layout_revision = self.layout_revision.wrapping_add(1);
 
         if invalid < old_item_count || invalid < self.items.len() {
             self.list_state
@@ -491,7 +543,7 @@ impl MarkdownState {
     fn reparse_reset(&mut self, cx: &mut Context<Self>) {
         self.image_sizes.clear();
         render::clear_code_measurements(cx.entity_id(), cx);
-        self.prepare_reparse(cx);
+        self.prepare_reparse();
         let parsed_document = super::parse::parse_document(&self.text);
         self.items = root_items(&parsed_document.root);
         self.parsed = Rc::new(parsed_document.root);
@@ -500,11 +552,7 @@ impl MarkdownState {
         {
             self.last_reparse_bytes = self.text.len();
         }
-        self.selection_revision = self.selection_revision.wrapping_add(1);
-        self.selection_adapter
-            .virtual_blocks
-            .borrow_mut()
-            .forget_positions();
+        self.layout_revision = self.layout_revision.wrapping_add(1);
         // Even an edit that preserves the number of root blocks can change
         // their heights, so every reparse must invalidate the cached sizes.
         self.list_state.reset(self.items.len());
@@ -512,96 +560,81 @@ impl MarkdownState {
         cx.notify();
     }
 
-    pub(super) fn reset_selection_projection(&mut self) {
-        self.is_selecting = false;
-        self.parsed.clear_selection();
-    }
-
     pub(super) fn is_selectable(&self) -> bool {
-        self.selectable
+        self.selection.is_some()
     }
 
-    pub(super) fn item_count(&self) -> usize {
-        self.items.len()
-    }
-
-    /// The selected text in the root list's `items`, or in the whole
-    /// document when the selection is not bounded to them. A block holding
-    /// the selection's `start` or `end` is read from those positions.
-    pub(super) fn selected_text_in(
+    /// The part of the run at `origin`, `len` bytes long, that the
+    /// selection covers.
+    pub(super) fn selected_range(
         &self,
-        items: Option<RangeInclusive<usize>>,
-        start: Option<TextPosition>,
-        end: Option<TextPosition>,
-    ) -> String {
-        let (BlockNode::Root { children }, Some(items)) = (&*self.parsed, items) else {
-            return self.parsed.selected_text();
-        };
-        let (Some(first), Some(last)) =
-            (self.items.get(*items.start()), self.items.get(*items.end()))
-        else {
-            return String::new();
-        };
-        let children = (first.block..=last.block)
-            .map(|block| {
-                let from = start.filter(|position| position.block == block);
-                let to = end.filter(|position| position.block == block);
-                if from.is_some() || to.is_some() {
-                    return children[block].selected_between(from, to);
-                }
-                let span_start = (block == first.block)
-                    .then(|| first.span.as_ref().map(|span| span.start))
-                    .flatten();
-                let span_end = (block == last.block)
-                    .then(|| last.span.as_ref().map(|span| span.end))
-                    .flatten();
-                render::block_span(&children[block], span_start, span_end)
-            })
-            .collect();
-        BlockNode::Root { children }.selected_text()
+        origin: &RunOrigin,
+        len: usize,
+        cx: &gpui::App,
+    ) -> Option<Range<usize>> {
+        let membership = self.selection.as_ref()?;
+        membership
+            .document
+            .read(cx)
+            .run_range(membership.entry, origin, len)
     }
 
-    /// The text position a selection end at a content point falls on, in
-    /// the block under it, from the text painted in the last frame.
-    pub(super) fn text_position_at(&self, content_point: Point<Pixels>) -> Option<TextPosition> {
-        let BlockNode::Root { children } = &*self.parsed else {
-            return None;
-        };
-        let block = self.items.get(self.item_ix_at(content_point.y)?)?.block;
-        let node = children.get(block)?;
-        let window_point =
-            content_point + self.list_state.scroll_px_offset_for_scrollbar() + self.bounds.origin;
-        self.selection_adapter
-            .runs_at(window_point)
-            .into_iter()
-            .find_map(|(state, offset)| node.position_of(block, &state, offset))
+    pub(super) fn begin_frame(&self) {
+        self.runs.borrow_mut().clear();
     }
 
-    pub(super) fn item_ix_at(&self, content_y: Pixels) -> Option<usize> {
-        let origin = self.bounds.origin.y + self.list_state.scroll_px_offset_for_scrollbar().y;
-        let count = self.list_state.item_count();
-        let mut ix = self.list_state.logical_scroll_top().item_ix;
-        while ix < count {
-            let bounds = self.list_state.bounds_for_item(ix)?;
-            if content_y < bounds.bottom() - origin {
-                return Some(ix);
-            }
-            ix += 1;
-        }
-        count.checked_sub(1)
+    pub(super) fn register_run(&self, run: PaintedRun) {
+        self.runs.borrow_mut().push(run);
+    }
+
+    /// The character under `window_point` in the text painted last frame;
+    /// none off the text.
+    pub(super) fn char_at(&self, window_point: Point<Pixels>) -> Option<TextPosition> {
+        let runs = self.runs.borrow();
+        let run = runs.iter().find(|run| run.bounds.contains(&window_point))?;
+        let offset = run.layout.index_for_position(window_point).ok()?;
+        Some(TextPosition {
+            path: run.origin.path.to_vec(),
+            line: run.origin.line,
+            offset: run.origin.base + offset,
+        })
+    }
+
+    /// The position a selection end at `window_point` falls on, from the text
+    /// painted last frame: on the run nearest to it, at the character
+    /// boundary under it, or at the end of a run above it or the start of one
+    /// below.
+    pub(super) fn position_at(&self, window_point: Point<Pixels>) -> Option<TextPosition> {
+        let runs = self.runs.borrow();
+        let distance = |bounds: &Bounds<Pixels>| {
+            let dx = (bounds.left() - window_point.x)
+                .max(window_point.x - bounds.right())
+                .max(px(0.));
+            let dy = (bounds.top() - window_point.y)
+                .max(window_point.y - bounds.bottom())
+                .max(px(0.));
+            dx.as_f32().hypot(dy.as_f32())
+        };
+        let run = runs
+            .iter()
+            .min_by(|a, b| distance(&a.bounds).total_cmp(&distance(&b.bounds)))?;
+        let offset = if window_point.y < run.bounds.top() {
+            0
+        } else if window_point.y >= run.bounds.bottom() {
+            run.text.len()
+        } else {
+            super::selection::nearest_boundary(&run.text, &run.layout, window_point)
+        };
+        Some(TextPosition {
+            path: run.origin.path.to_vec(),
+            line: run.origin.line,
+            offset: run.origin.base + offset,
+        })
     }
 
     /// Record where the document was placed; whether its size changed.
-    fn update_layout(&mut self, bounds: Bounds<Pixels>) -> bool {
-        if self.bounds.size.width != bounds.size.width {
-            self.selection_adapter
-                .virtual_blocks
-                .borrow_mut()
-                .forget_positions();
-        }
-        let resized = self.bounds.size != bounds.size;
+    fn update_layout(&mut self, bounds: Bounds<Pixels>) {
         self.bounds = bounds;
-        resized
     }
 
     #[cfg(test)]
@@ -648,29 +681,18 @@ impl Render for MarkdownState {
                 window,
                 cx,
             ))
-            .on_prepaint(move |bounds, window, cx| {
-                let (selection_involves_view, has_snapshot, is_selecting) = {
-                    let state = state.read(cx);
-                    (
-                        state.selection_adapter.participates_in_selection(cx),
-                        state.selection_adapter.has_selection_snapshot(cx),
-                        state.is_selecting,
-                    )
-                };
-                let mut revision_changed = false;
-                let resized = state.update(cx, |state, _| {
-                    revision_changed = state
-                        .selection_adapter
-                        .update_layout_revision(state.selection_revision, state.is_selecting);
-                    state.update_layout(bounds)
-                });
-                if !is_selecting
-                    && ((resized && selection_involves_view) || (revision_changed && has_snapshot))
-                {
-                    gpui_base::TextSelection::clear(window, cx);
-                }
+            .on_prepaint(move |bounds, _, cx| {
+                state.update(cx, |state, _| state.update_layout(bounds));
             })
     }
+}
+
+/// A run of text as it was painted, for hit-testing selection ends.
+pub(super) struct PaintedRun {
+    pub(super) origin: RunOrigin,
+    pub(super) text: SharedString,
+    pub(super) layout: gpui::TextLayout,
+    pub(super) bounds: Bounds<Pixels>,
 }
 
 #[cfg(test)]
@@ -681,7 +703,6 @@ mod tests {
         AppContext as _, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext,
         Window, div, px,
     };
-    use gpui_base::TextSelectionLayer;
 
     use super::*;
 
@@ -702,7 +723,6 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .w(px(400.))
-                .child(TextSelectionLayer)
                 .child(super::super::MarkdownView::new(&self.markdown).selectable(true))
         }
     }
@@ -837,69 +857,90 @@ mod tests {
         fs::remove_dir_all(root).expect("remove temporary directory");
     }
 
-    #[gpui::test]
-    fn drag_copies_exactly_the_highlighted_text(cx: &mut TestAppContext) {
-        use gpui::{Modifiers, MouseButton, point};
+    /// Drag from `start` to `end` and read what the view's document holds.
+    fn drag(
+        view: &Entity<SelectAllRoot>,
+        start: gpui::Point<gpui::Pixels>,
+        end: gpui::Point<gpui::Pixels>,
+        cx: &mut VisualTestContext,
+    ) -> String {
+        use gpui::{Modifiers, MouseButton};
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        view.read_with(cx, |root, cx| {
+            let state = root.markdown.read(cx);
+            let document = &state.selection.as_ref().unwrap().document;
+            document.read(cx).selected_text(cx)
+        })
+    }
 
+    fn open<'a>(
+        text: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<SelectAllRoot>, &'a mut VisualTestContext) {
         cx.update(crate::theme::init);
         cx.update(super::super::init);
-        let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new("Hello world", cx));
-        let cx: &mut VisualTestContext = cx;
+        let text = text.to_string();
+        let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new(&text, cx));
         cx.update(|window, cx| _ = window.draw(cx));
-
-        // The sweep ends the drag on both halves of every character it crosses.
-        for x in 1..120 {
-            let (start, end) = (point(px(1.), px(12.)), point(px(x as f32), px(12.)));
-            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
-            cx.update(|window, cx| _ = window.draw(cx));
-            cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
-            cx.update(|window, cx| _ = window.draw(cx));
-            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
-            cx.update(|window, cx| _ = window.draw(cx));
-
-            let highlighted =
-                view.read_with(cx, |root, cx| root.markdown.read(cx).parsed.selected_text());
-            let copied = cx.update(gpui_base::TextSelection::selected_text);
-            assert_eq!(copied, highlighted, "drag to x = {x}");
-        }
+        (view, cx)
     }
 
     #[gpui::test]
-    fn a_drag_ending_off_the_code_lines_copies_what_it_highlights(cx: &mut TestAppContext) {
-        use gpui::{Modifiers, MouseButton, point};
+    fn a_drag_ending_off_the_code_lines_ends_at_the_nearest_line(cx: &mut TestAppContext) {
+        use gpui::point;
 
-        cx.update(crate::theme::init);
-        cx.update(super::super::init);
-        let (view, cx) = cx.add_window_view(|_, cx| {
-            SelectAllRoot::new("```text\nalpha beta gamma\nsecond line\n```", cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|window, cx| _ = window.draw(cx));
+        let (view, cx) = open("```text\nalpha beta gamma\nsecond line\n```", cx);
         let first = cx.debug_bounds("markdown-code-line-0").unwrap();
         let last = cx.debug_bounds("markdown-code-line-1").unwrap();
-        let drag = |start, end, cx: &mut VisualTestContext| {
-            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
-            cx.update(|window, cx| _ = window.draw(cx));
-            cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
-            cx.update(|window, cx| _ = window.draw(cx));
-            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
-            cx.update(|window, cx| _ = window.draw(cx));
-            cx.update(gpui_base::TextSelection::selected_text)
-        };
-
-        // Into the block's padding below its last line, and above its first.
+        // Into the block's padding below its last line.
         let below = point(last.right() - px(4.), last.bottom() + px(4.));
+        let from_start = point(first.left() + px(1.), first.center().y);
+        assert_eq!(
+            drag(&view, from_start, below, cx),
+            "alpha beta gamma\nsecond line"
+        );
+        // From inside the first line, what follows the press, never what
+        // precedes it.
+        let from_inside = point(first.left() + px(40.), first.center().y);
+        let copied = drag(&view, from_inside, below, cx);
+        assert!(
+            copied.ends_with("\nsecond line")
+                && "alpha beta gamma".ends_with(copied.lines().next().unwrap()),
+            "{copied:?}"
+        );
+        // And above the first line, back to where the drag began.
         let above = point(first.left() + px(4.), first.top() - px(4.));
-        for (from, end) in [(first, below), (last, above)] {
-            for x in (1..120).step_by(7) {
-                let start = point(from.left() + px(x as f32), from.center().y);
-                let copied = drag(start, end, cx);
-                let highlighted =
-                    view.read_with(cx, |root, cx| root.markdown.read(cx).parsed.selected_text());
-                assert_eq!(copied, highlighted, "drag from {start:?} to {end:?}");
-            }
-        }
-        let start = point(first.left() + px(1.), first.center().y);
-        assert_eq!(drag(start, below, cx), "alpha beta gamma\nsecond line");
+        let from_end = point(last.right() - px(1.), last.center().y);
+        assert_eq!(
+            drag(&view, from_end, above, cx),
+            "alpha beta gamma\nsecond line"
+        );
+    }
+
+    #[gpui::test]
+    fn a_drag_through_a_table_takes_each_cell_whole_before_the_next(cx: &mut TestAppContext) {
+        use gpui::point;
+
+        let (view, cx) = open(
+            "| name | value |\n| --- | --- |\n\
+             | a long first cell whose words wrap over several rows of the table, \
+             because the window is far narrower than it | x |",
+            cx,
+        );
+        let first = cx.debug_bounds("markdown-table-cell-content-1-0").unwrap();
+        let second = cx.debug_bounds("markdown-table-cell-content-1-1").unwrap();
+        // The end lies on the first cell's first row, beside its wrapped rest.
+        let start = point(first.left() + px(1.), first.top() + px(4.));
+        let end = point(second.right() - px(1.), second.top() + px(4.));
+        assert_eq!(
+            drag(&view, start, end, cx),
+            "a long first cell whose words wrap over several rows of the table, because the \
+             window is far narrower than it\tx"
+        );
     }
 }

@@ -5,8 +5,6 @@ use gpui::prelude::FluentBuilder as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::theme::ActiveTheme as _;
-use crate::touch_selection::SelectAllTouched;
 use crate::widgets::input::SelectAll;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText, OpenUrl, PopupMenu};
 use gpui::{
@@ -14,11 +12,12 @@ use gpui::{
     HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, ParentElement as _, Pixels, StyleRefinement, Styled, Window, div,
 };
-use gpui_base::{StyledExt as _, TouchHandleLayout};
+use gpui_base::StyledExt as _;
 use serde::Deserialize;
 
 use super::{
     link_target::LinkTarget,
+    selection::{SelectionArea, SelectionDocument},
     state::{MarkdownState, PendingContextTarget},
 };
 
@@ -47,6 +46,7 @@ pub struct MarkdownView {
     state: Entity<MarkdownState>,
     style: StyleRefinement,
     selectable: Option<bool>,
+    selection_entry: Option<(Entity<SelectionDocument>, u64)>,
     compact_headings: Option<bool>,
     base_dir: Option<PathBuf>,
     menu_extension: Option<MenuExtension>,
@@ -60,6 +60,7 @@ impl MarkdownView {
             state: state.clone(),
             style: StyleRefinement::default(),
             selectable: None,
+            selection_entry: None,
             compact_headings: None,
             base_dir: None,
             menu_extension: None,
@@ -73,9 +74,16 @@ impl MarkdownView {
         self
     }
 
-    /// Set whether text participates in window-level selection.
+    /// Make the text selectable on its own.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = Some(selectable);
+        self
+    }
+
+    /// Make the text entry `entry` of `document`, selected together with the
+    /// document's other entries in a [`SelectionArea`] its owner draws.
+    pub fn selection_entry(mut self, document: &Entity<SelectionDocument>, entry: u64) -> Self {
+        self.selection_entry = Some((document.clone(), entry));
         self
     }
 
@@ -106,11 +114,9 @@ impl IntoElement for MarkdownView {
     }
 }
 
-/// What the view laid out for the frame: its hitbox, and the touch handles
-/// it owns.
+/// What the view laid out for the frame.
 pub struct MarkdownViewPrepaintState {
     hitbox: Hitbox,
-    touch_handles: TouchHandleLayout,
 }
 
 impl Element for MarkdownView {
@@ -134,9 +140,12 @@ impl Element for MarkdownView {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let state = self.state.clone();
         state.update(cx, |state, cx| {
-            if let Some(selectable) = self.selectable {
+            if let Some((document, entry)) = &self.selection_entry {
+                state.set_selection_entry(document, *entry, cx);
+            } else if let Some(selectable) = self.selectable {
                 state.set_selectable(selectable, cx);
             }
+            state.clear_own_selection_on_focus_out(window, cx);
             if let Some(compact) = self.compact_headings {
                 state.set_compact_headings(compact, cx);
             }
@@ -145,38 +154,17 @@ impl Element for MarkdownView {
             }
         });
         let focus_handle = state.read(cx).focus_handle.clone();
-        let mut element = div()
+        let element = div()
             .key_context(super::CONTEXT)
             .track_focus(&focus_handle)
             .w_full()
             .relative()
             .on_action({
                 let state = state.clone();
-                move |_: &SelectAll, window, cx| {
-                    if !state.read(cx).is_selectable() {
+                move |_: &SelectAll, _, cx| {
+                    if !select_whole(&state, cx) {
                         cx.propagate();
-                        return;
                     }
-                    gpui_base::TextSelection::clear(window, cx);
-                    let selection = state.read(cx).selection_handle().clone();
-                    selection.set_local_selection(true, cx);
-                    state.update(cx, |_, cx| cx.notify());
-                }
-            })
-            // The edit menu's Select All keeps the window selection the
-            // long press made, and with it the handles and the menu: the
-            // inlines paint everything selected and report the new ends,
-            // which the handles then drag from, back into a point selection.
-            .on_action({
-                let state = state.clone();
-                move |_: &SelectAllTouched, _, cx| {
-                    if !state.read(cx).is_selectable() {
-                        cx.propagate();
-                        return;
-                    }
-                    let selection = state.read(cx).selection_handle().clone();
-                    selection.set_local_selection(true, cx);
-                    state.update(cx, |_, cx| cx.notify());
                 }
             })
             .on_action({
@@ -190,8 +178,7 @@ impl Element for MarkdownView {
             })
             .on_action({
                 let state = state.clone();
-                move |action: &ShowMathSource, window, cx| {
-                    gpui_base::TextSelection::clear(window, cx);
+                move |action: &ShowMathSource, _, cx| {
                     state.update(cx, |state, cx| {
                         state.set_math_source(&action.path, action.source, cx)
                     });
@@ -203,18 +190,20 @@ impl Element for MarkdownView {
                 let state = state.clone();
                 let extension = self.menu_extension.clone();
                 move |menu, window, cx| {
-                    let (selectable, pending, base_dir) = {
+                    let (selected, pending, base_dir) = {
                         let markdown = state.read(cx);
                         (
-                            markdown.is_selectable(),
+                            markdown
+                                .selection
+                                .as_ref()
+                                .map(|membership| membership.document.read(cx).selected_text(cx)),
                             markdown.pending_context.clone(),
                             markdown.base_dir().map(Path::to_path_buf),
                         )
                     };
-                    let menu = if selectable {
-                        menu.selection_items(true, window, cx)
-                    } else {
-                        menu
+                    let menu = match selected {
+                        Some(selected) => menu.selection_items(selected, true),
+                        None => menu,
                     };
                     let menu = match pending {
                         None => menu,
@@ -312,6 +301,12 @@ impl Element for MarkdownView {
                 }
             })
             .into_any_element();
+        let mut element = match state.read(cx).own_document() {
+            Some(document) => SelectionArea::new(&document, element)
+                .w_full()
+                .into_any_element(),
+            None => element,
+        };
         let layout_id = element.request_layout(window, cx);
         (layout_id, (state, element))
     }
@@ -325,19 +320,17 @@ impl Element for MarkdownView {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        request_layout.0.read(cx).begin_frame();
         request_layout.1.prepaint(window, cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        // Over the text, so after its hitbox.
-        let state = request_layout.0.read(cx);
-        let touch_handles = if state.is_selectable() {
-            state.selection_adapter.prepaint_touch_handles(window, cx)
-        } else {
-            TouchHandleLayout::default()
-        };
-        MarkdownViewPrepaintState {
-            hitbox,
-            touch_handles,
+        if let Some(membership) = &request_layout.0.read(cx).selection {
+            membership.document.read(cx).register_participant(
+                membership.entry,
+                bounds,
+                request_layout.0.downgrade(),
+            );
         }
+        MarkdownViewPrepaintState { hitbox }
     }
 
     fn paint(
@@ -351,10 +344,6 @@ impl Element for MarkdownView {
         cx: &mut App,
     ) {
         let hitbox = &prepaint.hitbox;
-        let selectable = request_layout.0.read(cx).is_selectable();
-        if selectable {
-            request_layout.0.read(cx).selection_adapter.begin_frame();
-        }
         // Capture-phase so this runs before the Inline children's bubble-phase
         // handlers repopulate the pending link: a right-click on a non-link
         // area must not resurface the previous link's context menu.
@@ -371,35 +360,18 @@ impl Element for MarkdownView {
             }
         });
         request_layout.1.paint(window, cx);
-        if selectable {
-            let (adapter, content_bounds, scroll_offset) = {
-                let state = request_layout.0.read(cx);
-                (
-                    state.selection_adapter.clone(),
-                    state.bounds,
-                    state.list_state.scroll_px_offset_for_scrollbar(),
-                )
-            };
-            let y = hitbox.bounds.origin.y.as_f32().max(0.).to_bits() as u64;
-            let x = hitbox.bounds.origin.x.as_f32().max(0.).to_bits() as u64;
-            adapter.register(
-                hitbox.clone(),
-                content_bounds,
-                scroll_offset,
-                (y << 32) | x,
-                window,
-                cx,
-            );
-            // The handles of a touch selection go over the text, and under
-            // whatever is painted over the text after it.
-            adapter.paint_touch_handles(
-                &prepaint.touch_handles,
-                cx.theme().selection.alpha(1.),
-                window,
-                cx,
-            );
-        }
     }
+}
+
+/// Select everything the view shows, in its document. Whether it could.
+fn select_whole(state: &Entity<MarkdownState>, cx: &mut App) -> bool {
+    let Some(membership) = state.read(cx).selection.clone() else {
+        return false;
+    };
+    membership.document.update(cx, |document, cx| {
+        document.select_entry(membership.entry, cx)
+    });
+    true
 }
 
 #[cfg(test)]
@@ -413,7 +385,27 @@ mod tests {
     };
 
     use super::*;
-    use gpui_base::TextSelectionLayer;
+    use crate::markdown::selection::SelectionDocument;
+
+    /// What the keyboard's Copy puts on the clipboard.
+    fn copied(cx: &mut VisualTestContext) -> String {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+        cx.dispatch_action(gpui_base::input::Copy);
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default()
+    }
+
+    /// The text `markdown`'s document has selected.
+    fn selected_in(markdown: &Entity<MarkdownState>, cx: &mut VisualTestContext) -> String {
+        markdown.read_with(cx, |state, cx| {
+            state
+                .selection
+                .as_ref()
+                .map(|membership| membership.document.read(cx).selected_text(cx))
+                .unwrap_or_default()
+        })
+    }
 
     struct TestRoot {
         markdown: Entity<MarkdownState>,
@@ -422,10 +414,7 @@ mod tests {
     struct CrossViewRoot {
         first: Entity<MarkdownState>,
         second: Entity<MarkdownState>,
-    }
-
-    struct DragAreaRoot {
-        markdown: Entity<MarkdownState>,
+        document: Entity<SelectionDocument>,
     }
 
     struct OuterListRoot {
@@ -446,7 +435,6 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .w(px(320.))
-                .child(TextSelectionLayer)
                 .child(
                     div()
                         .h(px(24.))
@@ -459,9 +447,23 @@ mod tests {
 
     impl CrossViewRoot {
         fn new(cx: &mut Context<Self>) -> Self {
+            let first = cx.new(|cx| MarkdownState::new("Hello world", cx));
+            let second = cx.new(|cx| MarkdownState::new("Second message", cx));
+            let views = [first.clone(), second.clone()];
+            let document = cx.new(|_| {
+                SelectionDocument::new(Rc::new(move |range, cx| {
+                    views
+                        .iter()
+                        .enumerate()
+                        .map(|(entry, view)| (entry as u64, view.read(cx).parsed_root()))
+                        .filter(|(entry, _)| range.contains(entry))
+                        .collect()
+                }))
+            });
             Self {
-                first: cx.new(|cx| MarkdownState::new("Hello world", cx)),
-                second: cx.new(|cx| MarkdownState::new("Second message", cx)),
+                first,
+                second,
+                document,
             }
         }
     }
@@ -490,7 +492,6 @@ mod tests {
             let bubbled = self.bubbled_right_clicks.clone();
             div()
                 .size_full()
-                .child(TextSelectionLayer)
                 .child(MarkdownView::new(&self.markdown).selectable(true))
                 .on_mouse_down(MouseButton::Right, move |_, _, _| {
                     *bubbled.borrow_mut() += 1;
@@ -510,80 +511,72 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
-                .child(TextSelectionLayer)
                 .child(MarkdownView::new(&self.markdown).selectable(true))
         }
     }
 
-    impl DragAreaRoot {
-        fn new(cx: &mut Context<Self>) -> Self {
-            Self {
-                markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
-            }
-        }
-    }
-
-    impl Render for DragAreaRoot {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .child(TextSelectionLayer)
-                .child(crate::window_drag_area(
-                    "test-titlebar",
-                    div().w_full().h(px(52.)),
-                    window,
-                    cx,
-                ))
-                .child(
-                    div()
-                        .h(px(40.))
-                        .child(MarkdownView::new(&self.markdown).selectable(true)),
-                )
-        }
-    }
-
-    struct SwallowedClickRoot {
+    /// A thread dragged from a list above the text and dropped on a pane
+    /// below it: the drop takes the release.
+    struct DropRoot {
         markdown: Entity<MarkdownState>,
     }
 
-    impl Render for SwallowedClickRoot {
+    #[derive(Clone)]
+    struct Carried;
+
+    struct CarriedView;
+
+    impl Render for CarriedView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(20.))
+        }
+    }
+
+    impl Render for DropRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
-                .child(TextSelectionLayer)
                 .child(
                     div()
-                        .id("swallowing-button")
+                        .id("drag-source")
                         .w_full()
-                        .h(px(52.))
-                        .on_click(|_, window, cx| {
-                            crate::widgets::stop_click_propagation(window, cx)
-                        }),
+                        .h(px(40.))
+                        .on_drag(Carried, |_, _, _, cx| cx.new(|_| CarriedView)),
                 )
                 .child(
                     div()
                         .h(px(40.))
                         .child(MarkdownView::new(&self.markdown).selectable(true)),
+                )
+                .child(
+                    div()
+                        .id("drop-target")
+                        .w_full()
+                        .h(px(40.))
+                        .on_drop(|_: &Carried, _, _| {}),
                 )
         }
     }
 
     impl Render for CrossViewRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .pt(px(10.))
-                .child(TextSelectionLayer)
-                .child(
-                    div()
-                        .h(px(40.))
-                        .child(MarkdownView::new(&self.first).selectable(true)),
-                )
-                .child(
-                    div()
-                        .h(px(40.))
-                        .child(MarkdownView::new(&self.second).selectable(true)),
-                )
+            SelectionArea::new(
+                &self.document,
+                div()
+                    .size_full()
+                    .pt(px(10.))
+                    .child(
+                        div().h(px(40.)).child(
+                            MarkdownView::new(&self.first).selection_entry(&self.document, 0),
+                        ),
+                    )
+                    .child(
+                        div().h(px(40.)).child(
+                            MarkdownView::new(&self.second).selection_entry(&self.document, 1),
+                        ),
+                    ),
+            )
+            .size_full()
         }
     }
 
@@ -600,7 +593,7 @@ mod tests {
     impl Render for OuterListRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let markdown = self.markdown.clone();
-            div().size_full().child(TextSelectionLayer).child(
+            div().size_full().child(
                 gpui::list(self.list_state.clone(), move |_, _, _| {
                     div()
                         .w_full()
@@ -714,7 +707,7 @@ mod tests {
         cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
         cx.update(|window, cx| _ = window.draw(cx));
 
-        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        let selected = copied(cx);
         assert_eq!(selected, lines[5..].join("\n"));
     }
 
@@ -844,7 +837,7 @@ mod tests {
     fn release(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) -> String {
         cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
         cx.update(|window, cx| _ = window.draw(cx));
-        cx.update(gpui_base::TextSelection::selected_text)
+        copied(cx)
     }
 
     fn scroll_to_end(view: &Entity<OuterListRoot>, cx: &mut VisualTestContext) {
@@ -899,7 +892,7 @@ mod tests {
             cx.update(|window, cx| _ = window.draw(cx));
             cx.simulate_mouse_up(end, MouseButton::Left, shift);
             cx.update(|window, cx| _ = window.draw(cx));
-            let selected = cx.update(gpui_base::TextSelection::selected_text);
+            let selected = copied(cx);
             assert_eq!(selected, expected);
         }
     }
@@ -912,13 +905,13 @@ mod tests {
         let items = (0..1_000)
             .map(|ix| format!("item {ix}"))
             .collect::<Vec<_>>();
-        // Each drag starts in the second item of the root list and turns
-        // back within it before the jump.
+        // Each drag starts on screen in the second item of the root list and
+        // turns back within it before the jump.
         for (source, expected, anchor, back, last) in [
             (
                 format!("```text\n{}\n```", lines.join("\n")),
-                lines[40..].join("\n"),
-                "markdown-code-line-40",
+                lines[38..].join("\n"),
+                "markdown-code-line-38",
                 "markdown-code-line-33",
                 "markdown-code-line-2999",
             ),
@@ -1220,76 +1213,117 @@ mod tests {
             MouseButton::Left,
             Modifiers::default(),
         );
-        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        let selected = copied(cx);
         assert!(selected.is_empty(), "unexpected selection: {selected:?}");
     }
 
     #[gpui::test]
-    fn press_on_titlebar_drag_area_does_not_start_selection(cx: &mut TestAppContext) {
+    fn a_drag_and_drop_across_the_text_leaves_nothing_selected(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let (_, cx) = cx.add_window_view(|_, cx| DragAreaRoot::new(cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
+        let (view, cx) = cx.add_window_view(|_, cx| DropRoot {
+            markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
         });
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| _ = window.draw(cx));
 
         cx.simulate_mouse_down(
             point(px(10.), px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        for y in [30., 60., 100.] {
+            cx.simulate_mouse_move(
+                point(px(80.), px(y)),
+                Some(MouseButton::Left),
+                Modifiers::default(),
+            );
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        cx.simulate_mouse_up(
+            point(px(80.), px(100.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| _ = window.draw(cx));
+        // The pointer, free again, crosses the text.
+        cx.simulate_mouse_move(point(px(5.), px(60.)), None, Modifiers::default());
+        cx.simulate_mouse_move(point(px(90.), px(60.)), None, Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+        assert_eq!(selected_in(&markdown, cx), "");
+    }
+
+    /// Text above a plain strip and a control that takes the focus.
+    struct FocusRoot {
+        markdown: Entity<MarkdownState>,
+        control: gpui::FocusHandle,
+    }
+
+    impl Render for FocusRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .h(px(40.))
+                        .child(MarkdownView::new(&self.markdown).selectable(true)),
+                )
+                .child(div().id("plain-strip").w_full().h(px(40.)))
+                .child(
+                    div()
+                        .id("focusable-control")
+                        .w_full()
+                        .h(px(40.))
+                        .track_focus(&self.control),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn the_selection_goes_when_the_focus_leaves_the_text(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (view, cx) = cx.add_window_view(|_, cx| FocusRoot {
+            markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
+            control: cx.focus_handle(),
+        });
+        let cx: &mut VisualTestContext = cx;
+        // Focus moves are reported only in the window that has the focus.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+
+        cx.simulate_mouse_down(
+            point(px(1.), px(10.)),
             MouseButton::Left,
             Modifiers::default(),
         );
         cx.simulate_mouse_move(
-            point(px(80.), px(70.)),
+            point(px(300.), px(10.)),
             Some(MouseButton::Left),
             Modifiers::default(),
         );
+        cx.update(|window, cx| _ = window.draw(cx));
         cx.simulate_mouse_up(
-            point(px(80.), px(70.)),
+            point(px(300.), px(10.)),
             MouseButton::Left,
             Modifiers::default(),
         );
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-            assert!(
-                gpui_base::TextSelection::selected_text(window, cx).is_empty(),
-                "a titlebar press started a text selection"
-            );
-        });
-    }
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert_eq!(selected_in(&markdown, cx), "Hello world");
 
-    #[gpui::test]
-    fn click_that_stops_propagation_does_not_leave_selection_following_pointer(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let (_, cx) = cx.add_window_view(|_, cx| SwallowedClickRoot {
-            markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        // A press on something that takes no focus leaves it.
+        cx.simulate_click(point(px(10.), px(60.)), Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert_eq!(selected_in(&markdown, cx), "Hello world");
 
-        cx.simulate_mouse_down(
-            point(px(10.), px(20.)),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        cx.simulate_mouse_up(
-            point(px(10.), px(20.)),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        cx.simulate_mouse_move(point(px(80.), px(70.)), None, Modifiers::default());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-            assert!(
-                gpui_base::TextSelection::selected_text(window, cx).is_empty(),
-                "the released pointer kept selecting text"
-            );
-        });
+        // One on a control that takes the focus puts it away.
+        cx.simulate_click(point(px(10.), px(100.)), Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert_eq!(selected_in(&markdown, cx), "");
     }
 
     #[gpui::test]
@@ -1318,7 +1352,7 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        let selected = copied(cx);
         assert_eq!(selected, "Hello world\nSecond message");
     }
 
@@ -1363,7 +1397,7 @@ mod tests {
                 let _ = window.draw(cx);
             });
 
-            let selected = cx.update(gpui_base::TextSelection::selected_text);
+            let selected = copied(cx);
             assert_eq!(selected, expected, "source: {source:?}");
         }
     }
@@ -1407,7 +1441,7 @@ mod tests {
             .chain((0..=10).map(|ix| format!("item {ix}")))
             .collect::<Vec<_>>()
             .join("\n");
-        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        let selected = copied(cx);
         assert_eq!(selected, expected);
     }
 
@@ -1546,10 +1580,8 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        assert_eq!(
-            cx.update(gpui_base::TextSelection::selected_text).trim(),
-            "Alpha beta\nclick"
-        );
+        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+        assert_eq!(selected_in(&markdown, cx), "Alpha beta\nclick");
         cx.simulate_mouse_down(text_pos, MouseButton::Right, Modifiers::default());
         cx.simulate_mouse_up(text_pos, MouseButton::Right, Modifiers::default());
         cx.run_until_parked();
@@ -1606,10 +1638,7 @@ mod tests {
         cx.update(|window, cx| _ = window.draw(cx));
         cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
         cx.update(|window, cx| _ = window.draw(cx));
-        assert_eq!(
-            cx.update(gpui_base::TextSelection::selected_text),
-            "first line"
-        );
+        assert_eq!(copied(cx), "first line");
 
         let inside = point(line.left() + px(20.), line.center().y);
         cx.simulate_mouse_down(inside, MouseButton::Right, Modifiers::default());
@@ -1673,7 +1702,6 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .w(px(300.))
-                .child(TextSelectionLayer)
                 .child(MarkdownView::new(&self.markdown).selectable(true))
         }
     }
@@ -1708,26 +1736,50 @@ mod tests {
     }
 
     fn selected(view: &Entity<TouchRoot>, cx: &mut VisualTestContext) -> String {
-        view.read_with(cx, |root, cx| {
-            let markdown = root.markdown.read(cx);
-            markdown.selected_text_in(
-                Some(0..=markdown.item_count().saturating_sub(1)),
-                None,
-                None,
-            )
-        })
-        .trim()
-        .to_string()
+        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+        selected_in(&markdown, cx).trim().to_string()
     }
 
-    fn touch_selection(cx: &mut VisualTestContext) -> Option<gpui_base::TouchSelectionSnapshot> {
-        cx.update(|window, cx| gpui_base::TextSelection::touch_selection(window, cx))
+    fn touch_selection(
+        view: &Entity<TouchRoot>,
+        cx: &mut VisualTestContext,
+    ) -> Option<crate::touch_selection::TouchSelectionLayout> {
+        view.read_with(cx, |root, cx| {
+            root.markdown
+                .read(cx)
+                .selection
+                .as_ref()
+                .and_then(|membership| membership.document.read(cx).touch_layout())
+        })
+    }
+
+    /// Drag the knob at `edge` to `to` with a finger.
+    fn drag_knob(
+        cx: &mut VisualTestContext,
+        edge: gpui_base::SelectionEdge,
+        caret: gpui::Bounds<gpui::Pixels>,
+        to: gpui::Point<gpui::Pixels>,
+    ) {
+        use gpui::{TouchDragEvent, TouchPhase};
+        let finger = gpui_base::TouchHandle::hit_bounds(edge, caret).center();
+        for (phase, position) in [
+            (TouchPhase::Started, finger),
+            (TouchPhase::Moved, point(to.x, finger.y)),
+            (TouchPhase::Ended, point(to.x, finger.y)),
+        ] {
+            cx.simulate_event(TouchDragEvent {
+                phase,
+                start_position: finger,
+                position,
+            });
+            draw(cx);
+        }
     }
 
     #[gpui::test]
     fn long_press_release_keeps_handles_which_drag_the_selection(cx: &mut TestAppContext) {
         use gpui::{TouchDragEvent, TouchPhase};
-        use gpui_base::{SelectionEdge, TextSelection, TouchHandle};
+        use gpui_base::{SelectionEdge, TouchHandle};
 
         for continue_finger in [true, false] {
             let (view, cx) = open_touch_root(cx);
@@ -1753,25 +1805,24 @@ mod tests {
             }
             long_press(cx, &[TouchPhase::Started, TouchPhase::Ended], (70., 10.));
             assert_eq!(selected(&view, cx), "select");
-            let snapshot = touch_selection(cx).expect("a released long press keeps its handles");
-            assert!(snapshot.is_menu_open());
-            assert!(!snapshot.is_empty());
-            assert!(snapshot.start().left() < snapshot.end().left());
+            let layout =
+                touch_selection(&view, cx).expect("a released long press keeps its handles");
+            assert!(layout.menu_open);
+            assert!(!layout.is_empty());
+            assert!(layout.start.left() < layout.end.left());
 
-            // The view painted the handles in place: a touch on the end knob,
-            // which hangs below the line, takes it and drags the end along the
-            // line, through the window layer, to the end of the text.
-            let end = snapshot.end();
-            let finger = TouchHandle::hit_bounds(SelectionEdge::End, end).center();
+            // A touch on the end knob, which hangs below the line, takes it
+            // and drags the end along the line to the end of the text.
+            let finger = TouchHandle::hit_bounds(SelectionEdge::End, layout.end).center();
             cx.simulate_event(TouchDragEvent {
                 phase: TouchPhase::Started,
                 start_position: finger,
                 position: finger,
             });
             draw(cx);
-            let snapshot = touch_selection(cx).unwrap();
-            assert_eq!(snapshot.dragging(), Some(SelectionEdge::End));
-            assert!(!snapshot.is_menu_open());
+            let layout = touch_selection(&view, cx).unwrap();
+            assert_eq!(layout.dragging, Some(SelectionEdge::End));
+            assert!(!layout.menu_open);
             cx.simulate_event(TouchDragEvent {
                 phase: TouchPhase::Moved,
                 start_position: finger,
@@ -1785,48 +1836,41 @@ mod tests {
                 position: point(px(290.), finger.y),
             });
             draw(cx);
-            let snapshot = touch_selection(cx).unwrap();
-            assert!(snapshot.is_menu_open());
-            assert_eq!(snapshot.dragging(), None);
-            let select_start = snapshot.start().left();
+            let layout = touch_selection(&view, cx).unwrap();
+            assert!(layout.menu_open);
+            assert_eq!(layout.dragging, None);
+            let select_start = layout.start.left();
 
-            // Select All from the menu is a view-local selection; its handles
-            // still drag, turning it back into a point selection.
-            cx.update(|window, cx| {
-                window.dispatch_action(Box::new(crate::touch_selection::SelectAllTouched), cx);
-            });
+            // Select All from the menu takes the whole message; its handles
+            // still drag.
+            let select_all = cx.debug_bounds("edit-menu-select-all").unwrap();
+            cx.simulate_click(select_all.center(), Modifiers::default());
             cx.run_until_parked();
             draw(cx);
             assert_eq!(selected(&view, cx), "quick select value");
-            assert_eq!(
-                cx.update(TextSelection::selected_text).trim(),
-                "quick select value"
+            let layout = touch_selection(&view, cx).expect("select all keeps the touch selection");
+            assert!(layout.menu_open);
+            assert!(layout.start.left() < select_start);
+            drag_knob(
+                cx,
+                SelectionEdge::Start,
+                layout.start,
+                point(select_start + px(1.), layout.start.center().y),
             );
-            let snapshot = touch_selection(cx).expect("select all keeps the touch selection");
-            assert!(snapshot.is_menu_open());
-            let start = snapshot.start();
-            assert!(start.left() < select_start);
-            cx.update(|window, cx| {
-                TextSelection::begin_edge_drag(SelectionEdge::Start, start.origin, window, cx);
-                TextSelection::update_edge_drag(point(select_start, start.origin.y), window, cx);
-                TextSelection::end_edge_drag(window, cx);
-            });
-            draw(cx);
             assert_eq!(selected(&view, cx), "select value");
 
-            // A press on the menu leaves the selection alone; one on the text
-            // clears it.
-            let menu = gpui::Bounds::new(point(px(0.), px(200.)), gpui::size(px(120.), px(32.)));
-            cx.update(|window, cx| TextSelection::register_touch_ui(menu, window, cx));
-            cx.simulate_mouse_down(
-                point(px(10.), px(210.)),
-                MouseButton::Left,
-                Modifiers::default(),
-            );
+            // A press on the menu leaves the selection alone; a tap on the
+            // text between the knobs puts it away.
+            let menu = cx.debug_bounds("edit-menu").expect("the menu is open");
+            cx.simulate_mouse_down(menu.center(), MouseButton::Left, Modifiers::default());
             assert_eq!(selected(&view, cx), "select value");
-            cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
+            cx.simulate_mouse_up(menu.center(), MouseButton::Left, Modifiers::default());
+            let layout = touch_selection(&view, cx).unwrap();
+            let between = (layout.start.left() + layout.end.left()) / 2.;
+            cx.simulate_click(point(between, px(10.)), Modifiers::default());
             draw(cx);
-            assert!(touch_selection(cx).is_none());
+            assert!(touch_selection(&view, cx).is_none());
+            assert_eq!(selected(&view, cx), "");
         }
     }
 }

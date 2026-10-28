@@ -66,7 +66,7 @@ pub(super) fn badge(
                 .child(crate::widgets::fade_text(label.clone())),
         )
         .on_click(move |_, window, cx| {
-            crate::widgets::stop_click_propagation(window, cx);
+            cx.stop_propagation();
             let source = view.read(cx).opened_image_source(&url.to_string().into());
             crate::image_viewer::open(source, label.to_string(), window, cx);
         });

@@ -14,7 +14,6 @@ use gpui::{
 };
 
 use crate::theme::ActiveTheme as _;
-use crate::touch_selection::WindowTouchSelectionOverlay;
 use dialog::ActiveDialog;
 use notification::NotificationList;
 
@@ -76,13 +75,11 @@ impl OutsideDismissal {
 }
 
 /// tcode's per-window presentation on the Base [`gpui_base::Root`]: the
-/// modal and toast layers, and the touch surfaces the window text selection
-/// leaves behind.
+/// modal and toast layers.
 pub(crate) struct Overlays {
     dialogs: Vec<ActiveDialog>,
     sheets: Vec<gpui::WeakEntity<SheetBack>>,
     notifications: Entity<NotificationList>,
-    touch_selection: Entity<WindowTouchSelectionOverlay>,
 }
 
 /// Register the overlays every window root mounts. Call before opening windows.
@@ -96,7 +93,6 @@ impl Overlays {
             dialogs: Vec::new(),
             sheets: Vec::new(),
             notifications: cx.new(|cx| NotificationList::new(window, cx)),
-            touch_selection: cx.new(|cx| WindowTouchSelectionOverlay::new(window, cx)),
         }
     }
 
@@ -174,7 +170,6 @@ impl Render for Overlays {
             .absolute()
             .inset_0()
             // The edit menu floats above what was selected, under any dialog.
-            .child(self.touch_selection.clone())
             .when(!dialogs.is_empty(), |root| {
                 root.child(
                     div()
