@@ -231,6 +231,8 @@ pub use wire::{
 // only the pull requests linked to it. ApprovalRequest carries parent_item_id,
 // the subagent that asked, and SessionStatus carries pending approvals and
 // input while the provider is live, not only during a turn.
+//
+// Unreleased: the protocol adds the MoveQueued command.
 pub const PROTOCOL_VERSION: u32 = 21;
 
 #[cfg(test)]

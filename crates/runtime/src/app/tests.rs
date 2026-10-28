@@ -4847,6 +4847,31 @@ fn queued_sends_dispatch_one_per_completed_turn() {
 }
 
 #[test]
+fn moved_queue_entries_dispatch_in_their_new_order() {
+    let (commands, receiver) = smol::channel::unbounded();
+    let mut active = live_session(ProviderKind::Codex, commands);
+    let first = active.push_queued("first".into(), Vec::new());
+    active.push_queued("second".into(), Vec::new());
+    let third = active.push_queued("third".into(), Vec::new());
+    active.move_queued(third, Some(first));
+    active.move_queued(first, None);
+
+    let mut sent = Vec::new();
+    while active.dispatch_next_pending() == Ok(true) {
+        let Ok(SessionCommand::SendTurn {
+            delivery_id, text, ..
+        }) = receiver.try_recv()
+        else {
+            panic!("expected SendTurn");
+        };
+        sent.push(text);
+        active.accept_turn_delivery(delivery_id).unwrap();
+        active.turn_in_flight = false;
+    }
+    assert_eq!(sent, ["third", "second", "first"]);
+}
+
+#[test]
 fn future_scheduled_head_does_not_block_ordinary_dispatch_or_acceptance() {
     let (commands, receiver) = smol::channel::unbounded();
     let mut active = live_session(ProviderKind::Codex, commands);

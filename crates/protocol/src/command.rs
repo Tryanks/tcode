@@ -501,6 +501,12 @@ pub enum Command {
         session_id: String,
         id: u64,
     },
+    /// Put queued message `id` just before `before`, or last when `None`.
+    MoveQueued {
+        session_id: String,
+        id: u64,
+        before: Option<u64>,
+    },
     RetryTurn {
         session_id: String,
         turn_id: String,
@@ -662,6 +668,7 @@ impl Command {
             | Self::Steer { session_id, .. }
             | Self::SteerQueued { session_id, .. }
             | Self::DropQueued { session_id, .. }
+            | Self::MoveQueued { session_id, .. }
             | Self::RetryTurn { session_id, .. }
             | Self::Interrupt { session_id, .. }
             | Self::CompactContext { session_id, .. }

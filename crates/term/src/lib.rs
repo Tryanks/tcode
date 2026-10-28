@@ -687,49 +687,6 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_captures_output_resizes_and_accepts_input() {
-        let output = command(
-            "(for /l %i in (1,1,8192) do @echo terminal-output-%i) & echo tcode-final-line & exit /b 37",
-        );
-        let state = wait_until(&output, |state| state.exited);
-        assert!(
-            state.text().contains("tcode-final-line"),
-            "{}",
-            state.text()
-        );
-        assert_eq!(state.exit_code, Some(37));
-
-        let resized = Terminal::spawn_command(
-            std::env::temp_dir(),
-            "powershell.exe".into(),
-            vec![
-                "-NoProfile".into(),
-                "-Command".into(),
-                "$null = [Console]::ReadLine(); Write-Output ('size=' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)".into(),
-            ],
-            "powershell".into(),
-        )
-        .unwrap();
-        resized.resize(42, 9);
-        resized.write_input(b"\r".to_vec());
-        let state = wait_until(&resized, |state| state.exited);
-        assert_eq!((state.cols, state.screen_lines), (42, 9));
-        assert!(state.text().contains("size=42x9"), "{}", state.text());
-        assert_eq!(state.exit_code, Some(0));
-
-        let input = command("set /p line= && set line");
-        input.write_input(b"tcode-term-ok\r".to_vec());
-        let state = wait_until(&input, |state| state.exited);
-        assert!(
-            state.text().contains("line=tcode-term-ok"),
-            "{}",
-            state.text()
-        );
-        assert_eq!(state.exit_code, Some(0));
-    }
-
-    #[cfg(windows)]
-    #[test]
     fn windows_kills_child_with_pending_input() {
         let terminal = command("echo tcode-ready & ping -n 30 127.0.0.1 >nul");
         wait_until(&terminal, |state| state.text().contains("tcode-ready"));

@@ -953,6 +953,11 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.steer(&session_id, text, attachment_paths, cx),
         Command::SteerQueued { session_id, id } => app.steer_queued(&session_id, id, cx),
         Command::DropQueued { session_id, id } => app.drop_queued(&session_id, id, cx),
+        Command::MoveQueued {
+            session_id,
+            id,
+            before,
+        } => app.move_queued(&session_id, id, before),
         Command::RetryTurn {
             session_id,
             turn_id,
@@ -1380,6 +1385,14 @@ mod tests {
                 Command::DropQueued {
                     session_id: id.clone(),
                     id: 42,
+                },
+                "unknown_queued_message",
+            ),
+            (
+                Command::MoveQueued {
+                    session_id: id.clone(),
+                    id: 42,
+                    before: None,
                 },
                 "unknown_queued_message",
             ),
