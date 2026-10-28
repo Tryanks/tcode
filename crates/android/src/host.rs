@@ -16,7 +16,7 @@ use futures::{StreamExt as _, channel::mpsc};
 use gpui::App;
 use jni::{
     Env, JavaVM, jni_sig, jni_str,
-    objects::{JObject, JString, JValue},
+    objects::{JIntArray, JObject, JString, JValue},
     refs::Global,
 };
 use tcode_client::host::{HostFuture, PickedImage};
@@ -91,6 +91,39 @@ impl JniObject {
                 })
             })
             .map_err(|error: jni::errors::Error| error.to_string())
+    }
+}
+
+/// Android's own word segmentation: the Java ICU the platform ships.
+struct SystemWords(JniObject);
+
+impl tcode_client::words::WordSegmenter for SystemWords {
+    fn breaks(&self, text: &str) -> Vec<usize> {
+        let units = self.0.with_env(|env, activity| {
+            let string = env.new_string(text)?;
+            let array = env
+                .call_method(
+                    activity,
+                    jni_str!("gpuiWordBreaks"),
+                    jni_sig!("(Ljava/lang/String;)[I"),
+                    &[JValue::Object(&string)],
+                )?
+                .l()?;
+            let array = JIntArray::cast_local(env, array)?;
+            let mut units = vec![0; env.get_array_length(&array)? as usize];
+            env.get_int_array_region(&array, 0, &mut units)?;
+            Ok(units)
+        });
+        match units {
+            Ok(units) => tcode_client::words::breaks_from_utf16(
+                text,
+                units.into_iter().map(|unit| unit.max(0) as usize),
+            ),
+            Err(error) => {
+                log::warn!("Android word breaks unavailable: {error}");
+                tcode_client::words::breaks_from_utf16(text, [])
+            }
+        }
     }
 }
 
@@ -223,6 +256,7 @@ pub(crate) fn native_host(
     let picker = bridge.clone();
     let host = NativeClientHost::new(data_dir, device_name)
         .with_platform(platform)
+        .with_word_segmenter(SystemWords(bridge.object.clone()))
         .with_multicast_lock(move |acquire| {
             if let Err(error) = multicast.with_env(|env, activity| {
                 env.call_method(

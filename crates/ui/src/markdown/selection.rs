@@ -349,7 +349,7 @@ impl SelectionDocument {
     fn unit_at(&self, unit: Unit, point: &DocPoint, cx: &App) -> Option<(DocPoint, DocPoint)> {
         let text = self.segment_text(point, cx)?;
         let range = match unit {
-            Unit::Word => word_range(&text, point.position.offset)?,
+            Unit::Word => word_at(&text, point.position.offset, cx)?,
             Unit::Line => line_range(&text, point.position.offset),
         };
         let at = |offset| DocPoint {
@@ -530,6 +530,27 @@ impl SelectionDocument {
             }
         }
     }
+}
+
+/// The byte range of the word at `offset` in `text`, as the platform
+/// segments words: Chinese and other text written without spaces splits into
+/// its words. Where the platform has no segmentation, gpui-base's rule.
+fn word_at(text: &str, offset: usize, cx: &App) -> Option<std::ops::Range<usize>> {
+    let offset = floor_boundary(text, offset);
+    if offset >= text.len() {
+        return None;
+    }
+    let segmenter = cx
+        .try_global::<crate::remote::ClientAttachment>()
+        .map_or_else(tcode_client::words::system, |attachment| {
+            attachment.host().word_segmenter()
+        });
+    let Some(segmenter) = segmenter else {
+        return word_range(text, offset);
+    };
+    let breaks = segmenter.breaks(text);
+    let end = breaks.partition_point(|boundary| *boundary <= offset);
+    Some(*breaks.get(end.checked_sub(1)?)?..*breaks.get(end)?)
 }
 
 /// The byte range of the word at `offset` in `text`, as gpui-base's
@@ -1251,6 +1272,38 @@ mod tests {
         draw(cx);
         assert_eq!(menu_open(&markdown, cx), None);
         assert!(cx.debug_bounds("edit-menu").is_none());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    #[gpui::test]
+    fn a_double_click_on_chinese_takes_the_word_the_platform_segments(cx: &mut TestAppContext) {
+        let (_, markdown, cx) = open_body("我们修复问题", cx);
+        draw(cx);
+        // The right half of "修", the first character of "修复".
+        let position = markdown.read_with(cx, |state, _| {
+            let runs = state.runs.borrow();
+            let run = &runs[0];
+            let start = run.layout.position_for_index(6).unwrap();
+            let end = run.layout.position_for_index(9).unwrap();
+            point(start.x + (end.x - start.x) * 0.75, start.y + px(4.))
+        });
+        for click_count in [1, 2] {
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+                click_count,
+                first_mouse: false,
+            });
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+                click_count,
+            });
+        }
+        draw(cx);
+        assert_eq!(selected(&markdown, cx), "修复");
     }
 
     /// A message above a composer.

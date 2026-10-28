@@ -28,6 +28,10 @@ js-sys = "0.3"
 [dev-dependencies]
 smol = "2"
 
+# Linux has no segmenter every install carries; only its dictionary is bundled.
+[target.'cfg(target_os = "linux")'.dependencies]
+icu_segmenter = { version = "2.3", default-features = false, features = ["compiled_data"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6", optional = true }
 objc2 = { version = "0.6", optional = true }
