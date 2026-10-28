@@ -256,12 +256,17 @@ fn stream_blocks(
         if output.is_closed() {
             return Err(error("original read cancelled"));
         }
-        let mut block = vec![0; BLOCK];
-        let count = read.read(&mut block).map_err(io_error)?;
+        // A base64 decoder yields 768 bytes per read, and every block is a
+        // hand-over to the viewer's thread, so blocks are filled before they go.
+        let mut block = Vec::with_capacity(BLOCK);
+        let count = read
+            .by_ref()
+            .take(BLOCK as u64)
+            .read_to_end(&mut block)
+            .map_err(io_error)?;
         if count == 0 {
             return Ok(held);
         }
-        block.truncate(count);
         if !held.is_empty() {
             output.send_blocking(Ok(held)).map_err(error)?;
         }
