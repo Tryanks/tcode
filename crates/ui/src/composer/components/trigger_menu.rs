@@ -147,7 +147,7 @@ impl Composer {
                         "compact",
                         None,
                         "composer.cmd_compact_desc",
-                        MenuAccept::CompactContext,
+                        MenuAccept::InsertCommand("compact".into()),
                     ));
                 }
                 if goal_offered {
@@ -296,11 +296,6 @@ impl Composer {
             MenuAccept::OpenModelPicker => {
                 self.replace_trigger("", window, cx);
                 self.model_picker_token = self.model_picker_token.wrapping_add(1);
-            }
-            MenuAccept::CompactContext => {
-                self.replace_trigger("", window, cx);
-                self.workspace_store
-                    .update(cx, |store, _cx| store.compact_context());
             }
         }
         self.active_trigger = None;
@@ -564,6 +559,37 @@ mod tests {
             });
             assert_eq!(cx.debug_bounds("menu-row-0").is_some(), visible, "{text:?}");
         }
+    }
+
+    /// Picking `/compact` from the menu writes the command into the input like
+    /// any other; only sending it compacts.
+    #[gpui::test]
+    fn picking_compact_inserts_the_command_without_running_it(cx: &mut TestAppContext) {
+        let (store, composer, cx) = composer_window(false, cx);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        composer.update_in(cx, |composer, window, cx| {
+            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
+        });
+        assert!(store.read_with(cx, |store, _| compact_offered(&store.composer_state())));
+        cx.simulate_input("/comp");
+        cx.update(|window, cx| _ = window.draw(cx));
+        composer.read_with(cx, |composer, cx| {
+            assert_eq!(composer.menu_rows(cx).0[0].primary, "/compact");
+        });
+        // The action, not a simulated keystroke: the test driver types an
+        // unhandled Enter's `\n` into the input, which AppKit does not.
+        cx.update(|window, cx| {
+            window.dispatch_action(
+                Box::new(gpui_base::input::Enter {
+                    secondary: false,
+                    shift: false,
+                }),
+                cx,
+            )
+        });
+        composer.read_with(cx, |composer, cx| {
+            assert_eq!(composer.input.read(cx).value(), "/compact ");
+        });
     }
 
     #[gpui::test]

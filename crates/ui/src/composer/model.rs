@@ -217,8 +217,6 @@ pub(super) enum MenuAccept {
     InsertOrchestrate,
     /// Insert the scheduled-message command prefix.
     InsertLater,
-    /// Ask the provider to compact its context now.
-    CompactContext,
     /// Insert the goal command prefix.
     InsertGoal,
     /// Strip the `/model` command and open the model picker.
