@@ -562,6 +562,19 @@ impl MarkdownState {
         self.runs.borrow_mut().push(run);
     }
 
+    /// The character under `window_point` in the text painted last frame;
+    /// none off the text.
+    pub(super) fn char_at(&self, window_point: Point<Pixels>) -> Option<TextPosition> {
+        let runs = self.runs.borrow();
+        let run = runs.iter().find(|run| run.bounds.contains(&window_point))?;
+        let offset = run.layout.index_for_position(window_point).ok()?;
+        Some(TextPosition {
+            path: run.origin.path.to_vec(),
+            line: run.origin.line,
+            offset: run.origin.base + offset,
+        })
+    }
+
     /// The position a selection end at `window_point` falls on, from the text
     /// painted last frame: on the run nearest to it, at the character
     /// boundary under it, or at the end of a run above it or the start of one

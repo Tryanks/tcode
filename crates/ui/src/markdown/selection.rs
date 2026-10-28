@@ -88,12 +88,11 @@ pub(crate) fn render_path(path: &str) -> Rc<[u32]> {
 /// for copying text that is not on screen.
 pub(crate) type EntryNodes = Rc<dyn Fn(RangeInclusive<u64>, &App) -> Vec<(u64, Rc<BlockNode>)>>;
 
-/// What a multi-click selected, which a drag from it extends by.
+/// What a double or triple click selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Unit {
-    Character,
     Word,
-    Segment,
+    Line,
 }
 
 #[derive(Default)]
@@ -109,9 +108,8 @@ struct Touch {
 pub struct SelectionDocument {
     anchor: Option<DocPoint>,
     focus: Option<DocPoint>,
-    /// While the pointer is held: what the press selected, as the far edges
-    /// a drag keeps.
-    gesture: Option<(Unit, DocPoint, DocPoint)>,
+    /// While the pointer is held, the end a drag keeps.
+    gesture: Option<DocPoint>,
     entries: EntryNodes,
     frame: Rc<RefCell<Frame>>,
     touch: Touch,
@@ -325,6 +323,20 @@ impl SelectionDocument {
             })
     }
 
+    /// The character under `window_point`, in the entry it lies on; none
+    /// off the text.
+    fn char_at(&self, window_point: Point<Pixels>, cx: &App) -> Option<DocPoint> {
+        let frame = self.frame.borrow();
+        frame.participants.iter().find_map(|participant| {
+            let state = participant.state.upgrade()?;
+            let position = state.read(cx).char_at(window_point)?;
+            Some(DocPoint {
+                entry: participant.entry,
+                position,
+            })
+        })
+    }
+
     fn segment_text(&self, point: &DocPoint, cx: &App) -> Option<String> {
         let (_, node) = (self.entries)(point.entry..=point.entry, cx)
             .into_iter()
@@ -332,18 +344,13 @@ impl SelectionDocument {
         node.segment_text(&point.position.path, point.position.line)
     }
 
-    /// The edges of the `unit` around `point`.
-    fn unit_at(&self, unit: Unit, point: &DocPoint, cx: &App) -> (DocPoint, DocPoint) {
-        let text = match unit {
-            Unit::Character => None,
-            _ => self.segment_text(point, cx),
-        };
-        let Some(text) = text else {
-            return (point.clone(), point.clone());
-        };
+    /// The edges of the `unit` around the character at `point`, the way
+    /// gpui-base's multi-click finds them.
+    fn unit_at(&self, unit: Unit, point: &DocPoint, cx: &App) -> Option<(DocPoint, DocPoint)> {
+        let text = self.segment_text(point, cx)?;
         let range = match unit {
-            Unit::Word => word_range(&text, point.position.offset),
-            _ => 0..text.len(),
+            Unit::Word => word_range(&text, point.position.offset)?,
+            Unit::Line => line_range(&text, point.position.offset),
         };
         let at = |offset| DocPoint {
             entry: point.entry,
@@ -352,38 +359,36 @@ impl SelectionDocument {
                 ..point.position.clone()
             },
         };
-        (at(range.start), at(range.end))
+        Some((at(range.start), at(range.end)))
     }
 
-    fn press(&mut self, point: DocPoint, click_count: usize, extend: bool, cx: &mut Context<Self>) {
+    /// A press: a caret at `point`, or with `extend` the selection from its
+    /// anchor to `point`, which a drag then moves.
+    fn press(&mut self, point: DocPoint, extend: bool, cx: &mut Context<Self>) {
         self.touch = Touch::default();
-        let unit = match click_count {
-            0 | 1 => Unit::Character,
-            2 => Unit::Word,
-            _ => Unit::Segment,
+        let anchor = match &self.anchor {
+            Some(anchor) if extend => anchor.clone(),
+            _ => point.clone(),
         };
-        if extend && unit == Unit::Character && self.anchor.is_some() {
-            let anchor = self.anchor.clone().unwrap();
-            self.gesture = Some((unit, anchor.clone(), anchor.clone()));
-            self.set(anchor, point, cx);
-            return;
-        }
-        let (start, end) = self.unit_at(unit, &point, cx);
-        self.gesture = Some((unit, start.clone(), end.clone()));
+        self.gesture = Some(anchor.clone());
+        self.set(anchor, point, cx);
+    }
+
+    /// A double or triple click: the word or line at `point`. Whether there
+    /// was one.
+    fn select_unit(&mut self, unit: Unit, point: &DocPoint, cx: &mut Context<Self>) -> bool {
+        self.touch = Touch::default();
+        self.gesture = None;
+        let Some((start, end)) = self.unit_at(unit, point, cx) else {
+            return false;
+        };
         self.set(start, end, cx);
+        true
     }
 
     fn drag(&mut self, point: DocPoint, cx: &mut Context<Self>) {
-        let Some((unit, first, last)) = self.gesture.clone() else {
-            return;
-        };
-        let (start, end) = self.unit_at(unit, &point, cx);
-        if point < first {
-            self.set(last, start, cx);
-        } else if point > last {
-            self.set(first, end, cx);
-        } else {
-            self.set(first, last, cx);
+        if let Some(anchor) = self.gesture.clone() {
+            self.set(anchor, point, cx);
         }
     }
 
@@ -432,6 +437,7 @@ impl SelectionDocument {
         origin: &RunOrigin,
         range: &std::ops::Range<usize>,
         layout: &TextLayout,
+        visible: Bounds<Pixels>,
     ) {
         if !self.touch.active {
             return;
@@ -439,10 +445,12 @@ impl SelectionDocument {
         let Some((start, end)) = self.span() else {
             return;
         };
+        // An end clipped out of view gets no handle.
         let caret = |offset| {
             layout
                 .position_for_index(offset)
                 .map(|origin| Bounds::new(origin, gpui::size(px(0.), layout.line_height())))
+                .filter(|caret| visible.contains(&caret.center()))
         };
         let mut frame = self.frame.borrow_mut();
         let point = |offset| DocPoint {
@@ -524,44 +532,62 @@ impl SelectionDocument {
     }
 }
 
-/// The byte range of the word at `offset` in `text`: a run of letters and
-/// digits, of spaces, or of anything else.
-fn word_range(text: &str, offset: usize) -> std::ops::Range<usize> {
-    #[derive(PartialEq)]
+/// The byte range of the word at `offset` in `text`, as gpui-base's
+/// multi-click reads it: a run of ASCII, Latin or Cyrillic letters, digits
+/// and underscores, a run of spaces, or one other character (each CJK
+/// character is a word of its own). None past the end of the text.
+fn word_range(text: &str, offset: usize) -> Option<std::ops::Range<usize>> {
+    #[derive(Clone, Copy, PartialEq)]
     enum Class {
         Word,
         Space,
         Other,
     }
     let class = |c: char| {
-        if c.is_alphanumeric() || c == '_' {
+        if c == '_'
+            || c.is_ascii_alphanumeric()
+            || matches!(c, '\u{00C0}'..='\u{024F}' | '\u{0400}'..='\u{04FF}' | '\u{1E00}'..='\u{1EFF}' | '\u{0300}'..='\u{036F}')
+        {
             Class::Word
-        } else if c.is_whitespace() {
+        } else if c.is_whitespace() && !matches!(c, '\n' | '\r') {
             Class::Space
         } else {
             Class::Other
         }
     };
-    let offset = offset.min(text.len());
-    let Some(at) = text[offset..]
-        .chars()
-        .next()
-        .or_else(|| text[..offset].chars().next_back())
-    else {
-        return offset..offset;
-    };
+    let offset = floor_boundary(text, offset);
+    let at = text[offset..].chars().next()?;
     let kind = class(at);
+    let joins = |c: char| kind != Class::Other && class(c) == kind;
     let start = text[..offset]
         .char_indices()
         .rev()
-        .take_while(|(_, c)| class(*c) == kind)
+        .take_while(|(_, c)| joins(*c))
         .last()
         .map_or(offset, |(ix, _)| ix);
-    let end = text[offset..]
+    let end = text[offset + at.len_utf8()..]
         .char_indices()
-        .find(|(_, c)| class(*c) != kind)
-        .map_or(text.len(), |(ix, _)| offset + ix);
-    start..end.max(start)
+        .find(|(_, c)| !joins(*c))
+        .map_or(text.len(), |(ix, _)| offset + at.len_utf8() + ix);
+    Some(start..end)
+}
+
+/// The line of `text` holding `offset`.
+fn line_range(text: &str, offset: usize) -> std::ops::Range<usize> {
+    let offset = floor_boundary(text, offset);
+    let start = text[..offset].rfind('\n').map_or(0, |newline| newline + 1);
+    let end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |newline| offset + newline);
+    start..end
+}
+
+fn floor_boundary(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
 /// The surface a document's selection is made on: a press on it begins a
@@ -636,7 +662,7 @@ impl RenderOnce for SelectionArea {
                     "copy",
                     crate::tr!("edit_menu.copy").into_owned(),
                     move |_, cx| {
-                        let text = copy.read(cx).selected_text(cx);
+                        let text = copy.read(cx).selected_text(cx).trim().to_string();
                         if !text.is_empty() {
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
                         }
@@ -666,7 +692,7 @@ impl RenderOnce for SelectionArea {
             .on_action({
                 let document = document.clone();
                 move |_: &gpui_base::input::Copy, _, cx| {
-                    let text = document.read(cx).selected_text(cx);
+                    let text = document.read(cx).selected_text(cx).trim().to_string();
                     if text.is_empty() {
                         cx.propagate();
                         return;
@@ -712,16 +738,25 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                 document.update(cx, |document, cx| document.clear(cx));
                 return;
             }
+            if event.click_count > 1 {
+                let unit = if event.click_count == 2 {
+                    Unit::Word
+                } else {
+                    Unit::Line
+                };
+                if let Some(point) = document.read(cx).char_at(event.position, cx) {
+                    document.update(cx, |document, cx| document.select_unit(unit, &point, cx));
+                    focus_selection(&document, window, cx);
+                }
+                return;
+            }
             let Some(point) = document.read(cx).point_at(event.position, cx) else {
                 document.update(cx, |document, cx| document.clear(cx));
                 return;
             };
             document.update(cx, |document, cx| {
-                document.press(point, event.click_count, event.modifiers.shift, cx)
+                document.press(point, event.modifiers.shift, cx)
             });
-            if event.click_count > 1 {
-                focus_selection(&document, window, cx);
-            }
         }
     });
     window.on_mouse_event({
@@ -767,11 +802,14 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                 if window.default_prevented() || !hitbox.is_hovered(window) {
                     return;
                 }
-                let Some(point) = document.read(cx).point_at(event.start_position, cx) else {
+                let Some(point) = document.read(cx).char_at(event.start_position, cx) else {
                     return;
                 };
+                // The finger then moves the far end, from the word's start.
                 document.update(cx, |document, cx| {
-                    document.press(point, 2, false, cx);
+                    if document.select_unit(Unit::Word, &point, cx) {
+                        document.gesture = document.span().map(|(start, _)| start.clone());
+                    }
                     document.touch.active = document.has_selection();
                 });
                 if document.read(cx).touch.active {
@@ -970,13 +1008,15 @@ mod tests {
     };
 
     #[test]
-    fn a_double_click_takes_the_run_of_letters_spaces_or_marks_under_it() {
+    fn a_double_click_takes_a_run_of_letters_or_spaces_or_one_other_character() {
         let text = "let foo_bar = baz(1);";
-        assert_eq!(&text[word_range(text, 5)], "foo_bar");
-        assert_eq!(&text[word_range(text, 3)], " ");
-        assert_eq!(&text[word_range(text, 17)], "(");
-        assert_eq!(&text[word_range(text, text.len())], ");");
-        assert_eq!(word_range("", 0), 0..0);
+        let word = |text: &'static str, offset| word_range(text, offset).map(|r| &text[r]);
+        assert_eq!(word(text, 5), Some("foo_bar"));
+        assert_eq!(word(text, 3), Some(" "));
+        assert_eq!(word(text, 17), Some("("));
+        assert_eq!(word(text, 19), Some(")"));
+        assert_eq!(word(text, text.len()), None);
+        assert_eq!(word("选中文字", 3), Some("中"));
     }
 
     fn draw(cx: &mut VisualTestContext) {

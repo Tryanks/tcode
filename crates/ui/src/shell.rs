@@ -106,6 +106,8 @@ pub(crate) fn window_drag_area<E: gpui::InteractiveElement>(
     .on_mouse_down(
         MouseButton::Left,
         window.listener_for(&state, |state, event: &MouseDownEvent, window, _| {
+            // A press that moves the window leaves the focus where it was.
+            window.prevent_default();
             // Double-click zooms/maximizes the window like a native titlebar.
             if event.click_count >= 2 {
                 state.should_move = false;

@@ -263,6 +263,7 @@ impl Element for Inline {
                     origin,
                     selected,
                     &self.text_layout,
+                    window.content_mask().bounds,
                 );
             }
             view.register_run(PaintedRun {
