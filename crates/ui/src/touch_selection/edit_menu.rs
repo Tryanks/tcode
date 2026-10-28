@@ -3,6 +3,8 @@
 
 use std::rc::Rc;
 
+#[cfg(target_os = "ios")]
+use gpui::canvas;
 use gpui::{
     App, Bounds, ClickEvent, Corners, ElementId, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, RenderOnce, SharedString, Styled as _, Window, deferred, div, px,
