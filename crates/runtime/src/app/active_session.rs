@@ -507,6 +507,22 @@ impl ActiveSession {
         Some(self.queue.remove(index))
     }
 
+    /// Put queued message `id` just before `before`, or last when `None`.
+    /// Moving a submitted entry is harmless: its acceptance correlates by id.
+    pub(super) fn move_queued(&mut self, id: u64, before: Option<u64>) {
+        if before == Some(id) {
+            return;
+        }
+        let Some(from) = self.queue.iter().position(|m| m.id == id) else {
+            return;
+        };
+        let message = self.queue.remove(from);
+        let to = before
+            .and_then(|before| self.queue.iter().position(|m| m.id == before))
+            .unwrap_or(self.queue.len());
+        self.queue.insert(to, message);
+    }
+
     /// Inject a message into the turn already in flight. Deliberately does NOT
     /// touch the turn bookkeeping: the provider folds the message into the
     /// running turn (Claude emits no second `result`; Codex's `turn/steer`

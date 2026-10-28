@@ -197,6 +197,8 @@ pub struct Composer {
     /// strip contains at least one scheduled row.
     scheduled_countdown_tick: Option<Task<()>>,
     queued_refill: Option<(String, u64, String)>,
+    queue_drag: Option<components::queue_strip::QueueDrag>,
+    queue_scroll: gpui::ScrollHandle,
     /// A touch on the compact Queue button that has not lifted yet.
     steer_gesture: Option<SteerGesture>,
     /// Mic button + live dictation session (see `components::voice`).
@@ -369,6 +371,8 @@ impl Composer {
             pending_image_loads: 0,
             scheduled_countdown_tick: None,
             queued_refill: None,
+            queue_drag: None,
+            queue_scroll: gpui::ScrollHandle::new(),
             steer_gesture: None,
             #[cfg(feature = "voice")]
             voice,
@@ -2174,6 +2178,78 @@ mod replica_tests {
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "New draft while the drop is pending"
         );
+    }
+
+    /// Dragging a queued row onto another asks the host to send it in that
+    /// row's place; letting go where it started asks nothing.
+    #[gpui::test]
+    fn dragging_a_queued_row_moves_it_in_the_host_queue(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        status.queued_messages = (1..=3)
+            .map(|id| tcode_protocol::QueuedMessageStatus {
+                id,
+                editable: true,
+                delivery_key: None,
+                text: format!("Queued {id}"),
+                fire_at_unix_secs: None,
+            })
+            .collect();
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (_composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(gpui::size(px(1024.), px(768.)));
+        let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| _ = window.draw(cx));
+        draw(cx);
+        let left = gpui::MouseButton::Left;
+        let drag = |cx: &mut gpui::VisualTestContext, id: u64, to: gpui::Point<gpui::Pixels>| {
+            let start = cx
+                .debug_bounds(format!("queued-row-{id}").leak())
+                .unwrap()
+                .center();
+            cx.simulate_mouse_down(start, left, Modifiers::default());
+            cx.simulate_mouse_move(
+                start + gpui::point(px(0.), px(8.)),
+                left,
+                Modifiers::default(),
+            );
+            draw(cx);
+            cx.simulate_mouse_move(to, left, Modifiers::default());
+            draw(cx);
+            cx.simulate_mouse_up(to, left, Modifiers::default());
+            draw(cx);
+        };
+        let moves = |outgoing: &async_channel::Receiver<String>| {
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                        tcode_protocol::ClientPayload::Command(
+                            tcode_protocol::Command::MoveQueued { id, before, .. },
+                        ) => Some((id, before)),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let first = cx.debug_bounds("queued-row-1").unwrap();
+        drag(cx, 3, gpui::point(first.center().x, first.top() + px(2.)));
+        assert_eq!(moves(&outgoing), [(3, Some(1))]);
+
+        let last = cx.debug_bounds("queued-row-3").unwrap();
+        drag(cx, 1, gpui::point(last.center().x, last.bottom() - px(2.)));
+        assert_eq!(moves(&outgoing), [(1, None)]);
+
+        let second = cx.debug_bounds("queued-row-2").unwrap().center();
+        drag(cx, 2, second);
+        assert!(moves(&outgoing).is_empty(), "a row dropped in place stays");
     }
 
     /// Choosing a thread from the `@` menu references it: the host is asked to

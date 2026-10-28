@@ -198,6 +198,22 @@ impl AppState {
                         .then_some(())
                         .ok_or_else(|| refusal("queued message"))
                 }
+                Command::MoveQueued {
+                    session_id,
+                    id,
+                    before,
+                } => {
+                    session(session_id)?;
+                    self.resident(session_id)
+                        .is_some_and(|s| {
+                            [Some(*id), *before]
+                                .into_iter()
+                                .flatten()
+                                .all(|id| s.queue.iter().any(|message| message.id == id))
+                        })
+                        .then_some(())
+                        .ok_or_else(|| refusal("queued message"))
+                }
                 Command::RemoveTerminalContext {
                     session_id,
                     context_id,
