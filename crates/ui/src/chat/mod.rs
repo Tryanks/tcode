@@ -5402,6 +5402,151 @@ mod tests {
         driver.shutdown(cx, &store, &host);
     }
 
+    /// A `tcode_control` anchor opens its thread at the turn of the entry it
+    /// names: here the user message of a turn above the window the thread
+    /// opens with, in a log whose streamed replies the host merges on the
+    /// wire, so no held record index stands for a log position.
+    #[gpui::test]
+    fn an_anchor_link_opens_its_thread_at_the_anchored_turn(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        const TURNS: u64 = 12;
+        const DELTAS: u64 = 40;
+        let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
+        let seeded_id = session_id.clone();
+        // Turn `t` takes the rows from `t * (DELTAS + 5)`; its user message is
+        // the second, and the position a `tcode_control` anchor names it by.
+        let rows = smol::block_on(host.update_state_for_test(move |state, cx| {
+            let mut events = Vec::new();
+            for turn in 0..TURNS {
+                let answer = format!("answer-{turn}");
+                events.push(agent::AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                });
+                events.push(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: format!("user-{turn}"),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: format!("Question {turn}"),
+                        context_len: None,
+                        attachments: Vec::new(),
+                    },
+                }));
+                events.push(agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                    id: answer.clone(),
+                    parent_item_id: None,
+                    content: ItemContent::AssistantMessage {
+                        text: String::new(),
+                    },
+                }));
+                events.extend((0..DELTAS).map(|_| agent::AgentEvent::Delta {
+                    item_id: answer.clone(),
+                    kind: agent::DeltaKind::AssistantText,
+                    text: "word ".into(),
+                }));
+                events.push(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: answer,
+                    parent_item_id: None,
+                    content: ItemContent::AssistantMessage {
+                        text: "word ".repeat(DELTAS as usize),
+                    },
+                }));
+                events.push(agent::AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                });
+            }
+            for (ts, event) in events.iter().enumerate() {
+                state.record_event_for_replica_test(&seeded_id, ts as u64, event, cx);
+            }
+            events.len() as u64
+        }))
+        .expect("record the streamed turns");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        let link = driver.link.clone();
+        let page = driver.await_with_events(
+            cx,
+            &store,
+            link.query(tcode_protocol::Query::SessionHistoryPage {
+                session_id: session_id.clone(),
+                before: u64::MAX,
+                limit: 1,
+            }),
+        );
+        assert!(
+            matches!(
+                page,
+                Ok(tcode_protocol::QueryResponse::SessionHistoryPage { end, .. }) if end == rows
+            ),
+            "the recorded events are the log's only rows: {page:?}"
+        );
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (_, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+
+        let opened = |cx: &mut VisualTestContext| {
+            let view = cx.update(|window, _| window.root::<ChatView>().flatten())?;
+            let (row, highlighted) = view.read_with(cx, |chat, _| {
+                let row = chat.list_state.logical_scroll_top().item_ix;
+                (
+                    chat.rows.get(row).map(|row| row.turn),
+                    chat.highlighted_turn,
+                )
+            });
+            let turn = row.filter(|turn| highlighted == Some(*turn))?;
+            store
+                .read_with(cx, |store, _| {
+                    store.with_active_timeline(|timeline| {
+                        timeline
+                            .entries
+                            .iter()
+                            .find(|entry| {
+                                entry.turn == turn
+                                    && matches!(
+                                        entry.content,
+                                        EntryContent::Item(ItemContent::UserMessage { .. })
+                                    )
+                            })
+                            .map(|entry| entry.id.clone())
+                    })
+                })
+                .flatten()
+        };
+        // Turn 1 is above the opening window; turn 9 is inside it, in the
+        // thread already open.
+        for turn in [1, 9] {
+            let expected = format!("user-{turn}");
+            store.update(cx, |store, cx| {
+                let position = turn * (DELTAS + 5) + 1;
+                store.select_session_at_position(session_id.clone(), position, cx);
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while opened(cx).as_deref() != Some(expected.as_str()) {
+                assert!(Instant::now() < deadline, "waiting for {expected}");
+                driver.step(cx, &store);
+                draw(cx);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        driver.shutdown(cx, &store, &host);
+    }
+
     #[test]
     fn pending_collapse_is_scoped_to_its_session() {
         let first_seen = Instant::now();

@@ -12,7 +12,10 @@ use tcode_core::{
     },
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
-use tcode_protocol::{Command, CommandResponse, ProtocolError, RuntimeOperationId, SettingsPatch};
+use tcode_protocol::{
+    Command, CommandResponse, ProtocolError, Query, QueryResponse, RuntimeOperationId,
+    SettingsPatch,
+};
 
 use super::{ArchivedDeletion, KEPT_THREADS, StoreChange, TopicKind, WorkspaceStore};
 
@@ -574,15 +577,51 @@ impl WorkspaceStore {
         self.sync_active_conversation_ui();
     }
     pub fn select_session_at_turn(&mut self, session_id: String, turn: usize) {
+        self.anchor_turn_task = None;
         self.pending_chat_turn = Some((session_id.clone(), turn));
         self.select_session(session_id);
     }
-    /// Open a thread scrolled to the turn holding the event at `position`, once
-    /// its held history reaches that far back.
-    pub fn select_session_at_position(&mut self, session_id: String, position: u64) {
+    /// Open a thread, then scroll it to the turn holding the entry at
+    /// `position` once the host names that turn. Only the host can: the
+    /// records a client holds are merged and carry no row.
+    pub fn select_session_at_position(
+        &mut self,
+        session_id: String,
+        position: u64,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_chat_turn = None;
-        self.pending_chat_anchor = Some((session_id.clone(), position));
-        self.select_session(session_id);
+        self.select_session(session_id.clone());
+        let generation = self.selection_generation;
+        let host = self.host.clone();
+        self.anchor_turn_task = Some(cx.spawn(async move |this, cx| {
+            let response = host
+                .query(Query::ThreadAnchorTurn {
+                    session_id: session_id.clone(),
+                    position,
+                })
+                .await;
+            _ = this.update(cx, |store, cx| {
+                if store.selection_generation != generation {
+                    return;
+                }
+                store.anchor_turn_task = None;
+                match response {
+                    Ok(QueryResponse::ThreadAnchorTurn(Some(turn))) => {
+                        store.pending_chat_turn = Some((session_id, turn));
+                        store.load_pending_chat_history(cx);
+                        cx.notify();
+                    }
+                    Ok(QueryResponse::ThreadAnchorTurn(None)) => {}
+                    Ok(other) => {
+                        log::warn!("Unexpected anchor-turn response for {session_id}: {other:?}")
+                    }
+                    Err(error) => {
+                        log::warn!("Anchor in {session_id} at {position} unresolved: {error:?}")
+                    }
+                }
+            });
+        }));
     }
     pub fn send_turn(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
         self.dispatch(Command::SendTurn {
