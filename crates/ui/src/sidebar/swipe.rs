@@ -2,7 +2,7 @@
 //! again: the long-press menu's Settle / Unsettle, one gesture away.
 //!
 //! gpui-base has no swipe-action row, so the row claims GPUI's touch pan
-//! itself. GPUI locks a pan to one axis and reports it as `ScrollWheelEvent`s
+//! itself. GPUI locks a pan to one axis and reports it as `ScrollEvent`s
 //! at the pan's original contact; the row takes a horizontal one in the
 //! capture phase, and a vertical one goes on to the list.
 
@@ -94,7 +94,7 @@ impl SessionsSidebar {
                     |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                     move |bounds, hitbox, window, _| {
                         window.on_mouse_event(
-                            move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                            move |event: &gpui::ScrollEvent, phase, window, cx| {
                                 if phase != DispatchPhase::Capture {
                                     return;
                                 }

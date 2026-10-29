@@ -152,7 +152,7 @@ impl TouchSelectionOverlay {
 mod tests {
     use gpui::{
         AppContext as _, Context, Entity, IntoElement, LongPressEvent, Modifiers,
-        ParentElement as _, Render, ScrollDelta, ScrollWheelEvent, Styled as _, TestAppContext,
+        ParentElement as _, Render, ScrollDelta, ScrollEvent, Styled as _, TestAppContext,
         TouchDragEvent, TouchPhase, VisualTestContext, Window, div, point, px, size,
     };
     use gpui_base::{SelectionEdge, TouchHandle};
@@ -480,11 +480,12 @@ mod tests {
         // a touch that begins on a handle is that handle's drag, not a pan.
         let finger = point(second.left() + px(80.), second.center().y);
         let pan = |cx: &mut VisualTestContext, phase, dy| {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: finger,
                 delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
                 modifiers: Modifiers::default(),
                 touch_phase: phase,
+                source: gpui::ScrollSource::Touch,
             });
             draw(cx);
         };

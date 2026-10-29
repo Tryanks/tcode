@@ -137,10 +137,11 @@ pub fn init_client(cx: &mut App, host: &dyn ClientHost, options: &ShellOptions) 
     crate::image_viewer::init(cx);
     crate::shortcut::init(cx);
     // Global ⌘K / Ctrl-K opens/closes the command palette (handled by
-    // AppShell). `secondary` is gpui's platform modifier: command on macOS,
-    // control on Windows/Linux — where a literal `cmd-` binding would mean the
+    // AppShell). `secondary` is gpui's platform modifier: Command on a Mac,
+    // Control elsewhere — where a literal `cmd-` binding would mean the
     // Super/Win key, which the OS intercepts.
-    cx.bind_keys([KeyBinding::new("secondary-k", TogglePalette, None)]);
+    let palette = crate::shortcut::secondary("secondary-k", TogglePalette, None, cx);
+    cx.bind_keys([palette]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([KeyBinding::new("cmd-q", crate::shell::Quit, None)]);
 }

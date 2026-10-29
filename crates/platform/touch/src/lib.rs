@@ -6,8 +6,8 @@
 //! midpoint and scales as a pinch about it.
 
 use gpui::{
-    Modifiers, PinchEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchEvent,
-    TouchId, TouchPhase,
+    Modifiers, PinchEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollEvent, ScrollSource,
+    TouchEvent, TouchId, TouchPhase,
 };
 
 #[derive(Default)]
@@ -158,11 +158,12 @@ impl TwoFingerGestures {
 }
 
 fn scroll(position: Point<Pixels>, delta: Point<Pixels>, touch_phase: TouchPhase) -> PlatformInput {
-    PlatformInput::ScrollWheel(ScrollWheelEvent {
+    PlatformInput::Scroll(ScrollEvent {
         position,
         delta: ScrollDelta::Pixels(delta),
         modifiers: Modifiers::default(),
         touch_phase,
+        source: ScrollSource::Touch,
     })
 }
 
@@ -201,7 +202,7 @@ mod tests {
                     event.phase,
                     (f32::from(event.position.x), f32::from(event.position.y))
                 ),
-                PlatformInput::ScrollWheel(event) => {
+                PlatformInput::Scroll(event) => {
                     let delta = event.delta.pixel_delta(px(1.));
                     format!(
                         "scroll {:?} by {:?} at {:?}",

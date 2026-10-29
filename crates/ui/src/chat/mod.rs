@@ -3543,7 +3543,7 @@ impl ChatView {
                 .child(add_project)
                 .child(div().text_secondary(false, cx).child(crate::tr!(
                     "chat.palette_hint",
-                    shortcut = format_secondary_shortcut("k")
+                    shortcut = format_secondary_shortcut("k", cx)
                 ))),
         );
 
@@ -4990,7 +4990,7 @@ mod tests {
 
     #[gpui::test]
     fn a_live_file_edit_lays_out_only_the_diff_lines_on_screen(cx: &mut TestAppContext) {
-        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, VisualTestContext};
+        use gpui::{Modifiers, ScrollDelta, ScrollEvent, TouchPhase, VisualTestContext};
         use gpui::{point, px, size};
 
         let mut diff = format!("@@ -1,400 +1,401 @@\n+// {}\n", "wide ".repeat(80));
@@ -5049,11 +5049,12 @@ mod tests {
                 (TouchPhase::Moved, delta),
                 (TouchPhase::Ended, point(px(0.), px(0.))),
             ] {
-                cx.simulate_event(ScrollWheelEvent {
+                cx.simulate_event(ScrollEvent {
                     position: diff_bounds.center(),
                     delta: ScrollDelta::Pixels(delta),
                     modifiers: Modifiers::default(),
                     touch_phase,
+                    ..Default::default()
                 });
             }
             draw(cx);
@@ -6164,7 +6165,7 @@ mod tests {
         let resting = list.viewport_bounds();
         // One trackpad packet per displayed frame.
         let packet = |phase, dy: f32, cx: &mut gpui::VisualTestContext| {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: resting.center(),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.), px(dy))),
                 touch_phase: phase,
@@ -6306,7 +6307,7 @@ mod tests {
                 let composer = cx.debug_bounds("chat-composer").expect("composer");
                 assert!(status.bottom() <= composer.top());
                 assert!(status.bottom() <= list.viewport_bounds().bottom());
-                cx.simulate_event(gpui::ScrollWheelEvent {
+                cx.simulate_event(gpui::ScrollEvent {
                     position: list.viewport_bounds().center(),
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1200.))),
                     touch_phase: gpui::TouchPhase::Started,
@@ -6315,7 +6316,7 @@ mod tests {
                 cx.update(|window, cx| {
                     let _ = window.draw(cx);
                 });
-                cx.simulate_event(gpui::ScrollWheelEvent {
+                cx.simulate_event(gpui::ScrollEvent {
                     position: list.viewport_bounds().center(),
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100000.))),
                     touch_phase: gpui::TouchPhase::Moved,
@@ -6376,7 +6377,7 @@ mod tests {
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         let height = list.viewport_bounds().size.height;
         let scroll = |distance, cx: &mut VisualTestContext| {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: list.viewport_bounds().center(),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.), distance)),
                 touch_phase: gpui::TouchPhase::Moved,
@@ -6396,7 +6397,7 @@ mod tests {
         // redraws dirty windows whenever effects flush, so the store update,
         // its observers and the packet share one flush: the deferred packet
         // runs after the observers and before the frame, as on a display link.
-        let wheel = gpui::ScrollWheelEvent {
+        let wheel = gpui::ScrollEvent {
             position: list.viewport_bounds().center(),
             delta: gpui::ScrollDelta::Pixels(point(px(0.), px(40.))),
             touch_phase: gpui::TouchPhase::Moved,
@@ -6450,7 +6451,7 @@ mod tests {
             let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
             let bottom = list.scroll_px_offset_for_scrollbar().y;
             let scroll = |delta, cx: &mut gpui::VisualTestContext| {
-                cx.simulate_event(gpui::ScrollWheelEvent {
+                cx.simulate_event(gpui::ScrollEvent {
                     position: list.viewport_bounds().center(),
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), delta)),
                     touch_phase: phase,
@@ -6500,7 +6501,7 @@ mod tests {
 
     #[gpui::test]
     fn scroll_pill_over_inline_image_does_not_open_lightbox(cx: &mut TestAppContext) {
-        use gpui::{Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TouchPhase, point, px};
+        use gpui::{Modifiers, MouseButton, ScrollDelta, ScrollEvent, TouchPhase, point, px};
 
         let path = std::env::temp_dir().join(format!(
             "tcode-pill-image-{}-{}.png",
@@ -6643,7 +6644,7 @@ mod tests {
                 list.item_count()
             )
         });
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: list.viewport_bounds().center(),
             delta: ScrollDelta::Pixels(point(px(0.), list.viewport_bounds().top() - row.top())),
             touch_phase: TouchPhase::Moved,
@@ -6720,7 +6721,7 @@ mod tests {
         assert!(height > px(0.));
         assert!(cx.debug_bounds("scroll-to-end").is_none());
         let scroll = |distance, phase, cx: &mut VisualTestContext| {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: list.viewport_bounds().center(),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.), distance)),
                 touch_phase: phase,
@@ -7246,7 +7247,7 @@ mod tests {
                 (gpui::TouchPhase::Moved, distance),
                 (gpui::TouchPhase::Ended, px(0.)),
             ] {
-                cx.simulate_event(gpui::ScrollWheelEvent {
+                cx.simulate_event(gpui::ScrollEvent {
                     position,
                     delta: gpui::ScrollDelta::Pixels(point(px(0.), distance)),
                     touch_phase,
@@ -7414,7 +7415,7 @@ mod tests {
             // The finger is still moving: a pan packet resolves against that
             // frame's anchor before the next frame walks back into the page.
             if pan_delta != 0. {
-                cx.simulate_event(gpui::ScrollWheelEvent {
+                cx.simulate_event(gpui::ScrollEvent {
                     position: list.viewport_bounds().center(),
                     delta: gpui::ScrollDelta::Pixels(point(px(0.), px(pan_delta))),
                     touch_phase: gpui::TouchPhase::Moved,
@@ -7444,7 +7445,7 @@ mod tests {
 
     #[gpui::test]
     fn upward_scroll_moves_only_by_the_input_distance(cx: &mut TestAppContext) {
-        use gpui::{ScrollDelta, ScrollWheelEvent, point, px, size};
+        use gpui::{ScrollDelta, ScrollEvent, point, px, size};
 
         for width in [393., 1024.] {
             let mut timeline = synthetic_markdown_timeline(3);
@@ -7480,7 +7481,7 @@ mod tests {
             for step in 0..160 {
                 let item = list.logical_scroll_top().item_ix;
                 let before = list.bounds_for_item(item).unwrap().top();
-                cx.simulate_event(ScrollWheelEvent {
+                cx.simulate_event(ScrollEvent {
                     position: list.viewport_bounds().center(),
                     delta: ScrollDelta::Pixels(point(px(0.), px(40.))),
                     touch_phase: gpui::TouchPhase::Moved,

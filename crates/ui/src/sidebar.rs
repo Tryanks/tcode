@@ -1762,7 +1762,7 @@ impl SessionsSidebar {
             .child(div().flex_1().child(crate::tr!("sidebar.search")))
             .child(
                 crate::widgets::kbd::Kbd::new(gpui::Keystroke {
-                    modifiers: gpui::Modifiers::secondary_key(),
+                    modifiers: gpui::Modifiers::secondary_key(cx),
                     key: "k".into(),
                     key_char: None,
                 })

@@ -18,7 +18,7 @@ use gpui::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, Context, Entity,
     EntityId, Half as _, Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement,
     LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, PlatformInput, Point, RenderOnce, ScrollDelta, ScrollWheelEvent,
+    ParentElement as _, Pixels, PlatformInput, Point, RenderOnce, ScrollDelta, ScrollEvent,
     Styled as _, Task, TextLayout, TouchPhase, WeakEntity, Window, canvas, div, point, px,
 };
 use gpui_base::{GlobalState, SelectionEdge};
@@ -733,7 +733,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
         let document = document.clone();
         // In the capture phase: a scroller stretched past its end keeps the
         // whole stream, the lift included.
-        move |event: &ScrollWheelEvent, phase, _, cx| {
+        move |event: &ScrollEvent, phase, _, cx| {
             if !phase.capture() || !document.read(cx).touch.active {
                 return;
             }
@@ -919,7 +919,7 @@ fn auto_scroll(document: WeakEntity<SelectionDocument>, _: &Window, cx: &mut App
                         return true;
                     };
                     window.dispatch_event(
-                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        PlatformInput::Scroll(ScrollEvent {
                             position: clamp_into(pointer, viewport),
                             delta: ScrollDelta::Pixels(point(px(0.), -delta)),
                             modifiers: Modifiers::default(),
@@ -1098,7 +1098,7 @@ mod tests {
             div()
                 .size_full()
                 .child(MarkdownView::new(&self.markdown).selectable(true))
-                .on_scroll_wheel(move |event, window, _| {
+                .on_scroll(move |event, window, _| {
                     wheel_deltas
                         .borrow_mut()
                         .push(event.delta.pixel_delta(window.line_height()).y);
@@ -1361,11 +1361,12 @@ mod tests {
             (TouchPhase::Moved, false),
             (TouchPhase::Ended, true),
         ] {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: pan,
                 delta: ScrollDelta::Pixels(point(px(0.), px(-20.))),
                 modifiers: Modifiers::default(),
                 touch_phase: phase,
+                source: gpui::ScrollSource::Touch,
             });
             draw(cx);
             assert_eq!(menu_open(&markdown, cx), Some(open), "{phase:?}");
