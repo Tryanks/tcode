@@ -3946,11 +3946,7 @@ impl Render for ChatView {
                     matches!(next.part, RowPart::WorkLogActivity | RowPart::WorkLogLive)
                 });
                 let painted = this.painted_rows.clone();
-                // gpui-fast 0.1.8 can retain a reparented child without measuring it.
-                // Key rows by their content so expanding a Work Log does not hand
-                // the following message's layout nodes to a different row (#68 upstream).
                 v_flex()
-                    .id(("timeline-row", row.identity))
                     .debug_selector(move || format!("timeline-row-{index}"))
                     .on_prepaint(move |_, _, _| {
                         painted.set(Some(

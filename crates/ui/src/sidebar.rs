@@ -2306,36 +2306,33 @@ impl SessionsSidebar {
         row_height: f32,
         right_padding: f32,
         cx: &App,
-    ) -> gpui::Div {
-        // gpui-fast 0.1.8 can retain a reparented child without measuring it.
-        // Keep this slot present when the optional mark is hidden (#68 upstream).
-        let Some(color) = self.store.read(cx).provider_color(meta) else {
-            return div().absolute();
-        };
-        let color: gpui::Hsla = gpui::rgb(color).into();
+    ) -> Option<gpui::Div> {
+        let color: gpui::Hsla = gpui::rgb(self.store.read(cx).provider_color(meta)?).into();
         let glyph = match meta.provider {
             agent::ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
             kind => crate::provider_card::provider_glyph(kind),
         };
         let size = px(row_height - PROVIDER_MARK_INSET);
         let id = meta.id.clone();
-        div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .right(px(right_padding))
-            .flex()
-            .items_center()
-            .child(
-                div()
-                    .size(size)
-                    .debug_selector(move || format!("sidebar-provider-mark-{id}"))
-                    .child(
-                        glyph
-                            .size(size)
-                            .text_color(color.opacity(PROVIDER_MARK_ALPHA)),
-                    ),
-            )
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(right_padding))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .size(size)
+                        .debug_selector(move || format!("sidebar-provider-mark-{id}"))
+                        .child(
+                            glyph
+                                .size(size)
+                                .text_color(color.opacity(PROVIDER_MARK_ALPHA)),
+                        ),
+                ),
+        )
     }
 
     /// `base` carries the row's selectable surface, selected when `is_active`.
@@ -2798,7 +2795,7 @@ impl SessionsSidebar {
             .pl(px(THREAD_INDENT))
             // First child so the row's content paints over the mark.
             .relative()
-            .child(self.provider_mark(
+            .children(self.provider_mark(
                 meta,
                 crate::material::selectable_row_height(false),
                 crate::material::selectable_row_inset(false).into(),
@@ -2970,7 +2967,7 @@ impl SessionsSidebar {
             .justify_center()
             // First child so the row's content paints over the mark.
             .relative()
-            .child(self.provider_mark(
+            .children(self.provider_mark(
                 meta,
                 crate::material::selectable_row_two_line_height(false),
                 crate::material::selectable_row_inset(false).into(),
@@ -3881,7 +3878,7 @@ impl SessionsSidebar {
             })
             // First child so the row's content paints over the mark.
             .relative()
-            .child(mark)
+            .children(mark)
             .when(
                 self.store.read(cx).roster_session_id().as_deref() == Some(session_id.as_str()),
                 |row| row.bg(cx.theme().list_active).aria_selected(true),
