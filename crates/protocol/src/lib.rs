@@ -235,9 +235,9 @@ pub use wire::{
 // Version 22 (v0.3.3): the protocol adds the MoveQueued command and the
 // ThreadAnchorTurn query.
 //
-// Unreleased: the assistant_message item carries `summarized`, set when the
-// provider delivered a summary of the message rather than its text.
-pub const PROTOCOL_VERSION: u32 = 22;
+// Version 23 (v0.3.4): the assistant_message item carries `summarized`, set
+// when the provider delivered a summary of the message rather than its text.
+pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]
 mod tests;
