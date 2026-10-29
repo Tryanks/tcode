@@ -26,7 +26,7 @@ pub fn has_meaningful_history(timeline: &Timeline) -> bool {
 
 fn is_provider_work(content: &EntryContent) -> bool {
     match content {
-        EntryContent::Item(ItemContent::AssistantMessage { text }) => !text.trim().is_empty(),
+        EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => !text.trim().is_empty(),
         EntryContent::Item(
             ItemContent::CommandExecution { .. }
             | ItemContent::FileChange { .. }
@@ -208,7 +208,7 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                     body.push_str("\n\n");
                 }
             }
-            EntryContent::Item(ItemContent::AssistantMessage { text })
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. })
                 if !text.trim().is_empty() =>
             {
                 body.push_str("### Assistant\n\n");
@@ -419,7 +419,13 @@ mod tests {
     }
 
     fn assistant(id: &str, text: &str) -> AgentEvent {
-        item(id, ItemContent::AssistantMessage { text: text.into() })
+        item(
+            id,
+            ItemContent::AssistantMessage {
+                text: text.into(),
+                summarized: false,
+            },
+        )
     }
 
     fn completed(id: &str) -> AgentEvent {

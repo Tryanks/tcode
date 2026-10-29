@@ -458,7 +458,7 @@ fn last_turn(thread_id: &str, timeline: &Timeline) -> (LastTurn, usize) {
         .iter()
         .rev()
         .find_map(|entry| match &entry.content {
-            EntryContent::Item(ItemContent::AssistantMessage { text }) => Some(text.as_str()),
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => Some(text.as_str()),
             _ => None,
         });
     let (assistant_head, redacted) = match message {

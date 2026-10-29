@@ -1326,7 +1326,7 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             status.hash(hash);
             context_len.hash(hash);
         }
-        EntryContent::Item(ItemContent::AssistantMessage { text })
+        EntryContent::Item(ItemContent::AssistantMessage { text, .. })
         | EntryContent::Item(ItemContent::Reasoning { text }) => {
             text.len().hash(hash);
         }
@@ -1761,7 +1761,10 @@ mod tests {
     }
 
     fn assistant(text: &str) -> EntryContent {
-        EntryContent::Item(ItemContent::AssistantMessage { text: text.into() })
+        EntryContent::Item(ItemContent::AssistantMessage {
+            text: text.into(),
+            summarized: false,
+        })
     }
 
     fn reasoning(text: &str) -> EntryContent {

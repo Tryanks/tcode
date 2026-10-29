@@ -1874,7 +1874,10 @@ impl State {
         }
         let content = match stream.kind {
             DeltaKind::ReasoningText => ItemContent::Reasoning { text: stream.text },
-            _ => ItemContent::AssistantMessage { text: stream.text },
+            _ => ItemContent::AssistantMessage {
+                text: stream.text,
+                summarized: false,
+            },
         };
         vec![AgentEvent::ItemCompleted(ThreadItem {
             id: stream.id,
@@ -2891,7 +2894,7 @@ mod tests {
                     };
                     assert_eq!(item.id, previous_id);
                     match (previous_kind, item.content) {
-                        (DeltaKind::AssistantText, ItemContent::AssistantMessage { text })
+                        (DeltaKind::AssistantText, ItemContent::AssistantMessage { text, .. })
                         | (DeltaKind::ReasoningText, ItemContent::Reasoning { text }) => {
                             assert_eq!(text, previous_text)
                         }
@@ -2921,7 +2924,7 @@ mod tests {
         }
         let (id, _, expected) = previous.unwrap();
         assert!(matches!(state.flush_text().as_slice(),
-            [AgentEvent::ItemCompleted(ThreadItem { id: actual_id, content: ItemContent::AssistantMessage { text }, .. })]
+            [AgentEvent::ItemCompleted(ThreadItem { id: actual_id, content: ItemContent::AssistantMessage { text, .. }, .. })]
                 if actual_id == &id && text == expected));
         assert!(state.flush_text().is_empty());
     }

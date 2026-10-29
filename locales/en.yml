@@ -83,6 +83,7 @@ chat:
   copy: "Copy"
   copied: "Copied!"
   copy_message: "Copy message"
+  message_summarized: "Summarized"
   copy_title: "Copy title"
   copy_command: "Copy command"
   copy_output: "Copy output"

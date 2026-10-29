@@ -645,6 +645,7 @@ fn content_search_is_host_owned_and_survives_appends_limits_and_blank_queries() 
                     parent_item_id: None,
                     content: agent::ItemContent::AssistantMessage {
                         text: format!("zqxsentinel appended {index}"),
+                        summarized: false,
                     },
                 }),
             )

@@ -1063,6 +1063,7 @@ impl PiMapper {
                                     .and_then(Value::as_str)
                                     .unwrap_or("")
                                     .to_owned(),
+                                summarized: false,
                             }),
                             Some("thinking") => Some(ItemContent::Reasoning {
                                 text: block
@@ -1936,7 +1937,7 @@ mod tests {
                 .filter(|event| matches!(
                     event,
                     AgentEvent::ItemCompleted(ThreadItem {
-                        content: ItemContent::AssistantMessage { text },
+                        content: ItemContent::AssistantMessage { text, .. },
                         ..
                     }) if text == "PONG"
                 ))
@@ -1990,7 +1991,7 @@ mod tests {
                 AgentEvent::ItemCompleted(ThreadItem {
                     id,
                     content:
-                        ItemContent::Reasoning { text } | ItemContent::AssistantMessage { text },
+                        ItemContent::Reasoning { text } | ItemContent::AssistantMessage { text, .. },
                     ..
                 }) => Some((id.as_str(), text.as_str())),
                 _ => None,

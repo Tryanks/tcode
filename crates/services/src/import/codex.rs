@@ -85,7 +85,10 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                     attachments: Vec::new(),
                                 }
                             } else if role == Some("assistant") {
-                                ItemContent::AssistantMessage { text }
+                                ItemContent::AssistantMessage {
+                                    text,
+                                    summarized: false,
+                                }
                             } else {
                                 continue;
                             };
@@ -104,6 +107,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                 &mut next_id,
                                 ItemContent::AssistantMessage {
                                     text: text.to_string(),
+                                    summarized: false,
                                 },
                                 None,
                             );
