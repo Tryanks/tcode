@@ -11,8 +11,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Entity, KeyBinding, Render, SharedString, Window,
-    WindowOptions,
+    AnyWindowHandle, App, AppContext as _, Entity, Render, SharedString, Window, WindowOptions,
 };
 use tcode_client::host::ClientHost;
 
@@ -143,7 +142,7 @@ pub fn init_client(cx: &mut App, host: &dyn ClientHost, options: &ShellOptions) 
     let palette = crate::shortcut::secondary("secondary-k", TogglePalette, None, cx);
     cx.bind_keys([palette]);
     #[cfg(target_os = "macos")]
-    cx.bind_keys([KeyBinding::new("cmd-q", crate::shell::Quit, None)]);
+    cx.bind_keys([gpui::KeyBinding::new("cmd-q", crate::shell::Quit, None)]);
 }
 
 /// Open a window of this client around the view `build` returns: titled, in
