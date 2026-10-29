@@ -83,6 +83,7 @@ chat:
   copy: "复制"
   copied: "已复制！"
   copy_message: "复制消息"
+  message_summarized: "已概括"
   copy_title: "复制标题"
   copy_command: "复制命令"
   copy_output: "复制输出"

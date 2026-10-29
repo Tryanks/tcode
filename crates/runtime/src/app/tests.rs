@@ -114,6 +114,7 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
                 parent_item_id: Some("spawn-1".into()),
                 content: ItemContent::AssistantMessage {
                     text: "routed transcript".into(),
+                    summarized: false,
                 },
             }),
             cx,
@@ -122,7 +123,7 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
         assert!(mirror_timeline.entries.iter().any(|entry| {
             matches!(
                 &entry.content,
-                EntryContent::Item(ItemContent::AssistantMessage { text })
+                EntryContent::Item(ItemContent::AssistantMessage { text, .. })
                     if entry.id == "child-answer" && text == "routed transcript"
             )
         }));
@@ -410,6 +411,7 @@ fn native_mirror_child_item(i: usize) -> AgentEvent {
         parent_item_id: Some("spawn-1".into()),
         content: ItemContent::AssistantMessage {
             text: format!("answer {i}"),
+            summarized: false,
         },
     })
 }
@@ -598,6 +600,7 @@ fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_i
                 parent_item_id: Some("toolu_grandchild_2".into()),
                 content: ItemContent::AssistantMessage {
                     text: "Fetching pricing.".into(),
+                    summarized: false,
                 },
             }),
         ] {
@@ -668,6 +671,7 @@ fn unknown_parent_mirror_closes_when_the_parent_session_closes() {
                 parent_item_id: Some("toolu_orphan".into()),
                 content: ItemContent::AssistantMessage {
                     text: "working".into(),
+                    summarized: false,
                 },
             }),
             cx,
@@ -724,6 +728,7 @@ fn loading_a_mirror_with_an_open_turn_and_no_live_parent_ends_it() {
             parent_item_id: None,
             content: ItemContent::AssistantMessage {
                 text: "Research complete.".into(),
+                summarized: false,
             },
         }),
     ];
@@ -1470,6 +1475,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 "assistant",
                 ItemContent::AssistantMessage {
                     text: "The QR link expires too soon".into(),
+                    summarized: false,
                 },
             ),
         ] {
@@ -1595,6 +1601,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                     parent_item_id: None,
                     content: ItemContent::AssistantMessage {
                         text: raw_title.into(),
+                        summarized: false,
                     },
                 }))
                 .unwrap();
@@ -1741,6 +1748,7 @@ fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
             "middle",
             ItemContent::AssistantMessage {
                 text: "intermediate details ".repeat(1_000),
+                summarized: false,
             },
         ),
         item(
@@ -1755,6 +1763,7 @@ fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
             "answer",
             ItemContent::AssistantMessage {
                 text: "Make shared QR links last longer".into(),
+                summarized: false,
             },
         ),
     ]);
@@ -2517,6 +2526,7 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
                 parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "执行某某任务".into(),
+                    summarized: false,
                 },
             }))
             .unwrap();
@@ -4466,6 +4476,7 @@ fn resident_background_child_result_uses_completed_live_timeline() {
                 "preamble",
                 ItemContent::AssistantMessage {
                     text: "Earlier tool preamble.".into(),
+                    summarized: false,
                 },
             ),
             (
@@ -4478,12 +4489,14 @@ fn resident_background_child_result_uses_completed_live_timeline() {
                 "final-1",
                 ItemContent::AssistantMessage {
                     text: "Complete ".into(),
+                    summarized: false,
                 },
             ),
             (
                 "final-2",
                 ItemContent::AssistantMessage {
                     text: format!("answer.\n{}", "full detail ".repeat(80)),
+                    summarized: false,
                 },
             ),
         ] {
@@ -5219,6 +5232,7 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
                 parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "They differ in".into(),
+                    summarized: false,
                 },
             }),
         ] {
@@ -5391,6 +5405,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
             parent_item_id: None,
             content: ItemContent::AssistantMessage {
                 text: "The demo will be a static site.".into(),
+                summarized: false,
             },
         }),
     ] {
@@ -6872,7 +6887,7 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
         .iter()
         .filter_map(|stored| match &stored.event {
             AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::AssistantMessage { text },
+                content: ItemContent::AssistantMessage { text, .. },
                 ..
             }) => Some(text.as_str()),
             _ => None,
@@ -7073,7 +7088,10 @@ fn persisted_assistant_event(text: &str) -> AgentEvent {
     AgentEvent::ItemCompleted(ThreadItem {
         id: format!("item-{text}"),
         parent_item_id: None,
-        content: ItemContent::AssistantMessage { text: text.into() },
+        content: ItemContent::AssistantMessage {
+            text: text.into(),
+            summarized: false,
+        },
     })
 }
 
@@ -7113,7 +7131,7 @@ fn cold_select_installs_immediately_then_loads_persisted_timeline() {
 
     state.update(cx, |state, _| {
         assert!(state.selected_session().unwrap().timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "persisted cold output")
+            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "persisted cold output")
         ));
     });
 }
@@ -7162,7 +7180,7 @@ fn parked_readopt_refolds_events_appended_while_parked() {
 
     state.update(cx, |state, _| {
         assert!(state.selected_session().unwrap().timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "while parked")
+            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "while parked")
         ));
     });
 }
@@ -7205,10 +7223,10 @@ fn stale_timeline_completion_cannot_land_on_another_session() {
         let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, id_b);
         assert!(active.timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "only session B")
+            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "only session B")
         ));
         assert!(!active.timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "only session A")
+            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "only session A")
         ));
     });
 }
@@ -7244,10 +7262,10 @@ fn timeline_load_keeps_records_appended_during_the_fold() {
     state.update(cx, |state, _| {
         let timeline = &state.selected_session().unwrap().timeline;
         assert!(timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "before load")
+            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "before load")
         ));
         assert!(timeline.entries.iter().any(
-            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "raced append")
+            |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "raced append")
         ));
     });
 }
@@ -7734,6 +7752,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
                 parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "Migration step 1 done.".into(),
+                    summarized: false,
                 },
             }),
             cx,
@@ -7777,7 +7796,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
         assert!(active.turn_in_flight);
         assert!(active.timeline.entries.iter().any(|e| matches!(
             &e.content,
-            EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Migration step 1 done."
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "Migration step 1 done."
         )));
         assert!(active.timeline.entries.iter().any(|e| matches!(
             &e.content,
@@ -10172,7 +10191,7 @@ fn store_writer_survives_sigkill() {
             .iter()
             .map(|stored| match &stored.event {
                 AgentEvent::ItemCompleted(ThreadItem {
-                    content: ItemContent::AssistantMessage { text },
+                    content: ItemContent::AssistantMessage { text, .. },
                     ..
                 }) => text.split(' ').next().unwrap().parse().unwrap(),
                 other => panic!("run {run}: unexpected record {other:?}"),

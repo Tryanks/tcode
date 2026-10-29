@@ -580,7 +580,7 @@ fn tool_results_are_judged_by_their_raw_output_and_cursors_failure_text_fails_th
             .iter()
             .filter_map(|event| match event {
                 AgentEvent::ItemCompleted(ThreadItem {
-                    content: ItemContent::AssistantMessage { text },
+                    content: ItemContent::AssistantMessage { text, .. },
                     ..
                 }) => Some(text.as_str()),
                 _ => None,
@@ -979,7 +979,7 @@ fn subagent_sessions_become_subagent_items_with_their_own_activity() {
                         children.push((item.id.clone(), content.clone()));
                     }
                     (content, None) => assert!(
-                        matches!(content, ItemContent::AssistantMessage { text } if text == "The schema has one table."),
+                        matches!(content, ItemContent::AssistantMessage { text, .. } if text == "The schema has one table."),
                         "only the parent's own text stays in the parent: {content:?}"
                     ),
                 },
@@ -1005,7 +1005,7 @@ fn subagent_sessions_become_subagent_items_with_their_own_activity() {
         let texts: Vec<_> = children
             .iter()
             .filter_map(|(_, content)| match content {
-                ItemContent::AssistantMessage { text } => Some(text.as_str()),
+                ItemContent::AssistantMessage { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect();

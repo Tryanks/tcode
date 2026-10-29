@@ -237,6 +237,7 @@ fn search_is_limited_to_readable_threads_and_returns_anchors() {
             parent_item_id: None,
             content: ItemContent::AssistantMessage {
                 text: format!("{id} fixed the needle bug"),
+                summarized: false,
             },
         });
         store.append_event(id, 2, &reply).unwrap();
@@ -302,6 +303,7 @@ fn review_candidates_changes_no_state_and_reports_coverage() {
         parent_item_id: None,
         content: ItemContent::AssistantMessage {
             text: "Next step is wiring the importer.".into(),
+            summarized: false,
         },
     });
     let completed = AgentEvent::TurnCompleted {

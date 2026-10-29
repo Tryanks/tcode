@@ -1279,7 +1279,7 @@ mod tests {
             "Counted, edited, asked and echoed."
         );
         assert!(matches!(completed(&events, "msg-2"),
-            ItemContent::AssistantMessage { text } if text == "Counted, edited, asked and echoed."));
+            ItemContent::AssistantMessage { text, .. } if text == "Counted, edited, asked and echoed."));
 
         assert!(events.iter().any(|event| matches!(event,
             AgentEvent::TokenUsage(usage)
@@ -1353,7 +1353,7 @@ mod tests {
 
         let reply = at(&|event| {
             matches!(event, AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::AssistantMessage { text }, ..
+                content: ItemContent::AssistantMessage { text, .. }, ..
             }) if text == "The background task printed bgdone.")
         });
         let agent_started =

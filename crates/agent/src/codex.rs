@@ -3573,6 +3573,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         },
         "agentMessage" | "plan" | "proposed_plan" => ItemContent::AssistantMessage {
             text: string_field(item, "text"),
+            summarized: false,
         },
         "reasoning" => {
             let mut parts = strings(item.get("summary"));
@@ -4726,7 +4727,7 @@ mod tests {
                     };
                     assert_eq!(item.parent_item_id.as_deref(), Some(parent));
                     assert!(
-                        matches!(item.content, ItemContent::AssistantMessage { text } if text == "child reply")
+                        matches!(item.content, ItemContent::AssistantMessage { text, .. } if text == "child reply")
                     );
                     assert_eq!(actor.items.get("spawn"), previous.as_ref());
                     assert!(events.try_recv().is_err());
@@ -5694,7 +5695,7 @@ mod tests {
             );
             actor.handle_notification("item/completed", &json!({"item": {"type": "plan", "id": "native-plan", "text": "# Final native plan"}})).await;
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::AssistantMessage { text }, .. }) if text == "# Final native plan")
+                matches!(events.recv().await.unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::AssistantMessage { text, .. }, .. }) if text == "# Final native plan")
             );
             let _ = actor.child.kill();
             let _ = actor.child.wait();

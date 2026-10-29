@@ -2383,6 +2383,14 @@ impl Mapper {
         }
         out.extend(self.observe_stop_reason(message.get("stop_reason").and_then(Value::as_str)));
         let Some(content) = content else { return out };
+        // Thinking blocks the server tagged as narration carry its summary of
+        // the prose the model wrote to the user between tool calls; Claude Code
+        // shows them as messages, not as reasoning.
+        let narration: Vec<u64> = msg
+            .get("narration_block_indexes")
+            .and_then(Value::as_array)
+            .map(|indexes| indexes.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default();
 
         for (offset, block) in content.iter().enumerate() {
             let index = first_index + offset;
@@ -2394,6 +2402,7 @@ impl Mapper {
                         parent_item_id: None,
                         content: ItemContent::AssistantMessage {
                             text: text.to_string(),
+                            summarized: false,
                         },
                     }));
                 }
@@ -2406,13 +2415,23 @@ impl Mapper {
                     // The CLI redacts thinking content in this line even when it
                     // streamed the deltas; completing with "" would blank the
                     // reasoning the user just watched arrive.
-                    if !text.is_empty() {
+                    let content = if text.trim().is_empty() {
+                        None
+                    } else if narration.contains(&(offset as u64)) {
+                        Some(ItemContent::AssistantMessage {
+                            text: text.to_string(),
+                            summarized: true,
+                        })
+                    } else {
+                        Some(ItemContent::Reasoning {
+                            text: text.to_string(),
+                        })
+                    };
+                    if let Some(content) = content {
                         out.push(AgentEvent::ItemCompleted(ThreadItem {
                             id: format!("{msg_id}:{index}"),
                             parent_item_id: None,
-                            content: ItemContent::Reasoning {
-                                text: text.to_string(),
-                            },
+                            content,
                         }));
                     }
                 }
@@ -4825,6 +4844,41 @@ mod tests {
     /// start is the one event that can announce the thinking, so it must
     /// become an in-progress reasoning item that the empty deltas and the
     /// empty completion leave alone.
+    /// Captured from Claude Code 2.1.312 with claude-opus-5-5 and thinking on:
+    /// the prose the model wrote between two tool calls arrives as a second
+    /// thinking block holding the server's summary of it, and only the
+    /// `assistant` frame's `narration_block_indexes` tells it apart from
+    /// reasoning. It must complete the streamed item as a summarized message,
+    /// or the reply stays folded into the work log.
+    #[test]
+    fn narration_completes_its_streamed_block_as_a_summarized_message() {
+        let mut m = Mapper::new();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5-5","id":"msg_n","content":[]}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}},"thinking_display":"updates"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_n","content":[{"type":"thinking","thinking":"","signature":"CAQS+QQKEAgTGAI4AUIIdGhpbmtpbmc"}]},"thinking_duration_ms":2214,"thinking_display":"updates"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"","signature":""}},"thinking_display":"updates"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"f.txt contains two lines."}},"thinking_display":"updates"}"#,
+        ] {
+            feed(&mut m, line);
+        }
+        let completed = feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_n","content":[{"type":"thinking","thinking":"f.txt contains two lines.","signature":"CAQS0gYKEQgTGAI4AUIJbmFycmF0aW9u"}]},"narration_block_indexes":[0],"thinking_duration_ms":2,"thinking_display":"updates"}"#,
+        );
+        assert!(
+            matches!(
+                completed.as_slice(),
+                [AgentEvent::ItemCompleted(ThreadItem {
+                    id,
+                    parent_item_id: None,
+                    content: ItemContent::AssistantMessage { text, summarized: true },
+                })] if id == "msg_n:1" && text == "f.txt contains two lines."
+            ),
+            "{completed:?}"
+        );
+    }
+
     #[test]
     fn hidden_thinking_announces_itself_from_the_block_start() {
         let mut m = Mapper::new();
@@ -5108,7 +5162,7 @@ mod tests {
         assert!(matches!(
             &reinvoked[1],
             AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::AssistantMessage { text },
+                content: ItemContent::AssistantMessage { text, .. },
                 ..
             }) if text == "Background command completed successfully."
         ));
@@ -5734,7 +5788,7 @@ mod tests {
         ));
         assert!(matches!(
             &children[1].content,
-            ItemContent::AssistantMessage { text } if text == "pong"
+            ItemContent::AssistantMessage { text, .. } if text == "pong"
         ));
 
         assert!(events.iter().all(|event| match event {
@@ -5830,7 +5884,7 @@ mod tests {
         ));
         assert!(matches!(
             &flushed[flushed.len() - 2],
-            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::AssistantMessage { text }, .. })
+            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::AssistantMessage { text, .. }, .. })
                 if id == "toolu_spawn_bg:msg-child-2:0" && text == "done"
         ));
         assert!(mapper.take_pending_subagent_terminals().is_empty());

@@ -47,8 +47,11 @@ flowchart LR
 ```
 "#;
 
+const NARRATION_MARKDOWN: &str = "f.txt contains two lines, \"a\" and \"b\". Now I'll run wc to get exact line, word, and byte counts.";
+
 struct Gallery {
     markdown: Entity<MarkdownState>,
+    narration: Entity<MarkdownState>,
     started_at: u64,
     tabs: TabsState,
     options: Options,
@@ -92,6 +95,7 @@ struct TabsState {
 impl Gallery {
     fn new(options: Options, cx: &mut Context<Self>) -> Self {
         let markdown = cx.new(|cx| MarkdownState::new(ASSISTANT_MARKDOWN, cx));
+        let narration = cx.new(|cx| MarkdownState::new(NARRATION_MARKDOWN, cx));
         let started_at = now_millis().saturating_sub(7_300);
         let tick = cx.spawn(async move |this, cx| {
             loop {
@@ -103,6 +107,7 @@ impl Gallery {
         });
         Self {
             markdown,
+            narration,
             started_at,
             tabs: TabsState {
                 selected: [0, 0, 0, 1, 1, 0, 0, 0, 2],
@@ -319,16 +324,30 @@ impl Render for Gallery {
             section(
                 7,
                 "Assistant block",
-                state_row(vec![state_card(
-                    "PROSE · SOFT-WRAPPING CODE · TABLE",
-                    gallery_support::assistant(
-                        "gallery-s07-assistant-markdown",
-                        self.markdown.clone(),
-                        cwd,
+                state_row(vec![
+                    state_card(
+                        "PROSE · SOFT-WRAPPING CODE · TABLE",
+                        gallery_support::assistant(
+                            "gallery-s07-assistant-markdown",
+                            self.markdown.clone(),
+                            false,
+                            cwd,
+                            cx,
+                        ),
                         cx,
                     ),
-                    cx,
-                )]),
+                    state_card(
+                        "SUMMARIZED NARRATION",
+                        gallery_support::assistant(
+                            "gallery-s07-assistant-summarized",
+                            self.narration.clone(),
+                            true,
+                            cwd,
+                            cx,
+                        ),
+                        cx,
+                    ),
+                ]),
                 cx,
             ),
             section(

@@ -2289,7 +2289,9 @@ pub(super) fn final_assistant_message(timeline: &Timeline) -> String {
             break;
         }
         match &entry.content {
-            EntryContent::Item(ItemContent::AssistantMessage { text }) => parts.push(text.as_str()),
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => {
+                parts.push(text.as_str())
+            }
             _ => break,
         }
     }

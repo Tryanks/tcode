@@ -359,7 +359,7 @@ fn searchable_text(content: &EntryContent) -> Option<(SearchKind, String)> {
                 std::iter::once(text.as_str()).chain(attachments.iter().map(String::as_str)),
             ),
         ),
-        ItemContent::AssistantMessage { text } => (SearchKind::AssistantMessage, text.clone()),
+        ItemContent::AssistantMessage { text, .. } => (SearchKind::AssistantMessage, text.clone()),
         ItemContent::CommandExecution { command, .. } => {
             (SearchKind::CommandExecution, command.clone())
         }
@@ -480,7 +480,14 @@ mod tests {
         let store = SessionStore::open_at(root.clone()).unwrap();
         let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
         let reply = |id: &str, text: &str| {
-            completed(id, ItemContent::AssistantMessage { text: text.into() }).event
+            completed(
+                id,
+                ItemContent::AssistantMessage {
+                    text: text.into(),
+                    summarized: false,
+                },
+            )
+            .event
         };
         store
             .append_event(&meta.id, 1, &reply("first", "the auth.rs fix"))
@@ -564,12 +571,14 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "obsolete draft".into(),
+                    summarized: false,
                 },
             }),
             completed(
                 "assistant",
                 ItemContent::AssistantMessage {
                     text: "I updated crates/runtime/src/auth.rs".into(),
+                    summarized: false,
                 },
             )
             .event,
@@ -620,6 +629,7 @@ mod tests {
                     "next",
                     ItemContent::AssistantMessage {
                         text: "auth.rs verified".into(),
+                        summarized: false,
                     },
                 )
                 .event,
@@ -656,7 +666,10 @@ mod tests {
                     4,
                     &completed(
                         "snippet",
-                        ItemContent::AssistantMessage { text: text.into() },
+                        ItemContent::AssistantMessage {
+                            text: text.into(),
+                            summarized: false,
+                        },
                     )
                     .event,
                 )
@@ -679,6 +692,7 @@ mod tests {
                     "long",
                     ItemContent::AssistantMessage {
                         text: format!("{} AUTH.rs {}", "before ".repeat(40), "after ".repeat(40)),
+                        summarized: false,
                     },
                 )
                 .event,
@@ -713,7 +727,14 @@ mod tests {
             .event
         };
         let reply = |id: &str, text: &str| {
-            completed(id, ItemContent::AssistantMessage { text: text.into() }).event
+            completed(
+                id,
+                ItemContent::AssistantMessage {
+                    text: text.into(),
+                    summarized: false,
+                },
+            )
+            .event
         };
         let turn = |id: &str, done: bool| {
             if done {

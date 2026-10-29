@@ -224,7 +224,7 @@ fn render_incomplete_timeline(output: &mut String, timeline: &Timeline) {
                     output.push_str(visible);
                     output.push_str("\n\n");
                 }
-                EntryContent::Item(ItemContent::AssistantMessage { text }) => {
+                EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => {
                     output.push_str("#### Assistant\n\n");
                     output.push_str(text);
                     output.push_str("\n\n");
@@ -346,6 +346,7 @@ mod tests {
                 "assistant-1",
                 ItemContent::AssistantMessage {
                     text: "The project is ready.".into(),
+                    summarized: false,
                 },
             ),
             AgentEvent::TurnCompleted {
@@ -427,7 +428,9 @@ mod tests {
             .entries
             .iter()
             .filter_map(|entry| match &entry.content {
-                EntryContent::Item(ItemContent::AssistantMessage { text }) => Some(text.as_str()),
+                EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => {
+                    Some(text.as_str())
+                }
                 _ => None,
             })
             .collect();

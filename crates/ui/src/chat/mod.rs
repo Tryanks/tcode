@@ -1537,7 +1537,8 @@ impl ChatView {
                     ));
                 }
                 Segment::Assistant(entry) => {
-                    let EntryContent::Item(ItemContent::AssistantMessage { text }) = &entry.content
+                    let EntryContent::Item(ItemContent::AssistantMessage { text, summarized }) =
+                        &entry.content
                     else {
                         unreachable!();
                     };
@@ -1552,6 +1553,7 @@ impl ChatView {
                         components::assistant::AssistantData {
                             id: &entry.id,
                             text,
+                            summarized: *summarized,
                             cwd,
                             markdown,
                             compact: self.window_state.read(cx).compact,
@@ -3601,7 +3603,7 @@ fn floating_backing(radius: gpui::Pixels, cx: &App) -> gpui::Div {
 /// message's visible text.
 fn entry_markdown(entry: &TimelineEntry) -> Option<String> {
     match &entry.content {
-        EntryContent::Item(ItemContent::AssistantMessage { text }) => Some(text.clone()),
+        EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => Some(text.clone()),
         content => {
             let (text, _, context_len, _) = user_content(content)?;
             Some(plain_text_as_markdown(user_visible_text(text, context_len)))
@@ -5504,6 +5506,7 @@ mod tests {
                     parent_item_id: None,
                     content: ItemContent::AssistantMessage {
                         text: String::new(),
+                        summarized: false,
                     },
                 }));
                 events.extend((0..DELTAS).map(|_| agent::AgentEvent::Delta {
@@ -5516,6 +5519,7 @@ mod tests {
                     parent_item_id: None,
                     content: ItemContent::AssistantMessage {
                         text: "word ".repeat(DELTAS as usize),
+                        summarized: false,
                     },
                 }));
                 events.push(agent::AgentEvent::TurnCompleted {
@@ -7108,6 +7112,7 @@ mod tests {
                             parent_item_id: None,
                             content: ItemContent::AssistantMessage {
                                 text: format!("Answer {turn}.\n\n").repeat(3),
+                                summarized: false,
                             },
                         }),
                         agent::AgentEvent::TurnCompleted {
@@ -7446,7 +7451,7 @@ mod tests {
         for width in [393., 1024.] {
             let mut timeline = synthetic_markdown_timeline(3);
             for entry in &mut timeline.entries {
-                if let EntryContent::Item(ItemContent::AssistantMessage { text }) =
+                if let EntryContent::Item(ItemContent::AssistantMessage { text, .. }) =
                     &mut Arc::make_mut(entry).content
                 {
                     *text = (0..40)
@@ -8072,7 +8077,10 @@ This begins after the hard break."#;
     }
 
     fn assistant(text: &str) -> EntryContent {
-        EntryContent::Item(ItemContent::AssistantMessage { text: text.into() })
+        EntryContent::Item(ItemContent::AssistantMessage {
+            text: text.into(),
+            summarized: false,
+        })
     }
 
     fn reasoning(text: &str) -> EntryContent {
