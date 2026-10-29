@@ -1,8 +1,8 @@
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use gpui::{
-    Action, AsKeystroke, IntoElement, KeyContext, Keystroke, ParentElement as _, RenderOnce,
-    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, relative,
+    Action, AsKeystroke, IntoElement, KeyContext, Keystroke, OperatingSystem, ParentElement as _,
+    RenderOnce, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, relative,
 };
 use gpui_base::StyledExt as _;
 
@@ -58,57 +58,39 @@ impl Kbd {
             .map(|key| Self::new(key.as_keystroke().clone()))
     }
 
-    pub fn format(key: &Keystroke) -> String {
-        #[cfg(target_os = "macos")]
-        const SEPARATOR: &str = "";
-        #[cfg(not(target_os = "macos"))]
-        const SEPARATOR: &str = "+";
-
+    /// The keystroke as the host OS writes it: a Mac, a browser on one
+    /// included, uses its symbols; every other host spells the keys out.
+    pub fn format(key: &Keystroke, os: OperatingSystem) -> String {
+        let mac = os == OperatingSystem::Mac;
         let mut parts = Vec::new();
         if key.modifiers.control {
-            parts.push(if cfg!(target_os = "macos") {
-                "⌃"
-            } else {
-                "Ctrl"
-            });
+            parts.push(if mac { "⌃" } else { "Ctrl" });
         }
         if key.modifiers.alt {
-            parts.push(if cfg!(target_os = "macos") {
-                "⌥"
-            } else {
-                "Alt"
-            });
+            parts.push(if mac { "⌥" } else { "Alt" });
         }
         if key.modifiers.shift {
-            parts.push(if cfg!(target_os = "macos") {
-                "⇧"
-            } else {
-                "Shift"
-            });
+            parts.push(if mac { "⇧" } else { "Shift" });
         }
         if key.modifiers.platform {
-            parts.push(if cfg!(target_os = "macos") {
-                "⌘"
-            } else {
-                "Win"
-            });
+            parts.push(if mac { "⌘" } else { "Win" });
         }
 
         let key_name = match key.key.as_str() {
             "space" => "Space".to_string(),
-            "backspace" | "delete" if cfg!(target_os = "macos") => "⌫".to_string(),
+            "backspace" | "delete" if mac => "⌫".to_string(),
             "backspace" => "Backspace".to_string(),
             "delete" => "Delete".to_string(),
-            "escape" if cfg!(target_os = "macos") => "⎋".to_string(),
+            "escape" if mac => "⎋".to_string(),
             "escape" => "Esc".to_string(),
-            "enter" if cfg!(target_os = "macos") => "⏎".to_string(),
+            "enter" if mac => "⏎".to_string(),
             "enter" => "Enter".to_string(),
             "pagedown" => "Page Down".to_string(),
             "pageup" => "Page Up".to_string(),
-            "left" if cfg!(target_os = "macos") => "←".to_string(),
-            "right" if cfg!(target_os = "macos") => "→".to_string(),
-            "up" if cfg!(target_os = "macos") => "↑".to_string(),
-            "down" if cfg!(target_os = "macos") => "↓".to_string(),
+            "left" if mac => "←".to_string(),
+            "right" if mac => "→".to_string(),
+            "up" if mac => "↑".to_string(),
+            "down" if mac => "↓".to_string(),
             key if key.len() == 1 => key.to_uppercase(),
             key => {
                 let mut chars = key.chars();
@@ -118,7 +100,7 @@ impl Kbd {
             }
         };
         parts.push(&key_name);
-        parts.join(SEPARATOR)
+        parts.join(if mac { "" } else { "+" })
     }
 }
 
@@ -131,7 +113,7 @@ impl Styled for Kbd {
 impl RenderOnce for Kbd {
     fn render(self, _: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
         if !self.appearance {
-            return Self::format(&self.stroke).into_any_element();
+            return Self::format(&self.stroke, cx.platform_info().os).into_any_element();
         }
         div()
             .text_color(cx.theme().muted_foreground)
@@ -151,7 +133,7 @@ impl RenderOnce for Kbd {
             .whitespace_normal()
             .flex_shrink_0()
             .refine_style(&self.style)
-            .child(Self::format(&self.stroke))
+            .child(Self::format(&self.stroke, cx.platform_info().os))
             .into_any_element()
     }
 }

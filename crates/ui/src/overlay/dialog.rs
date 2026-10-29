@@ -422,7 +422,7 @@ impl RenderOnce for Dialog {
             .absolute()
             .size_full()
             .when(self.overlay, |el| el.bg(crate::material::scrim(1., cx)))
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+            .on_scroll(|_, _, cx| cx.stop_propagation());
         let popup = div()
             .id(("tcode-dialog", self.layer))
             .absolute()

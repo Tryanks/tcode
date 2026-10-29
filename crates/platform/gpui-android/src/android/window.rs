@@ -334,6 +334,7 @@ impl AndroidWindow {
                 bottom: px(ime_bottom as f32 / scale),
                 left: px(0.0),
             },
+            corner_radii: gpui::Corners::default(),
         };
         let previous = std::mem::replace(&mut self.0.state.borrow_mut().insets, insets.clone());
         if previous == insets {

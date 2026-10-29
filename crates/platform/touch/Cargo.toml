@@ -6,4 +6,4 @@ publish = false
 license = "Apache-2.0"
 
 [dependencies]
-gpui = { package = "gpui-fast", version = "0.1.10", default-features = false }
+gpui = { package = "gpui-fast", version = "0.1.12", default-features = false }

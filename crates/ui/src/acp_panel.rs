@@ -891,7 +891,7 @@ mod tests {
 
         let position = cx.debug_bounds("acp-market-row-agent-0").unwrap().center();
         for _ in 0..10 {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position,
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-1000.))),
                 touch_phase: gpui::TouchPhase::Moved,

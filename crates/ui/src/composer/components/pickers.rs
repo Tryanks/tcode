@@ -796,7 +796,7 @@ fn render_model_pane(
         .rounded(crate::material::radius_card(cx))
         .overflow_hidden()
         .on_key_down(move |ev, window, cx| {
-            if !ev.keystroke.modifiers.secondary() {
+            if !ev.keystroke.modifiers.secondary(cx) {
                 return;
             }
             if let Ok(n) = ev.keystroke.key.parse::<usize>()
@@ -1047,7 +1047,7 @@ fn render_model_row(
         .when(index < 9 && !compact, |this| {
             this.child(
                 crate::widgets::kbd::Kbd::new(gpui::Keystroke {
-                    modifiers: gpui::Modifiers::secondary_key(),
+                    modifiers: gpui::Modifiers::secondary_key(cx),
                     key: (index + 1).to_string(),
                     key_char: None,
                 })

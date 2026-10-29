@@ -7,8 +7,9 @@ use super::IosWindow;
 use crate::text_input::{self, NOT_FOUND, TextRange};
 use anyhow::{Result, anyhow};
 use gpui::{
-    AppLifecyclePhase, Autocapitalize, Edges, Modifiers, TextInputAction, TextInputConfiguration,
-    TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowInsets, point, px,
+    AppLifecyclePhase, Autocapitalize, Corners, Edges, Modifiers, TextInputAction,
+    TextInputConfiguration, TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowInsets, point,
+    px,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -79,6 +80,7 @@ impl HostMetrics {
                 bottom: px(self.keyboard_height),
                 left: px(0.0),
             },
+            corner_radii: Corners::default(),
         }
     }
 }

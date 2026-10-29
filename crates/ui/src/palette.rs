@@ -910,7 +910,7 @@ impl Render for CommandPalette {
                     .absolute()
                     .size_full()
                     .bg(crate::material::scrim(1., cx))
-                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+                    .on_scroll(|_, _, cx| cx.stop_propagation()),
             )
             .popup(card)
             // Enter belongs to the query input, which runs the selected item.
@@ -989,7 +989,7 @@ mod tests {
     fn dispatch_palette_key(
         palette: &Entity<CommandPalette>,
         cx: &mut VisualTestContext,
-        key: &str,
+        key: &'static str,
     ) {
         let event = KeyDownEvent {
             keystroke: gpui::Keystroke::parse(key).expect("valid palette key"),
@@ -1197,7 +1197,7 @@ mod tests {
         assert!(cx.debug_bounds("palette-card").is_none());
 
         let page_scroll = harness.read_with(cx, |harness, _| harness.page_scroll.clone());
-        let wheel = gpui::ScrollWheelEvent {
+        let wheel = gpui::ScrollEvent {
             position: gpui::point(px(10.), px(10.)),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-60.))),
             touch_phase: gpui::TouchPhase::Moved,
@@ -1329,7 +1329,7 @@ mod tests {
 
         let position = cx.debug_bounds("palette-row-5").unwrap().center();
         for _ in 0..30 {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position,
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-1000.))),
                 touch_phase: gpui::TouchPhase::Moved,

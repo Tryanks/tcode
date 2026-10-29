@@ -943,7 +943,7 @@ impl Composer {
             if steers {
                 let queue_hint = crate::tr!(
                     "composer.queue_hint",
-                    shortcut = format_secondary_shortcut("enter")
+                    shortcut = format_secondary_shortcut("enter", cx)
                 )
                 .into_owned();
                 row = row.child(
