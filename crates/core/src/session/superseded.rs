@@ -147,7 +147,10 @@ mod tests {
         AgentEvent::ItemCompleted(ThreadItem {
             id: id.into(),
             parent_item_id: None,
-            content: ItemContent::AssistantMessage { text: text.into() },
+            content: ItemContent::AssistantMessage {
+                text: text.into(),
+                summarized: false,
+            },
         })
     }
 

@@ -439,7 +439,8 @@ impl Activity {
                 }
                 ItemContent::WebSearch { .. } => self.count_tool("web_search"),
                 ItemContent::ImageRead { path, .. } => push_unique(&mut self.files, path.clone()),
-                ItemContent::AssistantMessage { text } | ItemContent::UserMessage { text, .. } => {
+                ItemContent::AssistantMessage { text, .. }
+                | ItemContent::UserMessage { text, .. } => {
                     collect_references(text, &mut self.references);
                 }
                 ItemContent::Reasoning { .. } | ItemContent::Other { .. } => {}
@@ -516,7 +517,7 @@ fn summarize_turn(
             } => summary
                 .steers
                 .push(head(visible(text, *context_len), head_chars)),
-            EntryContent::Item(ItemContent::AssistantMessage { text })
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. })
                 if !text.trim().is_empty() =>
             {
                 for heading in headings(text) {
@@ -586,7 +587,7 @@ fn summarize_segment(entries: &[(u64, &TimelineEntry)]) -> OutlineSegment {
             } if segment.steer.is_none() => {
                 segment.steer = Some(head(visible(text, *context_len), HEAD_CHARS));
             }
-            EntryContent::Item(ItemContent::AssistantMessage { text })
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. })
                 if segment.assistant_head.is_none() =>
             {
                 segment.assistant_head = first_lines(text, 2, HEAD_CHARS);
@@ -618,7 +619,7 @@ fn segments<'a, 'e>(
         };
         let narrates = matches!(
             &entry.content,
-            EntryContent::Item(ItemContent::AssistantMessage { text }) if !text.trim().is_empty()
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if !text.trim().is_empty()
         );
         let steers = matches!(entry.content, EntryContent::Steer { .. });
         if index > start && (steers || gap || (narrates && activity_since_cut)) {
@@ -796,7 +797,7 @@ fn hint_text(content: &EntryContent) -> Option<String> {
             ItemContent::UserMessage {
                 text, context_len, ..
             } => Some(visible(text, *context_len).to_owned()),
-            ItemContent::AssistantMessage { text } => Some(text.clone()),
+            ItemContent::AssistantMessage { text, .. } => Some(text.clone()),
             ItemContent::CommandExecution { command, .. } => Some(command.clone()),
             ItemContent::FileChange { changes, .. } => Some(
                 changes
@@ -1191,7 +1192,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                 "user_message",
                 with_attachments(visible(text, *context_len), attachments),
             ),
-            ItemContent::AssistantMessage { text } => ("assistant_message", text.clone()),
+            ItemContent::AssistantMessage { text, .. } => ("assistant_message", text.clone()),
             ItemContent::Reasoning { text } => ("reasoning", text.clone()),
             ItemContent::CommandExecution {
                 command,
@@ -1658,7 +1659,10 @@ mod tests {
     fn assistant(id: &str, text: &str) -> AgentEvent {
         AgentEvent::ItemCompleted(item(
             id,
-            ItemContent::AssistantMessage { text: text.into() },
+            ItemContent::AssistantMessage {
+                text: text.into(),
+                summarized: false,
+            },
         ))
     }
 

@@ -5176,7 +5176,7 @@ pub(crate) mod tests {
                     assert_eq!((held.from, held.end), (10, if empty { 12 } else { 14 }));
                     let timeline = &store.session_replica.as_ref().unwrap().1;
                     assert_eq!(timeline.entries.len(), 1);
-                    assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == if empty { "cached" } else { "cached continued" }));
+                    assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == if empty { "cached" } else { "cached continued" }));
                     let end = if empty { 12 } else { 14 };
                     host.subscribe(Subscription { topic: topic.clone(), after: None, known_index: None }).unwrap();
                     let replacement_id = host.subscription_request_id(&topic).unwrap();
@@ -5188,7 +5188,7 @@ pub(crate) mod tests {
                     assert_eq!((held.from, held.end), (end, end + 2));
                     let timeline = &store.session_replica.as_ref().unwrap().1;
                     assert_eq!(timeline.entries.len(), 1);
-                    assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "replacement"));
+                    assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "replacement"));
                 });
             }
         }
@@ -5234,6 +5234,7 @@ pub(crate) mod tests {
                             parent_item_id: None,
                             content: ItemContent::AssistantMessage {
                                 text: format!("Response {index}"),
+                                summarized: false,
                             },
                         })
                         .into(),
@@ -5852,6 +5853,7 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "working".into(),
+                    summarized: false,
                 },
             }),
         )
@@ -6516,6 +6518,7 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: format!("answer {turn} in {id}"),
+                    summarized: false,
                 },
             })
         };
@@ -7323,6 +7326,7 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "replicated".into(),
+                    summarized: false,
                 },
             }),
             AgentEvent::TurnCompleted {
@@ -7384,6 +7388,7 @@ pub(crate) mod tests {
                 parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "incremental replica".into(),
+                    summarized: false,
                 },
             }),
             AgentEvent::TurnCompleted {

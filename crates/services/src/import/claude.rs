@@ -106,6 +106,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                         "text" => block.get("text").and_then(Value::as_str).map(|text| {
                             ItemContent::AssistantMessage {
                                 text: text.to_string(),
+                                summarized: false,
                             }
                         }),
                         "thinking" => block.get("thinking").and_then(Value::as_str).map(|text| {

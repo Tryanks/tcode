@@ -59,6 +59,8 @@ impl MdState {
 pub(crate) struct AssistantData<'a> {
     pub(crate) id: &'a str,
     pub(crate) text: &'a str,
+    /// The provider delivered a summary of the message, not its own words.
+    pub(crate) summarized: bool,
     pub(crate) cwd: &'a Path,
     pub(crate) markdown: Option<Entity<MarkdownState>>,
     pub(crate) pinned: bool,
@@ -88,6 +90,7 @@ pub(crate) fn assistant(
     let AssistantData {
         id,
         text,
+        summarized,
         cwd,
         markdown,
         pinned,
@@ -107,12 +110,24 @@ pub(crate) fn assistant(
                 .into_any_element()
         },
     );
-    let message = v_flex().w_full().items_start().gap(px(2.)).child(
-        div()
-            .w_full()
-            .text_token(&cx.theme().tokens.typography.md)
-            .child(content),
-    );
+    let message = v_flex()
+        .w_full()
+        .items_start()
+        .gap(px(2.))
+        .child(
+            div()
+                .w_full()
+                .text_token(&cx.theme().tokens.typography.md)
+                .child(content),
+        )
+        .when(summarized, |message| {
+            message.child(
+                div()
+                    .text_token(&cx.theme().tokens.typography.xs)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(crate::tr!("chat.message_summarized").into_owned()),
+            )
+        });
     let margin_menu = move |menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
         menu_items(menu, window, cx)
     };

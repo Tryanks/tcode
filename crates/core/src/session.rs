@@ -1120,6 +1120,7 @@ impl Timeline {
                         parent_item_id: None,
                         content: ItemContent::AssistantMessage {
                             text: markdown.clone(),
+                            summarized: false,
                         },
                     },
                 );
@@ -1435,7 +1436,7 @@ impl Timeline {
             let entry = Arc::make_mut(entry);
             match (&mut entry.content, kind) {
                 (
-                    EntryContent::Item(ItemContent::AssistantMessage { text: existing }),
+                    EntryContent::Item(ItemContent::AssistantMessage { text: existing, .. }),
                     DeltaKind::AssistantText,
                 )
                 | (
@@ -1456,9 +1457,10 @@ impl Timeline {
         }
         // Providers may stream deltas before announcing the item: create lazily.
         let content = match kind {
-            DeltaKind::AssistantText => {
-                EntryContent::Item(ItemContent::AssistantMessage { text: text.into() })
-            }
+            DeltaKind::AssistantText => EntryContent::Item(ItemContent::AssistantMessage {
+                text: text.into(),
+                summarized: false,
+            }),
             DeltaKind::ReasoningText => {
                 EntryContent::Item(ItemContent::Reasoning { text: text.into() })
             }
@@ -1503,10 +1505,14 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             attachments,
         },
         (
-            EntryContent::Item(ItemContent::AssistantMessage { text: old }),
-            EntryContent::Item(ItemContent::AssistantMessage { text: new }),
+            EntryContent::Item(ItemContent::AssistantMessage { text: old, .. }),
+            EntryContent::Item(ItemContent::AssistantMessage {
+                text: new,
+                summarized,
+            }),
         ) => EntryContent::Item(ItemContent::AssistantMessage {
             text: merge_text(old, new),
+            summarized,
         }),
         (
             EntryContent::Item(ItemContent::Reasoning { text: old }),
@@ -2062,6 +2068,7 @@ mod tests {
                 parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "working".into(),
+                    summarized: false,
                 },
             }),
             user_msg("user-b", "B"),
@@ -2207,7 +2214,10 @@ mod tests {
             AgentEvent::ItemCompleted(ThreadItem {
                 id: id.into(),
                 parent_item_id: None,
-                content: ItemContent::AssistantMessage { text: id.into() },
+                content: ItemContent::AssistantMessage {
+                    text: id.into(),
+                    summarized: false,
+                },
             })
         };
         let events = vec![
@@ -2280,9 +2290,10 @@ mod tests {
                     id: "msg".into(),
                     parent_item_id: None,
                     content: match kind {
-                        DeltaKind::AssistantText => {
-                            ItemContent::AssistantMessage { text: text.into() }
-                        }
+                        DeltaKind::AssistantText => ItemContent::AssistantMessage {
+                            text: text.into(),
+                            summarized: false,
+                        },
                         DeltaKind::ReasoningText => ItemContent::Reasoning { text: text.into() },
                         DeltaKind::CommandOutput => ItemContent::CommandExecution {
                             command: "echo hi".into(),
@@ -2315,7 +2326,8 @@ mod tests {
                 assert_eq!(timeline.entries.len(), 1);
                 let text = match &timeline.entries[0].content {
                     EntryContent::Item(
-                        ItemContent::AssistantMessage { text } | ItemContent::Reasoning { text },
+                        ItemContent::AssistantMessage { text, .. }
+                        | ItemContent::Reasoning { text },
                     ) => text,
                     EntryContent::Item(ItemContent::CommandExecution {
                         command,
@@ -2450,7 +2462,7 @@ mod tests {
         ));
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "PONG"
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "PONG"
         ));
         assert!(matches!(
             &timeline.entries[2].content,
@@ -2507,7 +2519,7 @@ mod tests {
         ));
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Hi! How can I help you today?"
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "Hi! How can I help you today?"
         ));
         assert!(!timeline.turn_running);
         assert_eq!(timeline.last_turn_status, Some(TurnStatus::Completed));
@@ -2855,7 +2867,10 @@ mod tests {
         AgentEvent::ItemCompleted(ThreadItem {
             id: id.into(),
             parent_item_id: None,
-            content: ItemContent::AssistantMessage { text: text.into() },
+            content: ItemContent::AssistantMessage {
+                text: text.into(),
+                summarized: false,
+            },
         })
     }
 
@@ -3293,7 +3308,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.id == "pi-assistant-0:0")
                 .map(|entry| match &entry.content {
-                    EntryContent::Item(ItemContent::AssistantMessage { text }) =>
+                    EntryContent::Item(ItemContent::AssistantMessage { text, .. }) =>
                         (entry.turn, text.as_str()),
                     _ => unreachable!(),
                 })

@@ -600,7 +600,7 @@ async fn run_probe(
                     .ok();
             }
             AgentEvent::ItemCompleted(item) => {
-                if let ItemContent::AssistantMessage { text } = &item.content {
+                if let ItemContent::AssistantMessage { text, .. } = &item.content {
                     assistant.push_str(text);
                     assistant.push('\n');
                 }

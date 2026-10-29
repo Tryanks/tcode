@@ -7011,6 +7011,7 @@ mod tests {
                     format!("assistant-{turn}"),
                     agent::ItemContent::AssistantMessage {
                         text: answer.clone(),
+                        summarized: false,
                     },
                 ));
                 records.push(agent::AgentEvent::TurnCompleted {

@@ -79,7 +79,9 @@ fn claude_converter_maps_items_and_excludes_noise() {
         matches!(contents[4], ItemContent::ToolCall { image_reads, .. } if image_reads.len() == 1 && image_reads[0].data_base64 == "AQID")
     );
     assert!(matches!(contents[0], ItemContent::UserMessage { text, .. } if text == "Hello Claude"));
-    assert!(matches!(contents[1], ItemContent::AssistantMessage { text } if text == "Hello human"));
+    assert!(
+        matches!(contents[1], ItemContent::AssistantMessage { text, .. } if text == "Hello human")
+    );
     assert!(
         matches!(contents[2], ItemContent::Reasoning { text } if text == "Consider the request")
     );
@@ -110,7 +112,7 @@ fn codex_converter_maps_external_history_and_excludes_harness_and_own_sessions()
     assert_eq!(contents.len(), 4);
     assert!(matches!(contents[0], ItemContent::UserMessage { text, .. } if text == "Build it"));
     assert!(
-        matches!(contents[1], ItemContent::AssistantMessage { text } if text == "Working on it")
+        matches!(contents[1], ItemContent::AssistantMessage { text, .. } if text == "Working on it")
     );
     assert!(matches!(contents[2], ItemContent::Reasoning { text } if text == "First\nSecond"));
     assert!(matches!(contents[3], ItemContent::ToolCall {
@@ -297,7 +299,7 @@ fn import_is_idempotent_and_replays_into_timeline() {
     assert!(timeline.entries.iter().any(
         |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "Imported question")
     ));
-    assert!(timeline.entries.iter().any(|entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Imported answer")));
+    assert!(timeline.entries.iter().any(|entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "Imported answer")));
 
     let mut imported = meta.clone();
     imported.resume_cursor = None;

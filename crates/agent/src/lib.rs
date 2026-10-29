@@ -2132,6 +2132,10 @@ pub enum ItemContent {
     },
     AssistantMessage {
         text: String,
+        /// The provider delivered a summary of what the model told the user,
+        /// not the model's own words (Claude Code's narration blocks).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        summarized: bool,
     },
     Reasoning {
         text: String,
@@ -2764,6 +2768,33 @@ mod thread_item_serde_tests {
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
             r#"{"type":"user_input_requested","request_id":"q","questions":[],"delivery":"async"}"#
+        );
+    }
+
+    #[test]
+    fn assistant_messages_are_summarized_only_when_recorded() {
+        let legacy = r#"{"type":"item_completed","id":"m","content":{"kind":"assistant_message","text":"hi"}}"#;
+        assert!(matches!(
+            serde_json::from_str::<AgentEvent>(legacy).unwrap(),
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::AssistantMessage {
+                    summarized: false,
+                    ..
+                },
+                ..
+            })
+        ));
+        let event = AgentEvent::ItemCompleted(ThreadItem {
+            id: "m".into(),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage {
+                text: "hi".into(),
+                summarized: true,
+            },
+        });
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"item_completed","id":"m","content":{"kind":"assistant_message","text":"hi","summarized":true}}"#
         );
     }
 

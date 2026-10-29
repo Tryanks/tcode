@@ -866,7 +866,10 @@ impl OpenCodeMapper {
                     content: if reasoning {
                         ItemContent::Reasoning { text }
                     } else {
-                        ItemContent::AssistantMessage { text }
+                        ItemContent::AssistantMessage {
+                            text,
+                            summarized: false,
+                        }
                     },
                 };
                 events.push(if part.pointer("/time/end").is_some() {
@@ -2153,7 +2156,7 @@ mod tests {
         assert!(!events.iter().any(|event| matches!(
             event,
             AgentEvent::ItemUpdated(ThreadItem {
-                content: ItemContent::AssistantMessage { text },
+                content: ItemContent::AssistantMessage { text, .. },
                 ..
             }) if text == "DO NOT ECHO"
         )));

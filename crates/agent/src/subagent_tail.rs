@@ -77,7 +77,10 @@ impl TranscriptMapper {
                     if !text.is_empty() {
                         events.push(AgentEvent::ItemCompleted(self.item(
                             format!("{message_id}:{index}"),
-                            ItemContent::AssistantMessage { text: text.into() },
+                            ItemContent::AssistantMessage {
+                                text: text.into(),
+                                summarized: false,
+                            },
                         )));
                     }
                 }
@@ -507,7 +510,7 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert!(matches!(
             &second[0],
-            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::AssistantMessage { text }, .. })
+            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::AssistantMessage { text, .. }, .. })
                 if id == "spawn-1:m1:0" && text == "working"
         ));
         assert!(tail.read_appended().unwrap().is_empty());

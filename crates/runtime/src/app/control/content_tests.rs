@@ -54,7 +54,10 @@ impl StoredThread {
         });
         let assistant = self.record(item(
             &format!("a{n}"),
-            ItemContent::AssistantMessage { text: reply.into() },
+            ItemContent::AssistantMessage {
+                text: reply.into(),
+                summarized: false,
+            },
         ));
         self.record(turn_completed(n));
         (user, assistant)
@@ -166,6 +169,7 @@ fn original_entries_are_read_by_anchor_after_compaction_rewind_retry_and_fork() 
         "a1",
         ItemContent::AssistantMessage {
             text: "Worker 3 poisons the lock.".into(),
+            summarized: false,
         },
     ));
     target.record(turn_completed(1));

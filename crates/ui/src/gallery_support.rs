@@ -105,11 +105,18 @@ pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App)
     )
 }
 
-pub fn assistant(id: &str, markdown: Entity<MarkdownState>, cwd: &Path, cx: &App) -> AnyElement {
+pub fn assistant(
+    id: &str,
+    markdown: Entity<MarkdownState>,
+    summarized: bool,
+    cwd: &Path,
+    cx: &App,
+) -> AnyElement {
     assistant::assistant(
         assistant::AssistantData {
             id,
             text: "",
+            summarized,
             cwd,
             markdown: Some(markdown),
             compact: false,

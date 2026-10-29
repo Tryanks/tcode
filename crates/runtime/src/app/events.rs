@@ -1133,7 +1133,7 @@ pub(super) async fn generate_ai_title_inner(
         };
         match event {
             AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::AssistantMessage { text },
+                content: ItemContent::AssistantMessage { text, .. },
                 ..
             }) => completed_text.push_str(&text),
             AgentEvent::Delta {
@@ -1238,7 +1238,7 @@ pub(super) async fn run_fallback_review_inner(
         };
         match event {
             AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::AssistantMessage { text },
+                content: ItemContent::AssistantMessage { text, .. },
                 ..
             }) => completed_text.push_str(&text),
             AgentEvent::Delta {
@@ -1357,7 +1357,7 @@ pub(super) fn title_regeneration_context(timeline: &Timeline) -> (String, Vec<Pa
                         .trim(),
                     attachments.as_slice(),
                 ),
-                EntryContent::Item(ItemContent::AssistantMessage { text }) => {
+                EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => {
                     ("ASSISTANT", text.trim(), &[][..])
                 }
                 _ => return None,

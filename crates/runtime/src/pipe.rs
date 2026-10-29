@@ -2153,6 +2153,7 @@ mod tests {
                     "assistant",
                     ItemContent::AssistantMessage {
                         text: "The parser.".into(),
+                        summarized: false,
                     },
                 ),
             ),
