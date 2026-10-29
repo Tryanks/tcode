@@ -470,7 +470,7 @@ mod tests {
         let viewport = cx.debug_bounds("touch-picker-content").unwrap();
         assert!(viewport.bottom() <= sheet.bottom());
         assert!(viewport.size.height < content.size.height);
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: viewport.center(),
             delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-200.))),
             touch_phase: gpui::TouchPhase::Moved,

@@ -59,12 +59,7 @@ pub(crate) fn page_viewport<H: ScrollbarHandle + Clone>(
     handle: &H,
     element: impl IntoElement,
 ) -> ScrollBounce {
-    // gpui-base 0.8's own wheel handling stretches the edge away from both
-    // ends: a drag let go while moving throws it, and f32 rounding of the
-    // delta the content used reads as reaching it. The next drag then moves
-    // that stretch instead of the content. Scrolling itself, the content
-    // stretches only by what is left over at an end.
-    ScrollBounce::new(id, handle, element).scroll_wheel(false)
+    ScrollBounce::new(id, handle, element)
 }
 
 #[derive(IntoElement)]

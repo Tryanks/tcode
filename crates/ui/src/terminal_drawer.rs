@@ -23,9 +23,9 @@ use gpui::{
     Action, AnyElement, App, AppContext as _, Bounds, ClipboardItem, ContentMask, Context, Entity,
     ExternalPaths, FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role,
-    ScrollWheelEvent, Styled as _, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
-    Window, canvas, div, fill, font, point, prelude::FluentBuilder as _, px, rgb, size,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role, ScrollEvent,
+    Styled as _, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div,
+    fill, font, point, prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_base::{ElementExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable};
 use tcode_protocol::terminal::{
@@ -788,7 +788,7 @@ impl TerminalDrawer {
     fn on_scroll(
         &mut self,
         terminal_id: u64,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1353,7 +1353,7 @@ impl TerminalDrawer {
                     this.terminal_mouse_up(terminal_id, event, window, cx)
                 }),
             )
-            .on_scroll_wheel(cx.listener(move |this, event, window, cx| {
+            .on_scroll(cx.listener(move |this, event, window, cx| {
                 this.on_scroll(terminal_id, event, window, cx)
             }))
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {

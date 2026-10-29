@@ -266,7 +266,7 @@ impl Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, size};
+    use gpui::{ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point, size};
 
     /// A composer, phone or desktop, whose session awaits approval of a patch
     /// to `paths`.
@@ -372,7 +372,7 @@ mod tests {
         // Rows are measured as they come into view, so the list reaches its
         // end over successive gestures.
         for _ in 0..20 {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: first.center(),
                 delta: ScrollDelta::Pixels(point(px(0.), px(-2_000.))),
                 ..Default::default()

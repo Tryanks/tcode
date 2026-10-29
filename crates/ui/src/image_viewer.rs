@@ -11,9 +11,9 @@ use std::time::Instant;
 use gpui::{
     App, AppContext as _, Bounds, ClickEvent, Context, FocusHandle, ImageCacheError, ImageSource,
     InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement as _, PinchEvent, Pixels, Point, Render, RenderImage, ScrollDelta,
-    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _, Styled as _, TouchPhase,
-    Window, actions, div, img, point, prelude::FluentBuilder as _, px, size,
+    ParentElement as _, PinchEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollEvent,
+    SharedString, Size, StatefulInteractiveElement as _, Styled as _, TouchPhase, Window, actions,
+    div, img, point, prelude::FluentBuilder as _, px, size,
 };
 use gpui_base::motion::{Interpolate, Transition, transition};
 #[cfg(target_family = "wasm")]
@@ -91,17 +91,19 @@ enum OriginalState {
 }
 
 pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([
+    use crate::shortcut::secondary;
+    let bindings = [
         KeyBinding::new("=", ZoomIn, Some(CONTEXT)),
         KeyBinding::new("shift-=", ZoomIn, Some(CONTEXT)),
-        KeyBinding::new("secondary-=", ZoomIn, Some(CONTEXT)),
+        secondary("secondary-=", ZoomIn, Some(CONTEXT), cx),
         KeyBinding::new("-", ZoomOut, Some(CONTEXT)),
-        KeyBinding::new("secondary--", ZoomOut, Some(CONTEXT)),
+        secondary("secondary--", ZoomOut, Some(CONTEXT), cx),
         KeyBinding::new("0", ZoomToFit, Some(CONTEXT)),
-        KeyBinding::new("secondary-0", ZoomToFit, Some(CONTEXT)),
+        secondary("secondary-0", ZoomToFit, Some(CONTEXT), cx),
         KeyBinding::new("1", ActualSize, Some(CONTEXT)),
-        KeyBinding::new("secondary-1", ActualSize, Some(CONTEXT)),
-    ]);
+        secondary("secondary-1", ActualSize, Some(CONTEXT), cx),
+    ];
+    cx.bind_keys(bindings);
 }
 
 /// Open `source` in the viewer on the window's dialog stack, where it
@@ -557,7 +559,7 @@ impl ImageViewer {
     /// A trackpad or touch pan moves the image; any other scroll is a wheel,
     /// and zooms about the pointer, as does a scroll with Control or the
     /// platform modifier held, as browsers do.
-    fn scrolled(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn scrolled(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
         let now = cx.background_executor().now();
         self.pan = match (event.touch_phase, self.pan) {
             (TouchPhase::Started, _) => Some(Pan::Touching),
@@ -663,7 +665,7 @@ impl Render for ImageViewer {
             )
             .on_mouse_move(cx.listener(|this, event, _, cx| this.pointer_moved(event, cx)))
             .on_click(cx.listener(|this, event, window, cx| this.clicked(event, window, cx)))
-            .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scrolled(event, cx)))
+            .on_scroll(cx.listener(|this, event, _, cx| this.scrolled(event, cx)))
             .on_pinch(cx.listener(|this, event, _, cx| this.pinched(event, cx)))
             .when_some(image, |el, bounds| {
                 el.child(
@@ -906,11 +908,12 @@ mod tests {
     }
 
     fn scroll(cx: &mut VisualTestContext, delta: ScrollDelta, touch_phase: TouchPhase) {
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(400.), px(300.)),
             delta,
             modifiers: Modifiers::default(),
             touch_phase,
+            ..Default::default()
         });
         draw(cx);
     }
@@ -1080,11 +1083,12 @@ mod tests {
         );
 
         // One wheel notch at the centre grows the image a step, still centred.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(400.), px(300.)),
             delta: ScrollDelta::Lines(point(0., 1.)),
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
+            ..Default::default()
         });
         draw(cx);
         assert_eq!(
@@ -1164,11 +1168,12 @@ mod tests {
 
         // A browser's trackpad pinch arrives as a Control-wheel and scales by
         // e per 100 pixels: ln 2 of them double the image.
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: point(px(400.), px(300.)),
             delta: ScrollDelta::Pixels(point(px(0.), PINCH_PIXELS * std::f32::consts::LN_2)),
             modifiers: Modifiers::control(),
             touch_phase: TouchPhase::Moved,
+            ..Default::default()
         });
         draw(cx);
         assert_eq!(rounded(cx), [-100., 50., 1000., 500.]);

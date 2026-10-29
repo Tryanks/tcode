@@ -356,7 +356,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, point};
+    use gpui::{ScrollDelta, ScrollEvent, TestAppContext, point};
     use tcode_core::git::GitStatus;
     use tcode_protocol::{
         EventEnvelope, GitStatusStatus, HostMessage, ServerEvent, Topic, encode_line,
@@ -431,7 +431,7 @@ mod tests {
             "the dialog must not lay out all 300 file rows"
         );
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: first.center(),
             delta: ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
             ..Default::default()

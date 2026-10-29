@@ -640,7 +640,7 @@ mod tests {
             "an offscreen thumbnail must not be loaded"
         );
 
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: first.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100_000.))),
             touch_phase: gpui::TouchPhase::Moved,

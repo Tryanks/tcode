@@ -1,5 +1,7 @@
+use std::rc::Rc;
+
 use crate::widgets::kbd::Kbd;
-use gpui::{Action, App, KeyBinding, Keystroke, Modifiers, NoAction};
+use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, Keystroke, Modifiers, NoAction};
 use serde::Deserialize;
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -14,15 +16,16 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(crate::shell::navigate_thread);
     // With nothing focused the shell's own Undo listener is off the dispatch path.
     cx.on_action(crate::shell::undo_thread_action);
-    cx.bind_keys([
-        KeyBinding::new("secondary-z", crate::sidebar::ThreadUndo, None),
-        KeyBinding::new("secondary-c", gpui_base::input::Copy, Some("TcodeDiff")),
+    let bindings = [
+        secondary("secondary-z", crate::sidebar::ThreadUndo, None, cx),
+        secondary("secondary-c", gpui_base::input::Copy, Some("TcodeDiff"), cx),
         #[cfg(target_os = "ios")]
         KeyBinding::new("cmd-c", gpui_base::input::Copy, Some("TcodeDiff")),
         // GPUI gives later bindings precedence, including a global binding over
         // the editor's earlier contextual one. Keep the editor's native action.
-        KeyBinding::new("secondary-z", gpui_base::input::Undo, Some("Input")),
-    ]);
+        secondary("secondary-z", gpui_base::input::Undo, Some("Input"), cx),
+    ];
+    cx.bind_keys(bindings);
     // gpui-base gates Apple's editor bindings to macOS. iOS hardware
     // keyboards use Command too, while GPUI's secondary modifier is Control.
     #[cfg(target_os = "ios")]
@@ -41,10 +44,16 @@ pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("ctrl-v", NoAction, Some("Input"))]);
     for number in 1..=9 {
         let key = format!("secondary-{number}");
-        cx.bind_keys([
-            KeyBinding::new(&key, NavigateThread::Index(number - 1), None),
-            KeyBinding::new(&key, NoAction, Some("ModelPicker || ModelPicker > Input")),
-        ]);
+        let bindings = [
+            secondary(&key, NavigateThread::Index(number - 1), None, cx),
+            secondary(
+                &key,
+                NoAction,
+                Some("ModelPicker || ModelPicker > Input"),
+                cx,
+            ),
+        ];
+        cx.bind_keys(bindings);
     }
     cx.bind_keys([
         KeyBinding::new("ctrl-tab", NavigateThread::Next, None),
@@ -54,8 +63,9 @@ pub(crate) fn init(cx: &mut App) {
     // raw keystrokes (Tab, Ctrl-C as an interrupt) from its listener, so the
     // window root's focus traversal and selection copy must not claim them.
     let terminal = Some(crate::terminal_drawer::CONTEXT);
+    let undo = secondary("secondary-z", NoAction, terminal, cx);
     cx.bind_keys([
-        KeyBinding::new("secondary-z", NoAction, terminal),
+        undo,
         KeyBinding::new("tab", NoAction, terminal),
         KeyBinding::new("shift-tab", NoAction, terminal),
         #[cfg(target_os = "macos")]
@@ -65,15 +75,32 @@ pub(crate) fn init(cx: &mut App) {
     ]);
 }
 
+/// A binding whose `secondary-` is GPUI's semantic secondary modifier for the
+/// host OS: Command on a Mac, a browser on one included, and Control elsewhere.
+pub(crate) fn secondary<A: Action>(
+    keystrokes: &str,
+    action: A,
+    context: Option<&str>,
+    cx: &App,
+) -> KeyBinding {
+    let context = context.map(|context| {
+        Rc::new(KeyBindingContextPredicate::parse(context).expect("valid key context"))
+    });
+    KeyBinding::load(keystrokes, Box::new(action), context, false, None, cx)
+        .expect("valid keystroke")
+}
+
 /// Format a shortcut using GPUI's semantic secondary modifier.
-///
-/// The secondary modifier is Command on macOS and Control on Windows/Linux.
-pub(crate) fn format_secondary_shortcut(key: &str) -> String {
-    Kbd::format(&Keystroke {
-        modifiers: Modifiers::secondary_key(),
-        key: key.to_owned(),
-        key_char: None,
-    })
+pub(crate) fn format_secondary_shortcut(key: &str, cx: &App) -> String {
+    let os = cx.platform_info().os;
+    Kbd::format(
+        &Keystroke {
+            modifiers: Modifiers::secondary_key(cx),
+            key: key.to_owned(),
+            key_char: None,
+        },
+        os,
+    )
 }
 
 #[cfg(test)]
@@ -98,8 +125,9 @@ mod tests {
                     div()
                         .key_context(crate::terminal_drawer::CONTEXT)
                         .track_focus(&self.terminal)
-                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, _| {
-                            this.keys.push(event.keystroke.unparse());
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                            this.keys
+                                .push(event.keystroke.unparse(cx.platform_info().os));
                         })),
                 )
                 .child(

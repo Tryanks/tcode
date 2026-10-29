@@ -406,6 +406,13 @@ impl PlatformKeyboardLayout for AndroidKeyboardLayout {
 }
 
 impl Platform for AndroidPlatform {
+    fn platform_info(&self) -> gpui::PlatformInfo {
+        gpui::PlatformInfo {
+            os: gpui::OperatingSystem::Android,
+            target: gpui::PlatformTarget::Native,
+        }
+    }
+
     fn background_executor(&self) -> BackgroundExecutor {
         self.background_executor.clone()
     }

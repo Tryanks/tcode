@@ -2369,87 +2369,83 @@ impl AppShell {
                 |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                 move |bounds, hitbox, window, _| {
                     // Claiming TouchDrag would swallow edge taps. GPUI keeps
-                    // a pan's original contact in ScrollWheelEvent.position.
-                    window.on_mouse_event(
-                        move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
-                            if !phase.capture() {
+                    // a pan's original contact in ScrollEvent.position.
+                    window.on_mouse_event(move |event: &gpui::ScrollEvent, phase, window, cx| {
+                        if !phase.capture() {
+                            return;
+                        }
+                        let gpui::ScrollDelta::Pixels(delta) = event.delta else {
+                            return;
+                        };
+                        let Some(shell) = shell.upgrade() else { return };
+                        shell.update(cx, |shell, cx| {
+                            if delta.y != px(0.) {
+                                shell.move_edge_back(TouchPhase::Cancelled, window, cx);
                                 return;
                             }
-                            let gpui::ScrollDelta::Pixels(delta) = event.delta else {
+                            if event.touch_phase == TouchPhase::Started {
+                                shell.back_swipe = None;
+                                if (crate::overlay::active_sheet(window, cx).is_none()
+                                    && (!hitbox.should_handle_scroll(window)
+                                        || gpui_base::GlobalState::is_in_deferred_context(cx)
+                                        || shell.window_state.read(cx).palette_open
+                                        || !shell.compact(cx)
+                                        || shell.nav.read(cx).depth() <= 1))
+                                    || !bounds.contains(&event.position)
+                                    || event.position.x - bounds.left() > px(20.)
+                                {
+                                    return;
+                                }
+                                shell.begin_edge_back(
+                                    event.position,
+                                    bounds.size.width,
+                                    window,
+                                    cx,
+                                );
+                            }
+                            let Some(swipe) = shell.back_swipe.as_mut() else {
                                 return;
                             };
-                            let Some(shell) = shell.upgrade() else { return };
-                            shell.update(cx, |shell, cx| {
-                                if delta.y != px(0.) {
-                                    shell.move_edge_back(TouchPhase::Cancelled, window, cx);
-                                    return;
+                            if event.position != swipe.origin {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            if swipe.finished {
+                                return;
+                            }
+                            let now = cx.background_executor().now();
+                            swipe.progress.travel += delta.x;
+                            if event.touch_phase == TouchPhase::Moved && delta.x != px(0.) {
+                                let elapsed = now.duration_since(swipe.last_moved_at).as_secs_f32();
+                                swipe.progress.velocity = f32::from(delta.x) / elapsed.max(0.001);
+                                swipe.last_moved_at = now;
+                            }
+                            if !matches!(
+                                event.touch_phase,
+                                TouchPhase::Ended | TouchPhase::Cancelled
+                            ) {
+                                shell.move_edge_back(event.touch_phase, window, cx);
+                            }
+                            let Some(swipe) = shell.back_swipe.as_mut() else {
+                                return;
+                            };
+                            if matches!(
+                                event.touch_phase,
+                                TouchPhase::Ended | TouchPhase::Cancelled
+                            ) {
+                                if now.duration_since(swipe.last_moved_at)
+                                    > Duration::from_millis(100)
+                                {
+                                    swipe.progress.velocity = 0.;
                                 }
-                                if event.touch_phase == TouchPhase::Started {
-                                    shell.back_swipe = None;
-                                    if (crate::overlay::active_sheet(window, cx).is_none()
-                                        && (!hitbox.should_handle_scroll(window)
-                                            || gpui_base::GlobalState::is_in_deferred_context(cx)
-                                            || shell.window_state.read(cx).palette_open
-                                            || !shell.compact(cx)
-                                            || shell.nav.read(cx).depth() <= 1))
-                                        || !bounds.contains(&event.position)
-                                        || event.position.x - bounds.left() > px(20.)
-                                    {
-                                        return;
-                                    }
-                                    shell.begin_edge_back(
-                                        event.position,
-                                        bounds.size.width,
-                                        window,
-                                        cx,
-                                    );
+                                let origin = swipe.origin;
+                                shell.move_edge_back(event.touch_phase, window, cx);
+                                if event.touch_phase == TouchPhase::Ended {
+                                    crate::edge_back::catch_fling(origin, window, cx);
                                 }
-                                let Some(swipe) = shell.back_swipe.as_mut() else {
-                                    return;
-                                };
-                                if event.position != swipe.origin {
-                                    return;
-                                }
-                                cx.stop_propagation();
-                                if swipe.finished {
-                                    return;
-                                }
-                                let now = cx.background_executor().now();
-                                swipe.progress.travel += delta.x;
-                                if event.touch_phase == TouchPhase::Moved && delta.x != px(0.) {
-                                    let elapsed =
-                                        now.duration_since(swipe.last_moved_at).as_secs_f32();
-                                    swipe.progress.velocity =
-                                        f32::from(delta.x) / elapsed.max(0.001);
-                                    swipe.last_moved_at = now;
-                                }
-                                if !matches!(
-                                    event.touch_phase,
-                                    TouchPhase::Ended | TouchPhase::Cancelled
-                                ) {
-                                    shell.move_edge_back(event.touch_phase, window, cx);
-                                }
-                                let Some(swipe) = shell.back_swipe.as_mut() else {
-                                    return;
-                                };
-                                if matches!(
-                                    event.touch_phase,
-                                    TouchPhase::Ended | TouchPhase::Cancelled
-                                ) {
-                                    if now.duration_since(swipe.last_moved_at)
-                                        > Duration::from_millis(100)
-                                    {
-                                        swipe.progress.velocity = 0.;
-                                    }
-                                    let origin = swipe.origin;
-                                    shell.move_edge_back(event.touch_phase, window, cx);
-                                    if event.touch_phase == TouchPhase::Ended {
-                                        crate::edge_back::catch_fling(origin, window, cx);
-                                    }
-                                }
-                            });
-                        },
-                    );
+                            }
+                        });
+                    });
                 },
             )
             .absolute()
@@ -5647,7 +5643,7 @@ mod tests {
             draw(cx);
             if destination == Destination::Thread {
                 let viewport = chat.read_with(cx, |chat, _| chat.capture_viewport().unwrap());
-                cx.simulate_event(gpui::ScrollWheelEvent {
+                cx.simulate_event(gpui::ScrollEvent {
                     position: viewport.center(),
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1000.))),
                     ..Default::default()
@@ -5696,7 +5692,7 @@ mod tests {
             draw(cx);
             let initial_line = cx.debug_bounds(line).expect("diff line before scrolling");
             let body = cx.debug_bounds("diff-body").unwrap();
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: body.center(),
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(-120.), px(0.))),
                 ..Default::default()
@@ -7087,7 +7083,7 @@ mod tests {
             || cx.debug_bounds("chat-header-scroll").unwrap().bottom() + px(200.),
             |row| row.center().y,
         );
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: gpui::point(px(600.), timeline),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(20_000.))),
             ..Default::default()
@@ -7594,7 +7590,7 @@ mod tests {
         draw(cx);
         draw(cx);
         let header = cx.debug_bounds("chat-header-scroll").unwrap();
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: header.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(-1000.), px(0.))),
             ..Default::default()
@@ -7918,7 +7914,7 @@ mod tests {
             .expect("the diff body laid out");
         // A wheel turn at a time, each eased out and drawn, as a reader scrolls.
         for _ in 0..12 {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: body.center(),
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100.))),
                 ..Default::default()

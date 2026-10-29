@@ -18,7 +18,7 @@ use gpui::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, Context, Entity,
     EntityId, Half as _, Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement,
     LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, PlatformInput, Point, RenderOnce, ScrollDelta, ScrollWheelEvent,
+    ParentElement as _, Pixels, PlatformInput, Point, RenderOnce, ScrollDelta, ScrollEvent,
     Styled as _, Task, TextLayout, TouchPhase, WeakEntity, Window, canvas, div, point, px,
 };
 use gpui_base::{GlobalState, SelectionEdge};
@@ -110,6 +110,10 @@ pub struct SelectionDocument {
     focus: Option<DocPoint>,
     /// While the pointer is held, the end a drag keeps.
     gesture: Option<DocPoint>,
+    /// The word or line a double or triple click selected, and its ends. A
+    /// drag from that click and a shift-click after it extend the selection
+    /// by the same unit, and keep it selected whichever way they go.
+    unit: Option<(Unit, DocPoint, DocPoint)>,
     entries: EntryNodes,
     frame: Rc<RefCell<Frame>>,
     touch: Touch,
@@ -138,6 +142,7 @@ impl SelectionDocument {
             anchor: None,
             focus: None,
             gesture: None,
+            unit: None,
             entries,
             frame: Rc::default(),
             touch: Touch::default(),
@@ -191,6 +196,7 @@ impl SelectionDocument {
         self.anchor = None;
         self.focus = None;
         self.gesture = None;
+        self.unit = None;
         self.touch = Touch::default();
         self.changed(cx);
     }
@@ -205,6 +211,7 @@ impl SelectionDocument {
             return;
         };
         self.gesture = None;
+        self.unit = None;
         self.set(
             DocPoint {
                 entry,
@@ -363,9 +370,16 @@ impl SelectionDocument {
     }
 
     /// A press: a caret at `point`, or with `extend` the selection from its
-    /// anchor to `point`, which a drag then moves.
+    /// anchor to `point`, by the held unit after a double or triple click,
+    /// which a drag then moves.
     fn press(&mut self, point: DocPoint, extend: bool, cx: &mut Context<Self>) {
         self.touch = Touch::default();
+        if extend && let Some(unit) = self.unit.clone() {
+            self.gesture = Some(point.clone());
+            self.extend_unit(unit, point, cx);
+            return;
+        }
+        self.unit = None;
         let anchor = match &self.anchor {
             Some(anchor) if extend => anchor.clone(),
             _ => point.clone(),
@@ -374,21 +388,54 @@ impl SelectionDocument {
         self.set(anchor, point, cx);
     }
 
-    /// A double or triple click: the word or line at `point`. Whether there
-    /// was one.
+    /// A double or triple click, or a long press: the word or line at
+    /// `point`. Whether there was one.
     fn select_unit(&mut self, unit: Unit, point: &DocPoint, cx: &mut Context<Self>) -> bool {
         self.touch = Touch::default();
         self.gesture = None;
         let Some((start, end)) = self.unit_at(unit, point, cx) else {
+            self.unit = None;
             return false;
         };
+        self.unit = Some((unit, start.clone(), end.clone()));
         self.set(start, end, cx);
         true
     }
 
+    /// Keep the click that selected a unit going: until its button is
+    /// released, a drag extends the selection by that unit.
+    fn hold_unit(&mut self) {
+        self.gesture = self.unit.as_ref().map(|(_, start, _)| start.clone());
+    }
+
+    /// The selection from the far end of the held `unit` to the edge of the
+    /// unit at `point`, or the held unit alone while `point` is inside it.
+    /// Off the text, the moving end is `point` itself.
+    fn extend_unit(
+        &mut self,
+        (unit, start, end): (Unit, DocPoint, DocPoint),
+        point: DocPoint,
+        cx: &mut Context<Self>,
+    ) {
+        let (anchor, focus) = if point < start {
+            let edge = self.unit_at(unit, &point, cx).map(|(edge, _)| edge);
+            (end, edge.unwrap_or(point))
+        } else if point > end {
+            let edge = self.unit_at(unit, &point, cx).map(|(_, edge)| edge);
+            (start, edge.unwrap_or(point))
+        } else {
+            (start, end)
+        };
+        self.set(anchor, focus, cx);
+    }
+
     fn drag(&mut self, point: DocPoint, cx: &mut Context<Self>) {
-        if let Some(anchor) = self.gesture.clone() {
-            self.set(anchor, point, cx);
+        let Some(anchor) = self.gesture.clone() else {
+            return;
+        };
+        match self.unit.clone() {
+            Some(unit) => self.extend_unit(unit, point, cx),
+            None => self.set(anchor, point, cx),
         }
     }
 
@@ -505,6 +552,7 @@ impl SelectionDocument {
                 };
                 let offset = caret.map_or(Point::default(), |caret| caret.center() - position);
                 self.touch.dragging = Some((edge, offset));
+                self.unit = None;
                 cx.notify();
             }
             TouchPhase::Moved => {
@@ -733,7 +781,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
         let document = document.clone();
         // In the capture phase: a scroller stretched past its end keeps the
         // whole stream, the lift included.
-        move |event: &ScrollWheelEvent, phase, _, cx| {
+        move |event: &ScrollEvent, phase, _, cx| {
             if !phase.capture() || !document.read(cx).touch.active {
                 return;
             }
@@ -766,7 +814,11 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                     Unit::Line
                 };
                 if let Some(point) = document.read(cx).char_at(event.position, cx) {
-                    document.update(cx, |document, cx| document.select_unit(unit, &point, cx));
+                    document.update(cx, |document, cx| {
+                        if document.select_unit(unit, &point, cx) {
+                            document.hold_unit();
+                        }
+                    });
                     focus_selection(&document, window, cx);
                 }
                 return;
@@ -919,7 +971,7 @@ fn auto_scroll(document: WeakEntity<SelectionDocument>, _: &Window, cx: &mut App
                         return true;
                     };
                     window.dispatch_event(
-                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        PlatformInput::Scroll(ScrollEvent {
                             position: clamp_into(pointer, viewport),
                             delta: ScrollDelta::Pixels(point(px(0.), -delta)),
                             modifiers: Modifiers::default(),
@@ -1098,7 +1150,7 @@ mod tests {
             div()
                 .size_full()
                 .child(MarkdownView::new(&self.markdown).selectable(true))
-                .on_scroll_wheel(move |event, window, _| {
+                .on_scroll(move |event, window, _| {
                     wheel_deltas
                         .borrow_mut()
                         .push(event.delta.pixel_delta(window.line_height()).y);
@@ -1306,6 +1358,79 @@ mod tests {
         assert_eq!(selected(&markdown, cx), "修复");
     }
 
+    #[gpui::test]
+    fn a_drag_or_shift_click_from_a_double_click_extends_by_words(cx: &mut TestAppContext) {
+        let (_, markdown, cx) = open_body("alpha beta gamma delta", cx);
+        draw(cx);
+        // The middle of the character at byte `index`.
+        let at = |index: usize, cx: &mut VisualTestContext| {
+            markdown.read_with(cx, |state, _| {
+                let runs = state.runs.borrow();
+                let start = runs[0].layout.position_for_index(index).unwrap();
+                let end = runs[0].layout.position_for_index(index + 1).unwrap();
+                point((start.x + end.x) / 2., start.y + px(4.))
+            })
+        };
+        let (beta, gamma, delta, alpha) = (at(7, cx), at(13, cx), at(18, cx), at(2, cx));
+        // The caret before the character at byte `index`.
+        let caret = |index: usize, cx: &mut VisualTestContext| {
+            markdown.read_with(cx, |state, _| {
+                let start = state.runs.borrow()[0]
+                    .layout
+                    .position_for_index(index)
+                    .unwrap();
+                point(start.x, start.y + px(4.))
+            })
+        };
+        let press = |cx: &mut VisualTestContext, position, modifiers, click_count| {
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers,
+                click_count,
+                first_mouse: false,
+            });
+            draw(cx);
+        };
+        let release = |cx: &mut VisualTestContext, position, click_count| {
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+                click_count,
+            });
+            draw(cx);
+        };
+        press(cx, beta, Modifiers::default(), 1);
+        release(cx, beta, 1);
+        press(cx, beta, Modifiers::default(), 2);
+        assert_eq!(selected(&markdown, cx), "beta");
+
+        // The drag takes whole words, and the double-clicked one stays
+        // selected whichever way it goes.
+        for (to, expected) in [
+            (delta, "beta gamma delta"),
+            (alpha, "alpha beta"),
+            (beta, "beta"),
+        ] {
+            cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+            draw(cx);
+            assert_eq!(selected(&markdown, cx), expected);
+        }
+        release(cx, beta, 2);
+
+        // So does a shift-click after it, until a plain click starts afresh.
+        press(cx, gamma, Modifiers::shift(), 1);
+        release(cx, gamma, 1);
+        assert_eq!(selected(&markdown, cx), "beta gamma");
+        let (from, to) = (caret(13, cx), caret(2, cx));
+        press(cx, from, Modifiers::default(), 1);
+        release(cx, from, 1);
+        press(cx, to, Modifiers::shift(), 1);
+        release(cx, to, 1);
+        assert_eq!(selected(&markdown, cx), "pha beta ga");
+    }
+
     /// A message above a composer.
     struct Page {
         markdown: Entity<MarkdownState>,
@@ -1361,11 +1486,12 @@ mod tests {
             (TouchPhase::Moved, false),
             (TouchPhase::Ended, true),
         ] {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: pan,
                 delta: ScrollDelta::Pixels(point(px(0.), px(-20.))),
                 modifiers: Modifiers::default(),
                 touch_phase: phase,
+                source: gpui::ScrollSource::Touch,
             });
             draw(cx);
             assert_eq!(menu_open(&markdown, cx), Some(open), "{phase:?}");
