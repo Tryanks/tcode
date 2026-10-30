@@ -354,7 +354,7 @@ impl CrossFade {
 }
 
 /// Covers a leaving element so it takes no pointer, wheel or focus.
-fn shield() -> Div {
+pub(crate) fn shield() -> Div {
     div()
         .absolute()
         .inset_0()

@@ -10,17 +10,27 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::dock::{
-    DockAreaRenderer, DockLayout, DropIndicator, PaneNode, PaneRef, Panel, PanelEvent, PanelId,
-    TabGroup, TabGroupContext, TabGroupRenderer,
+    DockAreaRenderer, DockLayout, DropIndicator, NodeId, PaneNode, PaneRef, Panel, PanelEvent,
+    PanelId, TabGroup, TabGroupContext, TabGroupRenderer,
 };
-use gpui_base::{ElementExt as _, Placement, v_flex};
+use gpui_base::{ElementExt as _, Placement, ResizeHandleContext, v_flex};
 use serde::Deserialize;
+
+mod glide;
+
+pub(crate) use glide::{Before, Glides, Held};
 
 use crate::chat::{ChatView, WindowEdges};
 use crate::icon::{Icon, IconName};
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
 
 actions!(tcode, [SplitRight, SplitDown, ClosePane, ZoomPane]);
+
+/// The key context of a pane waiting for a thread beside others, where
+/// Escape closes it.
+pub(crate) const WAITING_CONTEXT: &str = "WaitingPane";
 
 /// Move the keyboard to another pane: the nearest painted one on a side, or
 /// the next or previous one in the layout's order.
@@ -124,6 +134,10 @@ pub(crate) struct ThreadPanel {
     group: Option<WeakEntity<TabGroup>>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
     among_others: bool,
+    /// Leaving the column: still drawn while its slot glides shut, inert.
+    closing: bool,
+    /// How the content is drawn while its split glides.
+    held: Held,
     _focus: Subscription,
     _focus_in: Subscription,
 }
@@ -158,6 +172,8 @@ impl ThreadPanel {
             group: None,
             bounds: Rc::default(),
             among_others: false,
+            closing: false,
+            held: Held::default(),
             _focus: focus,
             _focus_in: focus_in,
         }
@@ -187,12 +203,34 @@ impl ThreadPanel {
         }
     }
 
+    /// Whether the pane is leaving the column.
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing
+    }
+
+    /// Leave the column: the pane takes no pointer from now on, and the shell
+    /// takes it out once its slot has glided shut.
+    pub(crate) fn set_closing(&mut self, cx: &mut Context<Self>) {
+        self.closing = true;
+        cx.notify();
+    }
+
+    /// Lay the content out at `held`'s size along the axes it names, clipped
+    /// to the pane, rather than at the pane's size, and draw it at its
+    /// opacity.
+    pub(crate) fn set_held(&mut self, held: Held, cx: &mut Context<Self>) {
+        if self.held != held {
+            self.held = held;
+            cx.notify();
+        }
+    }
+
     /// The dock's tab group holding the pane.
     pub(crate) fn group(&self) -> Option<Entity<TabGroup>> {
         self.group.as_ref()?.upgrade()
     }
 
-    /// Where the pane was last painted.
+    /// Where the pane was last painted, as far as it shows.
     pub(crate) fn bounds(&self) -> Bounds<Pixels> {
         self.bounds.get()
     }
@@ -220,11 +258,14 @@ impl Render for ThreadPanel {
         const WAITING: usize = 0;
         const CHAT: usize = 1;
         let bounds = self.bounds.clone();
+        let held = self.held;
         // A pane beside others waits for a thread rather than offering the
         // empty workspace's way to start one. The swap cross-fades when the
-        // binding changes inside a layout that holds; when a neighbour comes
-        // or goes it lands with the dock re-parenting the group and snaps
-        // (see `ThreadPanes`). A pane whose thread closes is rebound before
+        // binding changes inside a layout that holds, and when the last
+        // neighbour starts closing, which the dock re-parents the group for
+        // only once its glide has played; when a neighbour comes it lands
+        // with the dock re-parenting the group and snaps (see
+        // `ThreadPanes`). A pane whose thread closes is rebound before
         // the fade, so the leaving layer is this chat already showing the
         // empty workspace: GPUI cannot draw an element tree from an earlier
         // frame, and the store frees a closed thread's timeline in
@@ -241,10 +282,15 @@ impl Render for ThreadPanel {
         .fill();
         let mut layers = Vec::new();
         if content.shows(WAITING) {
+            // A waiting pane draws no chat header, so no pane menu: this is
+            // its way to close, as the menu's row is.
+            let pane = self.focus_handle.clone();
+            let spacing = cx.theme().tokens.spacing.sm;
             layers.push((
                 WAITING,
                 v_flex()
                     .debug_selector(|| "waiting-pane".into())
+                    .relative()
                     .size_full()
                     .child(crate::material::empty_state(
                         Icon::new(IconName::Columns2),
@@ -252,20 +298,61 @@ impl Render for ThreadPanel {
                         "",
                         cx,
                     ))
+                    .child(
+                        div().absolute().top(spacing).right(spacing).child(
+                            Button::new("waiting-pane-close")
+                                .debug_selector(|| "waiting-pane-close".into())
+                                .ghost()
+                                .small()
+                                .compact()
+                                .icon(IconName::Close)
+                                .tooltip(crate::tr!("panes.close"))
+                                .on_click(move |_, window, cx| {
+                                    window.focus(&pane, cx);
+                                    window.dispatch_action(Box::new(ClosePane), cx);
+                                }),
+                        ),
+                    )
                     .into_any_element(),
             ));
         }
         if content.shows(CHAT) {
             layers.push((CHAT, self.chat.clone().into_any_element()));
         }
+        // A slot gliding below the dock's slot floor runs past its split's
+        // end, where the split's frame clips it: the pane's bounds are the
+        // part that shows. Content held wider than the slot is clipped by
+        // the tab group's content frame.
         div()
+            .relative()
             .size_full()
-            .on_prepaint(move |painted, _, _| bounds.set(painted))
+            // A waiting pane has no composer to hold the keyboard, so the
+            // pane holds it, and pane commands and Escape reach it there.
+            .when(waiting, |pane| {
+                pane.track_focus(&self.focus_handle)
+                    .key_context(WAITING_CONTEXT)
+            })
+            .on_prepaint(move |painted, window, _| {
+                bounds.set(painted.intersect(&window.content_mask().bounds))
+            })
             .on_action(cx.listener(|this, _: &SplitRight, window, cx| this.claim(window, cx)))
             .on_action(cx.listener(|this, _: &SplitDown, window, cx| this.claim(window, cx)))
             .on_action(cx.listener(|this, _: &ClosePane, window, cx| this.claim(window, cx)))
             .on_action(cx.listener(|this, _: &ZoomPane, window, cx| this.claim(window, cx)))
-            .child(content.render(layers).size_full())
+            .child(
+                content
+                    .render(layers)
+                    .map(|content| match held.size.width {
+                        Some(width) => content.w(width).flex_none(),
+                        None => content.w_full(),
+                    })
+                    .map(|content| match held.size.height {
+                        Some(height) => content.h(height).flex_none(),
+                        None => content.h_full(),
+                    })
+                    .opacity(held.opacity),
+            )
+            .when(self.closing, |pane| pane.child(crate::motion::shield()))
     }
 }
 
@@ -285,27 +372,29 @@ pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window
 
 /// The panes' appearance: the area is the chat column's reading surface.
 ///
-/// A pane opens, closes, zooms and resizes without motion: gpui-base's dock
-/// lays its groups out with no layout transition and unmounts a closed group
-/// at once, so neither a pane's size nor its leaving can be animated here.
+/// A pane opening or closing glides its split's slots (see [`Glides`]); a
+/// zoom and the widths a window resize redistributes land at once.
 ///
-/// The dock also re-parents a group whenever the tree around it changes: a
+/// The dock re-parents a group whenever the tree around it changes: a
 /// lone group sits in the area's frame, a split puts it under
 /// `("dock-split", node)`, a merge or a close lifts it back out, and zoom
 /// draws it straight into the frame. Element state is keyed by the full id
 /// path from the window root, so every pane that moves in the tree starts
 /// over: its focus ring and its waiting-hint cross-fade snap to their
-/// targets in the frame of a split, a close or a zoom (they glide only while
-/// the layout holds still), and its chat loses its handle-less stateful
-/// scrolls, such as the header's `chat-header-scroll`, and any other keyed
-/// state under it.
+/// targets in the frame of a split, of a zoom, or the frame a closing pane
+/// is taken out once its glide has played, and its chat loses its
+/// handle-less stateful scrolls, such as the header's `chat-header-scroll`,
+/// and any other keyed state under it.
 pub(crate) struct ThreadPanes {
     lands: DropLands,
+    handle_held: Rc<Cell<bool>>,
 }
 
 impl ThreadPanes {
-    pub(crate) fn new(lands: DropLands) -> Self {
-        Self { lands }
+    /// `handle_held` is set in every frame that draws a split's handle held
+    /// by the pointer.
+    pub(crate) fn new(lands: DropLands, handle_held: Rc<Cell<bool>>) -> Self {
+        Self { lands, handle_held }
     }
 }
 
@@ -322,6 +411,20 @@ impl DockAreaRenderer for ThreadPanes {
             lands: self.lands.clone(),
         })
     }
+
+    /// Base's own line. A handle the pointer holds takes the split's sizes
+    /// over, so the shell stops a glide there (see [`Glides::stop`]).
+    fn render_split_handle(
+        &self,
+        handle: &ResizeHandleContext,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<AnyElement> {
+        if handle.is_active() {
+            self.handle_held.set(true);
+        }
+        None
+    }
 }
 
 /// A pane's thread wears its own header, so the group draws no tab bar.
@@ -337,7 +440,8 @@ impl TabGroupRenderer for ThreadTabs {
     /// Among several panes, the one holding the keyboard wears the focus
     /// ring on top of its thread. `TabGroupContext` carries no focus state of
     /// its own; the displayed panel's focus handle answers. A group that may
-    /// close is one with a neighbour, and a zoomed group may not.
+    /// close is one with a neighbour, and a zoomed group may not; a pane
+    /// whose last neighbour is closing is alone already.
     fn render_active_panel(
         &self,
         panel: AnyView,
@@ -346,9 +450,14 @@ impl TabGroupRenderer for ThreadTabs {
         cx: &mut App,
     ) -> AnyElement {
         // Always sampled, so the ring glides in and out as the keyboard moves
-        // between panes that stay where they are. A split, a close or a zoom
-        // re-parents the group and the ring snaps (see `ThreadPanes`).
+        // between panes that stay where they are, and out as the last
+        // neighbour starts closing. A split or a zoom re-parents the group
+        // and the ring snaps (see `ThreadPanes`).
         let focused = group.is_closable()
+            && panel
+                .clone()
+                .downcast::<ThreadPanel>()
+                .is_ok_and(|pane| pane.read(cx).among_others)
             && group
                 .active_panel()
                 .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx));
@@ -483,6 +592,17 @@ pub(crate) fn min_width(
             .map(|child| min_width(child, edges, pane_min))
             .fold(0., f32::max),
     }
+}
+
+/// The split directly holding `child` under `node`.
+pub(crate) fn parent_split(node: &PaneNode, child: NodeId) -> Option<NodeId> {
+    let PaneRef::Split { children, .. } = node.kind() else {
+        return None;
+    };
+    if children.iter().any(|held| held.id() == child) {
+        return Some(node.id());
+    }
+    children.iter().find_map(|held| parent_split(held, child))
 }
 
 /// Which of `edges` the pane holding `panel` runs along, if `node` holds it.
