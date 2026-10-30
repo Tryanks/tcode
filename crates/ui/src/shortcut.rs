@@ -70,6 +70,7 @@ pub(crate) fn init(cx: &mut App) {
             KeyBinding::new(split_right, SplitRight, None),
             KeyBinding::new(split_down, SplitDown, None),
             KeyBinding::new(close, ClosePane, None),
+            KeyBinding::new("escape", ClosePane, Some(crate::panes::WAITING_CONTEXT)),
             KeyBinding::new(zoom, ZoomPane, None),
             KeyBinding::new(left, FocusPane::Left, None),
             KeyBinding::new(right, FocusPane::Right, None),

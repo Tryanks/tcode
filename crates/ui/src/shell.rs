@@ -178,6 +178,11 @@ struct ShellAttachment {
     sidebar: Entity<SessionsSidebar>,
     /// The wide layout's chat column, a dock of [`ThreadPanel`]s.
     thread_panes: Entity<DockArea>,
+    /// The column's splits gliding toward the layout an edit made.
+    glides: crate::panes::Glides,
+    /// Set by the panes' renderer in a frame that draws a split's handle
+    /// held by the pointer.
+    split_handle_held: Rc<Cell<bool>>,
     /// The pane showing the store's focused thread, or waiting for it; the
     /// compact layout's conversation is its chat.
     focused_pane: Entity<ThreadPanel>,
@@ -223,8 +228,17 @@ struct ShellAttachment {
 }
 
 impl ShellAttachment {
-    /// The chat column's panes, in the layout's order.
+    /// The chat column's panes, in the layout's order. A closing pane is no
+    /// longer one of them: nothing acts on it, focuses it or counts it.
     fn panes(&self, cx: &App) -> Vec<Entity<ThreadPanel>> {
+        self.all_panes(cx)
+            .into_iter()
+            .filter(|pane| !pane.read(cx).is_closing())
+            .collect()
+    }
+
+    /// Every pane the dock draws, closing ones too, in the layout's order.
+    fn all_panes(&self, cx: &App) -> Vec<Entity<ThreadPanel>> {
         let area = self.thread_panes.read(cx);
         area.layout(DockPlacement::Center)
             .map(|tree| {
@@ -233,6 +247,39 @@ impl ShellAttachment {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The closing panes whose split has stopped gliding, for the shell to
+    /// take out.
+    fn closed_panes(&self, cx: &App) -> Vec<Entity<ThreadPanel>> {
+        let Some(tree) = self.thread_panes.read(cx).layout(DockPlacement::Center) else {
+            return Vec::new();
+        };
+        self.all_panes(cx)
+            .into_iter()
+            .filter(|pane| {
+                pane.read(cx).is_closing()
+                    && tree
+                        .find_panel_node(PanelId::from(pane.entity_id()))
+                        .and_then(|group| crate::panes::parent_split(tree.root(), group))
+                        .is_none_or(|split| !self.glides.gliding(split))
+            })
+            .collect()
+    }
+
+    /// The layout once every closing pane has gone.
+    fn final_layout(&self, cx: &App) -> Option<gpui_base::dock::PaneTree> {
+        let mut tree = self
+            .thread_panes
+            .read(cx)
+            .layout(DockPlacement::Center)?
+            .clone();
+        for pane in self.all_panes(cx) {
+            if pane.read(cx).is_closing() {
+                tree.remove_panel(PanelId::from(pane.entity_id()));
+            }
+        }
+        Some(tree)
     }
 
     /// The focused pane's conversation.
@@ -281,7 +328,7 @@ pub(crate) fn pane_controls(
     Some(PaneControls {
         split_right: split(gpui_base::Placement::Right),
         split_down: split(gpui_base::Placement::Bottom),
-        close: closable || (zoomed && panes.len() > 1),
+        close: panes.len() > 1 && (closable || zoomed),
         zoom: panes.len() > 1,
         zoomed,
     })
@@ -1008,9 +1055,11 @@ impl AppShell {
                 .upgrade()
                 .is_some_and(|shell| shell.read(cx).drop_lands(bounds, placement, window, cx))
         });
+        let split_handle_held = Rc::new(Cell::new(false));
         let thread_panes = cx.new(|cx| {
-            let mut area = DockArea::new("thread-panes", None, window, cx)
-                .with_renderer(Rc::new(crate::panes::ThreadPanes::new(lands)));
+            let mut area = DockArea::new("thread-panes", None, window, cx).with_renderer(Rc::new(
+                crate::panes::ThreadPanes::new(lands, split_handle_held.clone()),
+            ));
             area.set_center(DockLayout::tabs().panel(thread_panel.clone()), window, cx);
             area
         });
@@ -1027,6 +1076,8 @@ impl AppShell {
         ));
         self.attachment = Some(ShellAttachment {
             thread_panes,
+            glides: Default::default(),
+            split_handle_held,
             focused_pane: thread_panel,
             diff: cx.new(|cx| DiffPanel::new(store.clone(), self.window_state.clone(), cx)),
             settings_page: cx
@@ -1164,13 +1215,13 @@ impl AppShell {
             })
             .cloned()
             .collect();
-        let area = attachment.thread_panes.clone();
+        let focused_pane = attachment.focused_pane.clone();
         let mut remaining = panes.len();
         for pane in closed {
-            if pane == attachment.focused_pane || remaining == 1 {
+            if pane == focused_pane || remaining == 1 {
                 pane.update(cx, |pane, cx| pane.set_session(None, cx));
             } else {
-                area.update(cx, |area, cx| area.remove_panel(pane, window, cx));
+                self.glide_out(&pane, cx);
                 remaining -= 1;
             }
         }
@@ -1294,6 +1345,7 @@ impl AppShell {
         let area = attachment.thread_panes.clone();
         let pane = self.new_pane(&store, window, cx);
         pane.update(cx, |pane, cx| pane.set_session(None, cx));
+        let before = self.glide_before_edit(window, cx);
         area.update(cx, |area, cx| {
             area.set_zoomed_out(window, cx);
             // `DockArea::split_at` splits only a panel the area already
@@ -1311,6 +1363,7 @@ impl AppShell {
                 cx,
             );
         });
+        self.glide_after_edit(before, cx);
         self.attachment.as_mut()?.focused_pane = pane.clone();
         window.focus(&pane.focus_handle(cx), cx);
         cx.notify();
@@ -1443,8 +1496,8 @@ impl AppShell {
     }
 
     /// Close the acting pane; its thread closes and stays in the threads
-    /// list. The dock hands the keyboard to a neighbour, whose thread the
-    /// store then focuses. The last pane stays.
+    /// list. The keyboard moves to a neighbour at once, whose thread the
+    /// store then focuses, and the pane glides shut. The last pane stays.
     fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.compact(cx) {
             return;
@@ -1456,35 +1509,189 @@ impl AppShell {
             return;
         };
         let area = attachment.thread_panes.clone();
-        let store = attachment.link.store.clone();
         let Some(group) = pane.read(cx).group() else {
             return;
         };
         area.update(cx, |area, cx| area.set_zoomed_out(window, cx));
-        if !group.read(cx).is_closable(cx) {
+        let panes = attachment.panes(cx);
+        if panes.len() < 2 || !group.read(cx).is_closable(cx) {
             return;
         }
-        let session_id = pane.read(cx).session_id().map(str::to_owned);
-        let handle = pane.focus_handle(cx);
-        if !handle.contains_focused(window, cx) {
-            window.focus(&handle, cx);
+        // Base hands the keyboard on only when it removes the group, which
+        // the glide puts off; this is the order it would pick in: the panes
+        // after this one in the layout, then those before it, nearest first.
+        let at = panes.iter().position(|held| *held == pane).unwrap_or(0);
+        let next = panes[at + 1..]
+            .first()
+            .or_else(|| panes[..at].last())
+            .cloned();
+        self.glide_out(&pane, cx);
+        if let Some(next) = next {
+            window.focus(&next.focus_handle(cx), cx);
+            self.pane_focused(next, window, cx);
         }
-        area.update(cx, |area, cx| area.remove_panel(pane, window, cx));
-        if let Some(session_id) = session_id {
-            store.update(cx, |store, cx| store.close_thread(&session_id, cx));
+    }
+
+    /// Start `pane` leaving the column: it turns inert and its slot glides
+    /// shut, after which [`Self::remove_closed`] takes it out.
+    fn glide_out(&mut self, pane: &Entity<ThreadPanel>, cx: &mut Context<Self>) {
+        pane.update(cx, |pane, cx| pane.set_closing(cx));
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let area = attachment.thread_panes.read(cx);
+        let size = area.bounds().size;
+        if let Some(tree) = area.layout(DockPlacement::Center).cloned() {
+            attachment
+                .glides
+                .close(&tree, size, PanelId::from(pane.entity_id()));
         }
+        cx.notify();
+    }
+
+    /// Take out the closing panes whose split has stopped gliding, closing
+    /// the threads they showed unless a pane shows them again by now.
+    fn remove_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(attachment) = self.attachment.as_ref() else {
             return;
         };
-        let panes = attachment.panes(cx);
-        if let Some(next) = panes
-            .iter()
-            .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))
-            .or(panes.first())
-            .cloned()
-        {
-            self.pane_focused(next, window, cx);
+        let area = attachment.thread_panes.clone();
+        let store = attachment.link.store.clone();
+        for pane in attachment.closed_panes(cx) {
+            let session_id = pane.read(cx).session_id().map(str::to_owned);
+            area.update(cx, |area, cx| area.remove_panel(pane, window, cx));
+            if let Some(session_id) = session_id
+                && store.read(cx).is_thread_open(&session_id)
+                && self.pane_showing(&session_id, cx).is_none()
+            {
+                store.update(cx, |store, cx| store.close_thread(&session_id, cx));
+            }
         }
+    }
+
+    /// Before an edit that adds panes: hand the dock the sizes the glides are
+    /// heading for, which is what it divides, and note the layout the new
+    /// panes glide out of.
+    fn glide_before_edit(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::panes::Before> {
+        let attachment = self.attachment.as_ref()?;
+        let area = attachment.thread_panes.clone();
+        let (targets, before) = {
+            let area = area.read(cx);
+            let tree = area.layout(DockPlacement::Center)?;
+            let size = area.bounds().size;
+            (
+                attachment.glides.targets(tree, size),
+                attachment.glides.before(tree, size),
+            )
+        };
+        area.update(cx, |area, cx| {
+            for (node, sizes) in targets {
+                area.set_split_sizes(node, sizes, window, cx);
+            }
+        });
+        Some(before)
+    }
+
+    /// After an edit that added panes: glide them in out of `before`.
+    fn glide_after_edit(&mut self, before: Option<crate::panes::Before>, cx: &mut Context<Self>) {
+        let Some(before) = before else {
+            return;
+        };
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let area = attachment.thread_panes.read(cx);
+        let size = area.bounds().size;
+        if let Some(tree) = area.layout(DockPlacement::Center).cloned() {
+            attachment.glides.begin(&before, &tree, size);
+        }
+        cx.notify();
+    }
+
+    /// This frame of the column's glides: each gliding split's sizes go to
+    /// the dock, each pane's content is held at the size its slot glides
+    /// toward, and the closing panes whose split has landed are taken out. A
+    /// split's handle under the pointer stops every glide where it is, and
+    /// the compact layout, which draws no panes, lands them.
+    fn glide_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.compact(cx);
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let handle_held = attachment.split_handle_held.replace(false);
+        let panes = attachment.all_panes(cx);
+        let closing = panes.iter().any(|pane| pane.read(cx).is_closing());
+        if attachment.glides.is_idle() && !closing {
+            return;
+        }
+        let area = attachment.thread_panes.clone();
+        let (tree, size) = {
+            let area = area.read(cx);
+            (
+                area.layout(DockPlacement::Center).cloned(),
+                area.bounds().size,
+            )
+        };
+        let Some(tree) = tree else {
+            return;
+        };
+        let frame = if handle_held {
+            attachment.glides.stop()
+        } else if compact {
+            attachment.glides.land(&tree, size)
+        } else {
+            attachment.glides.sample(&tree, size, window, cx)
+        };
+        area.update(cx, |area, cx| {
+            for (node, sizes) in frame.sizes {
+                area.set_split_sizes(node, sizes, window, cx);
+            }
+        });
+        for pane in &panes {
+            let held = frame
+                .holds
+                .get(&PanelId::from(pane.entity_id()))
+                .copied()
+                .unwrap_or_default();
+            pane.update(cx, |pane, cx| pane.set_held(held, cx));
+        }
+        if closing && !attachment.closed_panes(cx).is_empty() {
+            cx.defer_in(window, |this, window, cx| this.remove_closed(window, cx));
+        }
+    }
+
+    /// Land every glide at once and take out the panes closing, for an edit
+    /// that does not divide what they leave: a zoom, a whole layout.
+    fn land_glides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let area = attachment.thread_panes.clone();
+        let (tree, size) = {
+            let area = area.read(cx);
+            (
+                area.layout(DockPlacement::Center).cloned(),
+                area.bounds().size,
+            )
+        };
+        let Some(tree) = tree else {
+            return;
+        };
+        let frame = attachment.glides.land(&tree, size);
+        let panes = attachment.all_panes(cx);
+        area.update(cx, |area, cx| {
+            for (node, sizes) in frame.sizes {
+                area.set_split_sizes(node, sizes, window, cx);
+            }
+        });
+        for pane in panes {
+            pane.update(cx, |pane, cx| pane.set_held(Default::default(), cx));
+        }
+        self.remove_closed(window, cx);
     }
 
     fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1503,6 +1710,7 @@ impl AppShell {
         else {
             return;
         };
+        self.land_glides(window, cx);
         group.update(cx, |group, cx| group.toggle_zoom(window, cx));
     }
 
@@ -1550,16 +1758,15 @@ impl AppShell {
     /// handle can still drag it below its header; this only keeps the right
     /// panel from squeezing the column.
     fn chat_min_width(&self, collapsed: bool, fullscreen: bool, cx: &App) -> Pixels {
-        let Some(tree) = self.attachment.as_ref().and_then(|attachment| {
-            attachment
-                .thread_panes
-                .read(cx)
-                .layout(DockPlacement::Center)
-        }) else {
+        let Some(tree) = self
+            .attachment
+            .as_ref()
+            .and_then(|attachment| attachment.final_layout(cx))
+        else {
             return px(CHAT_MIN_WIDTH);
         };
         px(self.column_min_width(
-            tree,
+            &tree,
             &|panel| self.panel_session(panel, cx),
             collapsed,
             fullscreen,
@@ -1632,12 +1839,7 @@ impl AppShell {
         if self.compact(cx) || attachment.panes(cx).len() >= crate::panes::MAX_PANES {
             return false;
         }
-        let Some(mut tree) = attachment
-            .thread_panes
-            .read(cx)
-            .layout(DockPlacement::Center)
-            .cloned()
-        else {
+        let Some(mut tree) = attachment.final_layout(cx) else {
             return false;
         };
         // From the tree rather than the pane's group: the drop indicator asks
@@ -1768,6 +1970,7 @@ impl AppShell {
         let Some((tree, slots)) = self.plan_layout(layout, window, cx) else {
             return;
         };
+        self.land_glides(window, cx);
         let Some(attachment) = self.attachment.as_ref() else {
             return;
         };
@@ -1791,6 +1994,7 @@ impl AppShell {
             };
             panes.insert(panel, pane);
         }
+        let laid_out = self.glide_before_edit(window, cx);
         area.update(cx, |area, cx| {
             area.set_zoomed_out(window, cx);
             area.set_center(
@@ -1799,6 +2003,7 @@ impl AppShell {
                 cx,
             );
         });
+        self.glide_after_edit(laid_out, cx);
         for pane in before {
             if !panes.values().any(|kept| *kept == pane)
                 && let Some(session_id) = pane.read(cx).session_id().map(str::to_owned)
@@ -1827,14 +2032,14 @@ impl AppShell {
             return;
         };
         let compact = self.compact(cx);
-        let area = attachment.thread_panes.read(cx);
-        let zoomed = area.is_zoomed();
+        let zoomed = attachment.thread_panes.read(cx).is_zoomed();
+        let tree = attachment.final_layout(cx);
         let edges: Vec<_> = attachment
             .panes(cx)
             .into_iter()
             .map(|pane| {
-                let edges = area
-                    .layout(DockPlacement::Center)
+                let edges = tree
+                    .as_ref()
                     .filter(|_| !compact && !zoomed)
                     .and_then(|tree| {
                         crate::panes::edges_of(
@@ -4197,6 +4402,7 @@ impl Render for AppShell {
         // The window may have been resized without a bounds notification (a
         // first frame, or an inset change that narrowed the content box).
         self.sync_layout(window, cx);
+        self.glide_panes(window, cx);
         self.sync_panes(cx);
         if let Some(attachment) = &self.attachment {
             let title = attachment.link.store.read(cx).shell_window_title();
@@ -6088,14 +6294,15 @@ mod tests {
         );
     }
 
-    /// The thread each pane shows, in the layout's order.
+    /// The thread each pane on screen shows, a closing one too, in the
+    /// layout's order.
     fn pane_threads(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<Option<String>> {
         shell.read_with(cx, |shell, cx| {
             shell
                 .attachment
                 .as_ref()
                 .expect("attached")
-                .panes(cx)
+                .all_panes(cx)
                 .iter()
                 .map(|pane| pane.read(cx).session_id().map(str::to_owned))
                 .collect()
@@ -6110,9 +6317,25 @@ mod tests {
                 .attachment
                 .as_ref()
                 .expect("attached")
-                .panes(cx)
+                .all_panes(cx)
                 .iter()
                 .position(|pane| pane.focus_handle(cx).contains_focused(window, cx))
+        })
+    }
+
+    /// The chat column's width, and the width each pane on screen shows at,
+    /// in the layout's order.
+    fn pane_widths(shell: &Entity<AppShell>, cx: &VisualTestContext) -> (Pixels, Vec<Pixels>) {
+        shell.read_with(cx, |shell, cx| {
+            let attachment = shell.attachment.as_ref().expect("attached");
+            (
+                attachment.thread_panes.read(cx).bounds().size.width,
+                attachment
+                    .all_panes(cx)
+                    .iter()
+                    .map(|pane| pane.read(cx).bounds().size.width)
+                    .collect(),
+            )
         })
     }
 
@@ -6171,6 +6394,8 @@ mod tests {
         draw(cx);
         serve_thread(host, id);
         await_restore_update(shell, cx, |store| !store.chat_loading());
+        // The pane glides in before the pointer reaches it.
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
     }
 
@@ -6195,7 +6420,7 @@ mod tests {
     /// Where the column's only pane was painted.
     fn only_pane(shell: &Entity<AppShell>, cx: &VisualTestContext) -> gpui::Bounds<Pixels> {
         shell.read_with(cx, |shell, cx| {
-            let panes = shell.attachment.as_ref().expect("attached").panes(cx);
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
             assert_eq!(panes.len(), 1);
             panes[0].read(cx).bounds()
         })
@@ -6414,7 +6639,7 @@ mod tests {
         }
         assert!(cx.debug_bounds("focused-pane").is_some());
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").panes(cx)[1]
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[1]
                 .read(cx)
                 .chat()
                 .read(cx)
@@ -6450,7 +6675,7 @@ mod tests {
         draw(cx);
         let (zoomed, composer) = shell.read_with(cx, |shell, cx| {
             let attachment = shell.attachment.as_ref().expect("attached");
-            let composer = attachment.panes(cx)[pane]
+            let composer = attachment.all_panes(cx)[pane]
                 .read(cx)
                 .chat()
                 .read(cx)
@@ -6519,13 +6744,36 @@ mod tests {
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert!(cx.debug_bounds("waiting-pane").is_some());
+        // The new pane grows out of nothing beside the one it halves.
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths[1] < px(1.) && (widths[0] - column).abs() < px(1.),
+            "{widths:?} of {column:?}"
+        );
         answer_draft(&shell, &host, "draft-1", cx);
         // The hint fades out under the draft's chat, which has the keyboard
         // from the start of the fade.
         assert!(cx.debug_bounds("waiting-pane").is_some());
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            px(0.) < widths[1]
+                && widths[1] < column / 2.
+                && column / 2. < widths[0]
+                && widths[0] < column,
+            "halfway: {widths:?} of {column:?}"
+        );
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths
+                .iter()
+                .all(|width| (*width - column / 2.).abs() < px(1.)),
+            "landed: {widths:?} of {column:?}"
+        );
         assert!(cx.debug_bounds("waiting-pane").is_none());
         assert_eq!(
             pane_threads(&shell, cx),
@@ -6585,6 +6833,18 @@ mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert!(cx.debug_bounds("waiting-pane").is_some());
+        // The draft keeps its layout while its pane halves, and takes the
+        // half once the glide lands: its header, the only one (a waiting
+        // pane draws none), ends inside it.
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let draft = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .bounds()
+        });
+        let menu = cx.debug_bounds("pane-menu").expect("the draft's pane menu");
+        assert!(menu.right() <= draft.right(), "{menu:?} in {draft:?}");
 
         cx.simulate_keystrokes("secondary-2");
         draw(cx);
@@ -6596,6 +6856,51 @@ mod tests {
             assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
             assert!(store.is_thread_open("thread-1"));
         });
+    }
+
+    /// A pane waiting for a thread has no chat header, so no pane menu: its
+    /// corner button closes it, as ⇧⌘W and Escape do with the keyboard in it.
+    #[gpui::test]
+    fn a_waiting_pane_closes_from_its_corner_and_the_keyboard(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        serve_status(&host, "thread-1", true);
+        await_restore_update(&shell, cx, |store| {
+            store.session_status().is_some_and(|status| status.draft)
+        });
+        draw(cx);
+        let split = |cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-d");
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+            assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+            assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        };
+        let closed = |cx: &mut VisualTestContext, how: &str| {
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+            assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())], "{how}");
+        };
+
+        split(cx);
+        let close = cx
+            .debug_bounds("waiting-pane-close")
+            .expect("the waiting pane's close button");
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        draw(cx);
+        closed(cx, "corner button");
+        assert!(cx.debug_bounds("waiting-pane-close").is_none());
+
+        split(cx);
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        closed(cx, "secondary-shift-w");
+
+        split(cx);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        closed(cx, "escape");
     }
 
     /// Two columns fit beside the sidebar of a 1200pt window, each header
@@ -6611,12 +6916,14 @@ mod tests {
         cx.simulate_keystrokes("secondary-d");
         draw(cx);
         answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("draft-1".into())]
         );
         let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
-            let panes = shell.attachment.as_ref().expect("attached").panes(cx);
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
             panes.iter().map(|pane| pane.read(cx).bounds()).collect()
         });
         for pane in &panes {
@@ -6632,6 +6939,8 @@ mod tests {
             panes[1].right()
         );
         cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
 
@@ -6703,11 +7012,56 @@ mod tests {
         send_events(&host, vec![panes_index(&["thread-1"])]);
         await_restore_update(&shell, cx, |store| !store.is_thread_open("thread-1"));
         draw(cx);
+        // It glides shut first.
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
             assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
         });
+    }
+
+    /// A split's handle taken while the split glides stops the glide: the
+    /// panes stay where the pointer leaves them.
+    #[gpui::test]
+    fn a_handle_dragged_mid_glide_keeps_where_it_is_left(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        draw(cx);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths[0] > column / 2. + px(150.),
+            "still gliding: {widths:?}"
+        );
+        let left = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .bounds()
+        });
+        let handle = gpui::point(left.right(), left.center().y);
+        let to = handle - gpui::point(px(120.), px(0.));
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_move(handle, None, none);
+        draw(cx);
+        cx.simulate_mouse_down(handle, MouseButton::Left, none);
+        draw(cx);
+        for step in [handle - gpui::point(px(40.), px(0.)), to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), none);
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let (_, widths) = pane_widths(&shell, cx);
+        assert!(
+            (widths[0] - (to.x - left.left())).abs() < px(1.),
+            "the pane ends where the handle was left: {widths:?}, handle at {to:?}"
+        );
     }
 
     /// Closing a pane closes its thread, which stays listed, and the store
@@ -6724,6 +7078,68 @@ mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
 
         cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        // The pane glides shut, inert, the keyboard already in its neighbour.
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        let (closing, composer) = shell.read_with(cx, |shell, cx| {
+            let pane = shell.attachment.as_ref().expect("attached").all_panes(cx)[0].clone();
+            let pane = pane.read(cx);
+            let composer = pane.chat().read(cx).composer().read(cx);
+            (pane.bounds(), composer.input_focus_handle(cx))
+        });
+        cx.update(|window, _| assert!(!composer.is_focused(window)));
+        cx.simulate_click(closing.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the click is swallowed");
+        let (column, start) = pane_widths(&shell, cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (_, halfway) = pane_widths(&shell, cx);
+        assert!(
+            halfway[0] < start[0] && start[1] < halfway[1] && halfway[1] < column,
+            "{start:?} then {halfway:?} of {column:?}"
+        );
+        // Below the dock's slot floor it stops narrowing and fades out
+        // instead, gone as it is taken out.
+        let floored = |cx: &mut VisualTestContext| {
+            let closing = shell.read_with(cx, |shell, cx| {
+                shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                    .read(cx)
+                    .bounds()
+            });
+            assert!(
+                (closing.size.width - gpui_base::PANEL_MIN_SIZE).abs() < px(1.),
+                "at the floor: {closing:?}"
+            );
+            cx.update(|window, _| {
+                let closing = closing.scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|quad| {
+                        let mask = quad.content_mask.bounds;
+                        !mask.is_empty() && mask.intersect(&closing) == mask
+                    })
+                    .filter_map(|quad| quad.background.as_solid())
+                    .map(|fill| fill.a)
+                    .fold(0., f32::max)
+            })
+        };
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 5);
+        draw(cx);
+        let fading = floored(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 8);
+        draw(cx);
+        let faded = floored(cx);
+        assert!(
+            0. < faded && faded < fading && fading < 1.,
+            "the closing pane's content fades: {fading} then {faded}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
