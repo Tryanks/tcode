@@ -2744,20 +2744,14 @@ impl SessionsSidebar {
         });
         let radius = cx.theme().tokens.radius.md;
         let row = crate::material::accessible_clickable(
-            base.bg(fill)
-                .relative()
-                // Present without a colour too, so the children after it
-                // keep their places: gpui-fast can retain a reparented child
-                // without measuring it (#68 upstream).
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(radius)
-                        .when_some(outline, |outline, colour| {
-                            outline.border_1().border_color(colour)
-                        }),
-                ),
+            base.bg(fill).relative().children(outline.map(|colour| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(colour)
+            })),
             row_id,
             Role::Button,
             crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
