@@ -404,6 +404,28 @@ pub(crate) fn shown_in_pane(session_id: &str, cx: &App) -> bool {
     })
 }
 
+/// The outline colour of the pane of this window showing `session_id`,
+/// while the column shows more than one pane: none in a single or zoomed
+/// pane, nor in the compact layout.
+pub(crate) fn pane_colour(session_id: &str, cx: &App) -> Option<gpui::Hsla> {
+    let shell = current_shell(cx)?;
+    let shell = shell.read(cx);
+    let attachment = shell.attachment.as_ref()?;
+    if shell.compact(cx) || attachment.thread_panes.read(cx).is_zoomed() {
+        return None;
+    }
+    let panes = attachment.panes(cx);
+    if panes.len() < 2 {
+        return None;
+    }
+    let slot = panes
+        .iter()
+        .find(|pane| pane.read(cx).session_id() == Some(session_id))?
+        .read(cx)
+        .colour()?;
+    Some(crate::material::pane_colour(slot, cx))
+}
+
 /// Show a thread reached from `parent` in a pane beside `parent`'s, or the
 /// focused pane's: to its right, or below it where only that has room. False
 /// where no pane shows it then: the compact layout, or no room.
@@ -2040,6 +2062,29 @@ impl AppShell {
         self.pane_focused(focused.clone(), window, cx);
         window.focus(&focused.focus_handle(cx), cx);
         cx.notify();
+    }
+
+    /// Give each pane that has no colour yet the lowest palette slot no
+    /// other pane drawn holds. A pane keeps its slot while it changes thread
+    /// and while it glides out; the slot is free again once the pane is
+    /// taken out.
+    fn colour_panes(&self, cx: &mut App) {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let panes = attachment.all_panes(cx);
+        let mut taken: Vec<usize> = panes
+            .iter()
+            .filter_map(|pane| pane.read(cx).colour())
+            .collect();
+        for pane in panes {
+            if pane.read(cx).colour().is_none()
+                && let Some(slot) = (0..crate::panes::MAX_PANES).find(|slot| !taken.contains(slot))
+            {
+                taken.push(slot);
+                pane.update(cx, |pane, cx| pane.set_colour(slot, cx));
+            }
+        }
     }
 
     /// Tell each pane whether it shares the column, and its conversation
@@ -4422,6 +4467,7 @@ impl Render for AppShell {
         // first frame, or an inset change that narrowed the content box).
         self.sync_layout(window, cx);
         self.glide_panes(window, cx);
+        self.colour_panes(cx);
         self.sync_panes(cx);
         if let Some(attachment) = &self.attachment {
             let title = attachment.link.store.read(cx).shell_window_title();
@@ -7400,6 +7446,148 @@ mod tests {
             [Some("draft-1".into())],
             "the last pane stays"
         );
+    }
+
+    /// The outline painted along `bounds`, a pane's or a thread row's.
+    fn outline_at(bounds: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> Option<gpui::Hsla> {
+        cx.update(|window, _| {
+            let bounds = bounds.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .find(|quad| quad.bounds == bounds && quad.border_widths.left.as_f32() > 0.)
+                .map(|quad| quad.border_color)
+        })
+    }
+
+    /// The colour each pane on screen wears, in the layout's order.
+    fn pane_outlines(
+        shell: &Entity<AppShell>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<Option<gpui::Hsla>> {
+        let panes = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).bounds())
+                .collect::<Vec<_>>()
+        });
+        panes.into_iter().map(|pane| outline_at(pane, cx)).collect()
+    }
+
+    /// Beside others each pane wears a colour of its own, and the threads
+    /// list outlines the row of the thread it shows in that colour; a lone
+    /// pane wears none. A pane that shows another thread keeps its colour,
+    /// and the outline glides from the old thread's row to the new one's.
+    #[gpui::test]
+    fn each_pane_and_its_threads_row_wear_the_panes_colour(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("an index")
+        };
+        let mut third = index.sessions[1].clone();
+        third.id = "thread-3".into();
+        third.title = "thread-3".into();
+        third.updated_at = 0;
+        index.sessions.push(third);
+        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+        await_restore_update(&shell, cx, |store| store.thread_meta("thread-3").is_some());
+        let row = |selector: &'static str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds(selector).expect("the thread's row");
+            outline_at(row, cx)
+        };
+        let choose = |selector: &'static str, id: &str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds(selector).expect("the thread's row");
+            cx.simulate_click(row.center(), gpui::Modifiers::default());
+            draw(cx);
+            serve_thread(&host, id);
+            await_restore_update(&shell, cx, |store| !store.chat_loading());
+        };
+        assert_eq!(pane_outlines(&shell, cx), [None]);
+        assert_eq!(row("sidebar-thread-thread-1", cx), None);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        choose("sidebar-thread-thread-2", "thread-2", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        let colours = pane_outlines(&shell, cx);
+        let [Some(left), Some(right)] = colours[..] else {
+            panic!("each pane wears a colour: {colours:?}");
+        };
+        assert_ne!(left, right);
+        assert_eq!(row("sidebar-thread-thread-1", cx), Some(left));
+        assert_eq!(row("sidebar-thread-thread-2", cx), Some(right));
+        assert_eq!(row("sidebar-thread-thread-3", cx), None);
+
+        // The right pane, holding the keyboard, shows thread-3 instead.
+        choose("sidebar-thread-thread-3", "thread-3", cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-3".into())]
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        for leaving_or_coming in ["sidebar-thread-thread-2", "sidebar-thread-thread-3"] {
+            let outline = row(leaving_or_coming, cx).expect("still or already outlined");
+            assert!(
+                0. < outline.a
+                    && outline.a < right.a
+                    && (outline.h, outline.s, outline.l) == (right.h, right.s, right.l),
+                "{leaving_or_coming} halfway: {outline:?} toward {right:?}"
+            );
+        }
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_outlines(&shell, cx), [Some(left), Some(right)]);
+        assert_eq!(row("sidebar-thread-thread-1", cx), Some(left));
+        assert_eq!(row("sidebar-thread-thread-2", cx), None);
+        assert_eq!(row("sidebar-thread-thread-3", cx), Some(right));
+    }
+
+    /// The colour of a pane closed is the next new pane's.
+    #[gpui::test]
+    fn a_closed_panes_colour_goes_to_the_next_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let colours = pane_outlines(&shell, cx);
+        let [Some(left), Some(right)] = colours[..] else {
+            panic!("each pane wears a colour: {colours:?}");
+        };
+
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
+        assert_eq!(pane_outlines(&shell, cx), [None]);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-2", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("draft-1".into()), Some("draft-2".into())]
+        );
+        assert_eq!(pane_outlines(&shell, cx), [Some(right), Some(left)]);
     }
 
     /// Choosing from the threads list a thread another pane shows moves the
