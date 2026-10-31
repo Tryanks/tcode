@@ -134,6 +134,10 @@ pub(crate) struct ThreadPanel {
     group: Option<WeakEntity<TabGroup>>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
     among_others: bool,
+    /// The palette slot of the pane's outline, given by the shell when the
+    /// pane joins the column and kept while it changes thread and while it
+    /// leaves.
+    colour: Option<usize>,
     /// Leaving the column: still drawn while its slot glides shut, inert.
     closing: bool,
     /// How the content is drawn while its split glides.
@@ -172,6 +176,7 @@ impl ThreadPanel {
             group: None,
             bounds: Rc::default(),
             among_others: false,
+            colour: None,
             closing: false,
             held: Held::default(),
             _focus: focus,
@@ -201,6 +206,16 @@ impl ThreadPanel {
             self.among_others = among_others;
             cx.notify();
         }
+    }
+
+    /// The palette slot of the pane's outline, once it has one.
+    pub(crate) fn colour(&self) -> Option<usize> {
+        self.colour
+    }
+
+    pub(crate) fn set_colour(&mut self, slot: usize, cx: &mut Context<Self>) {
+        self.colour = Some(slot);
+        cx.notify();
     }
 
     /// Whether the pane is leaving the column.
@@ -380,11 +395,11 @@ pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window
 /// `("dock-split", node)`, a merge or a close lifts it back out, and zoom
 /// draws it straight into the frame. Element state is keyed by the full id
 /// path from the window root, so every pane that moves in the tree starts
-/// over: its focus ring and its waiting-hint cross-fade snap to their
-/// targets in the frame of a split, of a zoom, or the frame a closing pane
-/// is taken out once its glide has played, and its chat loses its
-/// handle-less stateful scrolls, such as the header's `chat-header-scroll`,
-/// and any other keyed state under it.
+/// over: its colour outline, its focus ring and its waiting-hint
+/// cross-fade snap to their targets in the frame of a split, of a zoom, or
+/// the frame a closing pane is taken out once its glide has played, and its
+/// chat loses its handle-less stateful scrolls, such as the header's
+/// `chat-header-scroll`, and any other keyed state under it.
 pub(crate) struct ThreadPanes {
     lands: DropLands,
     handle_held: HandleHeld,
@@ -440,11 +455,12 @@ impl TabGroupRenderer for ThreadTabs {
         Empty.into_any_element()
     }
 
-    /// Among several panes, the one holding the keyboard wears the focus
-    /// ring on top of its thread. `TabGroupContext` carries no focus state of
-    /// its own; the displayed panel's focus handle answers. A group that may
-    /// close is one with a neighbour, and a zoomed group may not; a pane
-    /// whose last neighbour is closing is alone already.
+    /// Among several panes, each wears the outline of its colour, and the
+    /// one holding the keyboard the focus ring on top of it.
+    /// `TabGroupContext` carries no focus state of its own; the displayed
+    /// panel's focus handle answers. A group that may close is one with a
+    /// neighbour, and a zoomed group may not; a pane whose last neighbour is
+    /// closing is alone already.
     fn render_active_panel(
         &self,
         panel: AnyView,
@@ -452,18 +468,32 @@ impl TabGroupRenderer for ThreadTabs {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        // Always sampled, so the ring glides in and out as the keyboard moves
-        // between panes that stay where they are, and out as the last
-        // neighbour starts closing. A split or a zoom re-parents the group
-        // and the ring snaps (see `ThreadPanes`).
-        let focused = group.is_closable()
-            && panel
-                .clone()
-                .downcast::<ThreadPanel>()
-                .is_ok_and(|pane| pane.read(cx).among_others)
+        // Both always sampled, so they glide in and out while the panes
+        // stay where they are: the ring as the keyboard moves between them,
+        // both out as the last neighbour starts closing. A split or a zoom
+        // re-parents the group and they snap (see `ThreadPanes`).
+        let pane = panel.clone().downcast::<ThreadPanel>().ok();
+        let shared =
+            group.is_closable() && pane.as_ref().is_some_and(|pane| pane.read(cx).among_others);
+        let focused = shared
             && group
                 .active_panel()
                 .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx));
+        let outline = match pane
+            .and_then(|pane| pane.read(cx).colour)
+            .map(|slot| crate::material::pane_colour(slot, cx))
+        {
+            Some(colour) if shared => colour,
+            Some(colour) => colour.opacity(0.),
+            None => gpui::transparent_black(),
+        };
+        let outline = gpui_base::motion::transition(
+            gpui::ElementId::NamedInteger("pane-outline".into(), panel.entity_id().as_u64()),
+            outline,
+            crate::motion::settle(),
+            window,
+            cx,
+        );
         let ring = crate::material::focus_ring(cx);
         let color = gpui_base::motion::transition(
             gpui::ElementId::NamedInteger("pane-focus-ring".into(), panel.entity_id().as_u64()),
@@ -480,6 +510,9 @@ impl TabGroupRenderer for ThreadTabs {
             .relative()
             .size_full()
             .child(panel)
+            .when(outline.a > 0., |this| {
+                this.child(div().absolute().inset_0().border_1().border_color(outline))
+            })
             .when(color.a > 0., |this| {
                 this.child(
                     div()

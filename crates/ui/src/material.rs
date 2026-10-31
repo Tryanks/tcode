@@ -732,6 +732,53 @@ pub(crate) fn focus_ring(cx: &App) -> BoxShadow {
         .inset()
 }
 
+/// The outline colour of palette slot `slot`, worn by a pane beside others
+/// and by its thread's row in the threads list.
+///
+/// gpui-base's tokens and Tcode's theme have no categorical hues: the
+/// theme's own hues mean danger, warning, success or the focus ring, and
+/// provider colours mean a provider. So the six hues are spread around the
+/// wheel from the theme's ring hue, 60° apart and none nearer it than 30°,
+/// each slot opposite the one before it. Each takes the lightness at which
+/// it has the same contrast against [`content_surface`], 4.5:1 in light and
+/// 7:1 in dark, and is drawn at half alpha, so every outline is as
+/// distinct, and as quiet, as the others.
+pub(crate) fn pane_colour(slot: usize, cx: &App) -> Hsla {
+    const OFFSETS: [f32; crate::panes::MAX_PANES] = [150., 330., 30., 210., 270., 90.];
+    const SATURATION: f32 = 0.75;
+    fn luminance(colour: Hsla) -> f32 {
+        let Rgba { r, g, b, .. } = colour.to_rgb();
+        let linear = |channel: f32| {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+    let theme = cx.theme();
+    let dark = theme.mode.is_dark();
+    let hue = (theme.ring.h + OFFSETS[slot % OFFSETS.len()] / 360.).fract();
+    let surface = luminance(content_surface(cx));
+    let target = if dark {
+        7. * (surface + 0.05) - 0.05
+    } else {
+        (surface + 0.05) / 4.5 - 0.05
+    };
+    // Luminance rises with lightness at a fixed hue and saturation.
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..20 {
+        let mid = (low + high) / 2.;
+        if luminance(gpui::hsla(hue, SATURATION, mid, 1.)) < target {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    gpui::hsla(hue, SATURATION, (low + high) / 2., 0.5)
+}
+
 /// Neutral rows shared by unhydrated workspace and conversation views.
 pub fn loading_skeleton(cx: &gpui::App) -> gpui::AnyElement {
     v_flex()
