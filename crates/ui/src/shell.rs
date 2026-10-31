@@ -1782,7 +1782,7 @@ impl AppShell {
         if zoomed {
             attachment.zoom.toggle();
         } else {
-            attachment.zoom.zoom_in(pane);
+            attachment.zoom.zoom_in(pane, cx);
         }
         cx.notify();
     }
@@ -1900,45 +1900,47 @@ impl AppShell {
     /// The acting pane and its neighbour on `side` exchange their
     /// conversations, each with its own composer, scroll and expanded rows,
     /// so a half-written message stays with its thread; the panes, their
-    /// slots and colours stay where they are. The keyboard follows the
-    /// acting pane's thread. Returns the neighbour, which now shows it.
+    /// slots and colours stay where they are. The keyboard stays in the
+    /// acting pane, or with `follow` goes with its thread to the neighbour.
+    /// Neither conversation closes.
     ///
     /// The conversations change places in one frame: gpui-base has no
     /// shared-element transition to carry a view from one place to another.
-    fn swap_pane(
-        &mut self,
-        side: Side,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<ThreadPanel>> {
-        if self.compact(cx) || self.attachment.as_ref()?.zoom.pane().is_some() {
-            return None;
+    fn swap_pane(&mut self, side: Side, follow: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx)
+            || self
+                .attachment
+                .as_ref()
+                .is_none_or(|attachment| attachment.zoom.pane().is_some())
+        {
+            return;
         }
-        let from = self.acting_pane(window, cx)?;
-        let to = self.neighbour_of(&from, side, cx)?;
+        let Some(from) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let Some(to) = self.neighbour_of(&from, side, cx) else {
+            return;
+        };
         let chat = from.read(cx).chat();
         let theirs = to.update(cx, |to, cx| to.replace_chat(chat, cx));
         from.update(cx, |from, cx| from.replace_chat(theirs, cx));
-        self.attachment.as_mut()?.focused_pane = to.clone();
-        window.focus(&to.focus_handle(cx), cx);
-        self.pane_focused(to.clone(), window, cx);
-        Some(to)
+        let focused = if follow { to } else { from };
+        if let Some(attachment) = self.attachment.as_mut() {
+            attachment.focused_pane = focused.clone();
+        }
+        window.focus(&focused.focus_handle(cx), cx);
+        self.pane_focused(focused, window, cx);
     }
 
-    /// The acting pane's thread takes over its neighbour on `side`: the two
-    /// exchange conversations as [`Self::swap_pane`] does, and the acting
-    /// pane, now showing the neighbour's thread, closes as
-    /// [`Self::close_pane`] closes one, that thread with it. A pane waiting
-    /// for a thread has none to move.
+    /// The acting pane's thread trades places with its neighbour's on
+    /// `side`, as [`Self::swap_pane`] exchanges them, and the keyboard goes
+    /// with it. A pane waiting for a thread has none to move.
     fn move_thread_to_pane(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(from) = self
+        if self
             .acting_pane(window, cx)
-            .filter(|pane| pane.read(cx).session_id().is_some())
-        else {
-            return;
-        };
-        if self.swap_pane(side, window, cx).is_some() {
-            self.glide_out(&from, cx);
+            .is_some_and(|pane| pane.read(cx).session_id().is_some())
+        {
+            self.swap_pane(side, true, window, cx);
         }
     }
 
@@ -2677,7 +2679,7 @@ pub(crate) fn init_pane_actions(cx: &mut App) {
     cx.on_action(|swap: &SwapPane, cx| {
         let side = swap.0;
         act(cx, move |shell, window, cx| {
-            shell.swap_pane(side, window, cx);
+            shell.swap_pane(side, false, window, cx)
         })
     });
     cx.on_action(|to: &MoveThreadToPane, cx| {
@@ -4114,7 +4116,7 @@ impl AppShell {
         }
         div()
             .size_full()
-            .bg(crate::material::opaque_canvas(cx))
+            .bg(crate::material::canvas(cx))
             .pt(seam.top)
             .pb(seam.bottom)
             .pl(seam.left)
@@ -4223,7 +4225,7 @@ impl AppShell {
             return div()
                 .id("app-shell")
                 .size_full()
-                .bg(crate::material::opaque_canvas(cx))
+                .bg(crate::material::canvas(cx))
                 .text_color(cx.theme().foreground)
                 .child(v_flex().id("hosts").size_full().child(page))
                 .into_any_element();
@@ -7237,6 +7239,98 @@ mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
     }
 
+    /// Tab and ⇧Tab in a zoomed pane keep the keyboard in it: the panes it
+    /// covers are still laid out, tab stops and all, but never take it. Back
+    /// in its slot the pane keeps the keyboard, and Tab leaves it again.
+    #[gpui::test]
+    fn tabbing_in_a_zoomed_pane_never_reaches_the_panes_it_covers(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        for key in ["tab", "shift-tab"] {
+            for press in 0..30 {
+                cx.simulate_keystrokes(key);
+                draw(cx);
+                assert_eq!(keyboard_pane(&shell, cx), Some(1), "{key} #{press}");
+            }
+        }
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_none());
+        assert_eq!(
+            keyboard_pane(&shell, cx),
+            Some(1),
+            "still in the pane, now in its slot"
+        );
+        let reached = (0..60).any(|_| {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+            keyboard_pane(&shell, cx) == Some(0)
+        });
+        assert!(
+            reached,
+            "back in its slot, Tab reaches the other pane again"
+        );
+    }
+
+    /// ⇧⌘↩ again halfway through a zoom turns it back from where it is: the
+    /// pane does not jump, and it shrinks back into its slot.
+    #[gpui::test]
+    fn a_zoom_turned_back_midway_shrinks_from_where_it_is(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        let slots: Vec<_> = shell.read_with(cx, |shell, cx| {
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+        });
+        let settle = crate::edge_back::SETTLE;
+        let frame = std::time::Duration::from_millis(16);
+        let close = |a: gpui::Bounds<Pixels>, b: gpui::Bounds<Pixels>| {
+            (a.left() - b.left()).abs() <= px(1.)
+                && (a.top() - b.top()).abs() <= px(1.)
+                && (a.right() - b.right()).abs() <= px(1.)
+                && (a.bottom() - b.bottom()).abs() <= px(1.)
+        };
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(settle / 2);
+        draw(cx);
+        let before = cx.debug_bounds("zoomed-pane").expect("growing");
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        let turned = cx.debug_bounds("zoomed-pane").expect("turning back");
+        assert!(close(before, turned), "{before:?} then {turned:?}");
+        cx.executor().advance_clock(frame);
+        draw(cx);
+        let after = cx.debug_bounds("zoomed-pane").expect("shrinking");
+        assert!(
+            after.size.width < turned.size.width,
+            "it shrinks from there: {turned:?} then {after:?}"
+        );
+
+        cx.executor().advance_clock(settle);
+        draw(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_none());
+        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+        });
+        assert_eq!(panes, slots, "back in its slot");
+    }
+
     /// Splitting a thread puts a draft beside it, in the thread's place in
     /// the store's focus, while the thread stays open in its own pane. Both
     /// panes' headers then have to fit beside the right panel for it to dock.
@@ -7462,8 +7556,9 @@ mod tests {
     }
 
     /// ⇧⌥⌘← exchanges the right pane's thread with the left one's, a
-    /// half-written message going along with it, and the keyboard follows
-    /// the thread; each pane keeps its colour, so the threads swap colours.
+    /// half-written message going along with it, and the keyboard stays in
+    /// the right pane, now on the left one's thread; each pane keeps its
+    /// colour, so the threads swap colours.
     #[gpui::test]
     fn swapping_panes_takes_the_thread_and_its_draft_along(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -7480,7 +7575,7 @@ mod tests {
             pane_threads(&shell, cx),
             [Some("thread-2".into()), Some("thread-1".into())]
         );
-        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the keyboard stays");
         let composer = shell.read_with(cx, |shell, cx| {
             shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
                 .read(cx)
@@ -7492,11 +7587,10 @@ mod tests {
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "half a thought"
         );
-        let caret = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
-        cx.update(|window, _| assert!(caret.is_focused(window), "the caret came along"));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
             assert!(store.is_thread_open("thread-1"));
+            assert!(store.is_thread_open("thread-2"));
         });
         let row = |selector: &'static str, cx: &mut VisualTestContext| {
             let row = cx.debug_bounds(selector).expect("the thread's row");
@@ -7519,11 +7613,11 @@ mod tests {
         assert_eq!(row("sidebar-thread-thread-1", cx), right);
     }
 
-    /// Moving the right pane's thread left shows it in the left pane, with
-    /// the keyboard, in place of the thread there, which closes as the right
-    /// pane glides shut.
+    /// Moving the right pane's thread left trades it with the left pane's:
+    /// the moved thread shows in the left pane with the keyboard, the left
+    /// pane's thread in the right pane, and nothing closes.
     #[gpui::test]
-    fn moving_a_thread_takes_over_its_neighbour(cx: &mut TestAppContext) {
+    fn moving_a_thread_trades_places_with_its_neighbour(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
@@ -7535,21 +7629,18 @@ mod tests {
             "alt-left"
         });
         draw(cx);
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-2".into()), Some("thread-1".into())],
-            "the right pane glides shut first, showing what it closes"
-        );
-        assert_eq!(keyboard_pane(&shell, cx), Some(0));
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
-        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-2".into()), Some("thread-1".into())]
+        );
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
             assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
-            assert!(!store.is_thread_open("thread-1"));
+            assert!(store.is_thread_open("thread-1"));
+            assert!(store.is_thread_open("thread-2"));
         });
-        assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
     }
 
     /// With the keyboard in a thread's terminal, the pane keys are the
@@ -7594,12 +7685,23 @@ mod tests {
     /// that runs them.
     #[gpui::test]
     fn pane_commands_show_their_keys(cx: &mut TestAppContext) {
+        use crate::widgets::kbd::Kbd;
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_panes(cx);
+        // A test window cannot read painted text, so the hint's key is read
+        // from the binding the row builds it from; Kbd compares by Debug.
+        let shown = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                format!("{:?}", Kbd::binding_for_action(&SplitRight, None, window))
+            })
+        };
         let os = cx.update(|_, cx| cx.platform_info().os);
-        let key = gpui::Keystroke::parse_with_os("secondary-d", os)
-            .unwrap()
-            .unparse(os);
+        let split = format!(
+            "{:?}",
+            Some(Kbd::new(
+                gpui::Keystroke::parse_with_os("secondary-d", os).unwrap()
+            ))
+        );
         shell
             .read_with(cx, |shell, _| shell.window_state())
             .update(cx, |state, cx| state.open_palette(cx));
@@ -7608,9 +7710,10 @@ mod tests {
         draw(cx);
         let row = cx.debug_bounds("palette-row-0").expect("the split's row");
         let hint = cx
-            .debug_bounds(format!("palette-row-0-key-{key}").leak())
+            .debug_bounds("palette-row-0-key")
             .expect("the row shows its key");
         assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
+        assert_eq!(shown(cx), split);
         cx.simulate_keystrokes("escape");
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
@@ -7620,9 +7723,10 @@ mod tests {
         draw(cx);
         let row = cx.debug_bounds("menu-item-0").expect("the split's row");
         let hint = cx
-            .debug_bounds(format!("menu-item-0-key-{key}").leak())
+            .debug_bounds("menu-item-0-key")
             .expect("the row shows its key");
         assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
+        assert_eq!(shown(cx), split);
     }
 
     /// Two columns fit beside the sidebar of a 1200pt window, each header
