@@ -4,6 +4,7 @@ pub(crate) type ToggleHandler = std::rc::Rc<dyn Fn(&bool, &mut gpui::Window, &mu
 pub mod button;
 pub mod checkbox;
 pub mod choice;
+mod collapsible;
 pub(crate) mod copy;
 mod fade_text;
 pub mod input;
@@ -20,6 +21,7 @@ pub mod tooltip;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
 pub use checkbox::Checkbox;
+pub use collapsible::{Chevron, Collapsible};
 pub use fade_text::{FadeText, fade_text};
 pub use input::{Input, Textarea};
 pub use kbd::Kbd;

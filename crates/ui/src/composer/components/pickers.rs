@@ -74,7 +74,7 @@ impl Composer {
     /// The model-picker button + popover (anchored above, ~360px).
     pub(in super::super) fn render_model_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let store = self.workspace_store.read(cx);
-        let composer_state = store.composer_state();
+        let composer_state = store.composer_state_for(self.session_id.as_deref());
         let Some(active_model) = composer_state.active_model.clone() else {
             return div().into_any_element();
         };
@@ -282,7 +282,7 @@ impl Composer {
     /// meter's, so it is neither listed nor named here.
     pub(in super::super) fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let store = self.workspace_store.read(cx);
-        let composer = store.composer_state();
+        let composer = store.composer_state_for(self.session_id.as_deref());
         let descriptors = composer
             .active_option_descriptors
             .iter()
@@ -381,6 +381,7 @@ impl Composer {
             );
 
         let store_entity = self.workspace_store.clone();
+        let session_id = self.session_id.clone();
         let composer_entity = cx.entity();
         crate::material::overlay_popover("traits-popover", cx)
             .anchor(Anchor::BottomLeft)
@@ -396,6 +397,7 @@ impl Composer {
                     composer_entity.read(cx).compact,
                     pending_restart,
                     &store_entity,
+                    session_id.clone(),
                     &popover,
                     window,
                     cx,
@@ -407,7 +409,10 @@ impl Composer {
     /// The circular context-window meter (ring showing used%, red > 90%) and
     /// its hover/click popover.
     pub(in super::super) fn render_context_meter(&self, cx: &mut Context<Self>) -> AnyElement {
-        let composer = self.workspace_store.read(cx).composer_state();
+        let composer = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref());
         let usage = composer.token_usage;
         let account_usage = composer.usage.clone();
         let provider = composer.provider;
@@ -439,6 +444,7 @@ impl Composer {
                 track,
             )));
 
+        let session_id = self.session_id.clone();
         crate::material::overlay_popover("context-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
@@ -447,7 +453,8 @@ impl Composer {
             .trigger(trigger)
             .content(move |_, window, cx| {
                 let compact = crate::window_seam::window_is_compact(window, cx);
-                let edit_window = window_editable.then(|| store_entity.clone());
+                let edit_window =
+                    window_editable.then(|| (store_entity.clone(), session_id.clone()));
                 render_context_meter_pane(
                     usage,
                     account_usage.clone(),
@@ -462,7 +469,10 @@ impl Composer {
     }
 
     pub(in super::super) fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let composer = self.workspace_store.read(cx).composer_state();
+        let composer = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref());
         let Some(control) = PermissionControl::from_composer(&composer) else {
             return permission_notice(&composer, cx);
         };
@@ -502,6 +512,7 @@ impl Composer {
                     .child(Icon::new(IconName::ChevronDown)),
             );
         let store_entity = self.workspace_store.clone();
+        let session_id = self.session_id.clone();
         let compact = self.compact;
         let title = control.label.clone();
         crate::material::overlay_popover("permission-popover", cx)
@@ -509,7 +520,14 @@ impl Composer {
             .when(self.compact, |popover| popover.bottom_sheet(title))
             .trigger(trigger)
             .content(move |_, _, cx| {
-                render_permission_pane(&control, compact, &store_entity, &cx.entity(), cx)
+                render_permission_pane(
+                    &control,
+                    compact,
+                    &store_entity,
+                    session_id.clone(),
+                    &cx.entity(),
+                    cx,
+                )
             })
             .into_any_element()
     }
@@ -564,7 +582,10 @@ impl Composer {
     }
 
     pub(in super::super) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let composer = self.workspace_store.read(cx).composer_state();
+        let composer = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref());
         let usage = composer.token_usage;
         let permission = PermissionControl::from_composer(&composer).map(|control| {
             if control.requested.is_some() {
@@ -614,6 +635,7 @@ fn render_model_pane(
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let compact = composer.read(cx).compact;
+    let session_id = composer.read(cx).session_id.clone();
 
     let rail_icon = |id: gpui::SharedString,
                      label: gpui::SharedString,
@@ -723,6 +745,7 @@ fn render_model_pane(
         let rows = rows.clone();
         let selected = selected.clone();
         let store_entity = store_entity.clone();
+        let session_id = session_id.clone();
         let popover = popover.clone();
         list.flex()
             .flex_col()
@@ -739,6 +762,7 @@ fn render_model_pane(
                                 &selected,
                                 compact,
                                 &store_entity,
+                                session_id.clone(),
                                 &popover,
                                 cx,
                             ))
@@ -785,6 +809,7 @@ fn render_model_pane(
 
     let key_rows: Vec<ModelRow> = rows.iter().take(9).cloned().collect();
     let store_key = store_entity.clone();
+    let key_session = session_id.clone();
     let popover_key = popover.clone();
 
     let pane = h_flex()
@@ -808,7 +833,12 @@ fn render_model_pane(
                     if row.acp {
                         store.set_active_acp_agent(row.id);
                     } else {
-                        store.set_active_model(row.provider, Some(row.id), row.profile_id);
+                        store.set_active_model_for(
+                            key_session.clone().unwrap_or_default(),
+                            row.provider,
+                            Some(row.id),
+                            row.profile_id,
+                        );
                     }
                 });
                 popover_key.update(cx, |st, cx| st.dismiss(window, cx));
@@ -821,7 +851,7 @@ fn render_model_pane(
             .w_full()
             .min_h_0()
             .child(pane)
-            .child(render_compact_model_footer(store_entity, cx))
+            .child(render_compact_model_footer(store_entity, session_id, cx))
             .into_any_element();
     }
     pane.with_animation(
@@ -834,9 +864,12 @@ fn render_model_pane(
 
 fn render_compact_model_footer(
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
-    let composer_state = store_entity.read(cx).composer_state();
+    let composer_state = store_entity
+        .read(cx)
+        .composer_state_for(session_id.as_deref());
     let selections = composer_state.active_option_selections.clone();
     let effort = composer_state
         .active_option_descriptors
@@ -875,6 +908,7 @@ fn render_compact_model_footer(
             .map(|option| {
                 let selected = current.as_deref() == Some(option.value.as_str());
                 let store = store_entity.clone();
+                let session_id = session_id.clone();
                 let value = option.value.clone();
                 Choice::new(
                     gpui::SharedString::from(format!("compact-effort-{}", option.value)),
@@ -884,7 +918,8 @@ fn render_compact_model_footer(
                 .on_select(move |_, cx| {
                     let value = value.clone();
                     store.update(cx, |store, _cx| {
-                        store.set_active_option(
+                        store.set_active_option_for(
+                            session_id.clone().unwrap_or_default(),
                             "reasoningEffort".to_string(),
                             Some(serde_json::Value::String(value)),
                         );
@@ -906,6 +941,7 @@ fn render_compact_model_footer(
             .iter()
             .map(|row| {
                 let store = store_entity.clone();
+                let session_id = session_id.clone();
                 let id = control.id.clone();
                 let value = row.value.clone();
                 Choice::new(
@@ -917,7 +953,11 @@ fn render_compact_model_footer(
                 .disabled(row.unavailable.is_some())
                 .on_select(move |_, cx| {
                     store.update(cx, |store, _cx| {
-                        store.set_active_option(id.clone(), Some(value.clone()))
+                        store.set_active_option_for(
+                            session_id.clone().unwrap_or_default(),
+                            id.clone(),
+                            Some(value.clone()),
+                        )
                     });
                 })
             })
@@ -950,12 +990,14 @@ fn render_compact_model_footer(
         .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_model_row(
     row: &ModelRow,
     index: usize,
     selected: &Option<String>,
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     popover: &Entity<PopoverState>,
     cx: &App,
 ) -> AnyElement {
@@ -994,7 +1036,12 @@ fn render_model_row(
                 if is_acp {
                     store.set_active_acp_agent(id);
                 } else {
-                    store.set_active_model(provider, Some(id), profile_id);
+                    store.set_active_model_for(
+                        session_id.clone().unwrap_or_default(),
+                        provider,
+                        Some(id),
+                        profile_id,
+                    );
                 }
             });
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));
@@ -1240,6 +1287,7 @@ fn render_permission_pane(
     control: &PermissionControl,
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
@@ -1257,6 +1305,7 @@ fn render_permission_pane(
         let pending = control.requested.as_ref() == Some(&option.value);
         let disabled = option.unavailable.is_some();
         let store = store_entity.clone();
+        let session_id = session_id.clone();
         let popover = popover.clone();
         let value = option.value.clone();
         let id = control.id.clone();
@@ -1283,7 +1332,11 @@ fn render_permission_pane(
                         .hover(|style| style.bg(cx.theme().muted))
                         .on_click(move |_, window, cx| {
                             store.update(cx, |store, _cx| {
-                                store.set_active_option(id.clone(), Some(value.clone()))
+                                store.set_active_option_for(
+                                    session_id.clone().unwrap_or_default(),
+                                    id.clone(),
+                                    Some(value.clone()),
+                                )
                             });
                             popover.update(cx, |state, cx| state.dismiss(window, cx));
                         })
@@ -1351,10 +1404,13 @@ fn render_permission_pane(
 /// pane open. `None` when the model describes fewer than two levels.
 fn render_effort_slider(
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     window: &mut Window,
     cx: &mut Context<PopoverState>,
 ) -> Option<AnyElement> {
-    let composer_state = store_entity.read(cx).composer_state();
+    let composer_state = store_entity
+        .read(cx)
+        .composer_state_for(session_id.as_deref());
     let (levels, current) = composer_state.active_option_descriptors.iter().find_map(
         |descriptor| match descriptor {
             OptionDescriptor::Select {
@@ -1390,6 +1446,7 @@ fn render_effort_slider(
         cx,
         |_, cx| {
             let store = store_entity.clone();
+            let session_id = session_id.clone();
             let values: Vec<String> = levels.iter().map(|level| level.value.clone()).collect();
             let mut applied = current;
             cx.subscribe_self(move |_, event: &SliderEvent, cx| {
@@ -1406,7 +1463,8 @@ fn render_effort_slider(
                 applied = index;
                 let value = value.clone();
                 store.update(cx, |store, _cx| {
-                    store.set_active_option(
+                    store.set_active_option_for(
+                        session_id.clone().unwrap_or_default(),
                         "reasoningEffort".to_string(),
                         Some(serde_json::Value::String(value)),
                     );
@@ -1467,6 +1525,7 @@ fn render_traits_pane(
     compact: bool,
     pending_restart: bool,
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     popover: &Entity<PopoverState>,
     window: &mut Window,
     cx: &mut Context<PopoverState>,
@@ -1522,7 +1581,8 @@ fn render_traits_pane(
                 let options = &options;
                 // The slider carries its own label and replaces the rows.
                 if id == "reasoningEffort"
-                    && let Some(slider) = render_effort_slider(store_entity, window, cx)
+                    && let Some(slider) =
+                        render_effort_slider(store_entity, session_id.clone(), window, cx)
                 {
                     pane = pane.child(slider);
                     continue;
@@ -1537,6 +1597,7 @@ fn render_traits_pane(
                         text.push_str(&default_suffix);
                     }
                     let store = store_entity.clone();
+                    let session_id = session_id.clone();
                     let pop = popover.clone();
                     let opt_id = id.clone();
                     let opt_value = opt.value.clone();
@@ -1557,7 +1618,8 @@ fn render_traits_pane(
                                 let opt_id = opt_id.clone();
                                 let opt_value = opt_value.clone();
                                 store.update(cx, |store, _cx| {
-                                    store.set_active_option(
+                                    store.set_active_option_for(
+                                        session_id.clone().unwrap_or_default(),
                                         opt_id,
                                         Some(serde_json::Value::String(opt_value)),
                                     );
@@ -1587,6 +1649,7 @@ fn render_traits_pane(
                 {
                     let is_selected = on == value;
                     let store = store_entity.clone();
+                    let session_id = session_id.clone();
                     let pop = popover.clone();
                     let opt_id = id.clone();
                     pane = pane.child(
@@ -1605,7 +1668,8 @@ fn render_traits_pane(
                             .on_click(move |_, window, cx| {
                                 let opt_id = opt_id.clone();
                                 store.update(cx, |store, _cx| {
-                                    store.set_active_option(
+                                    store.set_active_option_for(
+                                        session_id.clone().unwrap_or_default(),
                                         opt_id,
                                         Some(serde_json::Value::Bool(value)),
                                     );
@@ -1647,6 +1711,7 @@ fn render_traits_pane(
             selections,
             compact,
             store_entity,
+            session_id,
             cx,
         ))
         .into_any_element()
@@ -1658,6 +1723,7 @@ fn render_fast_mode_bolt(
     selections: &[agent::OptionSelection],
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -1698,7 +1764,11 @@ fn render_fast_mode_bolt(
                 cx.stop_propagation();
                 let value = fast.value(fast.next(level));
                 store.update(cx, |store, _cx| {
-                    store.set_active_option(fast.option_id.clone(), Some(value));
+                    store.set_active_option_for(
+                        session_id.clone().unwrap_or_default(),
+                        fast.option_id.clone(),
+                        Some(value),
+                    );
                 });
             }),
         )
@@ -1744,7 +1814,7 @@ fn render_context_meter_pane(
     pct: Option<f32>,
     compact: bool,
     // Present when the active model's context window can be changed here.
-    edit_window: Option<Entity<WorkspaceStore>>,
+    edit_window: Option<(Entity<WorkspaceStore>, Option<String>)>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -1794,7 +1864,7 @@ fn render_context_meter_pane(
                             .text_caption(cx)
                             .child(crate::tr!("composer.context_window_title")),
                     )
-                    .when_some(edit_window, |title, store| {
+                    .when_some(edit_window, |title, (store, session_id)| {
                         let popover = cx.entity();
                         let label = crate::tr!("composer.context_window_edit").into_owned();
                         title.child(
@@ -1808,7 +1878,12 @@ fn render_context_meter_pane(
                                 .icon(Icon::empty().path("icons/pencil.svg"))
                                 .on_click(move |_, window, cx| {
                                     popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                    super::context_window::open(store.clone(), window, cx);
+                                    super::context_window::open(
+                                        store.clone(),
+                                        session_id.clone(),
+                                        window,
+                                        cx,
+                                    );
                                 }),
                         )
                     }),
@@ -1979,7 +2054,15 @@ mod sheet_tests {
                             let mut composer = store.read(cx).composer_state();
                             composer.provider = Some(ProviderKind::ClaudeCode);
                             let control = PermissionControl::from_composer(&composer).unwrap();
-                            render_permission_pane(&control, compact, &store, &cx.entity(), cx)
+                            let session_id = store.read(cx).active_session_id();
+                            render_permission_pane(
+                                &control,
+                                compact,
+                                &store,
+                                session_id,
+                                &cx.entity(),
+                                cx,
+                            )
                         }
                     }),
             )

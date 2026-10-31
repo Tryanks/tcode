@@ -10,9 +10,9 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -336,39 +336,16 @@ impl OrchestrateSettingsPanel {
         }
     }
 
-    /// The per-item "restore default" affordance: icon-only, ghost, and inline
-    /// immediately after the row's title.
-    fn reset_button(
-        &self,
-        id: impl Into<ElementId>,
-        cx: &mut Context<Self>,
-        on_reset: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
-        let label = crate::tr!("settings.reset_item").into_owned();
-        Button::new(id)
-            .ghost()
-            .xsmall()
-            .icon(IconName::Undo)
-            .tooltip(label.clone())
-            .aria_label(label)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                on_reset(this, window, cx);
-            }))
-            .into_any_element()
-    }
-
     fn row_title(
         &self,
         title: impl Into<gpui::SharedString>,
-        reset: Option<AnyElement>,
+        reset: AnyElement,
         cx: &App,
     ) -> AnyElement {
         h_flex()
             .items_center()
-            .gap_1()
             .child(div().text_body(false, cx).child(title.into()))
-            .children(reset)
+            .child(reset)
             .into_any_element()
     }
 
@@ -443,13 +420,15 @@ impl OrchestrateSettingsPanel {
 
     fn render_child_approval(&self, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.store.read(cx).settings().orchestrate.child_approval;
-        let reset = (selected != ChildApprovalMode::Auto).then(|| {
-            self.reset_button("reset-orchestrate-child-approval", cx, |this, _, cx| {
+        let reset = crate::settings_rows::reset_action(
+            "reset-orchestrate-child-approval",
+            selected != ChildApprovalMode::Auto,
+            cx.listener(|this, _, _, cx| {
                 this.store.update(cx, |store, _cx| {
                     store.set_orchestrate_child_approval(ChildApprovalMode::Auto)
                 });
-            })
-        });
+            }),
+        );
         let selected_label = match selected {
             ChildApprovalMode::Orchestrator => {
                 crate::tr!("orchestrate.child_approval.orchestrator")
@@ -605,13 +584,15 @@ impl OrchestrateSettingsPanel {
 
     fn render_child_worktrees(&self, cx: &mut Context<Self>) -> AnyElement {
         let checked = self.store.read(cx).settings().orchestrate.child_worktrees;
-        let reset = checked.then(|| {
-            self.reset_button("reset-orchestrate-child-worktrees", cx, |this, _, cx| {
+        let reset = crate::settings_rows::reset_action(
+            "reset-orchestrate-child-worktrees",
+            checked,
+            cx.listener(|this, _, _, cx| {
                 this.store.update(cx, |store, _cx| {
                     store.set_orchestrate_child_worktrees(false)
                 });
-            })
-        });
+            }),
+        );
         crate::material::group(cx)
             .child(
                 crate::material::group_row(cx)
@@ -679,7 +660,18 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
-    fn render_children(&self, decision: bool, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_children(
+        &self,
+        decision: bool,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let list_id = if decision {
+            "orchestrate-decisions"
+        } else {
+            "orchestrate-children"
+        };
         let settings = self.store.read(cx).settings().orchestrate;
         let offset = if decision {
             0
@@ -697,7 +689,7 @@ impl OrchestrateSettingsPanel {
             .chain(settings.child_models)
             .collect();
         let profiles = &models[offset..offset + count];
-        let mut section = v_flex().w_full().gap_3().child(
+        let section = v_flex().w_full().gap_3().child(
             self.section_heading(
                 if decision {
                     crate::tr!("orchestrate.decisions.title")
@@ -721,22 +713,15 @@ impl OrchestrateSettingsPanel {
                 cx,
             ),
         );
-        if profiles.is_empty() {
-            return section
-                .child(self.status_note(
-                    cx.theme().danger,
-                    if decision {
-                        crate::tr!("orchestrate.decisions.empty")
-                    } else {
-                        crate::tr!("orchestrate.children.empty")
-                    },
-                    cx,
-                ))
-                .into_any_element();
-        }
-
-        if !profiles.iter().any(|profile| profile.enabled) {
-            section = section.child(self.status_note(
+        // Warns, folding in above the rows, once the last one is switched off.
+        let none_enabled = crate::motion::shown(
+            (gpui::ElementId::from(list_id), "none-enabled"),
+            (!profiles.is_empty() && !profiles.iter().any(|profile| profile.enabled)).then_some(()),
+            window,
+            cx,
+        );
+        let warning = none_enabled.map(|note| {
+            note.fold(div().w_full().pb_3().child(self.status_note(
                 cx.theme().warning,
                 if decision {
                     crate::tr!("orchestrate.decisions.none_enabled")
@@ -744,8 +729,8 @@ impl OrchestrateSettingsPanel {
                     crate::tr!("orchestrate.children.none_enabled")
                 },
                 cx,
-            ));
-        }
+            )))
+        });
 
         let mut rows: Vec<AnyElement> = Vec::new();
         for (index, row) in self.child_rows.iter().enumerate().skip(offset).take(count) {
@@ -771,15 +756,13 @@ impl OrchestrateSettingsPanel {
             } else {
                 format!("{} · {}", provider_label(provider), row.model)
             };
-            let reset = (!profile.description.is_empty()
-                && profile.bundled_guidance(decision).is_some())
-            .then(|| {
-                self.reset_button(
-                    ("reset-orchestrate-child", index),
-                    cx,
-                    move |this, window, cx| this.reset_child_definition(index, window, cx),
-                )
-            });
+            let reset = crate::settings_rows::reset_action(
+                ("reset-orchestrate-child", index),
+                !profile.description.is_empty() && profile.bundled_guidance(decision).is_some(),
+                cx.listener(move |this, _, window, cx| {
+                    this.reset_child_definition(index, window, cx)
+                }),
+            );
             rows.push(
                 crate::material::group_row_stacked(cx)
                     .items_stretch()
@@ -805,6 +788,24 @@ impl OrchestrateSettingsPanel {
                                 } else {
                                     (cx.theme().muted, cx.theme().muted_foreground)
                                 };
+                                let chip =
+                                    gpui::SharedString::from(format!("{list_id}-chip-{index}"));
+                                let settle =
+                                    || gpui_base::motion::Transition::new(crate::edge_back::SETTLE);
+                                let bg = gpui_base::motion::transition(
+                                    (chip.clone(), "bg"),
+                                    bg,
+                                    settle(),
+                                    window,
+                                    cx,
+                                );
+                                let fg = gpui_base::motion::transition(
+                                    (chip, "fg"),
+                                    fg,
+                                    settle(),
+                                    window,
+                                    cx,
+                                );
                                 let label = if decision && profile.enabled {
                                     crate::tr!("orchestrate.decisions.enabled")
                                 } else if decision {
@@ -860,6 +861,14 @@ impl OrchestrateSettingsPanel {
                             choices.join(" · ")
                         };
                         let fast_supported = self.child_fast_supported(provider, &row.model, cx);
+                        // Keep a stored `fast` visible even when the catalog no
+                        // longer declares support, so it can be switched off.
+                        let fast = crate::motion::shown(
+                            gpui::SharedString::from(format!("{list_id}-fast-{index}")),
+                            (fast_supported || profile.fast).then_some(()),
+                            window,
+                            cx,
+                        );
                         h_flex()
                             .gap_4()
                             .items_end()
@@ -879,30 +888,30 @@ impl OrchestrateSettingsPanel {
                                             .child(crate::tr!("orchestrate.children.effort_hint")),
                                     ),
                             )
-                            // Keep a stored `fast` visible even when the catalog no
-                            // longer declares support, so it can be switched off.
-                            .when(fast_supported || profile.fast, |row| {
+                            .when_some(fast, |row, fast| {
                                 row.child(
-                                    v_flex()
-                                        .gap_1()
-                                        .items_start()
-                                        .child(
-                                            div().text_caption(cx).child(crate::tr!(
+                                    fast.fade(
+                                        v_flex()
+                                            .gap_1()
+                                            .items_start()
+                                            .child(div().text_caption(cx).child(crate::tr!(
                                                 "orchestrate.children.fast_label"
-                                            )),
-                                        )
-                                        .child(
-                                            Switch::new(("orchestrate-child-fast", index))
-                                                .checked(profile.fast)
-                                                .tooltip(crate::tr!(
-                                                    "orchestrate.children.fast_hint"
-                                                ))
-                                                .on_click(cx.listener(
-                                                    move |this, checked: &bool, _, cx| {
-                                                        this.set_child_fast(index, *checked, cx);
-                                                    },
-                                                )),
-                                        ),
+                                            )))
+                                            .child(
+                                                Switch::new(("orchestrate-child-fast", index))
+                                                    .checked(profile.fast)
+                                                    .tooltip(crate::tr!(
+                                                        "orchestrate.children.fast_hint"
+                                                    ))
+                                                    .on_click(cx.listener(
+                                                        move |this, checked: &bool, _, cx| {
+                                                            this.set_child_fast(
+                                                                index, *checked, cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            ),
+                                    ),
                                 )
                             })
                     })
@@ -914,9 +923,35 @@ impl OrchestrateSettingsPanel {
                     .into_any_element(),
             );
         }
-        section
-            .child(crate::material::grouped(rows, cx))
-            .into_any_element()
+        // The rows and the warning that there are none cross-fade.
+        let slot = if profiles.is_empty() { "empty" } else { "rows" };
+        let mut listed = (!profiles.is_empty()).then(|| {
+            v_flex()
+                .w_full()
+                .children(warning)
+                .child(crate::material::grouped(rows, cx))
+        });
+        let body = crate::motion::cross_fade(
+            (gpui::ElementId::from(list_id), "body"),
+            slot,
+            window,
+            cx,
+            |slot, _, cx| match *slot {
+                "empty" => self.status_note(
+                    cx.theme().danger,
+                    if decision {
+                        crate::tr!("orchestrate.decisions.empty")
+                    } else {
+                        crate::tr!("orchestrate.children.empty")
+                    },
+                    cx,
+                ),
+                _ => listed
+                    .take()
+                    .map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
+            },
+        );
+        section.child(body).into_any_element()
     }
 }
 
@@ -933,8 +968,8 @@ impl Render for OrchestrateSettingsPanel {
             .child(self.render_intro(cx))
             .child(self.render_child_approval(cx))
             .child(self.render_child_worktrees(cx))
-            .child(self.render_children(true, compact, cx))
-            .child(self.render_children(false, compact, cx))
+            .child(self.render_children(true, compact, window, cx))
+            .child(self.render_children(false, compact, window, cx))
     }
 }
 

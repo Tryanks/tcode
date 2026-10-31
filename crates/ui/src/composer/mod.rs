@@ -130,6 +130,8 @@ fn draft_placeholder(compact: bool) -> Cow<'static, str> {
 pub struct Composer {
     compact: bool,
     workspace_store: Entity<WorkspaceStore>,
+    /// The thread this composer writes to.
+    session_id: Option<String>,
     input: Entity<TextareaState>,
     /// Dedicated free-form answer field shown inside an agent question card.
     /// Keeping it separate from the turn composer makes the pending question
@@ -211,7 +213,10 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
     fn interactive(&self, cx: &App) -> bool {
-        !self.workspace_store.read(cx).native_subagent_readonly()
+        !self
+            .workspace_store
+            .read(cx)
+            .native_subagent_readonly_for(self.session_id.as_deref())
             && !matches!(self.workspace_store.read(cx).connection_state(),
             tcode_client::ConnectionState::Offline { reason } if reason.is_terminal())
     }
@@ -246,6 +251,15 @@ impl Composer {
     #[cfg(test)]
     pub(crate) fn is_compact(&self) -> bool {
         self.compact
+    }
+
+    /// Write to `session_id`'s thread, or none. What the composer holds for
+    /// a thread follows on the next render.
+    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        if self.session_id != session_id {
+            self.session_id = session_id;
+            cx.notify();
+        }
     }
 
     /// Follow the window onto the other layout. Updated in place on purpose: a
@@ -341,6 +355,7 @@ impl Composer {
 
         Self {
             compact,
+            session_id: workspace_store.read(cx).active_session_id(),
             workspace_store,
             input,
             user_input_custom,
@@ -415,7 +430,7 @@ impl Composer {
         let destination = self
             .workspace_store
             .read(cx)
-            .with_composer_destination(composer_destination)
+            .with_composer_destination_for(self.session_id.as_deref(), composer_destination)
             .flatten();
         if self.input_destination == destination {
             return;
@@ -457,9 +472,9 @@ impl Composer {
     /// Put that provider-owned prefill into the ordinary composer so the user
     /// can edit or resend it; no inline transcript editor is involved.
     fn sync_native_rewind_prefill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let prefill = self
-            .workspace_store
-            .update(cx, |store, _cx| store.take_native_rewind_prefill());
+        let prefill = self.workspace_store.update(cx, |store, _cx| {
+            store.take_native_rewind_prefill_for(self.session_id.as_deref())
+        });
         let Some(prefill) = prefill else {
             return;
         };
@@ -468,10 +483,9 @@ impl Composer {
 
     /// Text another surface put here goes after what the user typed, which it never replaces.
     fn sync_composer_append(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = self
-            .workspace_store
-            .update(cx, |store, _cx| store.take_composer_append())
-        else {
+        let Some(text) = self.workspace_store.update(cx, |store, _cx| {
+            store.take_composer_append_for(self.session_id.as_deref())
+        }) else {
             return;
         };
         let typed = self.input.read(cx).value().trim_end().to_owned();
@@ -502,21 +516,31 @@ impl Composer {
     /// while queued attachments are deliberately ignored.
     fn on_menu(&mut self, action: &ComposerMenu, window: &mut Window, cx: &mut Context<Self>) {
         match action.clone() {
-            ComposerMenu::RemoveTerminalContext(id) => self
-                .workspace_store
-                .update(cx, |store, _cx| store.remove_terminal_context(id)),
-            ComposerMenu::RemoveReviewComment(index) => self
-                .workspace_store
-                .update(cx, |store, _cx| store.remove_review_comment(index)),
-            ComposerMenu::QueueSteer(id) => self
-                .workspace_store
-                .update(cx, |store, _cx| store.steer_queued(id)),
+            ComposerMenu::RemoveTerminalContext(id) => {
+                self.workspace_store.update(cx, |store, _cx| {
+                    store.remove_terminal_context_for(
+                        self.session_id.clone().unwrap_or_default(),
+                        id,
+                    )
+                })
+            }
+            ComposerMenu::RemoveReviewComment(index) => {
+                self.workspace_store.update(cx, |store, _cx| {
+                    store.remove_review_comment_for(
+                        self.session_id.clone().unwrap_or_default(),
+                        index,
+                    )
+                })
+            }
+            ComposerMenu::QueueSteer(id) => self.workspace_store.update(cx, |store, _cx| {
+                store.steer_queued_for(self.session_id.clone().unwrap_or_default(), id)
+            }),
             ComposerMenu::QueueEdit { id, text } => {
                 self.drop_queued_and_refill(id, text, window, cx)
             }
-            ComposerMenu::QueueDrop(id) => self
-                .workspace_store
-                .update(cx, |store, _cx| store.drop_queued(id)),
+            ComposerMenu::QueueDrop(id) => self.workspace_store.update(cx, |store, _cx| {
+                store.drop_queued_for(self.session_id.clone().unwrap_or_default(), id)
+            }),
             ComposerMenu::ImageOpen(index) => self.open_image_preview(index, window, cx),
             ComposerMenu::ImageRemove(index) => self.remove_image(index, cx),
         }
@@ -531,21 +555,25 @@ impl Composer {
     ) {
         let store = self.workspace_store.read(cx);
         if !self.interactive(cx)
-            || !store.composer_state().queue.is_some_and(|queue| {
-                queue
-                    .messages
-                    .iter()
-                    .any(|message| message.id == id && message.editable)
-            })
+            || !store
+                .composer_state_for(self.session_id.as_deref())
+                .queue
+                .is_some_and(|queue| {
+                    queue
+                        .messages
+                        .iter()
+                        .any(|message| message.id == id && message.editable)
+                })
         {
             return;
         }
-        let Some(session_id) = store.active_session_id() else {
+        let Some(session_id) = self.session_id.clone() else {
             return;
         };
         self.queued_refill = Some((session_id, id, text));
-        self.workspace_store
-            .update(cx, |store, _cx| store.drop_queued(id));
+        self.workspace_store.update(cx, |store, _cx| {
+            store.drop_queued_for(self.session_id.clone().unwrap_or_default(), id)
+        });
         cx.notify();
     }
 
@@ -554,11 +582,11 @@ impl Composer {
             return;
         };
         let store = self.workspace_store.read(cx);
-        if store.active_session_id().as_ref() != Some(session_id) {
+        if self.session_id.clone().as_ref() != Some(session_id) {
             self.queued_refill = None;
             return;
         }
-        let Some(queue) = store.composer_state().queue else {
+        let Some(queue) = store.composer_state_for(self.session_id.as_deref()).queue else {
             return;
         };
         if let Some(message) = queue.messages.iter().find(|message| message.id == *id) {
@@ -585,10 +613,14 @@ impl Composer {
             || !self
                 .workspace_store
                 .read(cx)
-                .composer_state()
+                .composer_state_for(self.session_id.as_deref())
                 .terminal_contexts
                 .is_empty()
-            || !self.workspace_store.read(cx).review_comments().is_empty()
+            || !self
+                .workspace_store
+                .read(cx)
+                .review_comments_for(self.session_id.as_deref())
+                .is_empty()
     }
 
     /// Send the composer's contents. `steer` is set by the ⌘/Ctrl+Enter gesture:
@@ -605,7 +637,7 @@ impl Composer {
         if self
             .workspace_store
             .read(cx)
-            .composer_state()
+            .composer_state_for(self.session_id.as_deref())
             .conversation_read_only
         {
             return;
@@ -634,7 +666,10 @@ impl Composer {
             return;
         }
         let text = input.read(cx).value().trim().to_string();
-        let composer_state = self.workspace_store.read(cx).composer_state();
+        let composer_state = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref());
         let compact_offered = compact_offered(&composer_state);
         let goal_offered = goal_offered(&composer_state);
         let current_goal = composer_state.goal.clone();
@@ -664,7 +699,12 @@ impl Composer {
             self.image_load_generation = self.image_load_generation.wrapping_add(1);
             self.pending_image_loads = 0;
             self.workspace_store.update(cx, |store, _cx| {
-                store.schedule_turn(message, attachment_paths, fire_at_unix_secs);
+                store.schedule_turn_for(
+                    self.session_id.clone().unwrap_or_default(),
+                    message,
+                    attachment_paths,
+                    fire_at_unix_secs,
+                );
             });
             cx.emit(ComposerEvent::Submitted);
             cx.notify();
@@ -690,17 +730,30 @@ impl Composer {
                     self.model_picker_token = self.model_picker_token.wrapping_add(1);
                 }
                 SlashIntent::Compact => {
-                    self.workspace_store
-                        .update(cx, |store, _cx| store.compact_context());
+                    self.workspace_store.update(cx, |store, _cx| {
+                        store.compact_context_for(self.session_id.clone().unwrap_or_default())
+                    });
                 }
                 SlashIntent::Goal(intent) => {
                     self.workspace_store.update(cx, |store, _cx| match intent {
-                        GoalIntent::Set(objective) => {
-                            store.set_goal(Some(objective), Some(agent::GoalStatus::Active))
+                        GoalIntent::Set(objective) => store.set_goal_for(
+                            self.session_id.clone().unwrap_or_default(),
+                            Some(objective),
+                            Some(agent::GoalStatus::Active),
+                        ),
+                        GoalIntent::Pause => store.set_goal_for(
+                            self.session_id.clone().unwrap_or_default(),
+                            None,
+                            Some(agent::GoalStatus::Paused),
+                        ),
+                        GoalIntent::Resume => store.set_goal_for(
+                            self.session_id.clone().unwrap_or_default(),
+                            None,
+                            Some(agent::GoalStatus::Active),
+                        ),
+                        GoalIntent::Clear => {
+                            store.clear_goal_for(self.session_id.clone().unwrap_or_default())
                         }
-                        GoalIntent::Pause => store.set_goal(None, Some(agent::GoalStatus::Paused)),
-                        GoalIntent::Resume => store.set_goal(None, Some(agent::GoalStatus::Active)),
-                        GoalIntent::Clear => store.clear_goal(),
                         GoalIntent::Edit => {}
                     })
                 }
@@ -719,7 +772,7 @@ impl Composer {
         if let Some((from, to)) = self
             .workspace_store
             .read(cx)
-            .composer_state()
+            .composer_state_for(self.session_id.as_deref())
             .relay_confirmation
         {
             let composer = cx.entity();
@@ -792,13 +845,29 @@ impl Composer {
         self.pending_image_loads = 0;
         self.workspace_store.update(cx, |store, _cx| {
             if relay {
-                store.confirm_relay_and_send(sent_text, attachment_paths);
+                store.confirm_relay_and_send_for(
+                    self.session_id.clone().unwrap_or_default(),
+                    sent_text,
+                    attachment_paths,
+                );
             } else if orchestrate {
-                store.orchestrate_turn(sent_text, attachment_paths);
+                store.orchestrate_turn_for(
+                    self.session_id.clone().unwrap_or_default(),
+                    sent_text,
+                    attachment_paths,
+                );
             } else if steer {
-                store.steer(sent_text, attachment_paths);
+                store.steer_for(
+                    self.session_id.clone().unwrap_or_default(),
+                    sent_text,
+                    attachment_paths,
+                );
             } else {
-                store.send_turn(sent_text, attachment_paths);
+                store.send_turn_for(
+                    self.session_id.clone().unwrap_or_default(),
+                    sent_text,
+                    attachment_paths,
+                );
             }
         });
         cx.emit(ComposerEvent::Submitted);
@@ -816,7 +885,7 @@ impl Composer {
         if self
             .workspace_store
             .read(cx)
-            .composer_state()
+            .composer_state_for(self.session_id.as_deref())
             .preparing_worktree
         {
             return div()
@@ -828,7 +897,10 @@ impl Composer {
                 .into_any_element();
         }
         let stopping = turn_running && !has_text;
-        let composer_state = self.workspace_store.read(cx).composer_state();
+        let composer_state = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref());
         let stop_pending = composer_state.stopping;
         let steerable = turn_running && has_text && composer_state.steering_supported;
         let armed = self.steer_gesture.as_ref().is_some_and(SteerGesture::armed);
@@ -861,8 +933,9 @@ impl Composer {
             .on_click(cx.listener(move |this, _, window, cx| {
                 if stopping {
                     if this.interactive(cx) {
-                        this.workspace_store
-                            .update(cx, |store, _cx| store.interrupt());
+                        this.workspace_store.update(cx, |store, _cx| {
+                            store.interrupt_for(this.session_id.clone().unwrap_or_default())
+                        });
                     }
                     return;
                 }
@@ -911,15 +984,21 @@ impl Composer {
             .w(size)
             .aria_label(crate::tr!("composer.stop"))
             .disabled(
-                !self.interactive(cx) || self.workspace_store.read(cx).composer_state().stopping,
+                !self.interactive(cx)
+                    || self
+                        .workspace_store
+                        .read(cx)
+                        .composer_state_for(self.session_id.as_deref())
+                        .stopping,
             )
             .child(div().size(px(11.)).rounded(px(2.)).bg(cx.theme().danger))
             .on_click(cx.listener(|this, _, _, cx| {
                 if !this.interactive(cx) {
                     return;
                 }
-                this.workspace_store
-                    .update(cx, |store, _cx| store.interrupt());
+                this.workspace_store.update(cx, |store, _cx| {
+                    store.interrupt_for(this.session_id.clone().unwrap_or_default())
+                });
             }))
     }
 
@@ -933,7 +1012,7 @@ impl Composer {
             let steers = self
                 .workspace_store
                 .read(cx)
-                .composer_state()
+                .composer_state_for(self.session_id.as_deref())
                 .steering_supported;
             let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
             let mut row = h_flex()
@@ -968,7 +1047,7 @@ impl Composer {
         if self
             .workspace_store
             .read(cx)
-            .composer_state()
+            .composer_state_for(self.session_id.as_deref())
             .preparing_worktree
         {
             return h_flex()
@@ -1002,7 +1081,7 @@ impl Composer {
         if self
             .workspace_store
             .read(cx)
-            .composer_state()
+            .composer_state_for(self.session_id.as_deref())
             .conversation_read_only
         {
             return Button::new("send-message")
@@ -1028,13 +1107,16 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_user_input_state(window, cx);
-        self.sync_images_session(cx);
+        self.sync_images_session();
         self.sync_text_destination(window, cx);
         self.sync_queued_refill(window, cx);
         self.sync_native_rewind_prefill(window, cx);
         self.sync_composer_append(window, cx);
         self.sync_fallback_review_draft(window, cx);
-        let composer_state = self.workspace_store.read(cx).composer_state();
+        let composer_state = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref());
         let readonly = composer_state.conversation_read_only;
         let turn_running = composer_state.turn_running;
         let approval = composer_state.pending_approval;
@@ -1146,19 +1228,19 @@ impl Render for Composer {
         let fallback_block = self
             .workspace_store
             .read(cx)
-            .active_fallback_block()
+            .fallback_block_for(self.session_id.as_deref())
             .cloned();
         let fallback_review = self
             .workspace_store
             .read(cx)
-            .active_fallback_review()
+            .fallback_review_for(self.session_id.as_deref())
             .cloned();
 
         let composer = cx.entity();
         let terminal_contexts = self
             .workspace_store
             .read(cx)
-            .composer_state()
+            .composer_state_for(self.session_id.as_deref())
             .terminal_contexts;
         let has_terminal_contexts = !terminal_contexts.is_empty();
         let context_chips =
@@ -1182,8 +1264,12 @@ impl Render for Composer {
                         .label(format!("{} · {}  ×", context.terminal_label, range))
                         .tooltip(context.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store
-                                .update(cx, |store, _cx| store.remove_terminal_context(id));
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.remove_terminal_context_for(
+                                    this.session_id.clone().unwrap_or_default(),
+                                    id,
+                                )
+                            });
                         }))
                         .context_menu(move |menu, _, _| {
                             menu.menu(
@@ -1197,7 +1283,10 @@ impl Render for Composer {
                             )
                         })
                 }));
-        let review_comments = self.workspace_store.read(cx).review_comments();
+        let review_comments = self
+            .workspace_store
+            .read(cx)
+            .review_comments_for(self.session_id.as_deref());
         let has_review_comments = !review_comments.is_empty();
         let review_chips = h_flex().w_full().flex_wrap().gap_1().children(
             review_comments
@@ -1218,8 +1307,12 @@ impl Render for Composer {
                         .label(format!("{} {}  ×", comment.file, range))
                         .tooltip(comment.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store
-                                .update(cx, |store, _cx| store.remove_review_comment(index));
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.remove_review_comment_for(
+                                    this.session_id.clone().unwrap_or_default(),
+                                    index,
+                                )
+                            });
                         }))
                         .context_menu(move |menu, _, _| {
                             menu.menu(
@@ -1456,8 +1549,8 @@ mod replica_tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, _| {
-            store.select_session(status.session_id.clone())
+        store.update(cx, |store, cx| {
+            store.select_session(status.session_id.clone(), cx)
         });
         (store, incoming, outgoing, status)
     }
@@ -1528,8 +1621,11 @@ mod replica_tests {
             );
             status.session_id = "other-thread".into();
             status.project_id = Some("project-b".into());
-            store.update(cx, |store, _| {
-                store.select_session(status.session_id.clone())
+            store.update(cx, |store, cx| {
+                store.select_session(status.session_id.clone(), cx)
+            });
+            composer.update(cx, |composer, cx| {
+                composer.set_session(Some(status.session_id.clone()), cx)
             });
             replace(
                 &incoming,
@@ -1560,8 +1656,11 @@ mod replica_tests {
             if is_draft {
                 restored_status.session_id = "reopened-project-draft".into();
             }
-            store.update(cx, |store, _| {
-                store.select_session(restored_status.session_id.clone())
+            store.update(cx, |store, cx| {
+                store.select_session(restored_status.session_id.clone(), cx)
+            });
+            composer.update(cx, |composer, cx| {
+                composer.set_session(Some(restored_status.session_id.clone()), cx)
             });
             replace(
                 &incoming,
@@ -1598,8 +1697,11 @@ mod replica_tests {
                 (status, "Other destination draft，你好"),
                 (restored_status, ""),
             ] {
-                store.update(cx, |store, _| {
-                    store.select_session(destination.session_id.clone())
+                store.update(cx, |store, cx| {
+                    store.select_session(destination.session_id.clone(), cx)
+                });
+                composer.update(cx, |composer, cx| {
+                    composer.set_session(Some(destination.session_id.clone()), cx)
                 });
                 replace(
                     &incoming,

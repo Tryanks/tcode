@@ -79,6 +79,7 @@ pub struct PopupMenu {
     items: Vec<MenuItem>,
     selected: Option<usize>,
     scroll: ScrollHandle,
+    after_choose: Option<AfterChoose>,
 }
 impl FluentBuilder for PopupMenu {}
 
@@ -90,6 +91,7 @@ impl PopupMenu {
             items: Vec::new(),
             selected: None,
             scroll: ScrollHandle::new(),
+            after_choose: None,
         }
     }
     fn build(
@@ -173,6 +175,12 @@ impl PopupMenu {
             disabled: false,
             checked: false,
         });
+        self
+    }
+    /// Run `then` once a chosen row's action has run and the menu has
+    /// handed the focus back to where it opened from.
+    pub fn after_choose(mut self, then: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.after_choose = Some(Rc::new(then));
         self
     }
     pub fn label(mut self, text: impl Into<SharedString>) -> Self {
@@ -263,6 +271,9 @@ impl PopupMenu {
         };
         window.dispatch_action(action.boxed_clone(), cx);
         cx.emit(DismissEvent);
+        if let Some(then) = self.after_choose.clone() {
+            window.defer(cx, move |window, cx| then(window, cx));
+        }
     }
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
@@ -363,13 +374,17 @@ impl Render for PopupMenu {
                     label,
                     icon,
                     render,
-                    action: _,
+                    action,
                     disabled,
                     checked,
                 } => {
                     let selected = self.selected == Some(index);
                     let disabled = *disabled;
                     let content = render.as_ref().map(|render| render(window, cx));
+                    // A touch menu has no keyboard to hint at.
+                    let key = (!self.touch)
+                        .then(|| super::Kbd::binding_for_action(action.as_ref(), None, window))
+                        .flatten();
                     items = items.child(
                         crate::material::menu_item_frame(self.touch, cx)
                             .text_body(self.touch, cx)
@@ -393,7 +408,18 @@ impl Render for PopupMenu {
                                 },
                             ))
                             .when_some(label.clone(), |el, label| el.child(label))
-                            .when_some(content, |el, content| el.child(content)),
+                            .when_some(content, |el, content| el.child(content))
+                            .when_some(key, |el, key| {
+                                el.child(
+                                    div()
+                                        .debug_selector(move || format!("menu-item-{index}-key"))
+                                        .flex_none()
+                                        .ml_auto()
+                                        .pl(cx.theme().tokens.spacing.md)
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(key.appearance(false)),
+                                )
+                            }),
                     );
                 }
             }
@@ -404,6 +430,7 @@ impl Render for PopupMenu {
 
 type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 type ItemRenderer = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+type AfterChoose = Rc<dyn Fn(&mut Window, &mut App)>;
 
 #[derive(Default)]
 struct MenuState {
@@ -428,10 +455,12 @@ where
         .appearance(false)
         .mouse_button(button)
         .overlay_closable(true)
+        // Each opening builds a fresh menu; a closing one keeps its menu, so
+        // the leaving popover draws it again without building or focusing.
         .on_open_change({
             let menu_state = menu_state.clone();
             move |open, _, cx| {
-                if !open {
+                if *open {
                     menu_state.update(cx, |state, _| state.menu = None);
                 }
             }
@@ -463,16 +492,12 @@ where
             menu_state.update(cx, |state, _| state.menu = Some(menu.clone()));
             menu.focus_handle(cx).focus(window, cx);
             // Weak: `menu_state` owns the menu this subscription lives as long
-            // as, so strong captures would keep both alive after the trigger
-            // unmounts, with the popover's deferred registration.
+            // as, so a strong capture would keep the popover state, and its
+            // deferred registration, alive after the trigger unmounts.
             let popover = cx.entity().downgrade();
             window
-                .subscribe(&menu, cx, {
-                    let menu_state = menu_state.downgrade();
-                    move |_, _: &DismissEvent, window, cx| {
-                        let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        let _ = menu_state.update(cx, |state, _| state.menu = None);
-                    }
+                .subscribe(&menu, cx, move |_, _: &DismissEvent, window, cx| {
+                    let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
                 })
                 .detach();
             menu
@@ -523,6 +548,8 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Con
 #[derive(Default)]
 struct ContextMenuState {
     menu: Option<Entity<PopupMenu>>,
+    /// Dismissed, and kept only to be drawn while it leaves.
+    closing: bool,
     position: Point<Pixels>,
     _subscription: Option<Subscription>,
     _deferred: Option<gpui_base::DeferredPopover>,
@@ -533,7 +560,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
 {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let dismissal = crate::overlay::OutsideDismissal::new(self.id.clone(), window, cx);
-        let state = window.use_keyed_state((self.id, "context-menu"), cx, |_, _| {
+        let state = window.use_keyed_state((self.id.clone(), "context-menu"), cx, |_, _| {
             ContextMenuState::default()
         });
         let builder = self.builder;
@@ -571,8 +598,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                         let state = state.downgrade();
                         move |_, _: &DismissEvent, window, cx| {
                             let _ = state.update(cx, |state, _| {
-                                state.menu = None;
-                                state._subscription = None;
+                                state.closing = true;
                                 state._deferred = None;
                             });
                             if menu_focus.contains_focused(window, cx)
@@ -586,6 +612,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                     menu.focus_handle(cx).focus(window, cx);
                     state.update(cx, |state, _| {
                         state.menu = Some(menu);
+                        state.closing = false;
                         state.position = position;
                         state._subscription = Some(subscription);
                         state._deferred = Some(deferred);
@@ -628,11 +655,39 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
             );
         }
         trigger = trigger.child(dismissal.release_listener());
-        let (menu, position) = {
+        let (menu, closing, position) = {
             let state = state.read(cx);
-            (state.menu.clone(), state.position)
+            (state.menu.clone(), state.closing, state.position)
         };
-        if let Some(menu) = menu {
+        // Sampled only while there is a menu, so a mounted trigger with
+        // none asks for no frames.
+        let presence = menu
+            .is_some()
+            .then(|| crate::motion::appear((self.id, "context-menu"), !closing, window, cx));
+        if presence.is_some_and(|presence| !presence.should_render()) {
+            state.update(cx, |state, _| {
+                state.menu = None;
+                state.closing = false;
+                state._subscription = None;
+            });
+        }
+        if let (Some(menu), Some(presence)) = (menu, presence)
+            && presence.should_render()
+        {
+            let progress = presence.progress;
+            let surface = div()
+                .opacity(progress)
+                .top(crate::motion::lift(progress))
+                .child(menu.clone());
+            let surface = if closing {
+                // Above the menu: a leaving menu takes no hover or press.
+                surface.child(div().absolute().inset_0().occlude())
+            } else {
+                surface.on_mouse_down_out(move |_, window, cx| {
+                    dismissal.consume(window, cx);
+                    menu.update(cx, |_, cx| cx.emit(DismissEvent));
+                })
+            };
             // The menu stays a child of the trigger so its actions dispatch
             // through the trigger's ancestor chain, where on_action handlers
             // (on the trigger itself or above it) live.
@@ -643,12 +698,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                         // does not export.
                         .margin(px(8.))
                         .occlude()
-                        .child(div().child(menu.clone()).on_mouse_down_out(
-                            move |_, window, cx| {
-                                dismissal.consume(window, cx);
-                                menu.update(cx, |_, cx| cx.emit(DismissEvent));
-                            },
-                        )),
+                        .child(surface),
                 )
                 .with_priority(gpui_base::POPUP_PRIORITY),
             );
@@ -744,7 +794,11 @@ mod tests {
                 ..Default::default()
             });
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx)
+            });
             cx.debug_bounds("tcode-popup-menu").expect("menu opens")
         };
 
@@ -753,6 +807,11 @@ mod tests {
 
         cx.simulate_keystrokes("escape");
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx)
+        });
         assert!(cx.debug_bounds("tcode-popup-menu").is_none());
 
         let menu = right_click(cx, point(px(380.), px(50.)));

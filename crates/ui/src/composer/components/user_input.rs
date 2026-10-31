@@ -7,7 +7,7 @@ impl Composer {
     pub(in super::super) fn pending_user_input(&self, cx: &App) -> Option<PendingUserInput> {
         self.workspace_store
             .read(cx)
-            .composer_state()
+            .composer_state_for(self.session_id.as_deref())
             .pending_user_input
     }
 
@@ -21,7 +21,7 @@ impl Composer {
         let current = self
             .workspace_store
             .read(cx)
-            .composer_state()
+            .composer_state_for(self.session_id.as_deref())
             .pending_user_input;
         let current_id = current.as_ref().map(|pending| pending.request_id.clone());
         if current_id != self.ui_request_id {
@@ -600,7 +600,11 @@ impl Composer {
         self.ui_selections.clear();
         self.ui_question_index = 0;
         self.workspace_store.update(cx, |store, _cx| {
-            store.respond_user_input(request_id, answers)
+            store.respond_user_input_for(
+                self.session_id.clone().unwrap_or_default(),
+                request_id,
+                answers,
+            )
         });
         cx.notify();
     }
@@ -673,7 +677,7 @@ mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.chat_loading()

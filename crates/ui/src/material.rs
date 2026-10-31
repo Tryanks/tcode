@@ -63,7 +63,10 @@ pub fn canvas(cx: &App) -> Hsla {
 /// Flatten the canvas over fullscreen vibrancy, where its translucent color
 /// would otherwise composite against black.
 pub fn opaque_canvas(cx: &App) -> Hsla {
-    cx.theme().background.opacity(1.)
+    Hsla {
+        a: 1.,
+        ..cx.theme().background
+    }
 }
 
 /// T1 paper: the near-opaque reading plane the chat workspace, right panel and
@@ -666,7 +669,8 @@ pub fn semantic_chip_with_icon(
     chip_surface(bg, fg, cx).child(icon).child(label.into())
 }
 
-fn chip_surface(bg: Hsla, fg: Hsla, cx: &App) -> Div {
+/// A [`semantic_chip`]'s surface, for a label that is not plain text.
+pub fn chip_surface(bg: Hsla, fg: Hsla, cx: &App) -> Div {
     let theme = cx.theme();
     gpui_base::h_flex()
         .flex_none()
@@ -729,6 +733,114 @@ pub(crate) fn focus_ring(cx: &App) -> BoxShadow {
     BoxShadow::new(px(0.), px(0.), ring)
         .spread_radius(px(2.))
         .inset()
+}
+
+/// The outline colour of palette slot `slot`, worn by a pane beside others
+/// and by its thread's row in the threads list.
+///
+/// As drawn, at half alpha over [`content_surface`], an outline contrasts
+/// about 2:1 with it in light (1.95–2.23:1) and 2.7:1 in dark (2.71–2.77:1):
+/// deliberately under the 3:1 asked of non-text, because it is a hint of
+/// which pane is which thread, not a control's boundary. Before alpha every
+/// hue has the same contrast against that surface, 4.5:1 in light and 7:1
+/// in dark, so every outline is as distinct, and as quiet, as the others.
+///
+/// gpui-base's tokens and Tcode's theme have no categorical hues: the
+/// theme's own hues mean the focus ring, danger, warning or success, and
+/// provider colours mean a provider. So the six hues go in the gaps the
+/// active theme's ring, danger, warning and success hues (each background
+/// and foreground) leave on the wheel: the gaps are cut into six cells in
+/// all, handed out so the narrowest cell is as wide as it can be, and each
+/// hue sits at a cell's centre, a cell from the next hue and at least half
+/// a cell from the theme's. Slot 0 takes the hue farthest from the theme's,
+/// each later slot the one farthest from the slots before it, so neighbours
+/// differ. With themes/tcode.json the slots are, in light, 322° 158° 60°
+/// 258° 110° 203° (at least 45° apart and 22° from the theme's hues), and in
+/// dark 292° 110° 182° 61° 340° 245° (47° apart, 23° from the theme's).
+pub(crate) fn pane_colour(slot: usize, cx: &App) -> Hsla {
+    const SATURATION: f32 = 0.75;
+    fn luminance(colour: Hsla) -> f32 {
+        let Rgba { r, g, b, .. } = colour.to_rgb();
+        let linear = |channel: f32| {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+    fn distance(a: f32, b: f32) -> f32 {
+        let turn = (a - b).rem_euclid(1.);
+        turn.min(1. - turn)
+    }
+    let theme = cx.theme();
+    let dark = theme.mode.is_dark();
+    let mut taken = [
+        theme.ring,
+        theme.danger,
+        theme.danger_foreground,
+        theme.warning,
+        theme.warning_foreground,
+        theme.success,
+        theme.success_foreground,
+    ]
+    .map(|colour| colour.h.rem_euclid(1.));
+    taken.sort_by(f32::total_cmp);
+    let gaps: [(f32, f32); 7] = std::array::from_fn(|index| {
+        let next = taken.get(index + 1).copied().unwrap_or(taken[0] + 1.);
+        (taken[index], next - taken[index])
+    });
+    let mut cells = [0_usize; 7];
+    for _ in 0..crate::panes::MAX_PANES {
+        let cell = |index: usize| gaps[index].1 / (cells[index] + 1) as f32;
+        let widest = (0..gaps.len())
+            .max_by(|&a, &b| cell(a).total_cmp(&cell(b)))
+            .unwrap_or_default();
+        cells[widest] += 1;
+    }
+    let mut hues = [0_f32; crate::panes::MAX_PANES];
+    let centres = gaps
+        .iter()
+        .zip(cells)
+        .flat_map(|(&(start, length), count)| {
+            (0..count)
+                .map(move |cell| (start + length * (cell as f32 + 0.5) / count as f32).fract())
+        });
+    for (hue, centre) in hues.iter_mut().zip(centres) {
+        *hue = centre;
+    }
+    let slot = slot % hues.len();
+    for next in 0..=slot {
+        let from = if next == 0 { &taken[..] } else { &hues[..next] };
+        let nearest = |hue: f32| {
+            from.iter()
+                .map(|&other| distance(hue, other))
+                .fold(f32::MAX, f32::min)
+        };
+        let farthest = (next..hues.len())
+            .max_by(|&a, &b| nearest(hues[a]).total_cmp(&nearest(hues[b])))
+            .unwrap_or(next);
+        hues.swap(next, farthest);
+    }
+    let hue = hues[slot];
+    let surface = luminance(content_surface(cx));
+    let target = if dark {
+        7. * (surface + 0.05) - 0.05
+    } else {
+        (surface + 0.05) / 4.5 - 0.05
+    };
+    // Luminance rises with lightness at a fixed hue and saturation.
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..20 {
+        let mid = (low + high) / 2.;
+        if luminance(gpui::hsla(hue, SATURATION, mid, 1.)) < target {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    gpui::hsla(hue, SATURATION, (low + high) / 2., 0.5)
 }
 
 /// Neutral rows shared by unhydrated workspace and conversation views.

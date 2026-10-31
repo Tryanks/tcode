@@ -14,6 +14,7 @@ pub(crate) enum NavigateThread {
 
 pub(crate) fn init(cx: &mut App) {
     cx.on_action(crate::shell::navigate_thread);
+    crate::shell::init_pane_actions(cx);
     // With nothing focused the shell's own Undo listener is off the dispatch path.
     cx.on_action(crate::shell::undo_thread_action);
     let bindings = [
@@ -59,11 +60,28 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("ctrl-tab", NavigateThread::Next, None),
         KeyBinding::new("ctrl-shift-tab", NavigateThread::Previous, None),
     ]);
+    // Later than gpui-base's editor bindings, so these win inside a text
+    // field too, where they shadow only its add-cursor keys on macOS and
+    // Windows (`secondary-alt-up`/`-down`).
+    let panes = pane_bindings(cx);
     // Bindings dispatch before key-down listeners, and the terminal forwards
     // raw keystrokes (Tab, Ctrl-C as an interrupt) from its listener, so the
     // window root's focus traversal and selection copy must not claim them.
     let terminal = Some(crate::terminal_drawer::CONTEXT);
     let undo = secondary("secondary-z", NoAction, terminal, cx);
+    // A terminal reads every pane key itself (Ctrl-D is EOF, Alt-arrows move
+    // by word), so none is a binding while it has the keyboard.
+    let blanks: Vec<_> = panes
+        .iter()
+        .map(|(key, _)| secondary(key, NoAction, terminal, cx))
+        .collect();
+    cx.bind_keys(panes.into_iter().map(|(_, binding)| binding));
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        crate::panes::ClosePane,
+        Some(crate::panes::WAITING_CONTEXT),
+    )]);
+    cx.bind_keys(blanks);
     cx.bind_keys([
         undo,
         KeyBinding::new("tab", NoAction, terminal),
@@ -88,6 +106,67 @@ pub(crate) fn secondary<A: Action>(
     });
     KeyBinding::load(keystrokes, Box::new(action), context, false, None, cx)
         .expect("valid keystroke")
+}
+
+/// The chat column's pane commands with their keys. Alt with the secondary
+/// modifier moves the keyboard, with Shift too it swaps, and with a digit it
+/// picks a layout: 1–4 by pane count, 5 spreads the agents. Moving a thread
+/// takes Control-Command on a Mac; elsewhere the secondary modifier is
+/// Control, where Control-arrows move by word and Control-Alt is focus, so it
+/// takes Alt alone, which gpui-base's text fields leave unbound there. AltGr
+/// typing still reaches a text field: GPUI prefers the character AltGr makes
+/// over a binding.
+///
+/// GNOME keeps Control-Alt-Left/Right (switch workspace) and
+/// Control-Alt-Shift-Left/Right (move the window to a workspace) for itself,
+/// so there focusing left or right is reached only by next/previous or from
+/// the palette, and a left or right swap loses its key, though Alt-Left/Right
+/// (move the thread) makes the same exchange, the keyboard following the
+/// thread.
+fn pane_bindings(cx: &App) -> Vec<(&'static str, KeyBinding)> {
+    use crate::panes::{
+        CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, PaneLayout, Side, SplitDown,
+        SplitRight, SwapPane, ZoomPane,
+    };
+    fn bind(key: &'static str, action: impl Action, cx: &App) -> (&'static str, KeyBinding) {
+        (key, secondary(key, action, None, cx))
+    }
+    let [move_left, move_right, move_up, move_down] = if cx.platform_info().is_mac() {
+        [
+            "secondary-ctrl-left",
+            "secondary-ctrl-right",
+            "secondary-ctrl-up",
+            "secondary-ctrl-down",
+        ]
+    } else {
+        ["alt-left", "alt-right", "alt-up", "alt-down"]
+    };
+    vec![
+        bind("secondary-d", SplitRight, cx),
+        bind("secondary-shift-d", SplitDown, cx),
+        bind("secondary-shift-w", ClosePane, cx),
+        bind("secondary-alt-w", CloseOtherPanes, cx),
+        bind("secondary-shift-enter", ZoomPane, cx),
+        bind("secondary-alt-left", FocusPane::Left, cx),
+        bind("secondary-alt-right", FocusPane::Right, cx),
+        bind("secondary-alt-up", FocusPane::Up, cx),
+        bind("secondary-alt-down", FocusPane::Down, cx),
+        bind("secondary-alt-]", FocusPane::Next, cx),
+        bind("secondary-alt-[", FocusPane::Previous, cx),
+        bind("secondary-alt-shift-left", SwapPane(Side::Left), cx),
+        bind("secondary-alt-shift-right", SwapPane(Side::Right), cx),
+        bind("secondary-alt-shift-up", SwapPane(Side::Up), cx),
+        bind("secondary-alt-shift-down", SwapPane(Side::Down), cx),
+        bind(move_left, MoveThreadToPane(Side::Left), cx),
+        bind(move_right, MoveThreadToPane(Side::Right), cx),
+        bind(move_up, MoveThreadToPane(Side::Up), cx),
+        bind(move_down, MoveThreadToPane(Side::Down), cx),
+        bind("secondary-alt-1", PaneLayout::Single, cx),
+        bind("secondary-alt-2", PaneLayout::Columns, cx),
+        bind("secondary-alt-3", PaneLayout::OneBesideTwo, cx),
+        bind("secondary-alt-4", PaneLayout::Grid, cx),
+        bind("secondary-alt-5", PaneLayout::SpreadAgents, cx),
+    ]
 }
 
 /// Format a shortcut using GPUI's semantic secondary modifier.

@@ -538,7 +538,7 @@ mod tests {
         crate::store::tests::seed_full_scope(&store, &replies, Vec::new(), cx);
         store.update(cx, |store, _| {
             // Keep navigation out of this cache test when its Index baseline arrives.
-            store.selected_session_id = Some("selected".into());
+            store.focus_thread_for_test("selected", None);
         });
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {

@@ -604,7 +604,7 @@ impl RowAnchor {
     }
 }
 
-fn reconcile_rows(state: &ListState, old: &[DiffListItem], new: &[DiffListItem]) {
+pub(crate) fn reconcile_rows<T: PartialEq>(state: &ListState, old: &[T], new: &[T]) {
     let prefix = old
         .iter()
         .zip(new)
@@ -881,8 +881,19 @@ fn render_gap<H: DiffListHost>(
     match host.gap_state(file_index, expandable) {
         GapState::Expandable => {}
         GapState::Loading => {
+            // The Loading line fades in where the expand controls were clicked.
+            let id = gpui::SharedString::from(format!(
+                "diff-gap-loading-{file_index}-{}",
+                new_lines.start
+            ));
             return row
-                .child(crate::tr!("pull_requests.files.loading_lines"))
+                .child(crate::motion::Sampled::new(move |window, cx| {
+                    let shown = crate::motion::appear(id, true, window, cx).progress;
+                    div()
+                        .opacity(shown)
+                        .child(crate::tr!("pull_requests.files.loading_lines"))
+                        .into_any_element()
+                }))
                 .into_any_element();
         }
         GapState::Fixed(reason) => {

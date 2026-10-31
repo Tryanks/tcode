@@ -51,13 +51,19 @@ impl Composer {
         };
         // The refused prompt is the last user message of this session; the
         // rewind path additionally needs its turn to have a provider checkpoint.
-        let refused = self.workspace_store.read(cx).last_user_message();
+        let refused = self
+            .workspace_store
+            .read(cx)
+            .last_user_message_for(self.session_id.as_deref());
         let can_rewind = refused.as_ref().is_some_and(|(turn, _)| {
-            self.workspace_store.read(cx).absolute_turn(*turn) > 0
+            self.workspace_store
+                .read(cx)
+                .absolute_turn_for(self.session_id.as_deref(), *turn)
+                > 0
                 && self
                     .workspace_store
                     .read(cx)
-                    .chat_native_rewind_state(*turn)
+                    .chat_native_rewind_state_for(self.session_id.as_deref(), *turn)
                     .is_some_and(|(available, disabled)| available && !disabled)
         });
 
@@ -75,8 +81,9 @@ impl Composer {
                     .icon(IconName::Close)
                     .aria_label(crate::tr!("fallback.dismiss"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_store
-                            .update(cx, |store, _cx| store.dismiss_fallback_block());
+                        this.workspace_store.update(cx, |store, _cx| {
+                            store.dismiss_fallback_block_for(this.session_id.as_deref())
+                        });
                         cx.notify();
                     })),
             );
@@ -97,8 +104,12 @@ impl Composer {
                         .label(crate::tr!("fallback.edit_retry"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
-                                store.rewind_turn(turn, RewindMode::Conversation);
-                                store.dismiss_fallback_block();
+                                store.rewind_turn_for(
+                                    this.session_id.clone().unwrap_or_default(),
+                                    turn,
+                                    RewindMode::Conversation,
+                                );
+                                store.dismiss_fallback_block_for(this.session_id.as_deref());
                             });
                             cx.notify();
                         })),
@@ -112,12 +123,13 @@ impl Composer {
                         .label(crate::tr!("fallback.retry_on", model = model.clone()))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
-                                store.set_active_model(
+                                store.set_active_model_for(
+                                    this.session_id.clone().unwrap_or_default(),
                                     ProviderKind::ClaudeCode,
                                     Some(model.clone()),
                                     None,
                                 );
-                                store.dismiss_fallback_block();
+                                store.dismiss_fallback_block_for(this.session_id.as_deref());
                             });
                             this.set_input_text(text.clone(), window, cx);
                         })),
@@ -150,7 +162,7 @@ impl Composer {
         let draft = self
             .workspace_store
             .read(cx)
-            .active_fallback_review()
+            .fallback_review_for(self.session_id.as_deref())
             .map(|review| review.draft.clone());
         if self.fallback_review_seeded == draft {
             return;
@@ -187,8 +199,9 @@ impl Composer {
                     .icon(IconName::Close)
                     .aria_label(crate::tr!("fallback.dismiss"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_store
-                            .update(cx, |store, _cx| store.dismiss_fallback_review());
+                        this.workspace_store.update(cx, |store, _cx| {
+                            store.dismiss_fallback_review_for(this.session_id.as_deref())
+                        });
                         cx.notify();
                     })),
             );
@@ -229,8 +242,12 @@ impl Composer {
                             return;
                         }
                         this.workspace_store.update(cx, |store, _cx| {
-                            store.send_turn(text, Vec::new());
-                            store.dismiss_fallback_review();
+                            store.send_turn_for(
+                                this.session_id.clone().unwrap_or_default(),
+                                text,
+                                Vec::new(),
+                            );
+                            store.dismiss_fallback_review_for(this.session_id.as_deref());
                         });
                         input.update(cx, |state, cx| state.set_value(String::new(), window, cx));
                         this.fallback_review_seeded = None;

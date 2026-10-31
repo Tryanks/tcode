@@ -305,8 +305,17 @@ impl PullRequestView {
                             cx,
                         ))
                     })
-                    .child(name)
-                    .child(Icon::new(icon).text_color(color))
+                    .child(name.clone())
+                    // A review recolours the reviewer's verdict where it stands.
+                    .child(crate::motion::Sampled::new(move |window, cx| {
+                        crate::motion::status_icon(
+                            SharedString::from(format!("pr-reviewer-verdict-{name}")),
+                            icon,
+                            color,
+                            window,
+                            cx,
+                        )
+                    }))
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .into_any_element()
             })
@@ -441,11 +450,23 @@ impl PullRequestView {
             popover
         };
         popover
-            .content(move |_, _, cx| Self::picker_body(&view, cx))
+            .content(move |_, window, cx| Self::picker_body(&view, window, cx))
             .into_any_element()
     }
 
-    fn picker_body(view: &Entity<Self>, cx: &mut App) -> AnyElement {
+    fn picker_body(view: &Entity<Self>, window: &mut Window, cx: &mut App) -> AnyElement {
+        let loading = view
+            .read(cx)
+            .picker()
+            .is_some_and(|picker| picker.rows.is_none() && picker.error.is_none());
+        // The rows, or what the host said instead, cross-fade over the loading line.
+        let spinning = gpui_base::motion::transition(
+            "pr-picker-loading",
+            if loading { 1. } else { 0. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
         let this = view.read(cx);
         let compact = this.compact(cx);
         let host_name = this.host_name(cx);
@@ -466,15 +487,7 @@ impl PullRequestView {
                         .into_owned(),
                 )
                 .into_any_element(),
-            (None, None) => h_flex()
-                .px_2()
-                .h(row_height)
-                .gap_2()
-                .items_center()
-                .text_secondary(compact, cx)
-                .child(Spinner::new())
-                .child(crate::tr!("pull_requests.meta.loading"))
-                .into_any_element(),
+            (None, None) => loading_line(row_height, compact, cx).into_any_element(),
             (Some(rows), None) if rows.is_empty() => material::empty_row(
                 crate::tr!(match kind {
                     PickerKind::Labels => "pull_requests.meta.labels_empty",
@@ -564,7 +577,25 @@ impl PullRequestView {
             .gap_1()
             .font_family(cx.theme().font_family.clone())
             .child(div().p_1().child(Input::new(&picker.filter)))
-            .child(body)
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        div()
+                            .opacity(if loading { 1. } else { 1. - spinning })
+                            .child(body),
+                    )
+                    .when(!loading && spinning > 0., |slot| {
+                        slot.child(
+                            loading_line(row_height, compact, cx)
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .opacity(spinning),
+                        )
+                    }),
+            )
             .when(!picker.complete, |body| {
                 body.child(div().px_2().text_secondary(compact, cx).child(crate::tr!(
                     match kind {
@@ -649,4 +680,16 @@ fn reviewer_rows(reviewers: PullRequestReviewerCandidates) -> Vec<Row> {
             reviewer: Some(candidate.reviewer),
         })
         .collect()
+}
+
+/// The picker's line while the host's choices are read.
+fn loading_line(height: gpui::Pixels, compact: bool, cx: &App) -> gpui::Div {
+    h_flex()
+        .px_2()
+        .h(height)
+        .gap_2()
+        .items_center()
+        .text_secondary(compact, cx)
+        .child(Spinner::new())
+        .child(crate::tr!("pull_requests.meta.loading"))
 }

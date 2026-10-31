@@ -226,23 +226,17 @@ impl WorkspaceStore {
         }
     }
 
-    pub(super) fn clear_terminal_topics(&mut self) {
-        for id in self.terminals.keys() {
-            let _ = self.host.unsubscribe(Subscription {
-                known_index: None,
-                topic: Topic::Terminal { terminal_id: *id },
-                after: None,
-            });
-        }
-        self.terminals.clear();
-    }
-
+    /// Replicate the terminals of every open thread and no other.
     pub(super) fn sync_terminal_topics(&mut self) {
-        let ids: Vec<_> = self
-            .session_status_replica
-            .as_ref()
-            .map(|status| status.terminals.iter().map(|entry| entry.id).collect())
-            .unwrap_or_default();
+        let entries: Vec<_> = self
+            .threads
+            .values()
+            .filter(|thread| thread.open)
+            .filter_map(|thread| thread.status.as_ref())
+            .flat_map(|status| status.terminals.iter())
+            .map(|entry| (entry.id, entry.title.clone()))
+            .collect();
+        let ids: Vec<_> = entries.iter().map(|(id, _)| *id).collect();
         self.terminals.retain(|id, _| {
             if ids.contains(id) {
                 return true;
@@ -254,11 +248,9 @@ impl WorkspaceStore {
             });
             false
         });
-        if let Some(status) = &self.session_status_replica {
-            for entry in &status.terminals {
-                if let Some(terminal) = self.terminals.get(&entry.id) {
-                    terminal.model_mut().set_fallback_title(entry.title.clone());
-                }
+        for (id, title) in entries {
+            if let Some(terminal) = self.terminals.get(&id) {
+                terminal.model_mut().set_fallback_title(title);
             }
         }
         for id in ids {

@@ -71,7 +71,11 @@ impl Composer {
         crate::store::ComposerQueue,
         Vec<tcode_protocol::QueuedMessageStatus>,
     )> {
-        let mut queue = self.workspace_store.read(cx).composer_state().queue?;
+        let mut queue = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref())
+            .queue?;
         let deliveries = self.workspace_store.read(cx).delivery_messages();
         let rows = std::mem::take(&mut queue.messages)
             .into_iter()
@@ -198,8 +202,10 @@ impl Composer {
         };
         cx.notify();
         if drag.before != drag.origin {
-            self.workspace_store
-                .update(cx, |store, _cx| store.move_queued(drag.id, drag.before));
+            let session_id = self.session_id.clone().unwrap_or_default();
+            self.workspace_store.update(cx, |store, _cx| {
+                store.move_queued_for(session_id, drag.id, drag.before)
+            });
         }
     }
 
@@ -369,8 +375,12 @@ impl Composer {
                             )
                             .tooltip(steer_tooltip)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.workspace_store
-                                    .update(cx, |store, _cx| store.steer_queued(id));
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.steer_queued_for(
+                                        this.session_id.clone().unwrap_or_default(),
+                                        id,
+                                    )
+                                });
                             })),
                     )
                     .child(

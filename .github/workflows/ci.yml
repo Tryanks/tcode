@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   # Pull requests opened with GITHUB_TOKEN start no pull_request run; the
   # agent-version workflow dispatches one instead.
   workflow_dispatch:
@@ -28,6 +29,7 @@ jobs:
   # required check must wait for that platform's Clippy and tests alone.
   linux-clippy:
     name: Linux x64 / clippy
+    if: !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps: &clippy-steps
@@ -123,6 +125,7 @@ jobs:
 
   linux-tests:
     name: Linux x64 / tests
+    if: !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps: &test-steps
@@ -178,24 +181,28 @@ jobs:
 
   macos-clippy:
     name: macOS arm64 / clippy
+    if: !github.event.pull_request.draft
     runs-on: macos-26
     timeout-minutes: 60
     steps: *clippy-steps
 
   macos-tests:
     name: macOS arm64 / tests
+    if: !github.event.pull_request.draft
     runs-on: macos-26
     timeout-minutes: 60
     steps: *test-steps
 
   windows-clippy:
     name: Windows x64 / clippy
+    if: !github.event.pull_request.draft
     runs-on: windows-2022
     timeout-minutes: 60
     steps: *clippy-steps
 
   windows-tests:
     name: Windows x64 / tests
+    if: !github.event.pull_request.draft
     runs-on: windows-2022
     timeout-minutes: 60
     steps: *test-steps
@@ -204,8 +211,9 @@ jobs:
   # must not let its platform's check pass.
   linux:
     name: Linux x64
+    if: !github.event.pull_request.draft
     needs: [linux-clippy, linux-tests]
-    if: always()
+    if: always() && !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: &require-platform
@@ -216,22 +224,25 @@ jobs:
 
   macos:
     name: macOS arm64
+    if: !github.event.pull_request.draft
     needs: [macos-clippy, macos-tests]
-    if: always()
+    if: always() && !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: *require-platform
 
   windows:
     name: Windows x64
+    if: !github.event.pull_request.draft
     needs: [windows-clippy, windows-tests]
-    if: always()
+    if: always() && !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps: *require-platform
 
   dependencies:
     name: Dependency hygiene
+    if: !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -247,6 +258,7 @@ jobs:
 
   ios:
     name: iOS
+    if: !github.event.pull_request.draft
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -270,6 +282,7 @@ jobs:
 
   android:
     name: Android
+    if: !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -316,6 +329,7 @@ jobs:
 
   web:
     name: Web
+    if: !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:

@@ -1,4 +1,4 @@
-//! Command output screens the host renders and pushes for the selected thread.
+//! Command output screens the host renders and pushes for an open thread.
 
 use std::rc::Rc;
 
@@ -27,38 +27,51 @@ impl CommandOutputReplica {
 }
 
 impl WorkspaceStore {
-    pub(crate) fn command_output(&self, item_id: &str) -> Option<&CommandOutputReplica> {
-        self.command_outputs.get(item_id)
+    pub(crate) fn command_output_for(
+        &self,
+        session_id: Option<&str>,
+        item_id: &str,
+    ) -> Option<&CommandOutputReplica> {
+        self.thread(session_id)?.command_outputs.get(item_id)
     }
 
-    /// Hold `item_id`'s output at `cols` on the selected thread. The host
+    /// Hold `item_id`'s output at `cols` on the open thread. The host
     /// answers once, then pushes again while the output grows.
-    pub(crate) fn watch_command_output(&mut self, item_id: &str, cols: u16) {
-        let Some(session_id) = self.selected_session_id.clone() else {
+    pub(crate) fn watch_command_output_for(
+        &mut self,
+        session_id: Option<&str>,
+        item_id: &str,
+        cols: u16,
+    ) {
+        let Some(session_id) = session_id else {
             return;
         };
-        let replica = self.command_outputs.entry(item_id.to_owned()).or_default();
+        let host = self.host.clone();
+        let Some(thread) = self.open_thread_mut(session_id) else {
+            return;
+        };
+        let replica = thread
+            .command_outputs
+            .entry(item_id.to_owned())
+            .or_default();
         if replica.watched == Some(cols) {
             return;
         }
         let previous = replica.watched.replace(cols);
         if let Some(previous) = previous {
-            let _ =
-                self.host
-                    .unsubscribe(command_output_subscription(&session_id, item_id, previous));
+            let _ = host.unsubscribe(command_output_subscription(session_id, item_id, previous));
         }
-        let _ = self
-            .host
-            .subscribe(command_output_subscription(&session_id, item_id, cols));
+        let _ = host.subscribe(command_output_subscription(session_id, item_id, cols));
     }
 
-    pub(crate) fn unwatch_command_output(&mut self, item_id: &str) {
-        let Some(session_id) = self.selected_session_id.as_deref() else {
+    pub(crate) fn unwatch_command_output_for(&mut self, session_id: Option<&str>, item_id: &str) {
+        let Some(session_id) = session_id else {
             return;
         };
         let Some(cols) = self
-            .command_outputs
-            .get_mut(item_id)
+            .threads
+            .get_mut(session_id)
+            .and_then(|thread| thread.command_outputs.get_mut(item_id))
             .and_then(|replica| replica.watched.take())
         else {
             return;
@@ -68,12 +81,12 @@ impl WorkspaceStore {
             .unsubscribe(command_output_subscription(session_id, item_id, cols));
     }
 
-    pub(super) fn clear_command_outputs(&mut self) {
-        let outputs = std::mem::take(&mut self.command_outputs);
-        let Some(session_id) = self.selected_session_id.as_deref() else {
+    /// Release the thread's outputs when it closes.
+    pub(super) fn clear_command_outputs(&mut self, session_id: &str) {
+        let Some(thread) = self.threads.get_mut(session_id) else {
             return;
         };
-        for (item_id, replica) in outputs {
+        for (item_id, replica) in std::mem::take(&mut thread.command_outputs) {
             if let Some(cols) = replica.watched {
                 let _ = self
                     .host
@@ -89,10 +102,10 @@ impl WorkspaceStore {
         cols: u16,
         frame: &TerminalFrame,
     ) {
-        if self.selected_session_id.as_deref() != Some(session_id) {
+        let Some(thread) = self.open_thread_mut(session_id) else {
             return;
-        }
-        if let Some(replica) = self
+        };
+        if let Some(replica) = thread
             .command_outputs
             .get_mut(item_id)
             .filter(|replica| replica.watched == Some(cols))

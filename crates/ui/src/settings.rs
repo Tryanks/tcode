@@ -28,18 +28,18 @@ impl Drop for TestLocaleGuard {
     }
 }
 
-/// Draws the window in Simplified Chinese, switches to English with the two
-/// calls the Settings language row makes, and checks that `shown` read `key`
-/// in each language. The caller holds a [`TestLocaleGuard`] and builds what it
-/// tests while Simplified Chinese is current, as a restart into it would.
+/// Switches the window to Simplified Chinese and then to English, each with
+/// the two calls the Settings language row makes, and checks that `shown`
+/// read `key` in each language. The caller holds a [`TestLocaleGuard`].
 #[cfg(test)]
 pub(crate) fn assert_follows_language_switch(
     cx: &mut gpui::VisualTestContext,
     key: &str,
     shown: impl Fn(&mut gpui::VisualTestContext) -> String,
 ) {
-    apply_locale(Some(LANGUAGE_SIMPLIFIED_CHINESE));
     cx.update(|window, cx| {
+        apply_locale(Some(LANGUAGE_SIMPLIFIED_CHINESE));
+        window.refresh();
         _ = window.draw(cx);
     });
     let chinese = crate::tr!(key).into_owned();

@@ -47,17 +47,39 @@ impl LoadError {
 #[cfg(not(target_os = "android"))]
 thread_local! {
     static LAST: RefCell<HashMap<usize, LoadError>> = RefCell::new(HashMap::new());
+    /// The native callbacks run outside any GPUI update, so a change reaches the
+    /// views showing it only through these.
+    static WATCHERS: RefCell<Vec<async_channel::Sender<()>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Wakes on every change to a recorded failure.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn watch() -> async_channel::Receiver<()> {
+    let (tx, rx) = async_channel::bounded(1);
+    WATCHERS.with_borrow_mut(|watchers| watchers.push(tx));
+    rx
+}
+
+#[cfg(not(target_os = "android"))]
+fn changed() {
+    WATCHERS.with_borrow_mut(|watchers| {
+        watchers
+            .retain(|tx| !matches!(tx.try_send(()), Err(async_channel::TrySendError::Closed(_))))
+    });
 }
 
 #[cfg(not(target_os = "android"))]
 fn clear(webview: usize) {
-    LAST.with_borrow_mut(|last| last.remove(&webview));
+    if LAST.with_borrow_mut(|last| last.remove(&webview)).is_some() {
+        changed();
+    }
 }
 
 #[cfg(not(target_os = "android"))]
 fn record(webview: usize, error: LoadError) {
     log::info!("preview: {}", error.describe());
     LAST.with_borrow_mut(|last| last.insert(webview, error));
+    changed();
 }
 
 /// Start reporting failed navigations for a freshly created webview.

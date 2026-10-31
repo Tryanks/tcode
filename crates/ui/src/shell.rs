@@ -49,6 +49,10 @@ use crate::chat::ChatView;
 use crate::diff::DiffPanel;
 use crate::icon::{Icon, IconName};
 use crate::palette::CommandPalette;
+use crate::panes::{
+    CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, OpenInNewPane, PaneLayout, Side,
+    SplitDown, SplitRight, SwapPane, ThreadPanel, ZoomPane,
+};
 use crate::preview_panel::PreviewPanel;
 #[cfg(preview_backend)]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
@@ -63,6 +67,7 @@ use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
 use crate::window_state::{Destination, OpenPanel, OpenThread, Route, WindowState};
+use gpui_base::dock::{DockArea, DockEvent, DockLayout, DockPlacement, InsertTarget, PanelId};
 
 actions!(tcode, [Quit, TogglePalette]);
 
@@ -172,7 +177,22 @@ impl Render for DestinationView {
 struct ShellAttachment {
     link: Attachment,
     sidebar: Entity<SessionsSidebar>,
-    chat: Entity<ChatView>,
+    /// The wide layout's chat column, a dock of [`ThreadPanel`]s.
+    thread_panes: Entity<DockArea>,
+    /// The column's splits gliding toward the layout an edit made.
+    glides: crate::panes::Glides,
+    /// The pane zoomed over the column.
+    zoom: crate::panes::Zoom,
+    /// A layout being put in while the column fades.
+    scene: crate::panes::Scene,
+    /// Set by the panes' renderer in a frame that draws a split's handle
+    /// held by the pointer: the handle's axis and where the pointer was.
+    split_handle_held: crate::panes::HandleHeld,
+    /// The split whose handle the pointer holds, found as the hold began.
+    held_split: Option<gpui_base::dock::NodeId>,
+    /// The pane showing the store's focused thread, or waiting for it; the
+    /// compact layout's conversation is its chat.
+    focused_pane: Entity<ThreadPanel>,
     diff: Entity<DiffPanel>,
     preview: Entity<PreviewPanel>,
     settings_page: Entity<SettingsPage>,
@@ -212,6 +232,263 @@ struct ShellAttachment {
     stamped: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+impl ShellAttachment {
+    /// The chat column's panes, in the layout's order. A closing pane is no
+    /// longer one of them: nothing acts on it, focuses it or counts it.
+    fn panes(&self, cx: &App) -> Vec<Entity<ThreadPanel>> {
+        self.all_panes(cx)
+            .into_iter()
+            .filter(|pane| !pane.read(cx).is_closing())
+            .collect()
+    }
+
+    /// Every pane the dock draws, closing ones too, in the layout's order.
+    fn all_panes(&self, cx: &App) -> Vec<Entity<ThreadPanel>> {
+        let area = self.thread_panes.read(cx);
+        area.layout(DockPlacement::Center)
+            .map(|tree| {
+                tree.panels()
+                    .filter_map(|panel| area.panel(panel)?.view().downcast::<ThreadPanel>().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The closing panes whose split has stopped gliding, for the shell to
+    /// take out.
+    fn closed_panes(&self, cx: &App) -> Vec<Entity<ThreadPanel>> {
+        let Some(tree) = self.thread_panes.read(cx).layout(DockPlacement::Center) else {
+            return Vec::new();
+        };
+        self.all_panes(cx)
+            .into_iter()
+            .filter(|pane| {
+                pane.read(cx).is_closing()
+                    && tree
+                        .find_panel_node(PanelId::from(pane.entity_id()))
+                        .and_then(|group| crate::panes::parent_split(tree.root(), group))
+                        .is_none_or(|split| !self.glides.gliding(split))
+            })
+            .collect()
+    }
+
+    /// The layout once every closing pane has gone.
+    fn final_layout(&self, cx: &App) -> Option<gpui_base::dock::PaneTree> {
+        let mut tree = self
+            .thread_panes
+            .read(cx)
+            .layout(DockPlacement::Center)?
+            .clone();
+        for pane in self.all_panes(cx) {
+            if pane.read(cx).is_closing() {
+                tree.remove_panel(PanelId::from(pane.entity_id()));
+            }
+        }
+        Some(tree)
+    }
+
+    /// The focused pane's conversation.
+    fn chat(&self, cx: &App) -> Entity<ChatView> {
+        self.focused_pane.read(cx).chat()
+    }
+}
+
+/// Which pane commands the window offers now; none in the compact layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PaneControls {
+    pub(crate) split_right: bool,
+    pub(crate) split_down: bool,
+    pub(crate) close: bool,
+    pub(crate) close_others: bool,
+    pub(crate) zoom: bool,
+    pub(crate) zoomed: bool,
+    /// The sides, in [`Side::ALL`]'s order, with a pane to swap with.
+    pub(crate) neighbours: [bool; 4],
+    /// Whether the pane shows a thread to move into a neighbour.
+    pub(crate) moves: bool,
+}
+
+impl PaneControls {
+    /// The sides with a pane to swap with.
+    pub(crate) fn sides(self) -> impl Iterator<Item = Side> {
+        Side::ALL
+            .into_iter()
+            .zip(self.neighbours)
+            .filter_map(|(side, beside)| beside.then_some(side))
+    }
+}
+
+/// This window's [`PaneControls`] for the pane showing `session_id`, or the
+/// focused pane; `None` where there are no panes.
+pub(crate) fn pane_controls(
+    session_id: Option<&str>,
+    window: &Window,
+    cx: &App,
+) -> Option<PaneControls> {
+    let shell = current_shell(cx)?;
+    let shell = shell.read(cx);
+    if shell.compact(cx) {
+        return None;
+    }
+    let attachment = shell.attachment.as_ref()?;
+    let panes = attachment.panes(cx);
+    let pane = session_id
+        .and_then(|session_id| {
+            panes
+                .iter()
+                .find(|pane| pane.read(cx).session_id() == Some(session_id))
+        })
+        .unwrap_or(&attachment.focused_pane);
+    let closable = pane
+        .read(cx)
+        .group()
+        .is_some_and(|group| group.read(cx).is_closable(cx));
+    let zoomed = attachment.zoom.is_zoomed();
+    let split = |placement| shell.split_allowed(pane, placement, window, cx);
+    // The panes beneath a zoomed one, or one on its way back to its slot,
+    // are covered, so it has no neighbours.
+    let covered = attachment.zoom.pane().is_some();
+    let neighbours = Side::ALL.map(|side| !covered && shell.neighbour_of(pane, side, cx).is_some());
+    Some(PaneControls {
+        split_right: split(gpui_base::Placement::Right),
+        split_down: split(gpui_base::Placement::Bottom),
+        close: panes.len() > 1 && (closable || zoomed),
+        close_others: panes.len() > 1,
+        zoom: panes.len() > 1,
+        zoomed,
+        neighbours,
+        moves: pane.read(cx).session_id().is_some(),
+    })
+}
+
+/// Give the keyboard to the focused pane, as a click in it does: its
+/// composer takes the caret. A pane command raised from outside the panes
+/// then acts on that pane and leaves the keyboard there.
+pub(crate) fn focus_focused_pane(window: &mut Window, cx: &mut App) {
+    let Some(shell) = current_shell(cx) else {
+        return;
+    };
+    let shell = shell.read(cx);
+    if shell.compact(cx) {
+        return;
+    }
+    let Some(handle) = shell
+        .attachment
+        .as_ref()
+        .map(|attachment| attachment.focused_pane.focus_handle(cx))
+    else {
+        return;
+    };
+    if !handle.contains_focused(window, cx) {
+        window.focus(&handle, cx);
+    }
+}
+
+/// Give the keyboard to the composer of the pane holding it, as a row of a
+/// pane header's menu leaves it: off the menu's button, as a pane command
+/// from the palette leaves it. Focus a row sent out of the panes stays there.
+pub(crate) fn focus_pane_composer(window: &mut Window, cx: &mut App) {
+    let Some(shell) = current_shell(cx) else {
+        return;
+    };
+    let shell = shell.read(cx);
+    if shell.compact(cx) {
+        return;
+    }
+    let Some(chat) = shell.attachment.as_ref().and_then(|attachment| {
+        let pane = attachment
+            .panes(cx)
+            .into_iter()
+            .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))?;
+        let pane = pane.read(cx);
+        pane.session_id().is_some().then(|| pane.chat())
+    }) else {
+        return;
+    };
+    chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
+}
+
+/// The layouts the palette offers now: those the column has room for.
+pub(crate) fn pane_layouts(window: &Window, cx: &App) -> Vec<PaneLayout> {
+    let Some(shell) = current_shell(cx) else {
+        return Vec::new();
+    };
+    let shell = shell.read(cx);
+    PaneLayout::ALL
+        .into_iter()
+        .filter(|layout| shell.plan_layout(*layout, window, cx).is_some())
+        .collect()
+}
+
+/// Whether a pane of this window shows `session_id`. The compact layout has
+/// no panes.
+pub(crate) fn shown_in_pane(session_id: &str, cx: &App) -> bool {
+    current_shell(cx).is_some_and(|shell| {
+        let shell = shell.read(cx);
+        !shell.compact(cx) && shell.pane_showing(session_id, cx).is_some()
+    })
+}
+
+/// The outline colour of the pane of this window showing `session_id`,
+/// while the column shows more than one pane: none in a single or zoomed
+/// pane, nor in the compact layout.
+pub(crate) fn pane_colour(session_id: &str, cx: &App) -> Option<gpui::Hsla> {
+    let shell = current_shell(cx)?;
+    let shell = shell.read(cx);
+    let attachment = shell.attachment.as_ref()?;
+    if shell.compact(cx) || attachment.zoom.is_zoomed() {
+        return None;
+    }
+    let panes = attachment.panes(cx);
+    if panes.len() < 2 {
+        return None;
+    }
+    let slot = panes
+        .iter()
+        .find(|pane| pane.read(cx).session_id() == Some(session_id))?
+        .read(cx)
+        .colour()?;
+    Some(crate::material::pane_colour(slot, cx))
+}
+
+/// Show a thread reached from `parent` in a pane beside `parent`'s, or the
+/// focused pane's: to its right, or below it where only that has room. False
+/// where no pane shows it then: the compact layout, or no room.
+pub(crate) fn show_beside(
+    session_id: &str,
+    parent: Option<&str>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(shell) = current_shell(cx) else {
+        return false;
+    };
+    shell.update(cx, |shell, cx| {
+        let Some(from) = parent
+            .and_then(|parent| shell.pane_showing(parent, cx))
+            .or_else(|| shell.acting_pane(window, cx))
+        else {
+            return false;
+        };
+        shell.open_in_new_pane(
+            session_id.to_owned(),
+            &from,
+            &[gpui_base::Placement::Right, gpui_base::Placement::Bottom],
+            window,
+            cx,
+        )
+    })
+}
+
+/// What fills one panel of a layout about to be installed.
+#[derive(Clone)]
+enum Slot {
+    Pane(Entity<ThreadPanel>),
+    /// A new pane showing this thread.
+    Thread(String),
+    Waiting,
 }
 
 /// What bootstrap tells the shell that is not the window itself.
@@ -304,14 +581,15 @@ const RIGHT_PANEL_WIDTH: f32 = 560.;
 /// The panel's narrowest: the icon tabs and the panel's own controls fit in
 /// 320pt, beside the window's caption buttons where the panel's strip holds them.
 const RIGHT_PANEL_MIN_WIDTH: f32 = 320. + window_caption::RIGHT_PANEL_CAPTION_WIDTH;
-/// The chat column never gets narrower than this beside the right panel, plus
-/// whatever its header holds beyond the plain one (`header_extra_width`). At
-/// 16pt padding the compact header fits: a title kept to a few words beside a
-/// "+10" pull request badge, the git and Open split buttons as icon and
-/// chevron, and five panel toggles measure 531pt. Where the chat's minimum and
-/// the panel's do not both fit beside the sidebar, the panel floats over the
-/// chat instead.
+/// A pane alone in the chat column never gets narrower than this beside the
+/// right panel, plus whatever its header holds beyond the plain one
+/// (`header_extra_width_for`), so its header keeps the tiers it has without
+/// panes. Where the chat column's minimum and the panel's do not both fit
+/// beside the sidebar, the panel floats over the chat instead.
 const CHAT_MIN_WIDTH: f32 = crate::chat::HEADER_COMPACT_MIN_WIDTH;
+/// A pane among others may narrow to its header's overflow tier; panes side
+/// by side add up ([`AppShell::chat_min_width`]).
+const PANE_MIN_WIDTH: f32 = crate::chat::HEADER_OVERFLOW_MIN_WIDTH;
 const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
@@ -470,7 +748,7 @@ impl AppShell {
             {
                 // Select once, before the baseline can trigger an empty-workspace
                 // draft fallback. Validation below never selects it again.
-                store.update(cx, |store, _| store.select_session(session_id.clone()));
+                store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
                 if let Some(attachment) = &mut shell.attachment {
                     attachment.observed_session_id = Some(session_id.clone());
                 }
@@ -608,8 +886,7 @@ impl AppShell {
                 .expect("checked above");
             store.update(cx, |store, cx| {
                 if store.active_session_id().as_deref() == Some(&pending.session_id) {
-                    store.leave_session();
-                    cx.notify();
+                    store.leave_session(cx);
                 }
             });
             self.window_state
@@ -741,14 +1018,15 @@ impl AppShell {
             .first()
             .map(|(id, _)| id.clone());
         if let Some(id) = &pending_session {
-            store.update(cx, |store, _| store.select_session(id.clone()));
+            store.update(cx, |store, cx| store.select_session(id.clone(), cx));
         }
         let preview =
             cx.new(|cx| PreviewPanel::new(store.clone(), self.window_state.clone(), window, cx));
         let sidebar =
             cx.new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx));
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.observe_in(&store, window, move |this, store, window, cx| {
+                this.reconcile_panes(window, cx);
                 this.stamp_connected(cx);
                 let selected = store.read(cx).active_session_id();
                 if let Some(attachment) = &mut this.attachment
@@ -821,8 +1099,40 @@ impl AppShell {
         };
 
         let observed_session_id = store.read(cx).active_session_id();
+        let thread_panel = self.new_pane(&store, window, cx);
+        let shell = cx.entity().downgrade();
+        let lands: crate::panes::DropLands = Rc::new(move |bounds, placement, window, cx| {
+            shell
+                .upgrade()
+                .is_some_and(|shell| shell.read(cx).drop_lands(bounds, placement, window, cx))
+        });
+        let split_handle_held = crate::panes::HandleHeld::default();
+        let thread_panes = cx.new(|cx| {
+            let mut area = DockArea::new("thread-panes", None, window, cx).with_renderer(Rc::new(
+                crate::panes::ThreadPanes::new(lands, split_handle_held.clone()),
+            ));
+            area.set_center(DockLayout::tabs().panel(thread_panel.clone()), window, cx);
+            area
+        });
+        subscriptions.push(cx.subscribe_in(
+            &thread_panes,
+            window,
+            |this, _, event: &DockEvent, window, cx| {
+                if let DockEvent::DragDrop { item, target } = event
+                    && let Some(session_id) = crate::sidebar::thread_carried(item)
+                {
+                    this.drop_thread(session_id.to_owned(), *target, window, cx);
+                }
+            },
+        ));
         self.attachment = Some(ShellAttachment {
-            chat: cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), window, cx)),
+            thread_panes,
+            glides: Default::default(),
+            zoom: Default::default(),
+            scene: Default::default(),
+            split_handle_held,
+            held_split: None,
+            focused_pane: thread_panel,
             diff: cx.new(|cx| DiffPanel::new(store.clone(), self.window_state.clone(), cx)),
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
@@ -866,6 +1176,122 @@ impl AppShell {
             self.window_state
                 .update(cx, |state, cx| state.open_thread(cx));
         }
+        cx.notify();
+    }
+
+    fn new_pane(
+        &self,
+        store: &Entity<WorkspaceStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ThreadPanel> {
+        let chat = cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), window, cx));
+        let shell = cx.entity().downgrade();
+        cx.new(|cx| {
+            ThreadPanel::new(
+                chat,
+                move |pane, window, cx| {
+                    _ = shell.update(cx, |shell, cx| shell.pane_focused(pane, window, cx));
+                },
+                window,
+                cx,
+            )
+        })
+    }
+
+    /// Keep the panes and the store's focus telling one story. The store's
+    /// focused thread is shown by the pane already showing it, which takes
+    /// the keyboard, or else by the focused pane. A pane whose thread the
+    /// store closed leaves the column; the focused pane, and the last one,
+    /// stay and show nothing until the store focuses something for them.
+    fn reconcile_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.compact(cx);
+        let Some(attachment) = &mut self.attachment else {
+            return;
+        };
+        let panes = attachment.panes(cx);
+        if !panes.contains(&attachment.focused_pane)
+            && let Some(first) = panes.first()
+        {
+            attachment.focused_pane = first.clone();
+        }
+        let store = attachment.link.store.clone();
+        let focused = store.read(cx).active_session_id();
+        if let Some(session_id) = focused {
+            let showing = panes
+                .iter()
+                .find(|pane| pane.read(cx).session_id() == Some(session_id.as_str()))
+                .cloned();
+            match showing {
+                Some(pane) if pane != attachment.focused_pane => {
+                    attachment.focused_pane = pane.clone();
+                    if !compact {
+                        if attachment.zoom.pane().is_some_and(|zoomed| *zoomed != pane) {
+                            attachment.zoom.zoom_out();
+                        }
+                        window.focus(&pane.focus_handle(cx), cx);
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let pane = attachment.focused_pane.clone();
+                    let left = pane.read(cx).session_id().map(str::to_owned);
+                    pane.update(cx, |pane, cx| pane.set_session(Some(session_id), cx));
+                    // A pane that waited with the keyboard had no composer to
+                    // give it to until now.
+                    if left.is_none() && pane.focus_handle(cx).is_focused(window) {
+                        pane.read(cx)
+                            .chat()
+                            .update(cx, |chat, cx| chat.focus_composer(window, cx));
+                    }
+                    if let Some(left) = left
+                        && store.read(cx).is_thread_open(&left)
+                    {
+                        store.update(cx, |store, cx| store.close_thread(&left, cx));
+                    }
+                }
+            }
+        }
+        let store = store.read(cx);
+        let closed: Vec<_> = panes
+            .iter()
+            .filter(|pane| {
+                pane.read(cx)
+                    .session_id()
+                    .is_some_and(|session_id| !store.is_thread_open(session_id))
+            })
+            .cloned()
+            .collect();
+        let focused_pane = attachment.focused_pane.clone();
+        let mut remaining = panes.len();
+        for pane in closed {
+            if pane == focused_pane || remaining == 1 {
+                pane.update(cx, |pane, cx| pane.set_session(None, cx));
+            } else {
+                self.glide_out(&pane, cx);
+                remaining -= 1;
+            }
+        }
+    }
+
+    /// The keyboard entered `pane`: the store acts on its thread.
+    fn pane_focused(&mut self, pane: Entity<ThreadPanel>, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(attachment) = &mut self.attachment else {
+            return;
+        };
+        if !attachment.panes(cx).contains(&pane) {
+            return;
+        }
+        attachment.focused_pane = pane.clone();
+        let session_id = pane.read(cx).session_id().map(str::to_owned);
+        attachment
+            .link
+            .store
+            .update(cx, |store, cx| match session_id {
+                Some(session_id) => store.focus_thread(&session_id, cx),
+                None if store.active_session_id().is_some() => store.release_focus(cx),
+                None => {}
+            });
         cx.notify();
     }
 
@@ -919,6 +1345,1020 @@ impl AppShell {
             state.sidebar_collapsed = collapsed;
             cx.notify();
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Panes
+// ---------------------------------------------------------------------------
+
+impl AppShell {
+    /// The pane a command acts on: the one holding the keyboard, or the
+    /// focused one while the keyboard is elsewhere.
+    fn acting_pane(&self, window: &Window, cx: &App) -> Option<Entity<ThreadPanel>> {
+        let attachment = self.attachment.as_ref()?;
+        attachment
+            .panes(cx)
+            .into_iter()
+            .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))
+            .or_else(|| Some(attachment.focused_pane.clone()))
+    }
+
+    /// The pane showing `session_id`.
+    fn pane_showing(&self, session_id: &str, cx: &App) -> Option<Entity<ThreadPanel>> {
+        self.attachment
+            .as_ref()?
+            .panes(cx)
+            .into_iter()
+            .find(|pane| pane.read(cx).session_id() == Some(session_id))
+    }
+
+    /// A pane on `placement`'s side of `from`, focused and waiting for a
+    /// thread.
+    fn add_pane(
+        &mut self,
+        from: &Entity<ThreadPanel>,
+        placement: gpui_base::Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(Entity<ThreadPanel>, Option<String>)> {
+        if self.compact(cx) || !self.split_allowed(from, placement, window, cx) {
+            return None;
+        }
+        let attachment = self.attachment.as_ref()?;
+        let node = from.read(cx).group()?.read(cx).node();
+        let beside = from.read(cx).session_id().map(str::to_owned);
+        let store = attachment.link.store.clone();
+        let area = attachment.thread_panes.clone();
+        let pane = self.new_pane(&store, window, cx);
+        pane.update(cx, |pane, cx| pane.set_session(None, cx));
+        self.attachment.as_mut()?.zoom.zoom_out();
+        let before = self.glide_before_edit(window, cx);
+        area.update(cx, |area, cx| {
+            // `DockArea::split_at` splits only a panel the area already
+            // holds, and base has no other way to register one: the pane
+            // joins the area, then moves beside `node`.
+            area.add_panel(pane.clone(), DockPlacement::Center, None, window, cx);
+            area.move_panel(
+                PanelId::from(pane.entity_id()),
+                InsertTarget::Split {
+                    node,
+                    placement,
+                    size: None,
+                },
+                window,
+                cx,
+            );
+        });
+        self.glide_after_edit(before, cx);
+        self.attachment.as_mut()?.focused_pane = pane.clone();
+        window.focus(&pane.focus_handle(cx), cx);
+        cx.notify();
+        Some((pane, beside))
+    }
+
+    /// Split the acting pane: the new pane shows a fresh draft in the same
+    /// project, and the thread split from stays open.
+    fn split_pane(
+        &mut self,
+        placement: gpui_base::Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(from) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let Some((_, beside)) = self.add_pane(&from, placement, window, cx) else {
+            return;
+        };
+        if let Some(store) = self.store() {
+            store.update(cx, |store, cx| {
+                store.release_focus(cx);
+                store.start_draft_beside(beside.as_deref(), cx);
+            });
+        }
+    }
+
+    /// Show `session_id` in a pane of its own, on the first of `placements`
+    /// beside `from` that the column has room for; the pane already showing
+    /// it takes the focus instead. False when no pane shows it: there was no
+    /// room, or the layout has no panes.
+    fn open_in_new_pane(
+        &mut self,
+        session_id: String,
+        from: &Entity<ThreadPanel>,
+        placements: &[gpui_base::Placement],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(store) = self.store().filter(|_| !self.compact(cx)) else {
+            return false;
+        };
+        if self.pane_showing(&session_id, cx).is_some() {
+            store.update(cx, |store, cx| store.select_session(session_id, cx));
+            return true;
+        }
+        let added = placements
+            .iter()
+            .any(|placement| self.add_pane(from, *placement, window, cx).is_some());
+        if added {
+            self.show_in_focused_pane(&session_id, cx);
+        }
+        added
+    }
+
+    /// Open `session_id` for the focused pane, which shows it once the panes
+    /// reconcile.
+    fn show_in_focused_pane(&self, session_id: &str, cx: &mut Context<Self>) {
+        if let Some(store) = self.store() {
+            store.update(cx, |store, cx| {
+                store.open_thread(session_id);
+                store.focus_thread(session_id, cx);
+            });
+        }
+    }
+
+    /// A thread dragged from the threads list landed on a pane: an edge opens
+    /// it in a new pane there, the pane itself shows it in place of its own.
+    fn drop_thread(
+        &mut self,
+        session_id: String,
+        target: gpui_base::dock::DropTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let store = attachment.link.store.clone();
+        let Some(pane) = attachment.panes(cx).into_iter().find(|pane| {
+            pane.read(cx)
+                .group()
+                .is_some_and(|group| group.read(cx).node() == target.node())
+        }) else {
+            return;
+        };
+        match target.placement() {
+            Some(placement) => {
+                if !self.open_in_new_pane(session_id, &pane, &[placement], window, cx) {
+                    return;
+                }
+            }
+            None => {
+                if self.pane_showing(&session_id, cx).is_none() {
+                    self.pane_focused(pane, window, cx);
+                }
+                store.update(cx, |store, cx| store.select_session(session_id, cx));
+            }
+        }
+        self.open_thread(window, cx);
+    }
+
+    /// Whether a thread dragged over the pane painted at `bounds` would land:
+    /// one a pane already shows only takes the focus, and an edge needs room
+    /// to split.
+    fn drop_lands(
+        &self,
+        bounds: gpui::Bounds<Pixels>,
+        placement: Option<gpui_base::Placement>,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return false;
+        };
+        let Some(session_id) = attachment.sidebar.read(cx).dragged_session() else {
+            return false;
+        };
+        // The panes beneath a zoomed one are covered, and it is in no tab
+        // group to drop on.
+        if attachment.zoom.pane().is_some() || self.pane_showing(session_id, cx).is_some() {
+            return false;
+        }
+        attachment
+            .panes(cx)
+            .into_iter()
+            .find(|pane| pane.read(cx).bounds().contains(&bounds.center()))
+            .is_some_and(|pane| {
+                placement.is_none_or(|placement| self.split_allowed(&pane, placement, window, cx))
+            })
+    }
+
+    /// Close the acting pane; its thread closes and stays in the threads
+    /// list. The keyboard moves to a neighbour at once, whose thread the
+    /// store then focuses, and the pane glides shut. The last pane stays.
+    fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) {
+            return;
+        }
+        let Some(pane) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let Some(group) = pane.read(cx).group() else {
+            return;
+        };
+        attachment.zoom.zoom_out();
+        let panes = attachment.panes(cx);
+        if panes.len() < 2 || !group.read(cx).is_closable(cx) {
+            return;
+        }
+        // Base hands the keyboard on only when it removes the group, which
+        // the glide puts off; this is the order it would pick in: the panes
+        // after this one in the layout, then those before it, nearest first.
+        let at = panes.iter().position(|held| *held == pane).unwrap_or(0);
+        let next = panes[at + 1..]
+            .first()
+            .or_else(|| panes[..at].last())
+            .cloned();
+        self.glide_out(&pane, cx);
+        if let Some(next) = next {
+            window.focus(&next.focus_handle(cx), cx);
+            self.pane_focused(next, window, cx);
+        }
+    }
+
+    /// Start `pane` leaving the column: it turns inert and its slot glides
+    /// shut, after which [`Self::remove_closed`] takes it out.
+    fn glide_out(&mut self, pane: &Entity<ThreadPanel>, cx: &mut Context<Self>) {
+        pane.update(cx, |pane, cx| pane.set_closing(cx));
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let area = attachment.thread_panes.read(cx);
+        let size = area.bounds().size;
+        if let Some(tree) = area.layout(DockPlacement::Center).cloned() {
+            attachment
+                .glides
+                .close(&tree, size, PanelId::from(pane.entity_id()));
+        }
+        cx.notify();
+    }
+
+    /// Take out the closing panes whose split has stopped gliding, closing
+    /// the threads they showed unless a pane shows them again by now.
+    fn remove_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let area = attachment.thread_panes.clone();
+        let store = attachment.link.store.clone();
+        for pane in attachment.closed_panes(cx) {
+            let session_id = pane.read(cx).session_id().map(str::to_owned);
+            area.update(cx, |area, cx| area.remove_panel(pane, window, cx));
+            if let Some(session_id) = session_id
+                && store.read(cx).is_thread_open(&session_id)
+                && self.pane_showing(&session_id, cx).is_none()
+            {
+                store.update(cx, |store, cx| store.close_thread(&session_id, cx));
+            }
+        }
+    }
+
+    /// Before an edit that adds panes: hand the dock the sizes the glides are
+    /// heading for, which is what it divides, and note the layout the new
+    /// panes glide out of.
+    fn glide_before_edit(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::panes::Before> {
+        let attachment = self.attachment.as_ref()?;
+        let area = attachment.thread_panes.clone();
+        let (targets, before) = {
+            let area = area.read(cx);
+            let tree = area.layout(DockPlacement::Center)?;
+            let size = area.bounds().size;
+            (
+                attachment.glides.targets(tree, size),
+                attachment.glides.before(tree, size),
+            )
+        };
+        area.update(cx, |area, cx| {
+            for (node, sizes) in targets {
+                area.set_split_sizes(node, sizes, window, cx);
+            }
+        });
+        Some(before)
+    }
+
+    /// After an edit that added panes: glide them in out of `before`.
+    fn glide_after_edit(&mut self, before: Option<crate::panes::Before>, cx: &mut Context<Self>) {
+        let Some(before) = before else {
+            return;
+        };
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let area = attachment.thread_panes.read(cx);
+        let size = area.bounds().size;
+        if let Some(tree) = area.layout(DockPlacement::Center).cloned() {
+            attachment.glides.begin(&before, &tree, size);
+        }
+        cx.notify();
+    }
+
+    /// This frame of the column's glides: each gliding split's sizes go to
+    /// the dock, each pane's content is held at the size its slot glides
+    /// toward, and the closing panes whose split has landed are taken out
+    /// before the dock draws them. A split's handle under the pointer stops
+    /// that split's glide where it is, and the compact layout, which draws no
+    /// panes, lands them.
+    fn glide_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.compact(cx);
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let handle_held = attachment.split_handle_held.take();
+        if handle_held.is_none() {
+            attachment.held_split = None;
+        }
+        let panes = attachment.all_panes(cx);
+        let closing = panes.iter().any(|pane| pane.read(cx).is_closing());
+        if attachment.glides.is_idle() && !closing {
+            return;
+        }
+        let area = attachment.thread_panes.clone();
+        let (tree, size) = {
+            let area = area.read(cx);
+            (
+                area.layout(DockPlacement::Center).cloned(),
+                area.bounds().size,
+            )
+        };
+        let Some(tree) = tree else {
+            return;
+        };
+        if let Some((axis, at)) = handle_held
+            && attachment.held_split.is_none()
+        {
+            let painted = |panel| {
+                panes
+                    .iter()
+                    .find(|pane| PanelId::from(pane.entity_id()) == panel)
+                    .map(|pane| pane.read(cx).bounds())
+            };
+            attachment.held_split = crate::panes::held_split(tree.root(), axis, at, &painted);
+        }
+        if let Some(split) = attachment.held_split {
+            attachment.glides.stop(split);
+        }
+        let frame = if compact {
+            attachment.glides.land(&tree, size)
+        } else {
+            attachment.glides.sample(&tree, size, window, cx)
+        };
+        area.update(cx, |area, cx| {
+            for (node, sizes) in frame.sizes {
+                area.set_split_sizes(node, sizes, window, cx);
+            }
+        });
+        for pane in &panes {
+            let held = frame
+                .holds
+                .get(&PanelId::from(pane.entity_id()))
+                .copied()
+                .unwrap_or_default();
+            pane.update(cx, |pane, cx| pane.set_held(held, cx));
+        }
+        if closing {
+            self.remove_closed(window, cx);
+        }
+    }
+
+    /// Land every glide at once and take out the panes closing, for an edit
+    /// that does not divide what they leave: a zoom, a layout put in.
+    fn land_glides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let area = attachment.thread_panes.clone();
+        let (tree, size) = {
+            let area = area.read(cx);
+            (
+                area.layout(DockPlacement::Center).cloned(),
+                area.bounds().size,
+            )
+        };
+        let Some(tree) = tree else {
+            return;
+        };
+        let frame = attachment.glides.land(&tree, size);
+        let panes = attachment.all_panes(cx);
+        area.update(cx, |area, cx| {
+            for (node, sizes) in frame.sizes {
+                area.set_split_sizes(node, sizes, window, cx);
+            }
+        });
+        for pane in panes {
+            pane.update(cx, |pane, cx| pane.set_held(Default::default(), cx));
+        }
+        self.remove_closed(window, cx);
+    }
+
+    /// Zoom the acting pane over the column (see [`crate::panes::Zoom`]), or
+    /// turn the zoomed one back into its slot from where it is; running
+    /// glides land first.
+    fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) {
+            return;
+        }
+        let Some(pane) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let zoomed = attachment.zoom.pane() == Some(&pane);
+        if !zoomed && attachment.panes(cx).len() < 2 {
+            return;
+        }
+        self.land_glides(window, cx);
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        if zoomed {
+            attachment.zoom.toggle();
+        } else {
+            attachment.zoom.zoom_in(pane, cx);
+        }
+        cx.notify();
+    }
+
+    /// This frame of the zoom. A zoomed pane that left the column, or is the
+    /// only one left in it, is back in its slot at once, and the compact
+    /// layout, which draws no panes, zooms none.
+    fn zoom_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.compact(cx);
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let gone = attachment.zoom.pane().is_some_and(|pane| {
+            let panes = attachment.all_panes(cx);
+            panes.len() < 2 || !panes.contains(pane)
+        });
+        if compact || gone {
+            attachment.zoom.land();
+        }
+        attachment.zoom.sample(window, cx);
+    }
+
+    /// The chat column: the dock of panes, faded while a layout goes in,
+    /// under the pane zoomed over it. The panes fading out to be replaced
+    /// take no pointer.
+    fn render_chat_column(&self, cx: &App) -> AnyElement {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return gpui::Empty.into_any_element();
+        };
+        let area = attachment.thread_panes.read(cx).bounds();
+        div()
+            .relative()
+            .size_full()
+            .when_some(attachment.scene.opacity(), |column, opacity| {
+                column.opacity(opacity)
+            })
+            .child(attachment.thread_panes.clone())
+            .children(attachment.zoom.render(area, cx))
+            .when(attachment.scene.leaving(), |column| {
+                column.child(crate::motion::shield())
+            })
+            .into_any_element()
+    }
+
+    /// Spatial moves go to the nearest pane painted on that side; Next and
+    /// Previous follow the layout's order and wrap. While a pane is drawn
+    /// over the column the others are covered, so nothing moves.
+    ///
+    /// Written here because gpui-base's dock has no keyboard navigation
+    /// between groups; it goes once the dock offers one.
+    fn focus_pane(&mut self, direction: FocusPane, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) {
+            return;
+        }
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        if attachment.zoom.pane().is_some() {
+            return;
+        }
+        let Some(from) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let panes = attachment.panes(cx);
+        let Some(at) = panes.iter().position(|pane| *pane == from) else {
+            return;
+        };
+        let target = match direction.side() {
+            None if direction == FocusPane::Next => panes.get((at + 1) % panes.len()).cloned(),
+            None => panes.get((at + panes.len() - 1) % panes.len()).cloned(),
+            Some(side) => self.neighbour_of(&from, side, cx),
+        };
+        if let Some(target) = target
+            && target != from
+        {
+            window.focus(&target.focus_handle(cx), cx);
+        }
+    }
+
+    /// The pane nearest `pane` on `side`, as they were last painted.
+    fn neighbour_of(
+        &self,
+        pane: &Entity<ThreadPanel>,
+        side: Side,
+        cx: &App,
+    ) -> Option<Entity<ThreadPanel>> {
+        let panes = self.attachment.as_ref()?.panes(cx);
+        let bounds: Vec<_> = panes.iter().map(|pane| pane.read(cx).bounds()).collect();
+        let at = panes.iter().position(|held| held == pane)?;
+        crate::panes::neighbour(bounds[at], &bounds, side).map(|ix| panes[ix].clone())
+    }
+
+    /// Close every pane but the acting one, as [`Self::close_pane`] closes
+    /// one: each glides shut and its thread closes once it is taken out.
+    fn close_other_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) {
+            return;
+        }
+        let Some(pane) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        attachment.zoom.zoom_out();
+        for other in attachment.panes(cx) {
+            if other != pane {
+                self.glide_out(&other, cx);
+            }
+        }
+        window.focus(&pane.focus_handle(cx), cx);
+        self.pane_focused(pane, window, cx);
+    }
+
+    /// The acting pane and its neighbour on `side` exchange their
+    /// conversations, each with its own composer, scroll and expanded rows,
+    /// so a half-written message stays with its thread; the panes, their
+    /// slots and colours stay where they are. The keyboard stays in the
+    /// acting pane, or with `follow` goes with its thread to the neighbour.
+    /// Neither conversation closes.
+    ///
+    /// The conversations change places in one frame: gpui-base has no
+    /// shared-element transition to carry a view from one place to another.
+    fn swap_pane(&mut self, side: Side, follow: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx)
+            || self
+                .attachment
+                .as_ref()
+                .is_none_or(|attachment| attachment.zoom.pane().is_some())
+        {
+            return;
+        }
+        let Some(from) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let Some(to) = self.neighbour_of(&from, side, cx) else {
+            return;
+        };
+        let chat = from.read(cx).chat();
+        let theirs = to.update(cx, |to, cx| to.replace_chat(chat, cx));
+        from.update(cx, |from, cx| from.replace_chat(theirs, cx));
+        let focused = if follow { to } else { from };
+        if let Some(attachment) = self.attachment.as_mut() {
+            attachment.focused_pane = focused.clone();
+        }
+        window.focus(&focused.focus_handle(cx), cx);
+        self.pane_focused(focused, window, cx);
+    }
+
+    /// The acting pane's thread trades places with its neighbour's on
+    /// `side`, as [`Self::swap_pane`] exchanges them, and the keyboard goes
+    /// with it. A pane waiting for a thread has none to move.
+    fn move_thread_to_pane(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .acting_pane(window, cx)
+            .is_some_and(|pane| pane.read(cx).session_id().is_some())
+        {
+            self.swap_pane(side, true, window, cx);
+        }
+    }
+
+    /// The narrowest the chat column can be: its panes' headers at their
+    /// narrowest, side by side, and never narrower than a pane alone. Base's dock gives every pane the same
+    /// `resizable_panel` range and has no per-panel minimum, so a pane's own
+    /// handle can still drag it below its header; this only keeps the right
+    /// panel from squeezing the column.
+    fn chat_min_width(&self, collapsed: bool, fullscreen: bool, cx: &App) -> Pixels {
+        let Some(tree) = self
+            .attachment
+            .as_ref()
+            .and_then(|attachment| attachment.final_layout(cx))
+        else {
+            return px(CHAT_MIN_WIDTH);
+        };
+        px(self.column_min_width(
+            &tree,
+            &|panel| self.panel_session(panel, cx),
+            collapsed,
+            fullscreen,
+            cx,
+        ))
+    }
+
+    /// The thread the pane `panel` shows.
+    fn panel_session(&self, panel: PanelId, cx: &App) -> Option<String> {
+        self.attachment
+            .as_ref()?
+            .thread_panes
+            .read(cx)
+            .panel(panel)?
+            .view()
+            .downcast::<ThreadPanel>()
+            .ok()?
+            .read(cx)
+            .session_id()
+            .map(str::to_owned)
+    }
+
+    /// [`Self::chat_min_width`] for `tree`, whose panels show the threads
+    /// `session_of` names. Only the pane along the column's left edge clears
+    /// the traffic lights over a collapsed sidebar.
+    fn column_min_width(
+        &self,
+        tree: &gpui_base::dock::PaneTree,
+        session_of: &dyn Fn(PanelId) -> Option<String>,
+        collapsed: bool,
+        fullscreen: bool,
+        cx: &App,
+    ) -> f32 {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return CHAT_MIN_WIDTH;
+        };
+        let store = attachment.link.store.read(cx);
+        let floor = if tree.panels().nth(1).is_some() {
+            PANE_MIN_WIDTH
+        } else {
+            CHAT_MIN_WIDTH
+        };
+        let pane_min = |panel: PanelId, edges: crate::chat::WindowEdges| {
+            let session_id = session_of(panel);
+            floor
+                + crate::chat::header_extra_width_for(
+                    store,
+                    session_id.as_deref(),
+                    collapsed && edges.left,
+                    fullscreen,
+                    false,
+                )
+        };
+        crate::panes::min_width(tree.root(), crate::chat::WindowEdges::BOTH, &pane_min)
+            .max(CHAT_MIN_WIDTH)
+    }
+
+    /// Whether `pane` may split along `placement`: below the cap, and with
+    /// the column's minimum after the split still fitting beside the sidebar.
+    fn split_allowed(
+        &self,
+        pane: &Entity<ThreadPanel>,
+        placement: gpui_base::Placement,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return false;
+        };
+        if self.compact(cx) || attachment.panes(cx).len() >= crate::panes::MAX_PANES {
+            return false;
+        }
+        let Some(mut tree) = attachment.final_layout(cx) else {
+            return false;
+        };
+        // From the tree rather than the pane's group: the drop indicator asks
+        // while the group is rendering.
+        let Some(node) = tree.find_panel_node(PanelId::from(pane.entity_id())) else {
+            return false;
+        };
+        tree.split(node, PanelId::from_u64(u64::MAX), placement, None);
+        self.column_fits(&tree, &|panel| self.panel_session(panel, cx), window, cx)
+    }
+
+    /// Whether `tree`'s minimum width, its panels showing the threads
+    /// `session_of` names, fits beside the sidebar.
+    fn column_fits(
+        &self,
+        tree: &gpui_base::dock::PaneTree,
+        session_of: &dyn Fn(PanelId) -> Option<String>,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return false;
+        };
+        let collapsed = self.window_state.read(cx).sidebar_collapsed;
+        let sidebar = if collapsed {
+            px(0.)
+        } else {
+            attachment.sidebar_width.get()
+        };
+        px(self.column_min_width(tree, session_of, collapsed, window.is_fullscreen(), cx))
+            <= window.viewport_size().width - sidebar
+    }
+
+    /// `layout` as the panes there would fill it: its tree, and what fills
+    /// each of the tree's panels. `None` where the column has no room for it,
+    /// or it has nothing to show: a single pane alone, a thread without
+    /// agents.
+    fn plan_layout(
+        &self,
+        layout: PaneLayout,
+        window: &Window,
+        cx: &App,
+    ) -> Option<(gpui_base::dock::PaneTree, Vec<(PanelId, Slot)>)> {
+        if self.compact(cx) {
+            return None;
+        }
+        let attachment = self.attachment.as_ref()?;
+        let focused = attachment.focused_pane.clone();
+        let panes = attachment.panes(cx);
+        let first = std::iter::once(Slot::Pane(focused.clone()));
+        let (fills, fewest): (Vec<_>, _) = match layout {
+            PaneLayout::SpreadAgents => {
+                let parent = focused.read(cx).session_id()?;
+                let mut agents: Vec<_> = attachment
+                    .link
+                    .store
+                    .read(cx)
+                    .sidebar_sessions()
+                    .into_iter()
+                    .filter(|meta| {
+                        meta.parent_session_id.as_deref() == Some(parent)
+                            && meta.archived_at.is_none()
+                            && !meta.is_settled()
+                    })
+                    .collect();
+                agents.sort_by_key(|meta| std::cmp::Reverse(meta.created_at));
+                let agents = agents.into_iter().map(|meta| {
+                    self.pane_showing(&meta.id, cx)
+                        .map_or(Slot::Thread(meta.id), Slot::Pane)
+                });
+                (
+                    first.chain(agents).take(crate::panes::MAX_PANES).collect(),
+                    2,
+                )
+            }
+            PaneLayout::Single if panes.len() < 2 => return None,
+            layout => {
+                let count = layout.splits(0).len() + 1;
+                let others = panes
+                    .iter()
+                    .filter(|pane| **pane != focused)
+                    .cloned()
+                    .map(Slot::Pane);
+                let fills = first
+                    .chain(others)
+                    .chain(std::iter::repeat(Slot::Waiting))
+                    .take(count)
+                    .collect();
+                (fills, count)
+            }
+        };
+        let mut tree = attachment
+            .thread_panes
+            .read(cx)
+            .layout(DockPlacement::Center)?
+            .clone();
+        let anchor = PanelId::from(focused.entity_id());
+        for panel in tree.panels().collect::<Vec<_>>() {
+            if panel != anchor {
+                tree.remove_panel(panel);
+            }
+        }
+        (fewest..=fills.len()).rev().find_map(|count| {
+            let mut tree = tree.clone();
+            let mut ids = vec![anchor];
+            for (ix, (from, placement)) in layout.splits(count).into_iter().enumerate() {
+                let node = tree.find_panel_node(ids[from])?;
+                let id = PanelId::from_u64(u64::MAX - ix as u64);
+                tree.split(node, id, placement, None);
+                ids.push(id);
+            }
+            // Every split opens right of or below its pane, so the focused
+            // pane leads the tree's order.
+            let slots: Vec<_> = tree.panels().zip(fills.iter().cloned()).collect();
+            let session_of = |panel: PanelId| match slots.iter().find(|(id, _)| *id == panel)? {
+                (_, Slot::Pane(pane)) => pane.read(cx).session_id().map(str::to_owned),
+                (_, Slot::Thread(session_id)) => Some(session_id.clone()),
+                (_, Slot::Waiting) => None,
+            };
+            self.column_fits(&tree, &session_of, window, cx)
+                .then_some((tree, slots))
+        })
+    }
+
+    /// Choose `layout` for the column. It goes in as a change of scene (see
+    /// [`crate::panes::Scene`]): the column fades out, the layout is put in at
+    /// the bottom of the fade and the column fades back in. A layout that
+    /// would leave every pane where it is drawn, none zoomed, changes
+    /// nothing. The focused pane keeps the keyboard.
+    fn apply_layout(&mut self, layout: PaneLayout, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(plan) = self.plan_layout(layout, window, cx) else {
+            return;
+        };
+        let unchanged = self.layout_unchanged(&plan, cx);
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        if !(unchanged && attachment.zoom.pane().is_none() && attachment.scene.is_idle()) {
+            attachment.scene.choose(layout);
+        }
+        let focused = attachment.focused_pane.clone();
+        self.pane_focused(focused.clone(), window, cx);
+        window.focus(&focused.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// This frame of a layout's change of scene: the layout goes in at the
+    /// bottom of the fade. The compact layout draws no panes, so a change of
+    /// scene stops there.
+    fn switch_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.compact(cx);
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        if compact {
+            attachment.scene.land();
+            return;
+        }
+        if let Some(layout) = attachment.scene.sample(window, cx) {
+            self.install_layout(layout, window, cx);
+        }
+    }
+
+    /// Whether `plan` would leave every pane where the dock lays it out:
+    /// nothing gliding or closing, and the same panes in the same splits at
+    /// the same shares.
+    fn layout_unchanged(
+        &self,
+        (tree, slots): &(gpui_base::dock::PaneTree, Vec<(PanelId, Slot)>),
+        cx: &App,
+    ) -> bool {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return false;
+        };
+        let area = attachment.thread_panes.read(cx);
+        let Some(now) = area.layout(DockPlacement::Center) else {
+            return false;
+        };
+        if !attachment.glides.is_idle()
+            || attachment
+                .all_panes(cx)
+                .iter()
+                .any(|pane| pane.read(cx).is_closing())
+        {
+            return false;
+        }
+        let shown = |planned: PanelId| match slots.iter().find(|(panel, _)| *panel == planned) {
+            Some((_, Slot::Pane(pane))) => Some(PanelId::from(pane.entity_id())),
+            _ => None,
+        };
+        crate::panes::same_layout(
+            now.root(),
+            tree.root(),
+            &|now, planned| shown(planned) == Some(now),
+            area.bounds().size,
+        )
+    }
+
+    /// Put `layout` in at once, as the panes are now: running glides land,
+    /// the zoomed pane is back in its slot, and the panes the layout leaves
+    /// out close with their threads; the focused pane keeps the keyboard.
+    fn install_layout(&mut self, layout: PaneLayout, window: &mut Window, cx: &mut Context<Self>) {
+        self.land_glides(window, cx);
+        let Some(plan) = self.plan_layout(layout, window, cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        attachment.zoom.land();
+        if self.layout_unchanged(&plan, cx) {
+            return;
+        }
+        let (tree, slots) = plan;
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let store = attachment.link.store.clone();
+        let area = attachment.thread_panes.clone();
+        let focused = attachment.focused_pane.clone();
+        let before = attachment.panes(cx);
+        let mut panes = HashMap::new();
+        let mut threads = Vec::new();
+        for (panel, slot) in slots {
+            let pane = match slot {
+                Slot::Pane(pane) => pane,
+                Slot::Waiting | Slot::Thread(_) => {
+                    let pane = self.new_pane(&store, window, cx);
+                    pane.update(cx, |pane, cx| pane.set_session(None, cx));
+                    if let Slot::Thread(session_id) = slot {
+                        threads.push((pane.clone(), session_id));
+                    }
+                    pane
+                }
+            };
+            panes.insert(panel, pane);
+        }
+        area.update(cx, |area, cx| {
+            area.set_center(
+                crate::panes::layout_of(tree.root(), &|panel| panes.get(&panel).cloned()),
+                window,
+                cx,
+            );
+        });
+        for pane in before {
+            if !panes.values().any(|kept| *kept == pane)
+                && let Some(session_id) = pane.read(cx).session_id().map(str::to_owned)
+            {
+                store.update(cx, |store, cx| store.close_thread(&session_id, cx));
+            }
+        }
+        for (pane, session_id) in threads {
+            if let Some(attachment) = self.attachment.as_mut() {
+                attachment.focused_pane = pane;
+            }
+            self.show_in_focused_pane(&session_id, cx);
+            self.reconcile_panes(window, cx);
+        }
+        self.pane_focused(focused.clone(), window, cx);
+        window.focus(&focused.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Give each pane that has no colour yet the lowest palette slot no
+    /// other pane drawn holds. A pane keeps its slot while it changes thread
+    /// and while it glides out; the slot is free again once the pane is
+    /// taken out.
+    fn colour_panes(&self, cx: &mut App) {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let panes = attachment.all_panes(cx);
+        let mut taken: Vec<usize> = panes
+            .iter()
+            .filter_map(|pane| pane.read(cx).colour())
+            .collect();
+        for pane in panes {
+            if pane.read(cx).colour().is_none()
+                && let Some(slot) = (0..crate::panes::MAX_PANES).find(|slot| !taken.contains(slot))
+            {
+                taken.push(slot);
+                pane.update(cx, |pane, cx| pane.set_colour(slot, cx));
+            }
+        }
+    }
+
+    /// Tell each pane whether it shares the column and how a zoom leaves it,
+    /// and its conversation which window edges its header runs along. The
+    /// layout's tree decides the first and the last, so they hold from the
+    /// frame a split lands; a pane drawn over the column is laid out as the
+    /// whole column.
+    fn sync_panes(&self, cx: &mut App) {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let compact = self.compact(cx);
+        for pane in attachment.all_panes(cx) {
+            let zoom = attachment.zoom.of(&pane);
+            pane.update(cx, |pane, cx| pane.set_zoom(zoom, cx));
+        }
+        let tree = attachment.final_layout(cx);
+        let edges: Vec<_> = attachment
+            .panes(cx)
+            .into_iter()
+            .map(|pane| {
+                let overlaid = attachment.zoom.pane() == Some(&pane);
+                let edges = tree
+                    .as_ref()
+                    .filter(|_| !compact && !overlaid)
+                    .and_then(|tree| {
+                        crate::panes::edges_of(
+                            tree.root(),
+                            crate::chat::WindowEdges::BOTH,
+                            PanelId::from(pane.entity_id()),
+                        )
+                    })
+                    .unwrap_or(crate::chat::WindowEdges::BOTH);
+                (pane, edges)
+            })
+            .collect();
+        let among_others = edges.len() > 1;
+        for (pane, edges) in edges {
+            pane.update(cx, |pane, cx| pane.set_among_others(among_others, cx));
+            pane.read(cx)
+                .chat()
+                .update(cx, |chat, cx| chat.set_edges(edges, cx));
+        }
     }
 }
 
@@ -1059,9 +2499,10 @@ impl AppShell {
             self.window_state
                 .update(cx, |state, cx| state.leave_route_for_chat(cx));
         }
+        self.reconcile_panes(window, cx);
         if let Some(attachment) = &self.attachment {
             attachment
-                .chat
+                .chat(cx)
                 .update(cx, |chat, cx| chat.focus_composer(window, cx));
         }
         // Selecting another thread can leave the destination unchanged. Its
@@ -1094,7 +2535,7 @@ impl AppShell {
             && self.destination(cx) == Destination::Thread
             && let Some((store, parent)) = self.agent_lead(cx)
         {
-            store.update(cx, |store, _| store.select_session(parent));
+            store.update(cx, |store, cx| store.select_session(parent, cx));
             return true;
         }
         // Everything below is one history: settings detail, settings root, a
@@ -1158,10 +2599,10 @@ impl AppShell {
             state.route() == Route::Chat
         };
         (on_screen
-            && !state.palette_open
+            && !state.palette_mounted()
             && self.pending_navigation_restore.is_none()
             && !gpui_base::GlobalState::is_in_deferred_context(cx))
-        .then(|| attachment.chat.clone())
+        .then(|| attachment.chat(cx))
     }
 }
 
@@ -1181,6 +2622,77 @@ pub(crate) fn navigate_thread(action: &crate::shortcut::NavigateThread, cx: &mut
                 state.go(Destination::Thread, cx);
             });
         }
+    });
+}
+
+/// Pane commands are app-level, so they reach the shell from anywhere in the
+/// window, with nothing focused too, once the dispatch that carried them ends.
+pub(crate) fn init_pane_actions(cx: &mut App) {
+    fn act(
+        cx: &mut App,
+        command: impl FnOnce(&mut AppShell, &mut Window, &mut Context<AppShell>) + 'static,
+    ) {
+        let Some((window, shell)) = current_window_shell(cx) else {
+            return;
+        };
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                shell.update(cx, |shell, cx| command(shell, window, cx));
+            });
+        });
+    }
+    cx.on_action(|_: &SplitRight, cx| {
+        act(cx, |shell, window, cx| {
+            shell.split_pane(gpui_base::Placement::Right, window, cx)
+        })
+    });
+    cx.on_action(|_: &SplitDown, cx| {
+        act(cx, |shell, window, cx| {
+            shell.split_pane(gpui_base::Placement::Bottom, window, cx)
+        })
+    });
+    cx.on_action(|action: &OpenInNewPane, cx| {
+        let session_id = action.0.clone();
+        act(cx, move |shell, window, cx| {
+            if let Some(from) = shell.acting_pane(window, cx)
+                && shell.open_in_new_pane(
+                    session_id,
+                    &from,
+                    &[gpui_base::Placement::Right],
+                    window,
+                    cx,
+                )
+            {
+                shell.open_thread(window, cx);
+            }
+        })
+    });
+    cx.on_action(|layout: &PaneLayout, cx| {
+        let layout = *layout;
+        act(cx, move |shell, window, cx| {
+            shell.apply_layout(layout, window, cx)
+        })
+    });
+    cx.on_action(|_: &ClosePane, cx| act(cx, AppShell::close_pane));
+    cx.on_action(|_: &CloseOtherPanes, cx| act(cx, AppShell::close_other_panes));
+    cx.on_action(|_: &ZoomPane, cx| act(cx, AppShell::toggle_zoom));
+    cx.on_action(|swap: &SwapPane, cx| {
+        let side = swap.0;
+        act(cx, move |shell, window, cx| {
+            shell.swap_pane(side, false, window, cx)
+        })
+    });
+    cx.on_action(|to: &MoveThreadToPane, cx| {
+        let side = to.0;
+        act(cx, move |shell, window, cx| {
+            shell.move_thread_to_pane(side, window, cx)
+        })
+    });
+    cx.on_action(|direction: &FocusPane, cx| {
+        let direction = *direction;
+        act(cx, move |shell, window, cx| {
+            shell.focus_pane(direction, window, cx)
+        })
     });
 }
 
@@ -1244,7 +2756,7 @@ pub fn can_swipe_back(cx: &mut App) -> bool {
                 let shell = shell.read(cx);
                 !crate::overlay::dialog_open(window, cx)
                     && shell.compact(cx)
-                    && !shell.window_state.read(cx).palette_open
+                    && !shell.window_state.read(cx).palette_mounted()
                     && !gpui_base::GlobalState::is_in_deferred_context(cx)
                     && shell.nav.read(cx).depth() > 1
             }
@@ -1451,7 +2963,7 @@ impl AppShell {
                                 SharedString::from(id.clone()),
                                 cx,
                             );
-                            store.update(cx, |store, _| store.select_session(id.clone()));
+                            store.update(cx, |store, cx| store.select_session(id.clone(), cx));
                         })
                 })
                 .autohide(true),
@@ -1532,7 +3044,7 @@ impl AppShell {
         store.update(cx, |store, cx| {
             match anchor.position {
                 Some(position) => store.select_session_at_position(anchor.thread_id, position, cx),
-                None => store.select_session(anchor.thread_id),
+                None => store.select_session(anchor.thread_id, cx),
             }
             cx.notify();
         });
@@ -2003,7 +3515,7 @@ impl AppShell {
         let body = if self.pending_navigation_restore.is_some() {
             crate::material::loading_skeleton(cx)
         } else {
-            attachment.chat.clone().into_any_element()
+            attachment.chat(cx).into_any_element()
         };
         v_flex()
             .debug_selector(|| "compact-thread-page".into())
@@ -2125,7 +3637,7 @@ impl AppShell {
             crate::material::loading_skeleton(cx)
         } else if terminal {
             attachment
-                .chat
+                .chat(cx)
                 .read(cx)
                 .terminal_drawer()
                 .into_any_element()
@@ -2137,7 +3649,7 @@ impl AppShell {
         // The drawer sizes its grid from the space it is actually given.
         if terminal {
             let size = window.viewport_size();
-            let drawer = attachment.chat.read(cx).terminal_drawer();
+            let drawer = attachment.chat(cx).read(cx).terminal_drawer();
             let (width, height) = (f32::from(size.width), f32::from(size.height) - 110.);
             if !drawer.read(cx).is_size(width, height) {
                 drawer.update(cx, |drawer, cx| drawer.resize(width, height, cx));
@@ -2175,7 +3687,7 @@ impl AppShell {
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
         };
-        let view = attachment.chat.read(cx).pull_request_view(cx);
+        let view = attachment.chat(cx).read(cx).pull_request_view(cx);
         let session = attachment.link.store.read(cx).active_session_id();
         let key = session.as_deref().and_then(|session| {
             attachment
@@ -2388,7 +3900,7 @@ impl AppShell {
                                 if (crate::overlay::active_sheet(window, cx).is_none()
                                     && (!hitbox.should_handle_scroll(window)
                                         || gpui_base::GlobalState::is_in_deferred_context(cx)
-                                        || shell.window_state.read(cx).palette_open
+                                        || shell.window_state.read(cx).palette_mounted()
                                         || !shell.compact(cx)
                                         || shell.nav.read(cx).depth() <= 1))
                                     || !bounds.contains(&event.position)
@@ -2604,7 +4116,7 @@ impl AppShell {
         }
         div()
             .size_full()
-            .bg(crate::material::opaque_canvas(cx))
+            .bg(crate::material::canvas(cx))
             .pt(seam.top)
             .pb(seam.bottom)
             .pl(seam.left)
@@ -2695,7 +4207,7 @@ impl AppShell {
 
     fn render_wide(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let route = self.window_state.read(cx).route();
-        let palette_open = self.window_state.read(cx).palette_open;
+        let palette_open = self.window_state.read(cx).palette_mounted();
         let fullscreen = window.is_fullscreen();
         if self.attachment.is_none() {
             // No host: the hosts page is the whole window, and the only page
@@ -2713,7 +4225,9 @@ impl AppShell {
             return div()
                 .id("app-shell")
                 .size_full()
-                .bg(crate::material::opaque_canvas(cx))
+                // The theme's tint, not `material::canvas`, which clears it
+                // over the macOS backdrop: this page keeps its tinted glass.
+                .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
                 .child(v_flex().id("hosts").size_full().child(page))
                 .into_any_element();
@@ -2858,13 +4372,10 @@ impl AppShell {
         // over the chat's right edge and the chat keeps the whole column
         // underneath, rather than either being squeezed below its minimum.
         let beside_sidebar = viewport_width - sidebar_layout_width;
-        let chat_min = px(CHAT_MIN_WIDTH
-            + crate::chat::header_extra_width(
-                attachment.link.store.read(cx),
-                collapsed,
-                fullscreen,
-                false,
-            ));
+        let chat_min = self.chat_min_width(collapsed, fullscreen, cx);
+        let Some(attachment) = &mut self.attachment else {
+            unreachable!("checked above");
+        };
         let right_floats =
             diff_open && chat_visible && beside_sidebar < chat_min + px(RIGHT_PANEL_MIN_WIDTH);
         attachment.floating_focus.update(cx, |focus, cx| {
@@ -2934,21 +4445,7 @@ impl AppShell {
             .when(right_docked, |panel| {
                 panel.size_range(chat_min..Pixels::MAX)
             })
-            .child(
-                v_flex()
-                    .size_full()
-                    .bg(crate::material::content_surface(cx))
-                    .shadow_sm()
-                    .child(
-                        div().flex_1().min_h_0().child(
-                            self.attachment
-                                .as_ref()
-                                .expect("attachment checked above")
-                                .chat
-                                .clone(),
-                        ),
-                    ),
-            );
+            .child(self.render_chat_column(cx));
         let attachment = self.attachment.as_ref().expect("attachment checked above");
         // Beside the chat, `flex_none`: whatever the group's sizes leave over or
         // lack goes to the chat, so the panel is exactly the width restored
@@ -3214,6 +4711,11 @@ impl Render for AppShell {
         // The window may have been resized without a bounds notification (a
         // first frame, or an inset change that narrowed the content box).
         self.sync_layout(window, cx);
+        self.glide_panes(window, cx);
+        self.switch_scene(window, cx);
+        self.zoom_panes(window, cx);
+        self.colour_panes(cx);
+        self.sync_panes(cx);
         if let Some(attachment) = &self.attachment {
             let title = attachment.link.store.read(cx).shell_window_title();
             if title != self.window_title {
@@ -3231,7 +4733,7 @@ impl Render for AppShell {
         // The palette takes focus on the frame it opens, at either width.
         let (palette_open, focus_query) = {
             let state = self.window_state.read(cx);
-            (state.palette_open, state.palette_focuses_query)
+            (state.palette_mounted(), state.palette_focuses_query)
         };
         if palette_open
             && !self.palette_was_open
@@ -3928,7 +5430,7 @@ mod tests {
                     .attachment
                     .as_ref()
                     .unwrap()
-                    .chat
+                    .chat(cx)
                     .read(cx)
                     .composer();
                 assert!(!composer.read(cx).input_focus_handle(cx).is_focused(window));
@@ -4005,7 +5507,7 @@ mod tests {
                     .attachment
                     .as_ref()
                     .unwrap()
-                    .chat
+                    .chat(cx)
                     .read(cx)
                     .composer()
                     .read(cx)
@@ -4167,7 +5669,7 @@ mod tests {
         let store = store_of(&shell, cx);
         // An OpenThread intent on the existing page must checkpoint without
         // waiting for a host response or a changed history.
-        store.update(cx, |store, _| store.select_session("thread-b".into()));
+        store.update(cx, |store, cx| store.select_session("thread-b".into(), cx));
         shell
             .read_with(cx, |shell, _| shell.window_state())
             .update(cx, |state, cx| state.open_thread(cx));
@@ -4184,8 +5686,7 @@ mod tests {
         );
 
         store.update(cx, |store, cx| {
-            store.select_session("thread-c".into());
-            cx.notify();
+            store.select_session("thread-c".into(), cx);
         });
         shell
             .read_with(cx, |shell, _| shell.window_state())
@@ -4322,7 +5823,13 @@ mod tests {
         resize(cx, 393.);
         let store = store_of(&shell, cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         for width in [1024., 393., 1024.] {
@@ -4332,7 +5839,7 @@ mod tests {
                     if id == "thread-2" {
                         focus.focus(window, cx);
                     }
-                    store.update(cx, |store, _| store.select_session(id.into()));
+                    store.update(cx, |store, cx| store.select_session(id.into(), cx));
                     let state = shell.read(cx).window_state();
                     state.update(cx, |_, cx| cx.emit(OpenThread));
                 });
@@ -4414,7 +5921,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("thread-a".into());
+            store.select_session("thread-a".into(), cx);
         });
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
@@ -4424,7 +5931,13 @@ mod tests {
         cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_thread(window, cx)));
         draw(cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let card = cx.debug_bounds("composer-card").unwrap();
@@ -4552,7 +6065,13 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         cx.update(|window, cx| focus.focus(window, cx));
@@ -4613,7 +6132,13 @@ mod tests {
         restore_status(&shell, &host, cx);
         let store = store_of(&shell, cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let deliver = |session: &str, readonly: bool, cx: &mut VisualTestContext| {
             let mut meta = tcode_core::project::SessionMeta::new(
@@ -4631,7 +6156,7 @@ mod tests {
                 id: "reasoningEffort".into(),
                 value: serde_json::json!("high"),
             }];
-            store.update(cx, |store, _| store.select_session(session.into()));
+            store.update(cx, |store, cx| store.select_session(session.into(), cx));
             for (topic, event) in [
                 (
                     Topic::Settings,
@@ -4814,6 +6339,2075 @@ mod tests {
     }
 
     #[gpui::test]
+    fn timeline_selection_copies_without_focusing_the_composer(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        cx.update(|window, _| window.activate_window());
+        let session = "thread-1";
+        let cwd = std::path::Path::new("/tmp/tcode-selection");
+        let records: Vec<agent::AgentEvent> = vec![
+            agent::AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "answer".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::AssistantMessage {
+                    text: "Selectable answer alpha beta gamma".into(),
+                    summarized: false,
+                },
+            }),
+            agent::AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            },
+        ];
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            cwd.into(),
+            None,
+        );
+        meta.id = session.into();
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: vec![meta],
+                    projects: Vec::new(),
+                }),
+            ),
+            (
+                Topic::SessionStatus {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(session_status(session, cwd))),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                    from: 0,
+                    end: records.len() as u64,
+                    records: records.into_iter().map(Into::into).collect(),
+                },
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        resize(cx, 1200.);
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
+        });
+        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        let text = cx
+            .debug_bounds("markdown-block-0")
+            .expect("the answer's paragraph");
+        let at = |dx: f32| gpui::point(text.left() + px(dx), text.center().y);
+        let none = gpui::Modifiers::default();
+        let select =
+            |from: gpui::Point<Pixels>, to: gpui::Point<Pixels>, cx: &mut VisualTestContext| {
+                cx.simulate_mouse_down(from, MouseButton::Left, none);
+                draw(cx);
+                for step in [from + gpui::point(px(5.), px(0.)), to] {
+                    cx.simulate_mouse_move(step, Some(MouseButton::Left), none);
+                    draw(cx);
+                }
+                cx.simulate_mouse_up(to, MouseButton::Left, none);
+                draw(cx);
+                cx.simulate_keystrokes("cmd-c");
+                draw(cx);
+                let copied = cx.read_from_clipboard().and_then(|item| item.text());
+                cx.update(|window, _| assert!(!focus.is_focused(window), "{copied:?}"));
+                copied
+            };
+
+        assert_eq!(
+            select(at(1.), at(600.), cx).as_deref(),
+            Some("Selectable answer alpha beta gamma")
+        );
+
+        cx.simulate_mouse_down(at(30.), MouseButton::Left, none);
+        cx.simulate_mouse_up(at(30.), MouseButton::Left, none);
+        draw(cx);
+        cx.update(|window, _| assert!(!focus.is_focused(window)));
+        assert_eq!(select(at(1.), at(60.), cx).as_deref(), Some("Select"));
+    }
+
+    #[gpui::test]
+    fn a_click_in_the_thread_pane_focuses_the_composer_only_on_desktop(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        resize(cx, 1200.);
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
+        });
+        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        let timeline = gpui::point(px(700.), px(300.));
+        for mobile in [true, false] {
+            cx.update(|window, cx| {
+                crate::window_seam::override_mobile_for_test(cx, mobile);
+                window.blur(cx);
+            });
+            draw(cx);
+            cx.simulate_mouse_down(timeline, MouseButton::Left, gpui::Modifiers::default());
+            cx.simulate_mouse_up(timeline, MouseButton::Left, gpui::Modifiers::default());
+            draw(cx);
+            cx.update(|window, _| {
+                assert_eq!(focus.is_focused(window), !mobile, "mobile: {mobile}");
+            });
+        }
+    }
+
+    /// A wide window over two indexed threads, `thread-1` (listed first)
+    /// shown in its only pane, the keyboard in it, its transitions done.
+    fn mount_panes(
+        cx: &mut TestAppContext,
+    ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
+        let (shell, host, cx) = mount(cx);
+        cx.update(|window, cx| {
+            // Focus listeners run only for an active window, as on screen.
+            window.activate_window();
+            crate::shortcut::init(cx);
+            set_back_target(window.window_handle(), &shell, cx);
+        });
+        resize(cx, 2000.);
+        send_events(
+            &host,
+            vec![
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(Default::default()),
+                ),
+                panes_index(&[]),
+            ],
+        );
+        serve_thread(&host, "thread-1");
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.open_thread(cx));
+        // The window settles before a pointer reaches it.
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        (shell, host, cx)
+    }
+
+    const PANES_CWD: &str = "/tmp/tcode-panes";
+
+    fn send_events(host: &MountedShell, events: Vec<(Topic, ServerEvent)>) {
+        for (topic, event) in events {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+    }
+
+    /// The index of [`mount_panes`]' two threads, `thread-1` listed first,
+    /// with `archived` archived.
+    fn panes_index(archived: &[&str]) -> (Topic, ServerEvent) {
+        let sessions = [("thread-1", 2), ("thread-2", 1)].map(|(id, updated_at)| {
+            let mut meta = tcode_core::project::SessionMeta::new(
+                agent::ProviderKind::Codex,
+                PANES_CWD.into(),
+                None,
+            );
+            meta.id = id.into();
+            meta.title = id.into();
+            meta.updated_at = updated_at;
+            meta.archived_at = archived.contains(&id).then_some(3);
+            meta
+        });
+        (
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                summary: Default::default(),
+                sessions: sessions.to_vec(),
+                projects: Vec::new(),
+            }),
+        )
+    }
+
+    fn serve_status(host: &MountedShell, id: &str, draft: bool) {
+        let mut status = session_status(id, std::path::Path::new(PANES_CWD));
+        status.draft = draft;
+        send_events(
+            host,
+            vec![(
+                Topic::SessionStatus {
+                    session_id: id.into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
+            )],
+        );
+    }
+
+    /// What the host answers a thread's subscriptions with: its status and an
+    /// empty log.
+    fn serve_thread(host: &MountedShell, id: &str) {
+        serve_status(host, id, false);
+        send_events(
+            host,
+            vec![(
+                Topic::SessionEvents {
+                    session_id: id.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                    from: 0,
+                    end: 0,
+                    records: Vec::new(),
+                },
+            )],
+        );
+    }
+
+    /// The thread each pane on screen shows, a closing one too, in the
+    /// layout's order.
+    fn pane_threads(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<Option<String>> {
+        shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).session_id().map(str::to_owned))
+                .collect()
+        })
+    }
+
+    /// Which pane holds the keyboard.
+    fn keyboard_pane(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> Option<usize> {
+        cx.update(|window, cx| {
+            shell
+                .read(cx)
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .all_panes(cx)
+                .iter()
+                .position(|pane| pane.focus_handle(cx).contains_focused(window, cx))
+        })
+    }
+
+    /// The chat column's width, and the width each pane on screen shows at,
+    /// in the layout's order.
+    fn pane_widths(shell: &Entity<AppShell>, cx: &VisualTestContext) -> (Pixels, Vec<Pixels>) {
+        shell.read_with(cx, widths_of)
+    }
+
+    fn widths_of(shell: &AppShell, cx: &App) -> (Pixels, Vec<Pixels>) {
+        let attachment = shell.attachment.as_ref().expect("attached");
+        (
+            attachment.thread_panes.read(cx).bounds().size.width,
+            attachment
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).bounds().size.width)
+                .collect(),
+        )
+    }
+
+    /// Answer the scratch draft the client asked for with `draft`.
+    fn answer_draft(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        draft: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        let request = std::iter::from_fn(|| host.outgoing.try_recv().ok())
+            .map(|line| decode_client_line(&line).expect("client line"))
+            .find(|message| {
+                matches!(
+                    message.payload,
+                    ClientPayload::Command(Command::StartScratchDraft)
+                )
+            })
+            .expect("a draft was asked for");
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Ack {
+                    id: request.id,
+                    result: Ok(tcode_protocol::CommandResponse::SessionId(Some(
+                        draft.into(),
+                    ))),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        await_restore_update(shell, cx, |store| {
+            store.active_session_id().as_deref() == Some(draft)
+        });
+        serve_thread(host, draft);
+        await_restore_update(shell, cx, |store| !store.chat_loading());
+        draw(cx);
+    }
+
+    /// Alt-click the threads list's `row`, showing `id`, which opens it in a
+    /// new pane, and serve it.
+    fn open_beside_from_list(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        row: &'static str,
+        id: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        let row = cx.debug_bounds(row).expect("the thread's row");
+        let alt = gpui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        cx.simulate_mouse_move(row.center(), None, alt);
+        draw(cx);
+        cx.simulate_click(row.center(), alt);
+        draw(cx);
+        serve_thread(host, id);
+        await_restore_update(shell, cx, |store| !store.chat_loading());
+        // The pane glides in before the pointer reaches it.
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+    }
+
+    /// Press on the threads list's `row` and carry it to `to`, drawing as the
+    /// pointer moves; the caller releases it.
+    fn drag_row(row: &'static str, to: gpui::Point<Pixels>, cx: &mut VisualTestContext) {
+        let from = cx.debug_bounds(row).expect("the thread's row").center();
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_move(from, None, none);
+        draw(cx);
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        draw(cx);
+        for step in [from + gpui::point(px(20.), px(0.)), (from + to) / 2., to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), none);
+            draw(cx);
+        }
+        // The drop's placeholder settles where the pointer rests.
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+    }
+
+    /// Where the column's only pane was painted.
+    fn only_pane(shell: &Entity<AppShell>, cx: &VisualTestContext) -> gpui::Bounds<Pixels> {
+        shell.read_with(cx, |shell, cx| {
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            assert_eq!(panes.len(), 1);
+            panes[0].read(cx).bounds()
+        })
+    }
+
+    /// A thread dragged from the threads list to a pane's right edge shows,
+    /// while it hovers, the half of the pane it would take, and opens there
+    /// with the keyboard on release.
+    #[gpui::test]
+    fn a_thread_dropped_on_a_panes_edge_opens_beside_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let pane = only_pane(&shell, cx);
+        let to = gpui::point(pane.right() - px(40.), pane.center().y);
+        drag_row("sidebar-thread-thread-2", to, cx);
+        let indicator = cx
+            .debug_bounds("pane-drop-indicator")
+            .expect("the pane the drop would open");
+        assert!(indicator.left() >= pane.center().x && indicator.right() <= pane.right());
+
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+        draw(cx);
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        assert!(cx.debug_bounds("pane-drop-indicator").is_none());
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-1"));
+        });
+    }
+
+    /// Dropped in a pane's middle, a thread takes that pane's place and the
+    /// thread it showed closes.
+    #[gpui::test]
+    fn a_thread_dropped_on_a_panes_middle_replaces_its_thread(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let pane = only_pane(&shell, cx);
+        drag_row("sidebar-thread-thread-2", pane.center(), cx);
+        let indicator = cx
+            .debug_bounds("pane-drop-indicator")
+            .expect("the pane the drop would replace");
+        assert!(indicator.left() < pane.center().x && indicator.right() > pane.center().x);
+
+        cx.simulate_mouse_up(pane.center(), MouseButton::Left, gpui::Modifiers::default());
+        draw(cx);
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(!store.is_thread_open("thread-1"));
+        });
+    }
+
+    /// A subagent's row in its lead's timeline opens the agent's thread
+    /// beside the lead, and marks it shown; once shown, the row moves the
+    /// keyboard to it rather than opening it twice.
+    #[gpui::test]
+    fn a_subagent_row_opens_its_thread_beside_the_lead(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        // The lead is reopened below, so the host answers it with the log
+        // that spawned the agent.
+        cx.simulate_keystrokes("secondary-2");
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("panes_index sends a snapshot");
+        };
+        let mut mirror = index.sessions[1].clone();
+        mirror.id = "mirror".into();
+        mirror.title = "mirror".into();
+        mirror.parent_session_id = Some("thread-1".into());
+        mirror.native_subagent = Some("spawn-1".into());
+        index.sessions.push(mirror);
+        let spawn = agent::AgentEvent::ItemStarted(agent::ThreadItem {
+            id: "spawn-1".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::Subagent {
+                agent_type: "explore".into(),
+                description: "Survey the panes".into(),
+                status: agent::ItemStatus::InProgress,
+                summary: None,
+                model: None,
+                effort: None,
+            },
+        });
+        let records: Vec<_> = [
+            agent::AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "ask".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::UserMessage {
+                    text: "Look around".into(),
+                    context_len: None,
+                    attachments: vec![],
+                },
+            }),
+            spawn,
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        send_events(
+            &host,
+            vec![
+                (topic, ServerEvent::IndexSnapshot(index)),
+                (
+                    Topic::SessionEvents {
+                        session_id: "thread-1".into(),
+                    },
+                    ServerEvent::SessionSnapshot {
+                        total: records.len() as u64,
+                        total_turns: 1,
+                        truncated: false,
+                        from: 0,
+                        end: records.len() as u64,
+                        records,
+                    },
+                ),
+            ],
+        );
+        cx.simulate_keystrokes("secondary-1");
+        await_restore_update(&shell, cx, |store| {
+            store.thread_meta("mirror").is_some() && !store.chat_loading()
+        });
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        let log = cx
+            .debug_bounds("worklog-header-0-spawn-1")
+            .expect("the turn's work log");
+        cx.simulate_mouse_move(log.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(log.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert!(cx.debug_bounds("subagent-shown").is_none());
+
+        let row = cx
+            .debug_bounds("subagent-row-spawn-1")
+            .expect("the subagent's row");
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        draw(cx);
+        serve_thread(&host, "mirror");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("mirror".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        assert!(cx.debug_bounds("subagent-shown").is_some());
+
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        let row = cx
+            .debug_bounds("subagent-row-spawn-1")
+            .expect("the subagent's row");
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("mirror".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+    }
+
+    /// Choose the palette's action `label`, in whatever language the host's
+    /// settings left the window in.
+    fn choose_from_palette(shell: &Entity<AppShell>, label: &str, cx: &mut VisualTestContext) {
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.open_palette(cx));
+        draw(cx);
+        cx.simulate_input(&format!(">{label}"));
+        draw(cx);
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+    }
+
+    /// Two columns from one pane keep its thread on the left and leave the
+    /// right waiting; a pane command from the palette hands the keyboard back
+    /// to the focused pane's composer, under the focus ring; a single pane
+    /// from two keeps the focused thread and closes the other; ⌥⌘2 lays out
+    /// two columns again. Each layout goes in as its fade plays.
+    #[gpui::test]
+    fn a_layout_fills_its_panes_from_the_focused_one(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let settle = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+        };
+        choose_from_palette(&shell, &PaneLayout::Columns.label(), cx);
+        settle(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        assert!(cx.debug_bounds("waiting-pane").is_some());
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        cx.simulate_keystrokes("secondary-alt-right secondary-2");
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        for command in [crate::tr!("panes.zoom"), crate::tr!("panes.unzoom")] {
+            choose_from_palette(&shell, &command, cx);
+            settle(cx);
+            assert_eq!(keyboard_pane(&shell, cx), Some(1), "{command}");
+        }
+        assert!(cx.debug_bounds("focused-pane").is_some());
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[1]
+                .read(cx)
+                .chat()
+                .read(cx)
+                .composer()
+                .read(cx)
+                .input_focus_handle(cx)
+        });
+        cx.update(|window, _| assert!(composer.is_focused(window), "the caret is back"));
+
+        choose_from_palette(&shell, &PaneLayout::Single.label(), cx);
+        settle(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(!store.is_thread_open("thread-1"));
+        });
+
+        cx.simulate_keystrokes("secondary-alt-2");
+        draw(cx);
+        settle(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into()), None]);
+    }
+
+    /// A row of a pane header's menu leaves the keyboard in that pane's
+    /// composer, as a pane command from the palette does, not on the menu's
+    /// button.
+    #[gpui::test]
+    fn a_pane_menu_row_hands_the_keyboard_to_the_composer(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        let button = cx.debug_bounds("pane-menu").expect("the pane menu");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        draw(cx);
+        let pane = keyboard_pane(&shell, cx).expect("the menu's pane has the keyboard");
+        // Split right, split down, a separator, then zoom.
+        let zoom = cx.debug_bounds("menu-item-3").expect("the zoom row");
+        cx.simulate_click(zoom.center(), gpui::Modifiers::default());
+        draw(cx);
+        let (zoomed, composer) = shell.read_with(cx, |shell, cx| {
+            let attachment = shell.attachment.as_ref().expect("attached");
+            let composer = attachment.all_panes(cx)[pane]
+                .read(cx)
+                .chat()
+                .read(cx)
+                .composer()
+                .read(cx)
+                .input_focus_handle(cx);
+            (attachment.zoom.is_zoomed(), composer)
+        });
+        assert!(zoomed, "the row ran");
+        assert_eq!(keyboard_pane(&shell, cx), Some(pane));
+        cx.update(|window, _| assert!(composer.is_focused(window), "the caret is back"));
+    }
+
+    /// A thread's agents spread beside it newest first, stacked on the
+    /// right; one that has settled stays out.
+    #[gpui::test]
+    fn spreading_agents_leaves_settled_ones_out(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("panes_index sends a snapshot");
+        };
+        for (id, created_at, settled_at) in [
+            ("agent-old", 1, None),
+            ("agent-new", 2, None),
+            ("agent-settled", 3, Some(4)),
+        ] {
+            let mut agent = index.sessions[1].clone();
+            agent.id = id.into();
+            agent.title = id.into();
+            agent.parent_session_id = Some("thread-1".into());
+            agent.created_at = created_at;
+            agent.settled_at = settled_at;
+            index.sessions.push(agent);
+        }
+        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+        await_restore_update(&shell, cx, |store| {
+            store.thread_meta("agent-settled").is_some()
+        });
+        draw(cx);
+
+        choose_from_palette(&shell, &PaneLayout::SpreadAgents.label(), cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [
+                Some("thread-1".into()),
+                Some("agent-new".into()),
+                Some("agent-old".into())
+            ]
+        );
+    }
+
+    /// How opaque the chat column is painted, read from its frame's fill, and
+    /// how many panes it draws, in the frame drawn now.
+    fn column_scene(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> (f32, usize) {
+        frame(cx, |window, cx| {
+            let attachment = shell.read(cx).attachment.as_ref().expect("attached");
+            let column = attachment
+                .thread_panes
+                .read(cx)
+                .bounds()
+                .scale(window.scale_factor());
+            let alpha = window
+                .painted_quads()
+                .iter()
+                .find(|quad| quad.bounds == column)
+                .and_then(|quad| quad.background.as_solid())
+                .expect("the column's fill")
+                .a;
+            (alpha, attachment.all_panes(cx).len())
+        })
+    }
+
+    /// A layout goes in as a change of scene: the column fades out, the new
+    /// panes are put in during the frame it is faintest, and it fades back
+    /// in. A layout chosen meanwhile is the one put in, the fade going on
+    /// from where it is: down to the bottom while it falls, turning back
+    /// down while it rises. One that changes nothing does not fade.
+    #[gpui::test]
+    fn a_layout_goes_in_while_the_column_is_faded_out(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        let settle = crate::edge_back::SETTLE;
+        let (rest, _) = column_scene(&shell, cx);
+        let at = |after: Duration, cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(after);
+            column_scene(&shell, cx)
+        };
+
+        cx.simulate_keystrokes("secondary-alt-2");
+        assert_eq!(column_scene(&shell, cx), (rest, 1), "the key's own frame");
+        let (falling, panes) = at(settle / 4, cx);
+        assert!(falling < rest && panes == 1, "falling: {falling} of {rest}");
+        let (lower, panes) = at(settle / 4 - Duration::from_millis(1), cx);
+        assert!(
+            lower < falling && panes == 1,
+            "lower: {lower}, {panes} panes"
+        );
+        let (lowest, panes) = at(Duration::from_millis(1), cx);
+        assert!(
+            lowest < lower && panes == 2,
+            "lowest: {lowest}, {panes} panes"
+        );
+        let (rising, panes) = at(settle / 4, cx);
+        assert!(
+            lowest < rising && rising < rest && panes == 2,
+            "rising: {rising}"
+        );
+        assert_eq!(at(settle, cx), (rest, 2), "back at rest");
+
+        // The keyboard stayed in the left pane, so two columns again leave
+        // every pane where it is.
+        let before = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)
+        });
+        cx.simulate_keystrokes("secondary-alt-2");
+        draw(cx);
+        assert_eq!(
+            at(settle / 4, cx),
+            (rest, 2),
+            "nothing changes, nothing fades"
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| {
+                shell.attachment.as_ref().expect("attached").all_panes(cx)
+            }),
+            before
+        );
+
+        // Falling toward four panes, one beside two is chosen instead.
+        cx.simulate_keystrokes("secondary-alt-4");
+        draw(cx);
+        let (falling, _) = at(settle / 4, cx);
+        cx.simulate_keystrokes("secondary-alt-3");
+        assert_eq!(
+            column_scene(&shell, cx),
+            (falling, 2),
+            "no jump as it goes on"
+        );
+        let (lowest, panes) = at(settle / 4, cx);
+        assert!(lowest < falling && panes == 3, "{lowest}, {panes} panes");
+
+        // Rising, one pane is chosen.
+        let (rising, _) = at(settle / 4, cx);
+        cx.simulate_keystrokes("secondary-alt-1");
+        assert_eq!(column_scene(&shell, cx), (rising, 3), "no jump as it turns");
+        let (turned, panes) = at(settle / 10, cx);
+        assert!(turned < rising && panes == 3, "turned back down: {turned}");
+        let (_, panes) = at(settle, cx);
+        assert_eq!(panes, 1);
+        assert_eq!(at(settle, cx), (rest, 1), "back at rest");
+    }
+
+    /// ⇧⌘↩ grows the right pane out of its slot over the column, the left
+    /// pane still drawn where it was beneath it, taking neither the pointer
+    /// nor the keyboard; zoomed, the pane fills the column. ⇧⌘↩ again
+    /// shrinks it back into its slot.
+    #[gpui::test]
+    fn a_zoomed_pane_grows_over_the_column_and_back_into_its_slot(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        let painted = |cx: &mut VisualTestContext| {
+            frame(cx, |_, cx| {
+                let attachment = shell.read(cx).attachment.as_ref().expect("attached");
+                let panes: Vec<_> = attachment
+                    .all_panes(cx)
+                    .iter()
+                    .map(|pane| pane.read(cx).bounds())
+                    .collect();
+                (attachment.thread_panes.read(cx).bounds(), panes)
+            })
+        };
+        let (column, slots) = painted(cx);
+        let between = |zoomed: gpui::Bounds<Pixels>| {
+            zoomed.intersect(&column) == zoomed
+                && slots[1].intersect(&zoomed) == slots[1]
+                && slots[1].size.width + px(1.) < zoomed.size.width
+                && zoomed.size.width < column.size.width - px(1.)
+        };
+        let settle = crate::edge_back::SETTLE;
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(settle / 2);
+        let (_, panes) = painted(cx);
+        let zoomed = cx
+            .debug_bounds("zoomed-pane")
+            .expect("drawn over the column");
+        assert!(
+            between(zoomed),
+            "growing: {zoomed:?} from {slots:?} to {column:?}"
+        );
+        assert_eq!(panes, [slots[0], zoomed], "the left pane where it was");
+        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the zoomed pane's keys");
+        let beneath = cx.update(|window, _| {
+            let left = slots[0].scale(window.scale_factor());
+            window.painted_quads().iter().any(|quad| {
+                quad.bounds.intersect(&left) == quad.bounds
+                    && quad.background.as_solid().is_some_and(|fill| fill.a > 0.)
+            })
+        });
+        assert!(beneath, "the left pane is still painted beneath");
+        let uncovered = gpui::point((column.left() + zoomed.left()) / 2., column.center().y);
+        cx.simulate_click(uncovered, gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the click is swallowed");
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(
+            keyboard_pane(&shell, cx),
+            Some(1),
+            "nor does it take the keys"
+        );
+
+        cx.executor().advance_clock(settle);
+        let (_, panes) = painted(cx);
+        assert_eq!(cx.debug_bounds("zoomed-pane"), Some(column));
+        assert_eq!(panes, [slots[0], column], "zoomed, it fills the column");
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(settle / 2);
+        draw(cx);
+        let zoomed = cx
+            .debug_bounds("zoomed-pane")
+            .expect("still over the column");
+        assert!(between(zoomed), "shrinking: {zoomed:?}");
+        cx.executor().advance_clock(settle);
+        let (_, panes) = painted(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_none());
+        assert_eq!(panes, slots, "both back in their slots");
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+    }
+
+    /// Tab and ⇧Tab in a zoomed pane keep the keyboard in it: the panes it
+    /// covers are still laid out, tab stops and all, but never take it. Back
+    /// in its slot the pane keeps the keyboard, and Tab leaves it again.
+    #[gpui::test]
+    fn tabbing_in_a_zoomed_pane_never_reaches_the_panes_it_covers(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        for key in ["tab", "shift-tab"] {
+            for press in 0..30 {
+                cx.simulate_keystrokes(key);
+                draw(cx);
+                assert_eq!(keyboard_pane(&shell, cx), Some(1), "{key} #{press}");
+            }
+        }
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_none());
+        assert_eq!(
+            keyboard_pane(&shell, cx),
+            Some(1),
+            "still in the pane, now in its slot"
+        );
+        let reached = (0..60).any(|_| {
+            cx.simulate_keystrokes("tab");
+            draw(cx);
+            keyboard_pane(&shell, cx) == Some(0)
+        });
+        assert!(
+            reached,
+            "back in its slot, Tab reaches the other pane again"
+        );
+    }
+
+    /// ⇧⌘↩ again halfway through a zoom turns it back from where it is: the
+    /// pane does not jump, and it shrinks back into its slot.
+    #[gpui::test]
+    fn a_zoom_turned_back_midway_shrinks_from_where_it_is(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        let slots: Vec<_> = shell.read_with(cx, |shell, cx| {
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+        });
+        let settle = crate::edge_back::SETTLE;
+        let frame = std::time::Duration::from_millis(16);
+        let close = |a: gpui::Bounds<Pixels>, b: gpui::Bounds<Pixels>| {
+            (a.left() - b.left()).abs() <= px(1.)
+                && (a.top() - b.top()).abs() <= px(1.)
+                && (a.right() - b.right()).abs() <= px(1.)
+                && (a.bottom() - b.bottom()).abs() <= px(1.)
+        };
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(settle / 2);
+        draw(cx);
+        let before = cx.debug_bounds("zoomed-pane").expect("growing");
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        let turned = cx.debug_bounds("zoomed-pane").expect("turning back");
+        assert!(close(before, turned), "{before:?} then {turned:?}");
+        cx.executor().advance_clock(frame);
+        draw(cx);
+        let after = cx.debug_bounds("zoomed-pane").expect("shrinking");
+        assert!(
+            after.size.width < turned.size.width,
+            "it shrinks from there: {turned:?} then {after:?}"
+        );
+
+        cx.executor().advance_clock(settle);
+        draw(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_none());
+        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+        });
+        assert_eq!(panes, slots, "back in its slot");
+    }
+
+    /// Splitting a thread puts a draft beside it, in the thread's place in
+    /// the store's focus, while the thread stays open in its own pane. Both
+    /// panes' headers then have to fit beside the right panel for it to dock.
+    #[gpui::test]
+    fn splitting_a_thread_shows_a_draft_beside_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw(cx);
+        let _ = sent(&host);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        assert!(cx.debug_bounds("waiting-pane").is_some());
+        // The new pane grows out of nothing beside the one it halves.
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths[1] < px(1.) && (widths[0] - column).abs() < px(1.),
+            "{widths:?} of {column:?}"
+        );
+        answer_draft(&shell, &host, "draft-1", cx);
+        // The hint fades out under the draft's chat, which has the keyboard
+        // from the start of the fade.
+        assert!(cx.debug_bounds("waiting-pane").is_some());
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            px(0.) < widths[1]
+                && widths[1] < column / 2.
+                && column / 2. < widths[0]
+                && widths[0] < column,
+            "halfway: {widths:?} of {column:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths
+                .iter()
+                .all(|width| (*width - column / 2.).abs() < px(1.)),
+            "landed: {widths:?} of {column:?}"
+        );
+        assert!(cx.debug_bounds("waiting-pane").is_none());
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("draft-1"));
+            assert!(store.is_thread_open("thread-1"));
+        });
+
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.active_session_id()),
+            Some("thread-1".into())
+        );
+        let docks = SIDEBAR_WIDTH + 2. * PANE_MIN_WIDTH + RIGHT_PANEL_MIN_WIDTH;
+        for (width, docked) in [(docks + 20., true), (docks - 20., false)] {
+            resize(cx, width);
+            draw(cx);
+            assert_eq!(
+                cx.debug_bounds("right-panel")
+                    .is_some_and(|panel| panel.size.width > px(0.)),
+                docked,
+                "{width}pt"
+            );
+            assert_eq!(
+                cx.debug_bounds("right-panel-overlay").is_some(),
+                !docked,
+                "{width}pt"
+            );
+        }
+    }
+
+    /// Beside a draft no draft is asked for, since the host would answer with
+    /// that same draft: the new pane waits with the keyboard, and the thread
+    /// chosen next from the threads list fills it.
+    #[gpui::test]
+    fn splitting_a_draft_leaves_the_new_pane_waiting(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        serve_status(&host, "thread-1", true);
+        await_restore_update(&shell, cx, |store| {
+            store.session_status().is_some_and(|status| status.draft)
+        });
+        draw(cx);
+        let _ = sent(&host);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        assert!(!sent(&host).iter().any(|payload| matches!(
+            payload,
+            ClientPayload::Command(Command::StartDraft { .. } | Command::StartScratchDraft)
+        )));
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        assert!(cx.debug_bounds("waiting-pane").is_some());
+        // The draft keeps its layout while its pane halves, and takes the
+        // half once the glide lands: its header, the only one (a waiting
+        // pane draws none), ends inside it.
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let draft = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .bounds()
+        });
+        let menu = cx.debug_bounds("pane-menu").expect("the draft's pane menu");
+        assert!(menu.right() <= draft.right(), "{menu:?} in {draft:?}");
+
+        cx.simulate_keystrokes("secondary-2");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-1"));
+        });
+    }
+
+    /// A pane waiting for a thread has no chat header, so no pane menu: its
+    /// corner button closes it, as ⇧⌘W and Escape do with the keyboard in it.
+    #[gpui::test]
+    fn a_waiting_pane_closes_from_its_corner_and_the_keyboard(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        serve_status(&host, "thread-1", true);
+        await_restore_update(&shell, cx, |store| {
+            store.session_status().is_some_and(|status| status.draft)
+        });
+        draw(cx);
+        let split = |cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-d");
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+            assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+            assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        };
+        let closed = |cx: &mut VisualTestContext, how: &str| {
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+            assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())], "{how}");
+        };
+
+        split(cx);
+        let close = cx
+            .debug_bounds("waiting-pane-close")
+            .expect("the waiting pane's close button");
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        draw(cx);
+        closed(cx, "corner button");
+        assert!(cx.debug_bounds("waiting-pane-close").is_none());
+
+        split(cx);
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        closed(cx, "secondary-shift-w");
+
+        split(cx);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        closed(cx, "escape");
+    }
+
+    /// Three panes, the keyboard in the top right one: ⌥⌘W glides the other
+    /// two shut while the keyboard stays, and their threads close, still
+    /// listed.
+    #[gpui::test]
+    fn closing_other_panes_leaves_the_focused_one(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        cx.simulate_keystrokes("secondary-alt-up");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [
+                Some("thread-1".into()),
+                Some("thread-2".into()),
+                Some("draft-1".into())
+            ]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        let (column, start) = pane_widths(&shell, cx);
+
+        cx.simulate_keystrokes("secondary-alt-w");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx).len(), 3, "they glide shut first");
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (_, halfway) = pane_widths(&shell, cx);
+        assert!(
+            start[1] < halfway[1] && halfway[1] < column,
+            "{start:?} then {halfway:?} of {column:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(!store.is_thread_open("thread-1"));
+            assert!(!store.is_thread_open("draft-1"));
+        });
+        assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
+    }
+
+    /// ⇧⌥⌘← exchanges the right pane's thread with the left one's, a
+    /// half-written message going along with it, and the keyboard stays in
+    /// the right pane, now on the left one's thread; each pane keeps its
+    /// colour, so the threads swap colours.
+    #[gpui::test]
+    fn swapping_panes_takes_the_thread_and_its_draft_along(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        cx.simulate_input("half a thought");
+        draw(cx);
+        let colours = pane_outlines(&shell, cx);
+
+        cx.simulate_keystrokes("secondary-alt-shift-left");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-2".into()), Some("thread-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the keyboard stays");
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .chat()
+                .read(cx)
+                .composer()
+        });
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "half a thought"
+        );
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("thread-1"));
+            assert!(store.is_thread_open("thread-2"));
+        });
+        let row = |selector: &'static str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds(selector).expect("the thread's row");
+            outline_at(row, cx).expect("outlined")
+        };
+        let [Some(left), Some(right)] = colours[..] else {
+            panic!("two panes, each in its colour: {colours:?}");
+        };
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let midway = row("sidebar-thread-thread-2", cx);
+        assert!(
+            midway != left && midway != right,
+            "the moved thread's row glides between the colours: {midway:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_outlines(&shell, cx), colours);
+        assert_eq!(row("sidebar-thread-thread-2", cx), left);
+        assert_eq!(row("sidebar-thread-thread-1", cx), right);
+    }
+
+    /// Moving the right pane's thread left trades it with the left pane's:
+    /// the moved thread shows in the left pane with the keyboard, the left
+    /// pane's thread in the right pane, and nothing closes.
+    #[gpui::test]
+    fn moving_a_thread_trades_places_with_its_neighbour(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        let mac = cx.update(|_, cx| cx.platform_info().is_mac());
+        cx.simulate_keystrokes(if mac { "cmd-ctrl-left" } else { "alt-left" });
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-2".into()), Some("thread-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-1"));
+            assert!(store.is_thread_open("thread-2"));
+        });
+    }
+
+    /// With the keyboard in a thread's terminal, the pane keys are the
+    /// terminal's: the layout's and the split's keys leave the panes alone.
+    #[gpui::test]
+    fn pane_keys_in_a_terminal_leave_the_panes_alone(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        store_of(&shell, cx).update(cx, |store, cx| store.toggle_terminal_panel(cx));
+        draw(cx);
+        let terminal = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .chat(cx)
+                .read(cx)
+                .terminal_drawer()
+                .focus_handle(cx)
+        });
+        cx.update(|window, cx| window.focus(&terminal, cx));
+        draw(cx);
+        cx.update(|window, _| {
+            assert!(
+                window
+                    .context_stack()
+                    .iter()
+                    .any(|context| context.contains(crate::terminal_drawer::CONTEXT)),
+                "the terminal has the keyboard"
+            )
+        });
+
+        cx.simulate_keystrokes("secondary-alt-2 secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        cx.update(|window, _| assert!(terminal.is_focused(window)));
+    }
+
+    /// The palette's pane commands and the pane menu's rows show the key
+    /// that runs them.
+    #[gpui::test]
+    fn pane_commands_show_their_keys(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        // A test window keeps none of the glyphs it paints (only its quads and
+        // underlines), so a hint is read by the width its text was laid out
+        // at. Split right's key (secondary-d) is one key shorter than split
+        // down's (secondary-shift-d), so each list's split-right hint must be
+        // the narrower: a row showing another command's key, or the same key
+        // on every row, is caught.
+        let palette_hint = |label: &str, cx: &mut VisualTestContext| {
+            shell
+                .read_with(cx, |shell, _| shell.window_state())
+                .update(cx, |state, cx| state.open_palette(cx));
+            draw(cx);
+            cx.simulate_input(&format!(">{label}"));
+            draw(cx);
+            let row = cx.debug_bounds("palette-row-0").expect("the command's row");
+            let hint = cx
+                .debug_bounds("palette-row-0-key")
+                .expect("the row shows its key");
+            assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
+            cx.simulate_keystrokes("escape");
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+            hint.size.width
+        };
+        let right = palette_hint(&crate::tr!("panes.split_right"), cx);
+        let down = palette_hint(&crate::tr!("panes.split_down"), cx);
+        assert!(
+            right < down,
+            "palette: split right {right:?}, down {down:?}"
+        );
+
+        let button = cx.debug_bounds("pane-menu").expect("the pane menu");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        draw(cx);
+        let menu_hint = |row: &'static str, key: &'static str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds(row).expect("the command's row");
+            let hint = cx.debug_bounds(key).expect("the row shows its key");
+            assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
+            hint.size.width
+        };
+        let right = menu_hint("menu-item-0", "menu-item-0-key", cx);
+        let down = menu_hint("menu-item-1", "menu-item-1-key", cx);
+        assert!(right < down, "menu: split right {right:?}, down {down:?}");
+    }
+
+    /// Two columns fit beside the sidebar of a 1200pt window, each header
+    /// whole. A split the window has no room for is refused; stacking still
+    /// fits.
+    #[gpui::test]
+    fn a_split_without_room_is_refused(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        resize(cx, 1200.);
+        draw(cx);
+        let _ = sent(&host);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into())]
+        );
+        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+        });
+        for pane in &panes {
+            assert!(pane.size.width >= px(PANE_MIN_WIDTH), "{pane:?}");
+        }
+        let overflow = cx
+            .debug_bounds("header-overflow")
+            .expect("the narrow header's one menu");
+        assert!(
+            overflow.right() <= panes[1].right(),
+            "the right pane's header ends at {:?}, past its pane at {:?}",
+            overflow.right(),
+            panes[1].right()
+        );
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+
+        resize(cx, SIDEBAR_WIDTH + 2. * PANE_MIN_WIDTH - 10.);
+        draw(cx);
+        // A thread carried from the pane's middle, where it would land, to
+        // its right edge, which has no room: the placeholder fades out rather
+        // than vanishing, and the drop there does nothing.
+        let pane = only_pane(&shell, cx);
+        drag_row("sidebar-thread-thread-2", pane.center(), cx);
+        assert!(cx.debug_bounds("pane-drop-indicator").is_some());
+        let edge = gpui::point(pane.right() - px(20.), pane.center().y);
+        cx.simulate_mouse_move(edge, Some(MouseButton::Left), gpui::Modifiers::default());
+        draw(cx);
+        let painted_alpha = |cx: &mut VisualTestContext| {
+            let placeholder = cx
+                .debug_bounds("pane-drop-indicator")
+                .expect("the placeholder, still drawn while it fades out");
+            cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .find(|quad| quad.bounds == placeholder.scale(window.scale_factor()))
+                    .and_then(|quad| quad.background.as_solid())
+                    .expect("the placeholder's fill")
+                    .a
+            })
+        };
+        let leaving = painted_alpha(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 3);
+        draw(cx);
+        let fading = painted_alpha(cx);
+        assert!(
+            fading < leaving,
+            "the placeholder fades: {leaving} then {fading}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert!(cx.debug_bounds("pane-drop-indicator").is_none());
+        cx.simulate_mouse_up(edge, MouseButton::Left, gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        let _ = sent(&host);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        assert!(
+            !sent(&host).iter().any(|payload| matches!(
+                payload,
+                ClientPayload::Command(Command::StartScratchDraft)
+            ))
+        );
+
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+    }
+
+    /// A thread archived while another pane has the keyboard takes its pane
+    /// with it; the focused thread is left alone.
+    #[gpui::test]
+    fn archiving_a_background_panes_thread_closes_the_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        send_events(&host, vec![panes_index(&["thread-1"])]);
+        await_restore_update(&shell, cx, |store| !store.is_thread_open("thread-1"));
+        draw(cx);
+        // It glides shut first.
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+        });
+    }
+
+    /// A split's handle taken while the split glides stops the glide: the
+    /// panes stay where the pointer leaves them.
+    #[gpui::test]
+    fn a_handle_dragged_mid_glide_keeps_where_it_is_left(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        draw(cx);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths[0] > column / 2. + px(150.),
+            "still gliding: {widths:?}"
+        );
+        let left = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .bounds()
+        });
+        let handle = gpui::point(left.right(), left.center().y);
+        let to = handle - gpui::point(px(120.), px(0.));
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_move(handle, None, none);
+        draw(cx);
+        cx.simulate_mouse_down(handle, MouseButton::Left, none);
+        draw(cx);
+        for step in [handle - gpui::point(px(40.), px(0.)), to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), none);
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let (_, widths) = pane_widths(&shell, cx);
+        assert!(
+            (widths[0] - (to.x - left.left())).abs() < px(1.),
+            "the pane ends where the handle was left: {widths:?}, handle at {to:?}"
+        );
+    }
+
+    /// A handle dragged on one split leaves the others gliding: a pane
+    /// closing in a stack beside it still glides shut.
+    #[gpui::test]
+    fn another_splits_handle_dragged_lets_a_close_finish(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into()), None]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(2));
+        let bounds = |cx: &mut VisualTestContext| -> Vec<gpui::Bounds<Pixels>> {
+            shell.read_with(cx, |shell, cx| {
+                let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+                panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+            })
+        };
+
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        let start = bounds(cx)[2].size.height;
+        let left = bounds(cx)[0];
+        let handle = gpui::point(left.right(), left.center().y);
+        let to = handle - gpui::point(px(120.), px(0.));
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_move(handle, None, none);
+        draw(cx);
+        cx.simulate_mouse_down(handle, MouseButton::Left, none);
+        draw(cx);
+        for step in [handle - gpui::point(px(40.), px(0.)), to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), none);
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx).len(), 3, "still closing");
+        let halfway = bounds(cx)[2].size.height;
+        assert!(
+            px(0.) < halfway && halfway < start - px(1.),
+            "the stack's glide runs on: {start:?} then {halfway:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into())]
+        );
+        let (_, widths) = pane_widths(&shell, cx);
+        assert!(
+            (widths[0] - (to.x - left.left())).abs() < px(1.),
+            "the columns stay where the handle was left: {widths:?}, handle at {to:?}"
+        );
+    }
+
+    /// A pane closed while it still grows in turns back from where it is
+    /// drawn, and the column ends as it was.
+    #[gpui::test]
+    fn a_pane_closed_while_it_grows_in_turns_back_where_it_is(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        draw(cx);
+        let (column, growing) = pane_widths(&shell, cx);
+        assert!(
+            px(1.) < growing[1] && growing[1] < column / 2. - px(1.),
+            "growing: {growing:?} of {column:?}"
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        let (_, turned) = pane_widths(&shell, cx);
+        assert!(
+            growing
+                .iter()
+                .zip(&turned)
+                .all(|(growing, turned)| (*growing - *turned).abs() < px(1.)),
+            "no jump as it turns: {growing:?} then {turned:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 10);
+        draw(cx);
+        let (_, shrinking) = pane_widths(&shell, cx);
+        assert!(
+            shrinking[1] < turned[1],
+            "it narrows from there: {turned:?} then {shrinking:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths.len() == 1 && (widths[0] - column).abs() < px(1.),
+            "{widths:?} of {column:?}"
+        );
+    }
+
+    /// A split made while a pane closes divides what the column will be, from
+    /// where its panes are drawn: nothing jumps, and the close still lands.
+    #[gpui::test]
+    fn a_split_made_while_a_pane_closes_glides_on_from_where_it_is(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        draw(cx);
+        let (column, closing) = pane_widths(&shell, cx);
+        assert!(
+            closing[0] < column / 2. - px(1.) && gpui_base::PANEL_MIN_SIZE < closing[0],
+            "closing: {closing:?} of {column:?}"
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into()), None]
+        );
+        let (_, split) = pane_widths(&shell, cx);
+        assert!(
+            (split[0] - closing[0]).abs() < px(1.)
+                && (split[1] - closing[1]).abs() < px(1.)
+                && split[2] < px(1.),
+            "no jump as it turns: {closing:?} then {split:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into()), None]);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths
+                .iter()
+                .all(|width| (*width - column / 2.).abs() < px(1.)),
+            "landed: {widths:?} of {column:?}"
+        );
+    }
+
+    /// With motion reduced a split, a zoom, a layout and a close land in the
+    /// frame they are made: the panes are at their halves at once, a zoomed
+    /// pane fills the column and is back in its slot, a layout is in with
+    /// the column at rest, and a closed pane is gone rather than left at the
+    /// dock's floor for a frame.
+    #[gpui::test]
+    fn with_motion_reduced_panes_split_zoom_lay_out_and_close_at_once(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths.len() == 2
+                && widths
+                    .iter()
+                    .all(|width| (*width - column / 2.).abs() < px(1.)),
+            "split: {widths:?} of {column:?}"
+        );
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        let (column, halves) = shell.read_with(cx, |shell, cx| {
+            let attachment = shell.attachment.as_ref().expect("attached");
+            let panes = attachment.all_panes(cx);
+            (
+                attachment.thread_panes.read(cx).bounds(),
+                panes
+                    .iter()
+                    .map(|pane| pane.read(cx).bounds())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        assert_eq!(cx.debug_bounds("zoomed-pane"), Some(column), "zoomed");
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_none(), "unzoomed");
+        let (rest, _) = column_scene(&shell, cx);
+        cx.simulate_keystrokes("secondary-alt-3");
+        assert_eq!(column_scene(&shell, cx), (rest, 3), "one beside two");
+        cx.simulate_keystrokes("secondary-alt-2");
+        assert_eq!(column_scene(&shell, cx), (rest, 2), "two columns");
+        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+        });
+        assert_eq!(panes, halves);
+
+        let closing = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0].clone()
+        });
+        let half = closing.read_with(cx, |pane, _| pane.bounds());
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        // The keystroke's own frame already leaves it out: it is not drawn
+        // again, not even at the dock's floor for a frame.
+        let last = closing.read_with(cx, |pane, _| pane.bounds());
+        assert_eq!(last, half, "where the closed pane was last drawn");
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths.len() == 1 && (widths[0] - column).abs() < px(1.),
+            "closed: {widths:?} of {column:?}"
+        );
+        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
+    }
+
+    /// Closing a pane closes its thread, which stays listed, and the store
+    /// moves on to the thread of the pane the keyboard lands in.
+    #[gpui::test]
+    fn closing_a_pane_focuses_its_neighbours_thread(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        // The pane glides shut, inert, the keyboard already in its neighbour.
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        let (closing, composer) = shell.read_with(cx, |shell, cx| {
+            let pane = shell.attachment.as_ref().expect("attached").all_panes(cx)[0].clone();
+            let pane = pane.read(cx);
+            let composer = pane.chat().read(cx).composer().read(cx);
+            (pane.bounds(), composer.input_focus_handle(cx))
+        });
+        cx.update(|window, _| assert!(!composer.is_focused(window)));
+        cx.simulate_click(closing.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the click is swallowed");
+        let (column, start) = pane_widths(&shell, cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (_, halfway) = pane_widths(&shell, cx);
+        assert!(
+            halfway[0] < start[0] && start[1] < halfway[1] && halfway[1] < column,
+            "{start:?} then {halfway:?} of {column:?}"
+        );
+        // Below the dock's slot floor it stops narrowing and fades out
+        // instead, gone as it is taken out.
+        let floored = |cx: &mut VisualTestContext| {
+            let closing = shell.read_with(cx, |shell, cx| {
+                shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                    .read(cx)
+                    .bounds()
+            });
+            assert!(
+                (closing.size.width - gpui_base::PANEL_MIN_SIZE).abs() < px(1.),
+                "at the floor: {closing:?}"
+            );
+            cx.update(|window, _| {
+                let closing = closing.scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|quad| {
+                        let mask = quad.content_mask.bounds;
+                        !mask.is_empty() && mask.intersect(&closing) == mask
+                    })
+                    .filter_map(|quad| quad.background.as_solid())
+                    .map(|fill| fill.a)
+                    .fold(0., f32::max)
+            })
+        };
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 5);
+        draw(cx);
+        let fading = floored(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 8);
+        draw(cx);
+        let faded = floored(cx);
+        assert!(
+            0. < faded && faded < fading && fading < 1.,
+            "the closing pane's content fades: {fading} then {faded}"
+        );
+        // The frame the glide lands in no longer draws the pane: no strip at
+        // the floor, its neighbour has the whole column.
+        let strip = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .bounds()
+        });
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        let (landed, (column, widths)) = frame(cx, |window, cx| {
+            let strip = strip.scale(window.scale_factor());
+            let landed = window
+                .painted_quads()
+                .iter()
+                .filter(|quad| {
+                    let mask = quad.content_mask.bounds;
+                    !mask.is_empty() && mask.intersect(&strip) == mask
+                })
+                .filter_map(|quad| quad.background.as_solid())
+                .map(|fill| fill.a)
+                .fold(0., f32::max);
+            (landed, widths_of(shell.read(cx), cx))
+        });
+        assert!(
+            landed == 0. && widths.len() == 1 && (widths[0] - column).abs() < px(1.),
+            "landed: {landed} drawn in the strip, {widths:?} of {column:?}"
+        );
+        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("draft-1"));
+            assert!(!store.is_thread_open("thread-1"));
+        });
+        assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
+
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("draft-1".into())],
+            "the last pane stays"
+        );
+    }
+
+    /// The outline painted along `bounds`, a pane's or a thread row's.
+    fn outline_at(bounds: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> Option<gpui::Hsla> {
+        cx.update(|window, _| {
+            let bounds = bounds.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .find(|quad| quad.bounds == bounds && quad.border_widths.left.as_f32() > 0.)
+                .map(|quad| quad.border_color)
+        })
+    }
+
+    /// The colour each pane on screen wears, in the layout's order.
+    fn pane_outlines(
+        shell: &Entity<AppShell>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<Option<gpui::Hsla>> {
+        let panes = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).bounds())
+                .collect::<Vec<_>>()
+        });
+        panes.into_iter().map(|pane| outline_at(pane, cx)).collect()
+    }
+
+    /// Beside others each pane wears a colour of its own, and the threads
+    /// list outlines the row of the thread it shows in that colour; a lone
+    /// pane wears none. A pane that shows another thread keeps its colour,
+    /// and the outline glides from the old thread's row to the new one's.
+    #[gpui::test]
+    fn each_pane_and_its_threads_row_wear_the_panes_colour(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("an index")
+        };
+        let mut third = index.sessions[1].clone();
+        third.id = "thread-3".into();
+        third.title = "thread-3".into();
+        third.updated_at = 0;
+        index.sessions.push(third);
+        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+        await_restore_update(&shell, cx, |store| store.thread_meta("thread-3").is_some());
+        let row = |selector: &'static str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds(selector).expect("the thread's row");
+            outline_at(row, cx)
+        };
+        let choose = |selector: &'static str, id: &str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds(selector).expect("the thread's row");
+            cx.simulate_click(row.center(), gpui::Modifiers::default());
+            draw(cx);
+            serve_thread(&host, id);
+            await_restore_update(&shell, cx, |store| !store.chat_loading());
+        };
+        assert_eq!(pane_outlines(&shell, cx), [None]);
+        assert_eq!(row("sidebar-thread-thread-1", cx), None);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        choose("sidebar-thread-thread-2", "thread-2", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        let colours = pane_outlines(&shell, cx);
+        let [Some(left), Some(right)] = colours[..] else {
+            panic!("each pane wears a colour: {colours:?}");
+        };
+        assert_ne!(left, right);
+        assert_eq!(row("sidebar-thread-thread-1", cx), Some(left));
+        assert_eq!(row("sidebar-thread-thread-2", cx), Some(right));
+        assert_eq!(row("sidebar-thread-thread-3", cx), None);
+
+        // The right pane, holding the keyboard, shows thread-3 instead.
+        choose("sidebar-thread-thread-3", "thread-3", cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-3".into())]
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        for leaving_or_coming in ["sidebar-thread-thread-2", "sidebar-thread-thread-3"] {
+            let outline = row(leaving_or_coming, cx).expect("still or already outlined");
+            assert!(
+                0. < outline.a
+                    && outline.a < right.a
+                    && (outline.h, outline.s, outline.l) == (right.h, right.s, right.l),
+                "{leaving_or_coming} halfway: {outline:?} toward {right:?}"
+            );
+        }
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_outlines(&shell, cx), [Some(left), Some(right)]);
+        assert_eq!(row("sidebar-thread-thread-1", cx), Some(left));
+        assert_eq!(row("sidebar-thread-thread-2", cx), None);
+        assert_eq!(row("sidebar-thread-thread-3", cx), Some(right));
+    }
+
+    /// The colour of a pane closed is the next new pane's.
+    #[gpui::test]
+    fn a_closed_panes_colour_goes_to_the_next_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let colours = pane_outlines(&shell, cx);
+        let [Some(left), Some(right)] = colours[..] else {
+            panic!("each pane wears a colour: {colours:?}");
+        };
+
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
+        assert_eq!(pane_outlines(&shell, cx), [None]);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-2", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("draft-1".into()), Some("draft-2".into())]
+        );
+        assert_eq!(pane_outlines(&shell, cx), [Some(right), Some(left)]);
+    }
+
+    /// Choosing from the threads list a thread another pane shows moves the
+    /// keyboard there instead of showing the thread twice.
+    #[gpui::test]
+    fn choosing_a_thread_shown_in_another_pane_focuses_that_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        // The threads list's first row, through its shortcut.
+        cx.simulate_keystrokes("secondary-1");
+        draw(cx);
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("thread-2"));
+        });
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+    }
+
+    #[gpui::test]
     fn project_choice_reuses_drafts_and_focuses_only_on_desktop(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         for (mobile, compact, projects) in [
@@ -4967,7 +8561,7 @@ mod tests {
                     .attachment
                     .as_ref()
                     .unwrap()
-                    .chat
+                    .chat(cx)
                     .read(cx)
                     .composer()
                     .read(cx)
@@ -5417,13 +9011,21 @@ mod tests {
     }
 
     fn draw(cx: &mut VisualTestContext) {
+        frame(cx, |_, _| ());
+    }
+
+    /// Draw a frame and `read` it as the screen shows it until the next one:
+    /// before the work it deferred runs, after which the test platform draws
+    /// again at once.
+    fn frame<R>(cx: &mut VisualTestContext, read: impl FnOnce(&mut Window, &mut App) -> R) -> R {
         cx.run_until_parked();
         cx.update(|window, cx| {
             // A frame that reuses any view keeps every debug bound of the
             // previous one, so an element no longer painted would still be found.
             window.refresh();
             _ = window.draw(cx);
-        });
+            read(window, cx)
+        })
     }
 
     fn resize(cx: &mut VisualTestContext, width: f32) {
@@ -5632,9 +9234,7 @@ mod tests {
             .collect();
         seed_wide_diff_with(&shell, &host, cx, conversation);
         draw(cx);
-        let chat = shell.read_with(cx, |shell, _| {
-            shell.attachment.as_ref().unwrap().chat.clone()
-        });
+        let chat = shell.read_with(cx, |shell, cx| shell.attachment.as_ref().unwrap().chat(cx));
         let mut reading_position = None;
         for destination in [Destination::Thread, Destination::Panel] {
             shell.update(cx, |shell, cx| shell.go(destination, cx));
@@ -5671,7 +9271,13 @@ mod tests {
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         let history = state.read_with(cx, |state, _| state.history().to_vec());
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         cx.update(|window, cx| {
             composer.update(cx, |composer, cx| {
@@ -5941,7 +9547,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("first".into());
+            store.select_session("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
@@ -6000,7 +9606,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("first".into());
+            store.select_session("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
@@ -6008,7 +9614,7 @@ mod tests {
             })
         });
         let search = shell.read_with(cx, |shell, cx| {
-            let chat = shell.attachment.as_ref().unwrap().chat.read(cx);
+            let chat = shell.attachment.as_ref().unwrap().chat(cx).read(cx);
             chat.composer().read(cx).model_search_focus_handle(cx)
         });
 
@@ -6094,7 +9700,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("first".into());
+            store.select_session("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
@@ -6203,7 +9809,13 @@ mod tests {
             "ctrl-z"
         };
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat(cx)
+                .read(cx)
+                .composer()
         });
         let input = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         cx.update(|window, cx| input.focus(window, cx));
@@ -6287,7 +9899,7 @@ mod tests {
             .unwrap();
         store.update(cx, |store, cx| {
             store.drain_host_events_for_test(cx);
-            store.select_session("thread-1".into());
+            store.select_session("thread-1".into(), cx);
         });
 
         resize(cx, 1024.);
@@ -6315,7 +9927,7 @@ mod tests {
                 .attachment
                 .as_ref()
                 .expect("attached")
-                .chat
+                .chat(cx)
                 .read(cx)
                 .composer()
         });
@@ -6357,7 +9969,7 @@ mod tests {
                 .attachment
                 .as_ref()
                 .unwrap()
-                .chat
+                .chat(cx)
                 .read(cx)
                 .composer()
                 .entity_id()),
@@ -6490,7 +10102,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session("thread-1".into()));
+        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
         as_mobile(cx);
         resize(cx, 393.);
 
@@ -6660,8 +10272,7 @@ mod tests {
 
             let store = store_of(&shell, cx);
             store.update(cx, |store, cx| {
-                store.select_session(thread.into());
-                cx.notify();
+                store.select_session(thread.into(), cx);
             });
             draw(cx);
 
@@ -6769,15 +10380,15 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session("thread-1".into()));
+        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
         as_mobile(cx);
         resize(cx, 393.);
-        let chat = shell.read_with(cx, |shell, _| {
+        let chat = shell.read_with(cx, |shell, cx| {
             shell
                 .attachment
                 .as_ref()
                 .expect("attached")
-                .chat
+                .chat(cx)
                 .entity_id()
         });
         let _ = sent(&host);
@@ -6812,7 +10423,7 @@ mod tests {
                     .attachment
                     .as_ref()
                     .expect("attached")
-                    .chat
+                    .chat(cx)
                     .entity_id(),
                 chat,
                 "the views over the workspace were never rebuilt"
@@ -6961,7 +10572,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
     }
@@ -7073,7 +10684,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
         await_restore_update(&shell, cx, |store| {
             store.composer_state().turn_running && !store.chat_loading()
         });
@@ -7104,8 +10715,8 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("working-status-19").is_none());
 
-        let chat = shell.read_with(cx, |shell, _| {
-            shell.attachment.as_ref().expect("attached").chat.clone()
+        let chat = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").chat(cx)
         });
         let invalidations = Rc::new(Cell::new(0));
         let _observer = cx.update(|_, cx| {
@@ -7141,7 +10752,7 @@ mod tests {
             )
             .unwrap();
         let store = store_of(&shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         crate::settings::assert_follows_language_switch(cx, "chat.new_thread", |cx| {
@@ -7388,7 +10999,13 @@ mod tests {
                 });
                 let chat_min = CHAT_MIN_WIDTH
                     + store.read_with(cx, |store, _| {
-                        crate::chat::header_extra_width(store, collapsed, false, false)
+                        crate::chat::header_extra_width_for(
+                            store,
+                            store.active_session_id().as_deref(),
+                            collapsed,
+                            false,
+                            false,
+                        )
                     });
                 let beside = width - sidebar;
                 if beside >= chat_min + RIGHT_PANEL_MIN_WIDTH {
@@ -7559,7 +11176,7 @@ mod tests {
                 .attachment
                 .as_ref()
                 .unwrap()
-                .chat
+                .chat(cx)
                 .read(cx)
                 .composer()
                 .read(cx)
@@ -7587,7 +11204,8 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_crowded_thread(cx);
         let store = store_of(&shell, cx);
-        resize(cx, 720.);
+        // Narrower than the header at its narrowest.
+        resize(cx, SIDEBAR_WIDTH + PANE_MIN_WIDTH);
         draw(cx);
         draw(cx);
         let header = cx.debug_bounds("chat-header-scroll").unwrap();
@@ -7597,12 +11215,17 @@ mod tests {
             ..Default::default()
         });
         draw(cx);
-        let toggle = cx.debug_bounds("diff-panel").unwrap();
+        let toggle = cx.debug_bounds("header-overflow").unwrap();
         assert!(
             toggle.left() >= header.left() && toggle.right() <= header.right(),
-            "the last panel toggle must scroll into view"
+            "the last panel control must scroll into view"
         );
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        draw(cx);
+        draw(cx);
+        // Terminal, tasks, then the diff.
+        let diff = cx.debug_bounds("menu-item-2").expect("the diff's row");
+        cx.simulate_click(diff.center(), gpui::Modifiers::default());
         draw_until(&shell, cx, &host, "diff-body", None);
         assert!(store.read_with(cx, |store, _| store.panel_state().right_panel_open));
     }
@@ -7748,7 +11371,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(shell, cx);
-        store.update(cx, |store, _| store.select_session(session.into()));
+        store.update(cx, |store, cx| store.select_session(session.into(), cx));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         resize(cx, 1200.);

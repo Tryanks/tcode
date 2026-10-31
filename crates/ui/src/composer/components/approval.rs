@@ -258,7 +258,11 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         self.workspace_store.update(cx, |store, _cx| {
-            store.respond_approval(request_id, decision)
+            store.respond_approval_for(
+                self.session_id.clone().unwrap_or_default(),
+                request_id,
+                decision,
+            )
         });
     }
 }
@@ -327,7 +331,7 @@ mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.chat_loading()

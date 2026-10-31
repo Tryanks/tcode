@@ -447,121 +447,152 @@ impl WorkspaceStore {
         self.dispatch(Command::MarkSessionUnread { session_id });
         self.local_settings_changed(cx);
     }
-    pub(crate) fn leave_session(&mut self) {
+    /// Leave the focused thread: nothing is focused, and the thread closes.
+    pub(crate) fn leave_session(&mut self, cx: &mut Context<Self>) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
-        self.history_task = None;
-        self.history_trim = None;
-        self.history_error = None;
-        self.history_pages_fetched = 0;
-        self.history_logged_records = None;
-        self.session_turn_offset = 0;
-        self.session_catching_up = false;
-        self.clear_terminal_topics();
-        self.clear_command_outputs();
-        if let Some(session_id) = self.selected_session_id.take() {
-            if let Some(thread) = self.threads.get_mut(&session_id) {
-                thread.left_at = self.selection_generation;
-                // The thread reopens at its tail.
-                if let Some(held) = &mut thread.history {
-                    held.drop_pages_above_tail();
-                }
-            }
-            self.release_left_threads();
-            for topic in [
-                tcode_protocol::Topic::SessionEvents {
-                    session_id: session_id.clone(),
-                },
-                tcode_protocol::Topic::SessionStatus {
-                    session_id: session_id.clone(),
-                },
-                tcode_protocol::Topic::SessionPlan {
-                    session_id: session_id.clone(),
-                },
-                tcode_protocol::Topic::GitStatus { session_id },
-            ] {
-                let _ = self.host.unsubscribe(tcode_protocol::Subscription {
-                    known_index: None,
-                    topic,
-                    after: None,
-                });
-            }
+        if let Some(session_id) = self.focused_session_id.take() {
+            self.close_thread(&session_id, cx);
         }
-        self.session_status_replica = None;
-        self.session_replica = None;
-        self.read_acknowledged = None;
-        self.active_destination = None;
-        self.git_status_replica = Default::default();
+        cx.notify();
     }
 
-    /// Keep the replicas of the [`KEPT_THREADS`] threads left most recently.
-    fn release_left_threads(&mut self) {
-        if self.threads.len() <= KEPT_THREADS {
+    /// Focus nothing while every thread stays open, for a surface about to
+    /// show a thread that does not exist yet.
+    pub(crate) fn release_focus(&mut self, cx: &mut Context<Self>) {
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+        if self.focused_session_id.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Act on an open thread, which another surface shows, leaving every
+    /// other thread as it is. A thread that is not open is not focused.
+    pub(crate) fn focus_thread(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.focused_session_id.as_deref() == Some(session_id)
+            || !self.is_thread_open(session_id)
+        {
             return;
         }
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+        self.focused_session_id = Some(session_id.to_owned());
+        cx.notify();
+    }
+
+    /// Whether a surface shows the thread, so its topics are subscribed.
+    pub(crate) fn is_thread_open(&self, session_id: &str) -> bool {
+        self.threads
+            .get(session_id)
+            .is_some_and(|thread| thread.open)
+    }
+
+    /// Stop showing a thread: its topics are unsubscribed and its paging
+    /// state forgotten, while its replicas stay for a while so reopening it
+    /// fetches only what it missed. Closing the focused thread leaves
+    /// nothing focused.
+    pub(crate) fn close_thread(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.focused_session_id.as_deref() == Some(session_id) {
+            self.focused_session_id = None;
+        }
+        cx.notify();
+        self.clear_command_outputs(session_id);
+        if let Some(thread) = self.threads.get_mut(session_id) {
+            thread.open = false;
+            thread.generation = thread.generation.wrapping_add(1);
+            thread.left_at = self.selection_generation;
+            thread.reset_paging();
+            thread.timeline = None;
+            thread.read_acknowledged = None;
+            thread.destination = None;
+            // The thread reopens at its tail.
+            if let Some(held) = &mut thread.history {
+                held.drop_pages_above_tail();
+            }
+        }
+        self.release_left_threads();
+        for topic in [
+            tcode_protocol::Topic::SessionEvents {
+                session_id: session_id.to_owned(),
+            },
+            tcode_protocol::Topic::SessionStatus {
+                session_id: session_id.to_owned(),
+            },
+            tcode_protocol::Topic::SessionPlan {
+                session_id: session_id.to_owned(),
+            },
+            tcode_protocol::Topic::GitStatus {
+                session_id: session_id.to_owned(),
+            },
+        ] {
+            let _ = self.host.unsubscribe(tcode_protocol::Subscription {
+                known_index: None,
+                topic,
+                after: None,
+            });
+        }
+        self.sync_terminal_topics();
+    }
+
+    /// Keep the replicas of the [`KEPT_THREADS`] threads left most recently,
+    /// besides the open ones.
+    fn release_left_threads(&mut self) {
         let mut left: Vec<(u64, String)> = self
             .threads
             .iter()
+            .filter(|(_, thread)| !thread.open)
             .map(|(id, thread)| (thread.left_at, id.clone()))
             .collect();
+        if left.len() <= KEPT_THREADS {
+            return;
+        }
         left.sort_unstable_by(|a, b| b.cmp(a));
         for (_, id) in &left[KEPT_THREADS..] {
             self.threads.remove(id);
         }
     }
 
-    pub fn select_session(&mut self, session_id: String) {
-        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
-        self.draft_fallback_pending = false;
-        if self.selected_session_id.as_ref() == Some(&session_id) {
-            return;
-        }
-        let project_id = self
-            .index_replica
-            .0
-            .iter()
-            .find(|meta| meta.id == session_id)
-            .and_then(|meta| meta.project_id.clone());
-        self.remember_project(project_id);
-        self.leave_session();
-        self.selected_session_id = Some(session_id.clone());
+    /// Show a thread: subscribe its topics and fold what the client already
+    /// holds of it, so a kept thread shows its last window at once.
+    pub(crate) fn open_thread(&mut self, session_id: &str) {
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionStatus {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             });
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionPlan {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             });
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionEvents {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             });
-        let thread = self.threads.entry(session_id.clone()).or_default();
-        self.session_status_replica = thread.status.clone();
-        self.git_status_replica = thread.git.clone().unwrap_or_default();
+        let thread = self.threads.entry(session_id.to_owned()).or_default();
+        if !thread.open {
+            thread.open = true;
+            thread.generation = thread.generation.wrapping_add(1);
+        }
+        thread.reset_paging();
+        thread.timeline = None;
         let after = thread.history.as_ref().map(|held| held.end);
-        let total_turns = thread.total_turns;
-        if let Some(total_turns) = total_turns.filter(|_| after.is_some()) {
-            let mut timeline = self.fold_held_records(&session_id);
-            self.session_turn_offset = total_turns.saturating_sub(timeline.turns.len());
-            self.settle_running_turn(&mut timeline);
-            self.session_replica = Some((session_id.clone(), timeline));
+        if let Some(total_turns) = thread.total_turns.filter(|_| after.is_some()) {
+            thread.refold(total_turns);
         }
         if !self.baseline_topics.contains(&tcode_protocol::Topic::Scope) {
             return;
         }
         for topic in [
             tcode_protocol::Topic::SessionStatus {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             },
             tcode_protocol::Topic::SessionPlan {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             },
             tcode_protocol::Topic::GitStatus {
-                session_id: session_id.clone(),
+                session_id: session_id.to_owned(),
             },
-            tcode_protocol::Topic::SessionEvents { session_id },
+            tcode_protocol::Topic::SessionEvents {
+                session_id: session_id.to_owned(),
+            },
         ] {
             let _ = self.host.subscribe(tcode_protocol::Subscription {
                 known_index: None,
@@ -574,12 +605,54 @@ impl WorkspaceStore {
             });
         }
         self.sync_terminal_topics();
-        self.sync_active_conversation_ui();
+        self.sync_conversation_ui(session_id);
     }
-    pub fn select_session_at_turn(&mut self, session_id: String, turn: usize) {
+
+    /// Act on a thread: one another surface shows only takes the focus,
+    /// any other replaces the focused thread.
+    pub fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let shown = self.is_thread_open(&session_id);
+        self.select(session_id, shown, cx);
+    }
+
+    /// Select the focused thread afresh once a new baseline dropped its
+    /// subscriptions.
+    pub(super) fn reselect_focused(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.focused_session_id.take() {
+            self.select(session_id, false, cx);
+        }
+    }
+
+    fn select(&mut self, session_id: String, shown: bool, cx: &mut Context<Self>) {
+        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
+        self.draft_fallback_pending = false;
+        if self.focused_session_id.as_ref() == Some(&session_id) {
+            return;
+        }
+        let project_id = self
+            .index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .and_then(|meta| meta.project_id.clone());
+        self.remember_project(project_id);
+        if shown {
+            self.focus_thread(&session_id, cx);
+            return;
+        }
+        self.leave_session(cx);
+        self.focused_session_id = Some(session_id.clone());
+        self.open_thread(&session_id);
+    }
+    pub fn select_session_at_turn(
+        &mut self,
+        session_id: String,
+        turn: usize,
+        cx: &mut Context<Self>,
+    ) {
         self.anchor_turn_task = None;
         self.pending_chat_turn = Some((session_id.clone(), turn));
-        self.select_session(session_id);
+        self.select_session(session_id, cx);
     }
     /// Open a thread, then scroll it to the turn holding the entry at
     /// `position` once the host names that turn. Only the host can: the
@@ -591,7 +664,7 @@ impl WorkspaceStore {
         cx: &mut Context<Self>,
     ) {
         self.pending_chat_turn = None;
-        self.select_session(session_id.clone());
+        self.select_session(session_id.clone(), cx);
         let generation = self.selection_generation;
         let host = self.host.clone();
         self.anchor_turn_task = Some(cx.spawn(async move |this, cx| {
@@ -623,119 +696,134 @@ impl WorkspaceStore {
             });
         }));
     }
-    pub fn send_turn(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
+    pub fn send_turn_for(
+        &mut self,
+        session_id: String,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+    ) {
         self.dispatch(Command::SendTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             text,
             attachment_paths,
         });
     }
-    pub fn schedule_turn(
+    pub fn schedule_turn_for(
         &mut self,
+        session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
         fire_at_unix_secs: u64,
     ) {
         self.dispatch(Command::ScheduleTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             text,
             attachment_paths,
             fire_at_unix_secs,
         });
     }
-    pub fn confirm_relay_and_send(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
+    pub fn confirm_relay_and_send_for(
+        &mut self,
+        session_id: String,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+    ) {
         self.dispatch(Command::ConfirmRelayAndSend {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             text,
             attachment_paths,
         });
     }
-    pub fn orchestrate_turn(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
+    pub fn orchestrate_turn_for(
+        &mut self,
+        session_id: String,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+    ) {
         self.dispatch(Command::OrchestrateTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             text,
             attachment_paths,
         });
     }
-    pub fn steer(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
+    pub fn steer_for(&mut self, session_id: String, text: String, attachment_paths: Vec<PathBuf>) {
         self.dispatch(Command::Steer {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             text,
             attachment_paths,
         });
     }
-    pub fn steer_queued(&mut self, id: u64) {
-        self.dispatch(Command::SteerQueued {
-            session_id: self.active_session_id().unwrap_or_default(),
-            id,
-        });
+    pub fn steer_queued_for(&mut self, session_id: String, id: u64) {
+        self.dispatch(Command::SteerQueued { session_id, id });
     }
-    pub fn drop_queued(&mut self, id: u64) {
-        self.dispatch(Command::DropQueued {
-            session_id: self.active_session_id().unwrap_or_default(),
-            id,
-        });
+    pub fn drop_queued_for(&mut self, session_id: String, id: u64) {
+        self.dispatch(Command::DropQueued { session_id, id });
     }
-    pub fn move_queued(&mut self, id: u64, before: Option<u64>) {
+    pub fn move_queued_for(&mut self, session_id: String, id: u64, before: Option<u64>) {
         self.dispatch(Command::MoveQueued {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             id,
             before,
         });
     }
-    pub fn retry_turn(&mut self, turn_id: String) {
+    pub fn retry_turn_for(&mut self, session_id: String, turn_id: String) {
         self.dispatch(Command::RetryTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             turn_id,
         });
     }
-    pub fn interrupt(&mut self) {
-        self.dispatch(Command::Interrupt {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn interrupt_for(&mut self, session_id: String) {
+        self.dispatch(Command::Interrupt { session_id });
     }
-    pub fn compact_context(&mut self) {
-        self.dispatch(Command::CompactContext {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn compact_context_for(&mut self, session_id: String) {
+        self.dispatch(Command::CompactContext { session_id });
     }
-    pub fn set_goal(&mut self, objective: Option<String>, status: Option<agent::GoalStatus>) {
+    pub fn set_goal_for(
+        &mut self,
+        session_id: String,
+        objective: Option<String>,
+        status: Option<agent::GoalStatus>,
+    ) {
         self.dispatch(Command::SetGoal {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             objective,
             status,
         });
     }
-    pub fn clear_goal(&mut self) {
-        self.dispatch(Command::ClearGoal {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn clear_goal_for(&mut self, session_id: String) {
+        self.dispatch(Command::ClearGoal { session_id });
     }
-    pub fn respond_approval(&mut self, request_id: String, decision: ApprovalDecision) {
+    pub fn respond_approval_for(
+        &mut self,
+        session_id: String,
+        request_id: String,
+        decision: ApprovalDecision,
+    ) {
         if self.approval_delivery_pending(&request_id) {
             return;
         }
         self.dispatch(Command::RespondApproval {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             request_id,
             decision,
         });
     }
-    pub fn respond_user_input(
+    pub fn respond_user_input_for(
         &mut self,
+        session_id: String,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
     ) {
         self.dispatch(Command::RespondUserInput {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             request_id,
             answers,
         });
     }
-    pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode) {
+    pub fn rewind_turn_for(&mut self, session_id: String, turn: usize, mode: RewindMode) {
         self.dispatch(Command::RewindTurn {
-            session_id: self.active_session_id().unwrap_or_default(),
-            turn: self.absolute_turn(turn),
+            turn: self.absolute_turn_for(Some(&session_id), turn),
+            session_id,
             mode,
         });
     }
@@ -745,11 +833,8 @@ impl WorkspaceStore {
             comment,
         });
     }
-    pub fn remove_review_comment(&mut self, index: usize) {
-        self.dispatch(Command::RemoveReviewComment {
-            session_id: self.active_session_id().unwrap_or_default(),
-            index,
-        });
+    pub fn remove_review_comment_for(&mut self, session_id: String, index: usize) {
+        self.dispatch(Command::RemoveReviewComment { session_id, index });
     }
 }
 
@@ -798,6 +883,34 @@ impl WorkspaceStore {
     pub fn start_scratch_draft(&mut self, cx: &mut Context<Self>) {
         self.create_and_select(Command::StartScratchDraft, cx);
     }
+    /// Start a draft in the project `session_id` belongs to, or a scratch
+    /// draft when it belongs to none. Beside a draft nothing starts: the host
+    /// answers a project's or a quick chat's draft request with its standing
+    /// draft, which would be that same draft.
+    pub(crate) fn start_draft_beside(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
+        if self
+            .session_status_for(session_id)
+            .is_some_and(|status| status.draft)
+        {
+            return;
+        }
+        let project = session_id
+            .and_then(|id| {
+                self.index_replica
+                    .0
+                    .iter()
+                    .find(|meta| meta.id == id)
+                    .and_then(|meta| meta.project_id.clone())
+                    .or_else(|| self.threads.get(id)?.status.as_ref()?.project_id.clone())
+            })
+            .and_then(|project_id| self.project(&project_id))
+            .filter(|project| !project.quick_chat)
+            .map(|project| (project.id.clone(), project.root.clone()));
+        match project {
+            Some((project_id, root)) => self.start_draft(project_id, root, cx),
+            None => self.start_scratch_draft(cx),
+        }
+    }
     fn create_and_select(&mut self, command: Command, cx: &mut Context<Self>) {
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         let request_generation = self.creation_request_generation;
@@ -814,28 +927,25 @@ impl WorkspaceStore {
                 if store.selection_generation == selection_generation
                     && let Ok(CommandResponse::SessionId(Some(id))) = response
                 {
-                    store.select_session(id);
-                    cx.notify();
+                    store.select_session(id, cx);
                 }
             });
         })
         .detach();
     }
-    pub fn set_draft_workspace(&mut self, mode: WorkspaceMode) {
-        self.dispatch(Command::SetDraftWorkspace {
-            session_id: self.active_session_id().unwrap_or_default(),
-            mode,
-        });
+    pub fn set_draft_workspace_for(&mut self, session_id: String, mode: WorkspaceMode) {
+        self.dispatch(Command::SetDraftWorkspace { session_id, mode });
     }
-    pub fn run_git_action(
+    pub fn run_git_action_for(
         &mut self,
+        session_id: String,
         action: GitAction,
         message: Option<String>,
         included: Option<Vec<String>>,
         feature_branch: Option<String>,
     ) {
         self.dispatch(Command::RunGitAction {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             action,
             message,
             included,
@@ -851,16 +961,11 @@ impl WorkspaceStore {
             feature_branch: request.feature_branch,
         });
     }
-    pub fn load_branches(&mut self) {
-        self.dispatch(Command::LoadBranches {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn load_branches_for(&mut self, session_id: String) {
+        self.dispatch(Command::LoadBranches { session_id });
     }
-    pub fn checkout_branch(&mut self, branch: String) {
-        self.dispatch(Command::CheckoutBranch {
-            session_id: self.active_session_id().unwrap_or_default(),
-            branch,
-        });
+    pub fn checkout_branch_for(&mut self, session_id: String, branch: String) {
+        self.dispatch(Command::CheckoutBranch { session_id, branch });
     }
     pub fn cycle_project_sort(&mut self, cx: &mut Context<Self>) {
         self.dispatch(Command::CycleProjectSort);
@@ -870,61 +975,64 @@ impl WorkspaceStore {
 
 impl WorkspaceStore {
     pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_terminal_panel_for(self.active_session_id().unwrap_or_default(), cx);
+    }
+    pub fn toggle_terminal_panel_for(&mut self, session_id: String, cx: &mut Context<Self>) {
         let opening = !self
-            .active_conversation_ui()
+            .thread_conversation_ui(Some(&session_id))
             .is_some_and(|ui| ui.terminal_open);
-        if let Some(ui) = self.active_conversation_ui_mut() {
+        if let Some(ui) = self.thread_conversation_ui_mut(Some(&session_id)) {
             ui.terminal_open = opening;
         }
         if opening {
-            self.dispatch(Command::ToggleTerminalPanel {
-                session_id: self.active_session_id().unwrap_or_default(),
-            });
+            self.dispatch(Command::ToggleTerminalPanel { session_id });
         } else {
-            self.dispatch(Command::CloseTerminalPanel {
-                session_id: self.active_session_id().unwrap_or_default(),
-            });
+            self.dispatch(Command::CloseTerminalPanel { session_id });
         }
         cx.emit(StoreChange {
             topic: TopicKind::ActiveSession,
         });
         cx.notify();
     }
-    pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn close_terminal_panel_for(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if let Some(ui) = self.thread_conversation_ui_mut(Some(&session_id)) {
             ui.terminal_open = false;
         }
-        self.dispatch(Command::CloseTerminalPanel {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+        self.dispatch(Command::CloseTerminalPanel { session_id });
         cx.emit(StoreChange {
             topic: TopicKind::ActiveSession,
         });
         cx.notify();
     }
-    pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn set_terminal_height_for(
+        &mut self,
+        session_id: String,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ui) = self.thread_conversation_ui_mut(Some(&session_id)) {
             ui.terminal_height = height;
         }
-        self.dispatch(Command::SetTerminalHeight {
-            session_id: self.active_session_id().unwrap_or_default(),
-            height,
-        });
+        self.dispatch(Command::SetTerminalHeight { session_id, height });
         cx.emit(StoreChange {
             topic: TopicKind::ActiveSession,
         });
         cx.notify();
     }
-    pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+    pub fn close_terminal_for(
+        &mut self,
+        session_id: String,
+        terminal_id: u64,
+        cx: &mut Context<Self>,
+    ) {
         let closes_drawer = self
-            .session_status_replica
-            .as_ref()
+            .thread_status(Some(&session_id))
             .is_some_and(|status| status.terminals.len() <= 1);
-        if closes_drawer && let Some(ui) = self.active_conversation_ui_mut() {
+        if closes_drawer && let Some(ui) = self.thread_conversation_ui_mut(Some(&session_id)) {
             ui.terminal_open = false;
         }
         self.dispatch(Command::CloseTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             terminal_id,
         });
         cx.emit(StoreChange {
@@ -932,29 +1040,25 @@ impl WorkspaceStore {
         });
         cx.notify();
     }
-    pub fn restart_terminal(&mut self) {
-        self.dispatch(Command::RestartTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn restart_terminal_for(&mut self, session_id: String) {
+        self.dispatch(Command::RestartTerminal { session_id });
     }
-    pub fn new_terminal(&mut self) {
-        self.dispatch(Command::NewTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
+    pub fn new_terminal_for(&mut self, session_id: String) {
+        self.dispatch(Command::NewTerminal { session_id });
     }
-    pub fn split_terminal(&mut self, direction: TerminalSplitDirection) {
+    pub fn split_terminal_for(&mut self, session_id: String, direction: TerminalSplitDirection) {
         self.dispatch(Command::SplitTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             direction,
         });
     }
-    pub fn activate_terminal(&mut self, terminal_id: u64) {
+    pub fn activate_terminal_for(&mut self, session_id: String, terminal_id: u64) {
         self.dispatch(Command::ActivateTerminal {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             terminal_id,
         });
     }
-    pub fn capture_terminal_selection(&mut self, terminal_id: u64) {
+    pub fn capture_terminal_selection_for(&mut self, session_id: String, terminal_id: u64) {
         let selection = self
             .client_terminal(terminal_id)
             .and_then(|terminal| terminal.selected_text())
@@ -964,14 +1068,14 @@ impl WorkspaceStore {
                 text: selection.text,
             });
         self.dispatch(Command::CaptureTerminalSelection {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             terminal_id,
             selection,
         });
     }
-    pub fn remove_terminal_context(&mut self, context_id: u64) {
+    pub fn remove_terminal_context_for(&mut self, session_id: String, context_id: u64) {
         self.dispatch(Command::RemoveTerminalContext {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             context_id,
         });
     }
@@ -1052,14 +1156,15 @@ impl WorkspaceStore {
     pub fn update_providers(&mut self, providers: Vec<ProviderKind>) {
         self.dispatch(Command::UpdateProviders { providers });
     }
-    pub fn set_active_model(
+    pub fn set_active_model_for(
         &mut self,
+        session_id: String,
         provider: ProviderKind,
         model: Option<String>,
         profile_id: Option<String>,
     ) {
         self.dispatch(Command::SetActiveModel {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             provider,
             model,
             profile_id,
@@ -1069,9 +1174,14 @@ impl WorkspaceStore {
         self.dispatch(Command::ToggleFavoriteModel { model });
         self.local_settings_changed(cx);
     }
-    pub fn set_active_option(&mut self, id: String, value: Option<serde_json::Value>) {
+    pub fn set_active_option_for(
+        &mut self,
+        session_id: String,
+        id: String,
+        value: Option<serde_json::Value>,
+    ) {
         self.dispatch(Command::SetActiveOption {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             id,
             value,
         });

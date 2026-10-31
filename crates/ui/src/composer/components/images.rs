@@ -98,10 +98,9 @@ pub(crate) fn fit_for_upload(mime: &str, bytes: Vec<u8>) -> image::ImageResult<(
 impl Composer {
     /// Reset the thumbnail strip when the active session changes (its pending
     /// images belong to a specific session).
-    pub(in super::super) fn sync_images_session(&mut self, cx: &mut Context<Self>) {
-        let id = self.workspace_store.read(cx).active_session_id();
-        if id != self.images_session {
-            self.images_session = id;
+    pub(in super::super) fn sync_images_session(&mut self) {
+        if self.session_id != self.images_session {
+            self.images_session = self.session_id.clone();
             self.pending_images.clear();
             self.image_load_generation = self.image_load_generation.wrapping_add(1);
             self.pending_image_loads = 0;
@@ -118,7 +117,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.sync_images_session(cx);
+        self.sync_images_session();
         let current_count = self.pending_images.len() + self.pending_image_loads;
         // Type and count are known now; the size is checked once the image is
         // fitted, since a phone photo starts far larger than it is sent.
@@ -127,11 +126,14 @@ impl Composer {
             return false;
         }
         let store = self.workspace_store.read(cx);
-        let session_id = store.active_session_id();
-        let attachments_dir = store.composer_state().attachments_dir;
+        let session_id = self.session_id.clone();
+        let attachments_dir = store
+            .composer_state_for(self.session_id.as_deref())
+            .attachments_dir;
         let link = store.attachment_link();
         let remote_limit = store.client_remote_attachment_limit_bytes();
         self.pending_image_loads += 1;
+        cx.notify();
         let generation = self.image_load_generation;
         let result_name = name.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -173,7 +175,7 @@ impl Composer {
                 })
                 .await;
             let _ = this.update_in(cx, |composer, window, cx| {
-                if !composer.owns_image_load(generation, &session_id, cx) {
+                if !composer.owns_image_load(generation, &session_id) {
                     return;
                 }
                 let prepared = match prepared {
@@ -181,6 +183,7 @@ impl Composer {
                     Err(error) => {
                         composer.pending_image_loads =
                             composer.pending_image_loads.saturating_sub(1);
+                        cx.notify();
                         composer.notify_add_image_error(error, window, cx);
                         return;
                     }
@@ -198,6 +201,7 @@ impl Composer {
                     TransferVerdict::Reject => {
                         composer.pending_image_loads =
                             composer.pending_image_loads.saturating_sub(1);
+                        cx.notify();
                         window.push_notification(
                             Notification::error(
                                 crate::tr!(
@@ -226,9 +230,10 @@ impl Composer {
                             let result_name = result_name.clone();
                             let release = move |cx: &mut App| {
                                 if dropped.borrow_mut().take().is_some() {
-                                    release_entity.update(cx, |composer, _cx| {
+                                    release_entity.update(cx, |composer, cx| {
                                         composer.pending_image_loads =
                                             composer.pending_image_loads.saturating_sub(1);
+                                        cx.notify();
                                     });
                                 }
                             };
@@ -277,10 +282,10 @@ impl Composer {
 
     /// Whether a load started under `generation` for `session_id` still
     /// belongs to the strip on screen.
-    fn owns_image_load(&self, generation: u64, session_id: &Option<String>, cx: &App) -> bool {
+    fn owns_image_load(&self, generation: u64, session_id: &Option<String>) -> bool {
         self.image_load_generation == generation
             && &self.images_session == session_id
-            && &self.workspace_store.read(cx).active_session_id() == session_id
+            && &self.session_id == session_id
     }
 
     fn notify_add_image_error(
@@ -315,15 +320,13 @@ impl Composer {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |composer, window, cx| {
-                if !composer.owns_image_load(generation, &session_id, cx) {
+                if !composer.owns_image_load(generation, &session_id) {
                     return;
                 }
                 composer.pending_image_loads = composer.pending_image_loads.saturating_sub(1);
+                cx.notify();
                 match result {
-                    Ok(path) => {
-                        composer.pending_images.push(PendingImage { path, name });
-                        cx.notify();
-                    }
+                    Ok(path) => composer.pending_images.push(PendingImage { path, name }),
                     Err(err) => {
                         composer.notify_add_image_error(AddImageError::Persist(err), window, cx)
                     }
@@ -345,7 +348,7 @@ impl Composer {
         else {
             return;
         };
-        self.sync_images_session(cx);
+        self.sync_images_session();
         let remaining =
             MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_loads);
         if remaining == 0 {
@@ -461,7 +464,7 @@ impl Composer {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.pending_images.is_empty() {
+        if self.pending_images.is_empty() && self.pending_image_loads == 0 {
             return None;
         }
         let mut row = h_flex().w_full().gap_1().flex_wrap();
@@ -521,6 +524,17 @@ impl Composer {
                             Box::new(ComposerMenu::ImageRemove(index)),
                         )
                     }),
+            );
+        }
+        for index in 0..self.pending_image_loads {
+            row = row.child(
+                Button::new(("thumb-loading", index))
+                    .secondary()
+                    .small()
+                    .chip()
+                    .icon(IconName::Image)
+                    .loading(true)
+                    .aria_label(crate::tr!("composer.loading")),
             );
         }
         Some(row.into_any_element())

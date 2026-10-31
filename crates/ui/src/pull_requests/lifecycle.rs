@@ -1231,7 +1231,7 @@ impl MergeDialog {
 }
 
 impl Render for MergeDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let target = &self.target;
         let key = &target.offer.key;
         let number = key.number.to_string();
@@ -1274,19 +1274,26 @@ impl Render for MergeDialog {
                     ),
                     cx,
                 ))
-                .child(
-                    self.fact(
-                        "pull_requests.merge.head",
-                        match &head {
-                            Some(head) => div()
-                                .font_family(mono.clone())
-                                .child(short(head))
-                                .into_any_element(),
-                            None => Spinner::new().into_any_element(),
-                        },
+                .child(self.fact(
+                    "pull_requests.merge.head",
+                    // The head cross-fades over the spinner that held its place.
+                    crate::motion::cross_fade(
+                        "pr-merge-head",
+                        head.clone(),
+                        window,
                         cx,
+                        |head, _, cx| {
+                            match head {
+                                Some(head) => div()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .child(short(head))
+                                    .into_any_element(),
+                                None => Spinner::new().into_any_element(),
+                            }
+                        },
                     ),
-                );
+                    cx,
+                ));
         let view = cx.entity();
         let compact = target.window_state.read(cx).compact;
         let method = match (state, self.method) {
@@ -1320,34 +1327,71 @@ impl Render for MergeDialog {
             (Some(_), None) => div().into_any_element(),
             (None, _) => Spinner::new().into_any_element(),
         };
+        // The methods cross-fade over the spinner as the action state arrives.
+        let reading = gpui_base::motion::transition(
+            "pr-merge-reading",
+            if state.is_none() { 1. } else { 0. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        let method = div()
+            .relative()
+            .child(
+                div()
+                    .opacity(if state.is_none() { 1. } else { 1. - reading })
+                    .child(method),
+            )
+            .when(state.is_some() && reading > 0., |slot| {
+                slot.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .opacity(reading)
+                        .child(Spinner::new()),
+                )
+            });
         let default_box = self
             .method
             .filter(|method| state.is_some() && Some(*method) != target.project_default)
             .zip(target.project.clone())
-            .map(|(method, (_, project))| {
+            .map(|(method, (_, project))| (method, project));
+        let make_default = self.make_default;
+        let default_box =
+            crate::motion::shown("pr-merge-default", default_box, window, cx).map(|shown| {
+                let (method, project) = shown.value.clone();
                 let view = view.clone();
-                Checkbox::new("pr-merge-default")
-                    .label(
-                        crate::tr!(
-                            "pull_requests.merge.make_default",
-                            method = segment_label(method),
-                            project = project
+                shown.fold(
+                    Checkbox::new("pr-merge-default")
+                        .label(
+                            crate::tr!(
+                                "pull_requests.merge.make_default",
+                                method = segment_label(method),
+                                project = project
+                            )
+                            .into_owned(),
                         )
-                        .into_owned(),
-                    )
-                    .checked(self.make_default)
-                    .disabled(self.sending)
-                    .on_click(move |checked, _, cx| {
-                        let checked = *checked;
-                        view.update(cx, |dialog, cx| {
-                            dialog.make_default = checked;
-                            cx.notify();
-                        })
-                    })
+                        .checked(make_default)
+                        .disabled(self.sending)
+                        .on_click(move |checked, _, cx| {
+                            let checked = *checked;
+                            view.update(cx, |dialog, cx| {
+                                dialog.make_default = checked;
+                                cx.notify();
+                            })
+                        }),
+                )
             });
-        let credits =
-            self.credits_shown().then(|| {
-                let view = view.clone();
+        let credits = crate::motion::shown(
+            "pr-merge-credits",
+            self.credits_shown().then_some(()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let view = view.clone();
+            shown.fold(
                 v_flex()
                     .gap_0p5()
                     .child(
@@ -1365,9 +1409,10 @@ impl Render for MergeDialog {
                     )
                     .child(div().text_secondary(compact, cx).child(
                         crate::tr!("pull_requests.merge.remove_credits_caption").into_owned(),
-                    ))
-            });
-        let note = |icon: IconName, color, text: String| {
+                    )),
+            )
+        });
+        let note = |icon: SharedString, color, text: String, cx: &App| {
             h_flex()
                 .gap_1p5()
                 .items_start()
@@ -1377,14 +1422,15 @@ impl Render for MergeDialog {
                     // Centres the font-sized icon on the first line's taller line box.
                     div()
                         .pt(cx.theme().tokens.spacing.xxs)
-                        .child(Icon::new(icon).text_color(color)),
+                        .child(Icon::empty().path(icon).text_color(color)),
                 )
                 .child(div().flex_1().min_w_0().child(text))
         };
-        let mut notes = Vec::new();
+        let mut notes: Vec<(&'static str, IconName, gpui::Hsla, String)> = Vec::new();
         if let Some(state) = state {
             if state.merge_queue {
-                notes.push(note(
+                notes.push((
+                    "queue",
                     IconName::ListOrdered,
                     cx.theme().info,
                     crate::tr!("pull_requests.merge.queue_note", number = number.clone())
@@ -1393,7 +1439,8 @@ impl Render for MergeDialog {
             } else if self.auto
                 && let Some(method) = self.method
             {
-                notes.push(note(
+                notes.push((
+                    "auto",
                     IconName::GitMerge,
                     cx.theme().info,
                     crate::tr!(
@@ -1407,7 +1454,8 @@ impl Render for MergeDialog {
             }
             let failing = state.failing_checks.len();
             if failing > 0 {
-                notes.push(note(
+                notes.push((
+                    "failing",
                     IconName::CircleX,
                     cx.theme().danger,
                     if failing == 1 {
@@ -1422,7 +1470,8 @@ impl Render for MergeDialog {
                 ));
             }
             if state.pending_checks > 0 {
-                notes.push(note(
+                notes.push((
+                    "running",
                     IconName::CircleDashed,
                     cx.theme().warning,
                     if state.pending_checks == 1 {
@@ -1437,14 +1486,16 @@ impl Render for MergeDialog {
                 ));
             }
             if state.merge_state == PullRequestMergeState::Blocked {
-                notes.push(note(
+                notes.push((
+                    "blocked",
                     IconName::MessageSquareWarning,
                     cx.theme().danger,
                     crate::tr!("pull_requests.actions.blocked").into_owned(),
                 ));
             }
             if let Some(behind) = state.behind_by.filter(|behind| *behind > 0) {
-                notes.push(note(
+                notes.push((
+                    "behind",
                     IconName::ArrowUpDown,
                     muted,
                     crate::tr!(
@@ -1456,8 +1507,40 @@ impl Render for MergeDialog {
                 ));
             }
         }
-        let failure = match &self.state {
-            Some(Err(reason)) => Some(
+        // Each note fades in and out on its own as the state is read and the method changes.
+        let notes: Vec<AnyElement> = ["queue", "auto", "failing", "running", "blocked", "behind"]
+            .into_iter()
+            .filter_map(|kind| {
+                let current = notes.iter().find(|(key, ..)| *key == kind);
+                let shown = crate::motion::shown(
+                    SharedString::from(format!("pr-merge-note-{kind}")),
+                    current.map(|(_, icon, color, text)| {
+                        (
+                            crate::icon::IconNamed::path(icon.clone()),
+                            *color,
+                            text.clone(),
+                        )
+                    }),
+                    window,
+                    cx,
+                )?;
+                let (icon, color, text) = shown.value.clone();
+                Some(shown.fold(note(icon, color, text, cx)))
+            })
+            .collect();
+        let retry = cx.listener(|this, _, _, cx| this.load(cx));
+        let failure = crate::motion::shown(
+            "pr-merge-failure",
+            match &self.state {
+                Some(Err(reason)) => Some(reason.clone()),
+                _ => None,
+            },
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let reason = shown.value.clone();
+            shown.fold(
                 v_flex()
                     .gap_1()
                     .text_secondary(compact, cx)
@@ -1471,11 +1554,10 @@ impl Render for MergeDialog {
                             .outline()
                             .xsmall()
                             .label(crate::tr!("pull_requests.detail.retry"))
-                            .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
+                            .on_click(retry),
                     ),
-            ),
-            _ => None,
-        };
+            )
+        });
         let ready = state.is_some() && self.method.is_some();
         v_flex()
             .gap_3()

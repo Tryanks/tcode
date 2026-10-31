@@ -7,10 +7,10 @@ use std::{
 };
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, DismissEvent,
-    ElementId, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, DismissEvent, ElementId, Entity, EventEmitter,
+    FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{
     Toast as BaseToast, ToastManager, ToastMotion, ToastOptions, ToastStack, ToastStackState,
@@ -19,6 +19,7 @@ use gpui_base::{
 
 use crate::{
     icon::{Icon, IconName},
+    motion::PresencePhase,
     sizing::Sizable as _,
     theme::ActiveTheme as _,
     typography::TextRole as _,
@@ -235,8 +236,22 @@ impl EventEmitter<DismissEvent> for Notification {}
 
 impl Render for Notification {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let presence = crate::motion::appear(
+            "toast-presence",
+            self.transition_status != ToastTransitionStatus::Ending,
+            window,
+            cx,
+        );
+        if !presence.should_render() {
+            return div().into_any_element();
+        }
+        // gpui-base has no inert subtree: the cover takes the pointer from a
+        // leaving toast, but a control already focused in it keeps focus.
+        let cover = (presence.phase == PresencePhase::Exiting)
+            .then(|| div().absolute().inset_0().occlude());
+        let progress = presence.progress;
+        let lift = crate::motion::lift(progress);
         if crate::window_seam::window_is_compact(window, cx) {
-            let entering = self.transition_status == ToastTransitionStatus::Starting;
             let action = self
                 .action
                 .clone()
@@ -286,14 +301,10 @@ impl Render for Notification {
                     ),
                 )
                 .children(action)
-                .with_animation(
-                    "compact-toast-enter",
-                    Animation::new(Duration::from_millis(150)),
-                    move |el, delta| {
-                        let delta = if entering { delta } else { 1. };
-                        el.opacity(delta).relative().top(px(8. * (1. - delta)))
-                    },
-                )
+                .children(cover)
+                .opacity(progress)
+                .relative()
+                .top(lift)
                 .into_any_element();
         }
         let content = self
@@ -317,6 +328,8 @@ impl Render for Notification {
             .items_start()
             .gap(spacing.md)
             .relative()
+            .top(lift)
+            .opacity(progress)
             .occlude()
             .w_full()
             .p(spacing.lg)
@@ -354,8 +367,24 @@ impl Render for Notification {
                         })),
                 ),
             )
+            .children(cover)
             .into_any_element()
     }
+}
+
+/// A leaving toast stays mounted for its `appear` exit. A compact toast also
+/// enters over `SETTLE`; a wide one keeps the stack's own sonner timing.
+fn toast_manager(compact: bool) -> ToastManager<NotificationId, Entity<Notification>> {
+    let sonner = ToastMotion::sonner();
+    ToastManager::new(ToastMotion {
+        duration: if compact {
+            crate::edge_back::SETTLE
+        } else {
+            sonner.duration
+        },
+        exit_duration: crate::edge_back::SETTLE,
+        ..sonner
+    })
 }
 
 pub(crate) struct NotificationList {
@@ -384,7 +413,7 @@ impl NotificationList {
         })
         .detach();
         Self {
-            manager: ToastManager::new(ToastMotion::sonner()),
+            manager: toast_manager(false),
             stack_state: ToastStackState::default(),
             compact: false,
             focus_handle: cx.focus_handle().tab_stop(true),
@@ -395,14 +424,15 @@ impl NotificationList {
     pub fn push(&mut self, note: Notification, window: &mut Window, cx: &mut Context<Self>) {
         let compact = crate::window_seam::window_is_compact(window, cx);
         self.sync_layout(compact, cx);
+        let id = note.id.clone();
+        // A notice pushed again under its id updates the one on screen, so it
+        // neither replays its entry nor, if it was leaving, finishes leaving.
+        let existing = self.manager.get(&id).cloned();
         let timeout = if compact {
             // Replacement is immediate: discarded messages never reappear later.
-            self.manager = ToastManager::new(ToastMotion {
-                duration: Duration::from_millis(150),
-                exit_duration: Duration::ZERO,
-                ..ToastMotion::sonner()
-            });
-            self.subscriptions.clear();
+            self.manager = toast_manager(true);
+            self.subscriptions
+                .retain(|kept, _| existing.is_some() && *kept == id);
             Some(Duration::from_secs(if note.action.is_some() {
                 5
             } else {
@@ -411,15 +441,26 @@ impl NotificationList {
         } else {
             note.autohide.then_some(Duration::from_secs(5))
         };
-        let id = note.id.clone();
-        let entity = cx.new(|_| note);
-        let dismiss_id = id.clone();
-        self.subscriptions.insert(
-            id.clone(),
-            cx.subscribe(&entity, move |this, _, _: &DismissRequest, cx| {
-                this.dismiss(&dismiss_id, cx);
-            }),
-        );
+        let entity = match existing {
+            Some(entity) => {
+                entity.update(cx, |current, cx| {
+                    *current = note;
+                    cx.notify();
+                });
+                entity
+            }
+            None => {
+                let entity = cx.new(|_| note);
+                let dismiss_id = id.clone();
+                self.subscriptions.insert(
+                    id.clone(),
+                    cx.subscribe(&entity, move |this, _, _: &DismissRequest, cx| {
+                        this.dismiss(&dismiss_id, cx);
+                    }),
+                );
+                entity
+            }
+        };
         self.manager.push(
             id,
             entity,
@@ -440,15 +481,7 @@ impl NotificationList {
             .rev()
             .find(|(_, _, status)| *status != ToastTransitionStatus::Ending)
             .map(|(id, note, _)| (id.clone(), note.clone()));
-        self.manager = ToastManager::new(if compact {
-            ToastMotion {
-                duration: Duration::from_millis(150),
-                exit_duration: Duration::ZERO,
-                ..ToastMotion::sonner()
-            }
-        } else {
-            ToastMotion::sonner()
-        });
+        self.manager = toast_manager(compact);
         self.subscriptions
             .retain(|id, _| latest.as_ref().is_some_and(|(latest, _)| latest == id));
         if let Some((id, note)) = latest {
@@ -567,8 +600,7 @@ impl Render for NotificationList {
                 .children(
                     self.manager
                         .iter()
-                        .rev()
-                        .find(|(_, _, status)| *status != ToastTransitionStatus::Ending)
+                        .next_back()
                         .map(|(_, note, _)| note.clone()),
                 )
                 .into_any_element();

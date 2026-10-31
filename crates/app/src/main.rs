@@ -682,7 +682,7 @@ fn main() {
                     if let Some(id) = session_id
                         && let Some(store) = shell.read(cx).store()
                     {
-                        store.update(cx, |store, _| store.select_session(id));
+                        store.update(cx, |store, cx| store.select_session(id, cx));
                     }
                     let window_state = shell.read(cx).window_state();
                     window_state.update(cx, |state, cx| {
@@ -706,24 +706,7 @@ fn main() {
                             link.command(Command::OpenLatestSession).await
                             && let Some(store) = cx.update(|cx| shell.read(cx).store())
                         {
-                            store.update(cx, |store, _| store.select_session(id));
-                        }
-                        for _ in 0..100 {
-                            if cx.update(|cx| {
-                                shell.read(cx).store().is_some_and(|store| {
-                                    store.read(cx).active_session_id().is_some()
-                                })
-                            }) {
-                                break;
-                            }
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(10))
-                                .await;
-                        }
-                        if let Some(store) = cx.update(|cx| shell.read(cx).store()) {
-                            store.update(cx, |store, _cx| {
-                                store.sync_active_conversation_ui();
-                            });
+                            store.update(cx, |store, cx| store.select_session(id, cx));
                         }
                     }
                 })

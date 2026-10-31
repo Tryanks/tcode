@@ -8,8 +8,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, AppContext as _, Context, IntoElement, ParentElement as _, Styled as _, Window,
-    div, px,
+    AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Styled as _,
+    Window, canvas, div, px,
 };
 use gpui_base::v_flex;
 use preview_mcp::{js, ports};
@@ -34,6 +35,46 @@ const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly
 const SCREENSHOT_UNSUPPORTED: &str =
     "preview_screenshot is only supported on macOS, iOS and Android";
 
+/// Whether the pointer is dragging a gpui-base resize handle. Base keeps the
+/// handle's drag payload private; the resize cursor its band hands the drag is
+/// the public sign of one.
+fn resize_drag_active(cx: &App) -> bool {
+    matches!(
+        cx.active_drag_cursor_style(),
+        Some(CursorStyle::ResizeColumn | CursorStyle::ResizeRow)
+    )
+}
+
+/// How far a gpui-base resize band beside the panel reaches into it: a band
+/// straddling the boundary 4.5px, one hugging the edge 5px
+/// (`HANDLE_PADDING`, `HANDLE_SIZE`, both private to base).
+#[cfg(not(target_os = "android"))]
+const HANDLE_BAND_REACH: Pixels = px(5.);
+
+/// The even margin between the panel's content area and the page's frame.
+/// It is at least the band's reach, so a resize handle beside the panel (the
+/// chat/right-panel divider, the floating panel's edge) is GPUI content along
+/// its whole width and never lies over the page.
+#[cfg(not(target_os = "android"))]
+fn page_margin(cx: &App) -> Pixels {
+    cx.theme().tokens.spacing.sm.max(HANDLE_BAND_REACH)
+}
+
+/// Whether a press lands on the strip left of the page where a resize handle
+/// sits: the margin, the frame's border and the band's half beyond the
+/// panel's edge. Base tells nothing outside a handle's own renderer that the
+/// handle is pressed, and a drag starts only once the pointer is past GPUI's
+/// 2px drag threshold, which from this strip can already be over the page; so
+/// the press itself is the signal.
+#[cfg(not(target_os = "android"))]
+fn on_page_seam(page: Bounds<Pixels>, position: Point<Pixels>, cx: &App) -> bool {
+    let distance = page.left() - position.x;
+    position.y >= page.top()
+        && position.y <= page.bottom()
+        && distance > px(0.)
+        && distance <= page_margin(cx) + px(1.) + HANDLE_BAND_REACH
+}
+
 fn wait_timeout_message(pending: &[String]) -> String {
     format!(
         "preview_wait_for timed out; unmet conditions: {}",
@@ -47,6 +88,11 @@ pub(super) struct Backend {
     /// cannot install after its owning panel has been dropped.
     _owner: Rc<()>,
     compact_panel_selected: bool,
+    /// The left button went down beside the page, where a resize handle
+    /// sits, and has not come up yet.
+    seam_pressed: bool,
+    #[cfg(not(target_os = "android"))]
+    _load_errors: gpui::Task<()>,
 }
 
 impl Backend {
@@ -56,10 +102,24 @@ impl Backend {
     ) -> Self {
         let owner = Rc::new(());
         let lifecycle = cx.new(|_| BrowserLifecycle::new(Rc::downgrade(&owner), proxy));
+        #[cfg(not(target_os = "android"))]
+        let load_errors = {
+            let changes = super::load_error::watch();
+            cx.spawn(async move |panel, cx| {
+                while changes.recv().await.is_ok() {
+                    if panel.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+        };
         Self {
             lifecycle,
             _owner: owner,
             compact_panel_selected: false,
+            seam_pressed: false,
+            #[cfg(not(target_os = "android"))]
+            _load_errors: load_errors,
         }
     }
 }
@@ -166,9 +226,17 @@ impl PreviewPanel {
         let visible = visible_preview_key(
             active.as_deref(),
             window_state.route(),
-            window_state.palette_open,
+            window_state.palette_mounted(),
             self.store.read(cx).preview_panel_showing()
                 && self.store.read(cx).preview_browser_settings().enabled
+                // gpui-fast-macos 0.1.10 hands a drag GPUI began to the native
+                // view under the pointer (`send_window_event` hit-tests
+                // whenever no native view owns the press) and GPUI's own view
+                // then drops the event, so a resize handle stops following
+                // the pointer over the page. A hidden view is not hit-tested;
+                // it hides and returns without motion (`yield_to_resize_handles`).
+                && !self.backend.seam_pressed
+                && !resize_drag_active(cx)
                 && (!window_state.compact
                     || (!self.compact_overflow_open
                         && self.backend.compact_panel_selected
@@ -182,6 +250,76 @@ impl PreviewPanel {
                 lifecycle.hide_except(visible.as_deref(), cx);
             }
         });
+    }
+
+    /// Keep the page out of the pointer's way while a resize handle is held:
+    /// hide it when a handle beside it is pressed or a resize drag is seen,
+    /// and show it again, at the size the drag left, when the button is
+    /// released. Window listeners, so this holds whether or not anything
+    /// re-renders this panel in between.
+    ///
+    /// The page goes and comes back at once, with no fade: gpui-webview 0.8
+    /// draws a native view, which offers only `set_visible` and bounds, no
+    /// opacity, so neither an exit nor an entry can be animated here.
+    #[cfg(not(target_os = "android"))]
+    pub(super) fn yield_to_resize_handles(
+        &self,
+        active: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let panel = cx.entity().downgrade();
+        let page = active.and_then(|key| self.lifecycle_entity().read(cx).ready_view(key));
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                window.on_mouse_event({
+                    let panel = panel.clone();
+                    move |event: &MouseDownEvent, phase, _, cx| {
+                        if !phase.capture() || event.button != MouseButton::Left {
+                            return;
+                        }
+                        let Some(page) = page.as_ref() else {
+                            return;
+                        };
+                        let page = page.read(cx);
+                        if page.visible() && on_page_seam(page.bounds(), event.position, cx) {
+                            let _ = panel.update(cx, |panel, cx| {
+                                panel.backend.seam_pressed = true;
+                                panel.sync_visibility(cx);
+                            });
+                        }
+                    }
+                });
+                window.on_mouse_event({
+                    let panel = panel.clone();
+                    move |_: &MouseMoveEvent, phase, _, cx| {
+                        if phase.capture() && resize_drag_active(cx) {
+                            let _ = panel.update(cx, |panel, cx| panel.sync_visibility(cx));
+                        }
+                    }
+                });
+                window.on_mouse_event({
+                    let panel = panel.clone();
+                    // Capture, while the drag is still active: GPUI ends it
+                    // after this event dispatches, and the render this asks
+                    // for comes after that.
+                    move |_: &MouseUpEvent, phase, _, cx| {
+                        if !phase.capture() {
+                            return;
+                        }
+                        let dragging = resize_drag_active(cx);
+                        let _ = panel.update(cx, |panel, cx| {
+                            if dragging || panel.backend.seam_pressed {
+                                panel.backend.seam_pressed = false;
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
     }
 
     /// Get or lazily create the browser for one stable conversation key.
@@ -403,8 +541,23 @@ impl PreviewPanel {
                 Availability::Ready(view) => {
                     #[cfg(target_os = "ios")]
                     let view = super::ios::element(view);
+                    #[cfg(not(target_os = "android"))]
+                    let margin = page_margin(cx);
+                    #[cfg(target_os = "android")]
+                    let margin = px(0.);
+                    // gpui-webview 0.8 has no corner radius or layer clip for
+                    // the native view, so the page stays square inside the
+                    // rounded frame and its corners cover the frame's.
+                    let page = div()
+                        .size_full()
+                        .rounded(crate::material::radius_card(cx))
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .overflow_hidden()
+                        .child(view);
                     if let Some((width, height)) = self.store.read(cx).preview_canvas(id) {
                         div()
+                            .p(margin)
                             .flex()
                             .flex_1()
                             .min_h_0()
@@ -417,11 +570,16 @@ impl PreviewPanel {
                                     .h(px(height as f32))
                                     .max_w_full()
                                     .max_h_full()
-                                    .child(view),
+                                    .child(page),
                             )
                             .into_any_element()
                     } else {
-                        div().flex_1().min_h_0().child(view).into_any_element()
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .p(margin)
+                            .child(page)
+                            .into_any_element()
                     }
                 }
                 Availability::Starting(_) => self.render_note(
@@ -1018,7 +1176,7 @@ impl PreviewPanel {
         let state = self.window_state.read(cx);
         if self.store.read(cx).active_session_id().as_deref() != Some(session_id)
             || !self.store.read(cx).preview_panel_showing()
-            || state.palette_open
+            || state.palette_mounted()
             || state.route() != crate::window_state::Route::Chat
             || (state.compact
                 && (state.destination() != crate::window_state::Destination::Panel

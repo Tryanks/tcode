@@ -86,7 +86,7 @@ pub fn work_log(
 }
 
 pub fn subagent(entry: &TimelineEntry, cx: &App) -> AnyElement {
-    subagent::subagent_row(entry, None, cx)
+    subagent::subagent_row(entry, None, false, cx)
 }
 
 pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App) -> AnyElement {

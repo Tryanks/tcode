@@ -5,9 +5,11 @@ use gpui::{
     Pixels, RenderOnce, SharedString, StyleRefinement, Styled, WeakFocusHandle, Window, div,
     prelude::FluentBuilder as _, px,
 };
+use gpui_base::motion::PresenceSample;
 
 use crate::{
     icon::IconName,
+    motion::{self, PresencePhase},
     sizing::Sizable as _,
     theme::ActiveTheme as _,
     typography::TextRole as _,
@@ -24,8 +26,8 @@ use super::OverlayExt as _;
 const DIALOG_WIDTH: f32 = 448.;
 const DIALOG_WIDE_WIDTH: f32 = 640.;
 
-/// gpui `list`/`uniform_list` need a definite height and `DialogContent` is
-/// `flex_1`, which the builder cannot read back; the two list dialogs (ACP
+/// gpui `list`/`uniform_list` need a definite height, and the dialog's own
+/// height cannot be read back from a builder; the two list dialogs (ACP
 /// agents, plugins) share this one height.
 pub(crate) const DIALOG_LIST_HEIGHT: f32 = 456.;
 
@@ -34,6 +36,13 @@ type Closed = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type ContentBuilder = Rc<dyn Fn(DialogContent, &mut Window, &mut App) -> DialogContent>;
 
 pub(crate) struct ActiveDialog {
+    /// Unique per opening: a dialog opened again is a new one with its own
+    /// motion.
+    pub id: usize,
+    pub closing: bool,
+    /// The open dialogs below this one when it opened, fixed so its offset
+    /// and element ids hold while dialogs beneath it leave.
+    pub layer: usize,
     pub focus_handle: FocusHandle,
     pub previous_focus_handle: Option<WeakFocusHandle>,
     pub builder: DialogBuilder,
@@ -134,7 +143,9 @@ impl Styled for DialogContent {
 
 impl RenderOnce for DialogContent {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        self.base.flex_1().min_h_0().children(self.children)
+        // Its basis is the height a builder sets: under an auto-height
+        // dialog a zero basis would size it by its content alone.
+        self.base.flex_auto().min_h_0().children(self.children)
     }
 }
 
@@ -270,6 +281,7 @@ pub struct Dialog {
     focus_handle: FocusHandle,
     layer: usize,
     topmost: bool,
+    presence: Option<PresenceSample>,
 }
 
 impl Dialog {
@@ -292,6 +304,7 @@ impl Dialog {
             focus_handle: cx.focus_handle(),
             layer: 0,
             topmost: true,
+            presence: None,
         }
     }
     fn alert(cx: &mut App) -> Self {
@@ -388,6 +401,11 @@ impl Dialog {
         self.focus_handle = focus;
         self
     }
+    /// The open/close motion the overlay host sampled for this dialog.
+    pub(crate) fn presence(mut self, presence: PresenceSample) -> Self {
+        self.presence = Some(presence);
+        self
+    }
 }
 
 impl ParentElement for Dialog {
@@ -408,11 +426,15 @@ impl RenderOnce for Dialog {
         // open in phone-sized and browser viewports. Clamp here rather than at
         // each call site: a wider-than-viewport dialog is also positioned
         // off-screen, because `x` is derived from the same width. The height cap
-        // below keeps the footer actions reachable; `DialogContent` is already
-        // `flex_1 min_h_0`, so a scrolling body shrinks into it.
+        // below keeps the footer actions reachable; `DialogContent` can shrink
+        // to nothing (`min_h_0`), so a scrolling body shrinks into it.
         let width = crate::sizing::fit_viewport(f32::from(self.width), viewport.width);
         let x = viewport.width / 2. - width / 2.;
         let inset = cx.theme().tokens.spacing.lg;
+        let progress = self.presence.map_or(1., |presence| presence.progress);
+        let exiting = self
+            .presence
+            .is_some_and(|presence| presence.phase == PresencePhase::Exiting);
         let y = viewport.height / 10. + inset * self.layer as f32;
         let content = self
             .content
@@ -421,7 +443,10 @@ impl RenderOnce for Dialog {
         let backdrop = div()
             .absolute()
             .size_full()
-            .when(self.overlay, |el| el.bg(crate::material::scrim(1., cx)))
+            .when(self.overlay, |el| {
+                el.bg(crate::material::scrim(progress, cx))
+            })
+            .when(exiting, |el| el.occlude())
             .on_scroll(|_, _, cx| cx.stop_propagation());
         let popup = div()
             .id(("tcode-dialog", self.layer))
@@ -431,7 +456,7 @@ impl RenderOnce for Dialog {
                     return el.inset_0().overflow_hidden();
                 }
                 el.left(x)
-                    .top(y)
+                    .top(y + motion::lift(progress))
                     .w(width)
                     .when_some(self.max_width, |el, width| el.max_w(width))
                     .max_h(viewport.height - y - inset)
@@ -447,6 +472,7 @@ impl RenderOnce for Dialog {
                     .shadow_xl()
             })
             .occlude()
+            .opacity(progress)
             .refine_style(&self.style)
             .when_some(self.title, |el, title| {
                 // `pr_8` keeps a long title clear of the close button.
@@ -475,12 +501,27 @@ impl RenderOnce for Dialog {
                         ),
                 )
             });
+        // A leaving dialog keeps the open one's element tree, so its scroll
+        // and input state hold through the exit. It is inert by the base's
+        // own switches: not topmost, no Escape, no backdrop press. Focus has
+        // already gone back to the opener, so its focus trap confines nothing;
+        // the occluding scrim and the shield over the card keep the pointer
+        // from its controls, from focusing it, and from what lies beneath.
+        let popup = popup.when(exiting, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .on_scroll(|_, _, cx| cx.stop_propagation()),
+            )
+        });
         self.base.render(
             self.layer,
-            self.topmost,
+            self.topmost && !exiting,
             self.focus_handle,
-            self.keyboard,
-            self.overlay_closable,
+            self.keyboard && !exiting,
+            self.overlay_closable && !exiting,
             backdrop,
             popup,
             self.button_props.on_ok,

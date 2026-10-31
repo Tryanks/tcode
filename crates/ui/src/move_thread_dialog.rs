@@ -88,7 +88,7 @@ impl MoveThreadDialog {
 }
 
 impl Render for MoveThreadDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
         let current = store
             .sidebar_sessions()
@@ -113,6 +113,17 @@ impl Render for MoveThreadDialog {
             let selected = self.selected.as_deref() == Some(project.id.as_str());
             let id = project.id.clone();
             let root = project.root.to_string_lossy().into_owned();
+            let fill = gpui_base::motion::transition(
+                gpui::ElementId::from(("move-thread-project-fill", index)),
+                if selected {
+                    cx.theme().list_active
+                } else {
+                    cx.theme().list_active.opacity(0.)
+                },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
             list = list.child(
                 crate::material::menu_item_frame(false, cx)
                     .id(("move-thread-project", index))
@@ -121,7 +132,7 @@ impl Render for MoveThreadDialog {
                     .aria_selected(selected)
                     .w_full()
                     .cursor_pointer()
-                    .when(selected, |row| row.bg(cx.theme().list_active))
+                    .bg(fill)
                     .hover(|style| style.bg(cx.theme().muted))
                     .on_click(cx.listener(move |dialog, _, window, cx| {
                         dialog.selected = Some(id.clone());
@@ -159,14 +170,18 @@ impl Render for MoveThreadDialog {
                     .text_secondary(false, cx)
                     .child(crate::tr!("sidebar.move_thread_confirm")),
             )
-            .when_some(self.error.clone(), |column, error| {
-                column.child(
-                    div()
-                        .text_secondary(false, cx)
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
-            })
+            .children(
+                crate::motion::shown("move-thread-error", self.error.clone(), window, cx).map(
+                    |error| {
+                        error.fold(
+                            div()
+                                .text_secondary(false, cx)
+                                .text_color(cx.theme().danger)
+                                .child(error.value.clone()),
+                        )
+                    },
+                ),
+            )
     }
 }
 

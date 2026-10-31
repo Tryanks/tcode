@@ -51,7 +51,10 @@ impl Composer {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let state = self.workspace_store.read(cx).composer_state();
+        let state = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref());
         let goal = state.goal.clone()?;
         let control = state.provider.and_then(|provider| provider.caps().goals);
         let enabled = self.interactive(cx) && goal_offered(&state).is_some();
@@ -111,8 +114,13 @@ impl Composer {
                         .disabled(!enabled)
                         .tooltip(crate::tr!(label))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store
-                                .update(cx, |store, _cx| store.set_goal(None, Some(status)));
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.set_goal_for(
+                                    this.session_id.clone().unwrap_or_default(),
+                                    None,
+                                    Some(status),
+                                )
+                            });
                         })),
                 )
             })
@@ -140,8 +148,9 @@ impl Composer {
                     .disabled(!enabled)
                     .tooltip(crate::tr!("composer.goal_clear"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_store
-                            .update(cx, |store, _cx| store.clear_goal());
+                        this.workspace_store.update(cx, |store, _cx| {
+                            store.clear_goal_for(this.session_id.clone().unwrap_or_default())
+                        });
                     })),
             );
 

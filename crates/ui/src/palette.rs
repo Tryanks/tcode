@@ -1,7 +1,7 @@
 //! Command palette with action, thread-title and message-content search.
 //!
 //! Rendered by [`crate::AppShell`] as a full-window overlay only while
-//! [`crate::WindowState::palette_open`] is set. Sources:
+//! [`crate::WindowState::palette_mounted`] holds. Sources:
 //! - Threads: fuzzy match over session titles (enter opens the thread).
 //! - Messages: debounced full-text search over persisted conversation events.
 //! - Actions: "New thread…" per project, "Open settings", "Toggle theme",
@@ -91,6 +91,8 @@ enum Action {
         session_id: String,
         turn: Option<usize>,
     },
+    /// A pane command or layout, which the shell answers.
+    Pane(Rc<dyn gpui::Action>),
 }
 
 /// One rendered palette row.
@@ -135,6 +137,10 @@ pub struct CommandPalette {
     search_generation: u64,
     results: Option<Rc<Results>>,
     list_state: ListState,
+    /// Whether [`Self::open`] has run since the palette last showed closed:
+    /// the host opens it on mount, and a palette reopened while it leaves is
+    /// still mounted, so it opens itself.
+    opened: bool,
     _search_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -185,6 +191,7 @@ impl CommandPalette {
             search_generation: 0,
             results: None,
             list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            opened: false,
             _search_task: None,
             _subscriptions: subscriptions,
         }
@@ -206,6 +213,7 @@ impl CommandPalette {
         self.selected = 0;
         self.content_hits.clear();
         self.invalidate_results(true, cx);
+        self.opened = true;
     }
 
     #[cfg(test)]
@@ -267,13 +275,13 @@ impl CommandPalette {
         cx.notify();
     }
 
-    fn results(&mut self, cx: &Context<Self>) -> Rc<Results> {
+    fn results(&mut self, window: &Window, cx: &Context<Self>) -> Rc<Results> {
         if let Some(results) = &self.results {
             return results.clone();
         }
         let mut rows = Vec::new();
         let mut items = Vec::new();
-        for group in self.groups(cx) {
+        for group in self.groups(window, cx) {
             rows.push(Row::Caption(group.label));
             for item in group.items {
                 rows.push(Row::Item(items.len()));
@@ -298,7 +306,7 @@ impl CommandPalette {
 
     /// Build the grouped result list for the current query. A leading `>`
     /// restricts results to Actions.
-    fn groups(&self, cx: &Context<Self>) -> Vec<Group> {
+    fn groups(&self, window: &Window, cx: &Context<Self>) -> Vec<Group> {
         let raw = self.query.read(cx).value().to_string();
         let actions_only = raw.trim_start().starts_with('>');
         // Strip the `>` prefix so the remainder still fuzzy-matches action labels.
@@ -377,6 +385,103 @@ impl CommandPalette {
                 crate::tr!("palette.open_preview").into_owned(),
                 IconName::Globe,
                 Action::OpenPreview,
+            );
+        }
+        let pane = |action: Box<dyn gpui::Action>| Action::Pane(action.into());
+        if let Some(panes) = crate::shell::pane_controls(None, window, cx) {
+            use crate::panes::{
+                CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, SplitDown, SplitRight,
+                SwapPane, ZoomPane,
+            };
+            if panes.split_right {
+                push_action(
+                    crate::tr!("panes.split_right").into_owned(),
+                    IconName::Columns2,
+                    pane(Box::new(SplitRight)),
+                );
+            }
+            if panes.split_down {
+                push_action(
+                    crate::tr!("panes.split_down").into_owned(),
+                    IconName::Rows2,
+                    pane(Box::new(SplitDown)),
+                );
+            }
+            if panes.close {
+                push_action(
+                    crate::tr!("panes.close").into_owned(),
+                    IconName::Close,
+                    pane(Box::new(ClosePane)),
+                );
+            }
+            if panes.close_others {
+                push_action(
+                    crate::tr!("panes.close_others").into_owned(),
+                    IconName::Close,
+                    pane(Box::new(CloseOtherPanes)),
+                );
+            }
+            if panes.zoom {
+                let (label, icon) = if panes.zoomed {
+                    (crate::tr!("panes.unzoom"), IconName::Minimize2)
+                } else {
+                    (crate::tr!("panes.zoom"), IconName::Maximize2)
+                };
+                push_action(label.into_owned(), icon, pane(Box::new(ZoomPane)));
+            }
+            if panes.zoom && !panes.zoomed {
+                let moves = [
+                    (
+                        crate::tr!("panes.focus_left"),
+                        IconName::ArrowLeft,
+                        FocusPane::Left,
+                    ),
+                    (
+                        crate::tr!("panes.focus_right"),
+                        IconName::ArrowRight,
+                        FocusPane::Right,
+                    ),
+                    (
+                        crate::tr!("panes.focus_up"),
+                        IconName::ArrowUp,
+                        FocusPane::Up,
+                    ),
+                    (
+                        crate::tr!("panes.focus_down"),
+                        IconName::ArrowDown,
+                        FocusPane::Down,
+                    ),
+                    (
+                        crate::tr!("panes.focus_next"),
+                        IconName::ChevronRight,
+                        FocusPane::Next,
+                    ),
+                    (
+                        crate::tr!("panes.focus_previous"),
+                        IconName::ChevronLeft,
+                        FocusPane::Previous,
+                    ),
+                ];
+                for (label, icon, action) in moves {
+                    push_action(label.into_owned(), icon, pane(Box::new(action)));
+                }
+            }
+            for side in panes.sides() {
+                let swap = SwapPane(side);
+                push_action(swap.label().into_owned(), side.icon(), pane(Box::new(swap)));
+            }
+            if panes.moves {
+                for side in panes.sides() {
+                    let to = MoveThreadToPane(side);
+                    push_action(to.label().into_owned(), side.icon(), pane(Box::new(to)));
+                }
+            }
+        }
+        for layout in crate::shell::pane_layouts(window, cx) {
+            push_action(
+                layout.label().into_owned(),
+                layout.icon(),
+                pane(Box::new(layout)),
             );
         }
         if store.scope().is_full() {
@@ -493,7 +598,7 @@ impl CommandPalette {
     }
 
     fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let results = self.results(cx);
+        let results = self.results(window, cx);
         if let Some(item) = results.items.get(self.selected) {
             self.activate(item.action.clone(), window, cx);
         }
@@ -580,13 +685,17 @@ impl CommandPalette {
                     cx,
                 );
             }
+            Action::Pane(action) => {
+                self.close(cx);
+                crate::shell::focus_focused_pane(window, cx);
+                window.dispatch_action(action.boxed_clone(), cx);
+            }
             Action::OpenThread { session_id, turn } => {
                 self.store.update(cx, |store, cx| {
                     if let Some(turn) = turn {
-                        store.select_session_at_turn(session_id, turn);
-                        cx.notify();
+                        store.select_session_at_turn(session_id, turn, cx);
                     } else {
-                        store.select_session(session_id);
+                        store.select_session(session_id, cx);
                     }
                 });
                 self.close(cx);
@@ -596,8 +705,8 @@ impl CommandPalette {
         }
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let results = self.results(cx);
+    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let results = self.results(window, cx);
         let total = results.items.len();
         let selected = match ev.keystroke.key.as_str() {
             "down" if total > 0 => (self.selected + 1).min(total - 1),
@@ -624,6 +733,7 @@ impl CommandPalette {
         row: &Row,
         items: &[Item],
         compact: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -642,6 +752,12 @@ impl CommandPalette {
         let item = &items[index];
         let is_sel = index == self.selected;
         let action = item.action.clone();
+        let key = match &item.action {
+            Action::Pane(action) => {
+                crate::widgets::kbd::Kbd::binding_for_action(action.as_ref(), None, window)
+            }
+            _ => None,
+        };
         // Every result takes the two-line row, so the list's uniform height
         // hint holds whether or not a result has a subtitle.
         let row = crate::material::selectable_row_two_line(
@@ -722,6 +838,15 @@ impl CommandPalette {
                             .child(provider_glyph(provider)),
                     )
                 })
+                .when_some(key, |this, key| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .debug_selector(move || format!("palette-row-{index}-key"))
+                            .text_secondary(compact, cx)
+                            .child(key.appearance(false)),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.activate(action.clone(), window, cx);
                 })),
@@ -732,15 +857,29 @@ impl CommandPalette {
 
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = self.window_state.read(cx).compact;
-        let open = self.window_state.read(cx).palette_open;
-        let presence = gpui_base::motion::Presence::new("palette-presence", open)
-            .transition(gpui_base::motion::Transition::new(crate::edge_back::SETTLE))
-            .sample(window, cx);
-        if !open && (!compact || !presence.should_render() || presence.progress == 0.) {
+        let (compact, open, focus_query) = {
+            let state = self.window_state.read(cx);
+            (
+                state.compact,
+                state.palette_open,
+                state.palette_focuses_query,
+            )
+        };
+        if !open {
+            self.opened = false;
+            // A leaving palette takes no keys.
+            if self.focus_handle.contains_focused(window, cx) {
+                window.blur(cx);
+            }
+        } else if !self.opened {
+            self.open(focus_query, window, cx);
+        }
+        let presence = crate::motion::appear("palette-presence", open, window, cx);
+        if !open && (!presence.should_render() || presence.progress == 0.) {
             return div().into_any_element();
         }
-        let results = self.results(cx);
+        let exiting = !open;
+        let results = self.results(window, cx);
         let total = results.items.len();
         if total > 0 && self.selected >= total {
             self.selected = total - 1;
@@ -785,8 +924,14 @@ impl Render for CommandPalette {
                     .child(
                         list(
                             self.list_state.clone(),
-                            cx.processor(move |this, ix: usize, _, cx| {
-                                this.render_row(&results.rows[ix], &results.items, compact, cx)
+                            cx.processor(move |this, ix: usize, window, cx| {
+                                this.render_row(
+                                    &results.rows[ix],
+                                    &results.items,
+                                    compact,
+                                    window,
+                                    cx,
+                                )
                             }),
                         )
                         .size_full(),
@@ -903,13 +1048,33 @@ impl Render for CommandPalette {
                 )
                 .into_any_element();
         }
+        // A leaving palette keeps the open one's element tree and is inert:
+        // not topmost, no Escape, no backdrop press, and an occluding scrim
+        // and a shield over the card keep the pointer from it.
+        let card = card
+            .relative()
+            .top(crate::motion::lift(presence.progress))
+            .opacity(presence.progress)
+            .when(exiting, |card| {
+                card.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .on_scroll(|_, _, cx| cx.stop_propagation()),
+                )
+            });
         gpui_base::Dialog::new(cx)
+            .layer(0, !exiting)
+            .close_on_escape(!exiting)
+            .close_on_backdrop_press(!exiting)
             // gpui-base's backdrop parent dismisses but does not block; the scrim stops wheels without occluding it.
             .backdrop(
                 div()
                     .absolute()
                     .size_full()
-                    .bg(crate::material::scrim(1., cx))
+                    .bg(crate::material::scrim(presence.progress, cx))
+                    .when(exiting, |scrim| scrim.occlude())
                     .on_scroll(|_, _, cx| cx.stop_propagation()),
             )
             .popup(card)
@@ -961,7 +1126,7 @@ mod tests {
 
     impl Render for PaletteHarness {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let open = self.window_state.read(cx).palette_open;
+            let open = self.window_state.read(cx).palette_mounted();
             div()
                 .relative()
                 .size_full()
@@ -1059,10 +1224,10 @@ mod tests {
             query.read(cx).focus_handle(cx).focus(window, cx);
         });
 
-        cx.update(|_, cx| {
+        cx.update(|window, cx| {
             palette.update(cx, |palette, cx| {
                 assert!(palette.query.read(cx).value().is_empty());
-                let items = &palette.results(cx).items;
+                let items = &palette.results(window, cx).items;
                 assert!(
                     items
                         .iter()
@@ -1097,8 +1262,8 @@ mod tests {
         for _ in 0..10 {
             dispatch_palette_key(&palette, cx, "down");
         }
-        cx.update(|_, cx| {
-            let total = palette.update(cx, |palette, cx| palette.results(cx).items.len());
+        cx.update(|window, cx| {
+            let total = palette.update(cx, |palette, cx| palette.results(window, cx).items.len());
             assert_eq!(palette.read(cx).selected, total - 1);
         });
 
@@ -1174,12 +1339,17 @@ mod tests {
             let harness = harness.read(cx);
             (harness.palette.clone(), harness.window_state.clone())
         });
+        let settle = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
         let open = |cx: &mut VisualTestContext, focus_query: bool| {
             cx.update(|window, cx| {
                 window_state.update(cx, |state, cx| state.open_palette(cx));
                 palette.update(cx, |palette, cx| palette.open(focus_query, window, cx));
             });
-            cx.update(|window, cx| window.draw(cx).clear(cx));
+            settle(cx);
             assert!(cx.debug_bounds("palette-card").is_some());
         };
         let is_open = |cx: &mut VisualTestContext| {
@@ -1194,6 +1364,11 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         assert!(!is_open(cx), "Escape reaches the dialog through the query");
+        assert!(
+            cx.debug_bounds("palette-card").is_some(),
+            "the palette leaves on screen"
+        );
+        settle(cx);
         assert!(cx.debug_bounds("palette-card").is_none());
 
         let page_scroll = harness.read_with(cx, |harness, _| harness.page_scroll.clone());
@@ -1222,6 +1397,8 @@ mod tests {
         assert!(is_open(cx), "the wheel leaves the palette open");
         cx.simulate_click(gpui::point(px(10.), px(10.)), gpui::Modifiers::default());
         assert!(!is_open(cx), "a backdrop press closes the palette");
+        settle(cx);
+        assert!(cx.debug_bounds("palette-card").is_none());
 
         drop(palette);
         driver.shutdown(cx, &workspace_store, &host);
@@ -1308,7 +1485,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("thread-0".into()));
+        store.update(cx, |store, cx| store.select_session("thread-0".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         window_state.update(cx, |state, cx| state.open_palette(cx));
         let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {
@@ -1337,7 +1514,9 @@ mod tests {
             });
             draw(cx);
         }
-        let last = palette.update(cx, |palette, cx| palette.results(cx).items.len() - 1);
+        let last = palette.update_in(cx, |palette, window, cx| {
+            palette.results(window, cx).items.len() - 1
+        });
         assert!(
             cx.debug_bounds(format!("palette-row-{last}").leak())
                 .is_some()

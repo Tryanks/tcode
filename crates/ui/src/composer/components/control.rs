@@ -5,11 +5,11 @@ use tcode_protocol::{ControlStatus, ThreadReferenceStatus};
 impl Composer {
     fn control_status(&self, cx: &App) -> Option<(String, ControlStatus)> {
         let store = self.workspace_store.read(cx);
-        let status = store.session_status()?;
+        let status = store.session_status_for(self.session_id.as_deref())?;
         if status.draft {
             return None;
         }
-        Some((store.active_session_id()?, status.control.clone()?))
+        Some((self.session_id.clone()?, status.control.clone()?))
     }
 
     /// The grant requests the thread's model made with `request_grant`. Only
@@ -157,7 +157,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         let store = self.workspace_store.read(cx);
-        let Some(session_id) = store.active_session_id() else {
+        let Some(session_id) = self.session_id.clone() else {
             return;
         };
         let title = store
