@@ -2723,8 +2723,31 @@ impl SessionsSidebar {
             window,
             cx,
         );
+        // Among several panes, the thread's pane's colour outlines the row.
+        // It fades in and out, and keeps its colour while it fades out.
+        let outline = crate::motion::shown(
+            SharedString::from(format!("{row_id}-pane-outline")),
+            crate::shell::pane_colour(&meta.id, cx),
+            window,
+            cx,
+        )
+        .map(|shown| shown.value.opacity(shown.progress()));
+        let radius = cx.theme().tokens.radius.md;
         let row = crate::material::accessible_clickable(
-            base.bg(fill),
+            base.bg(fill)
+                .relative()
+                // Present without a colour too, so the children after it
+                // keep their places: gpui-fast can retain a reparented child
+                // without measuring it (#68 upstream).
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(radius)
+                        .when_some(outline, |outline, colour| {
+                            outline.border_1().border_color(colour)
+                        }),
+                ),
             row_id,
             Role::Button,
             crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
@@ -3216,7 +3239,7 @@ impl SessionsSidebar {
                 cx,
             )
             .pl(px(THREAD_INDENT))
-            // First child so the row's content paints over the mark.
+            // Ahead of the row's content, which paints over the mark.
             .relative()
             .children(self.provider_mark(
                 meta,
@@ -3391,7 +3414,7 @@ impl SessionsSidebar {
             })
             .items_stretch()
             .justify_center()
-            // First child so the row's content paints over the mark.
+            // Ahead of the row's content, which paints over the mark.
             .relative()
             .children(self.provider_mark(
                 meta,
