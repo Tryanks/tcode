@@ -1061,7 +1061,7 @@ impl Render for CommandPalette {
                         .absolute()
                         .inset_0()
                         .occlude()
-                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+                        .on_scroll(|_, _, cx| cx.stop_propagation()),
                 )
             });
         gpui_base::Dialog::new(cx)

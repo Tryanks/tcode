@@ -718,7 +718,7 @@ mod tests {
         cx.simulate_click(probe.center(), Default::default());
         assert_eq!(clicks.get(), 1, "an open dialog takes clicks");
         let scroller = cx.debug_bounds("dialog-scroller").unwrap();
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: scroller.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-300.))),
             ..Default::default()

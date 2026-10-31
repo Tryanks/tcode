@@ -359,7 +359,7 @@ pub(crate) fn shield() -> Div {
         .absolute()
         .inset_0()
         .occlude()
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .on_scroll(|_, _, cx| cx.stop_propagation())
 }
 
 /// A status glyph: its colour glides and a new glyph cross-fades over the
