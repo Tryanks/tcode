@@ -26,8 +26,8 @@ use super::OverlayExt as _;
 const DIALOG_WIDTH: f32 = 448.;
 const DIALOG_WIDE_WIDTH: f32 = 640.;
 
-/// gpui `list`/`uniform_list` need a definite height and `DialogContent` is
-/// `flex_1`, which the builder cannot read back; the two list dialogs (ACP
+/// gpui `list`/`uniform_list` need a definite height, and the dialog's own
+/// height cannot be read back from a builder; the two list dialogs (ACP
 /// agents, plugins) share this one height.
 pub(crate) const DIALOG_LIST_HEIGHT: f32 = 456.;
 
@@ -143,7 +143,9 @@ impl Styled for DialogContent {
 
 impl RenderOnce for DialogContent {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        self.base.flex_1().min_h_0().children(self.children)
+        // Its basis is the height a builder sets: under an auto-height
+        // dialog a zero basis would size it by its content alone.
+        self.base.flex_auto().min_h_0().children(self.children)
     }
 }
 
@@ -424,8 +426,8 @@ impl RenderOnce for Dialog {
         // open in phone-sized and browser viewports. Clamp here rather than at
         // each call site: a wider-than-viewport dialog is also positioned
         // off-screen, because `x` is derived from the same width. The height cap
-        // below keeps the footer actions reachable; `DialogContent` is already
-        // `flex_1 min_h_0`, so a scrolling body shrinks into it.
+        // below keeps the footer actions reachable; `DialogContent` can shrink
+        // to nothing (`min_h_0`), so a scrolling body shrinks into it.
         let width = crate::sizing::fit_viewport(f32::from(self.width), viewport.width);
         let x = viewport.width / 2. - width / 2.;
         let inset = cx.theme().tokens.spacing.lg;
