@@ -2,10 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
 use agent::ProviderKind;
 use serde::{Serialize, de::DeserializeOwned};
 #[cfg(test)]
@@ -13,7 +12,7 @@ use tcode_core::settings::{EnvVar, ThemeMode};
 use tcode_core::{
     control::{ControlActivityEntry, ReviewRecord},
     pull_request::HostKind,
-    settings::Settings,
+    settings::{Settings, provider_key},
 };
 
 const REVIEWS_FILE: &str = "reviews.json";
@@ -93,7 +92,7 @@ impl SettingsStore {
         let Ok(bytes) = fs::read(&self.path) else {
             return Settings::default();
         };
-        match Self::decode(&bytes) {
+        match self.decode(&bytes) {
             Ok(settings) => settings,
             Err(err) => {
                 log::warn!("failed to parse settings.json: {err}");
@@ -111,13 +110,18 @@ impl SettingsStore {
             }
             Err(error) => return Err(error),
         };
-        Self::decode(&bytes)
+        self.decode(&bytes)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }
 
-    fn decode(bytes: &[u8]) -> serde_json::Result<Settings> {
+    fn decode(&self, bytes: &[u8]) -> serde_json::Result<Settings> {
         let mut settings: Settings = serde_json::from_slice(bytes)?;
         settings.migrate_legacy();
+        if claude_homes_to_config_dirs(&mut settings)
+            && let Err(error) = self.save(&settings)
+        {
+            log::warn!("failed to save settings.json: {error}");
+        }
         Ok(settings)
     }
 
@@ -403,6 +407,46 @@ impl SettingsStore {
     }
 }
 
+/// Rewrites each Claude Code profile directory saved as the CLI's `HOME`,
+/// whose config directory is `<home>/.claude`, to that config directory.
+/// A directory that already holds `projects/` is a config directory itself.
+fn claude_homes_to_config_dirs(settings: &mut Settings) -> bool {
+    let builtin = settings
+        .providers
+        .get_mut(provider_key(ProviderKind::ClaudeCode));
+    let profiles = settings
+        .profiles
+        .values_mut()
+        .filter(|profile| profile.kind == ProviderKind::ClaudeCode)
+        .map(|profile| &mut profile.settings);
+    let mut rewritten = false;
+    for card in builtin.into_iter().chain(profiles) {
+        if let Some(config_dir) = card.home_path.as_deref().and_then(claude_config_dir) {
+            card.home_path = Some(config_dir);
+            rewritten = true;
+        }
+    }
+    rewritten
+}
+
+fn claude_config_dir(home: &Path) -> Option<PathBuf> {
+    let config_dir = home.join(".claude");
+    if !config_dir.is_dir() || home.join("projects").exists() {
+        return None;
+    }
+    // The CLI reads `.claude.json` from its config directory.
+    let seed = home.join(".claude.json");
+    let copied = config_dir.join(".claude.json");
+    if seed.exists()
+        && !copied.exists()
+        && let Err(error) = fs::copy(&seed, &copied)
+    {
+        log::warn!("failed to copy {}: {error}", seed.display());
+        return None;
+    }
+    Some(config_dir)
+}
+
 #[cfg(unix)]
 fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -472,6 +516,62 @@ mod tests {
                 .unwrap()
                 .contains("remote_port")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A Claude profile directory saved when it was the CLI's `HOME` keeps
+    /// the CLI's config directory, `<home>/.claude`, and its onboarding seed.
+    #[test]
+    fn claude_profiles_saved_as_a_home_load_their_dot_claude_as_the_config_dir() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-settings-claude-{}", uuid::Uuid::new_v4()));
+        let store = SettingsStore::new(root.clone());
+        let typed_home = root.join("typed-home");
+        let profile_home = root.join("profile-homes/kimi");
+        let config_dir = root.join("config-dir");
+        let missing = root.join("missing");
+        let codex_home = root.join("codex-home");
+        for dir in [&typed_home, &profile_home, &config_dir, &codex_home] {
+            fs::create_dir_all(dir.join(".claude")).unwrap();
+        }
+        fs::create_dir_all(config_dir.join("projects")).unwrap();
+        let seed = r#"{"hasCompletedOnboarding":true}"#;
+        fs::write(profile_home.join(".claude.json"), seed).unwrap();
+        fs::write(
+            &store.path,
+            serde_json::to_vec(&serde_json::json!({
+                "providers": {"claude": {"home_path": typed_home}},
+                "profiles": {
+                    "kimi": {"kind": "claude_code", "home_path": profile_home},
+                    "work": {"kind": "claude_code", "home_path": config_dir},
+                    "gone": {"kind": "claude_code", "home_path": missing},
+                    "codex-work": {"kind": "codex", "home_path": codex_home},
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        store.load();
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        let home = |card: &serde_json::Value| PathBuf::from(card["home_path"].as_str().unwrap());
+        assert_eq!(
+            home(&saved["providers"]["claude"]),
+            typed_home.join(".claude")
+        );
+        let profiles = &saved["profiles"];
+        assert_eq!(home(&profiles["kimi"]), profile_home.join(".claude"));
+        assert_eq!(home(&profiles["work"]), config_dir);
+        assert_eq!(home(&profiles["gone"]), missing);
+        assert_eq!(home(&profiles["codex-work"]), codex_home);
+        assert_eq!(
+            fs::read_to_string(profile_home.join(".claude/.claude.json")).unwrap(),
+            seed
+        );
+        assert!(profile_home.join(".claude.json").exists());
+        assert!(!typed_home.join(".claude/.claude.json").exists());
         let _ = fs::remove_dir_all(root);
     }
 
