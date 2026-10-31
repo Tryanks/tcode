@@ -120,8 +120,9 @@ pub(crate) fn secondary<A: Action>(
 /// GNOME keeps Control-Alt-Left/Right (switch workspace) and
 /// Control-Alt-Shift-Left/Right (move the window to a workspace) for itself,
 /// so there focusing left or right is reached only by next/previous or from
-/// the palette, and swapping left or right only from the palette or the
-/// pane menu.
+/// the palette, and a left or right swap loses its key, though Alt-Left/Right
+/// (move the thread) makes the same exchange, the keyboard following the
+/// thread.
 fn pane_bindings() -> Vec<(&'static str, KeyBinding)> {
     use crate::panes::{
         CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, PaneLayout, Side, SplitDown,
