@@ -181,8 +181,10 @@ struct ShellAttachment {
     /// The column's splits gliding toward the layout an edit made.
     glides: crate::panes::Glides,
     /// Set by the panes' renderer in a frame that draws a split's handle
-    /// held by the pointer.
-    split_handle_held: Rc<Cell<bool>>,
+    /// held by the pointer: the handle's axis and where the pointer was.
+    split_handle_held: crate::panes::HandleHeld,
+    /// The split whose handle the pointer holds, found as the hold began.
+    held_split: Option<gpui_base::dock::NodeId>,
     /// The pane showing the store's focused thread, or waiting for it; the
     /// compact layout's conversation is its chat.
     focused_pane: Entity<ThreadPanel>,
@@ -1055,7 +1057,7 @@ impl AppShell {
                 .upgrade()
                 .is_some_and(|shell| shell.read(cx).drop_lands(bounds, placement, window, cx))
         });
-        let split_handle_held = Rc::new(Cell::new(false));
+        let split_handle_held = crate::panes::HandleHeld::default();
         let thread_panes = cx.new(|cx| {
             let mut area = DockArea::new("thread-panes", None, window, cx).with_renderer(Rc::new(
                 crate::panes::ThreadPanes::new(lands, split_handle_held.clone()),
@@ -1078,6 +1080,7 @@ impl AppShell {
             thread_panes,
             glides: Default::default(),
             split_handle_held,
+            held_split: None,
             focused_pane: thread_panel,
             diff: cx.new(|cx| DiffPanel::new(store.clone(), self.window_state.clone(), cx)),
             settings_page: cx
@@ -1614,15 +1617,19 @@ impl AppShell {
 
     /// This frame of the column's glides: each gliding split's sizes go to
     /// the dock, each pane's content is held at the size its slot glides
-    /// toward, and the closing panes whose split has landed are taken out. A
-    /// split's handle under the pointer stops every glide where it is, and
-    /// the compact layout, which draws no panes, lands them.
+    /// toward, and the closing panes whose split has landed are taken out
+    /// before the dock draws them. A split's handle under the pointer stops
+    /// that split's glide where it is, and the compact layout, which draws no
+    /// panes, lands them.
     fn glide_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
         let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
-        let handle_held = attachment.split_handle_held.replace(false);
+        let handle_held = attachment.split_handle_held.take();
+        if handle_held.is_none() {
+            attachment.held_split = None;
+        }
         let panes = attachment.all_panes(cx);
         let closing = panes.iter().any(|pane| pane.read(cx).is_closing());
         if attachment.glides.is_idle() && !closing {
@@ -1639,9 +1646,21 @@ impl AppShell {
         let Some(tree) = tree else {
             return;
         };
-        let frame = if handle_held {
-            attachment.glides.stop()
-        } else if compact {
+        if let Some((axis, at)) = handle_held
+            && attachment.held_split.is_none()
+        {
+            let painted = |panel| {
+                panes
+                    .iter()
+                    .find(|pane| PanelId::from(pane.entity_id()) == panel)
+                    .map(|pane| pane.read(cx).bounds())
+            };
+            attachment.held_split = crate::panes::held_split(tree.root(), axis, at, &painted);
+        }
+        if let Some(split) = attachment.held_split {
+            attachment.glides.stop(split);
+        }
+        let frame = if compact {
             attachment.glides.land(&tree, size)
         } else {
             attachment.glides.sample(&tree, size, window, cx)
@@ -1659,8 +1678,8 @@ impl AppShell {
                 .unwrap_or_default();
             pane.update(cx, |pane, cx| pane.set_held(held, cx));
         }
-        if closing && !attachment.closed_panes(cx).is_empty() {
-            cx.defer_in(window, |this, window, cx| this.remove_closed(window, cx));
+        if closing {
+            self.remove_closed(window, cx);
         }
     }
 
@@ -6326,17 +6345,19 @@ mod tests {
     /// The chat column's width, and the width each pane on screen shows at,
     /// in the layout's order.
     fn pane_widths(shell: &Entity<AppShell>, cx: &VisualTestContext) -> (Pixels, Vec<Pixels>) {
-        shell.read_with(cx, |shell, cx| {
-            let attachment = shell.attachment.as_ref().expect("attached");
-            (
-                attachment.thread_panes.read(cx).bounds().size.width,
-                attachment
-                    .all_panes(cx)
-                    .iter()
-                    .map(|pane| pane.read(cx).bounds().size.width)
-                    .collect(),
-            )
-        })
+        shell.read_with(cx, widths_of)
+    }
+
+    fn widths_of(shell: &AppShell, cx: &App) -> (Pixels, Vec<Pixels>) {
+        let attachment = shell.attachment.as_ref().expect("attached");
+        (
+            attachment.thread_panes.read(cx).bounds().size.width,
+            attachment
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).bounds().size.width)
+                .collect(),
+        )
     }
 
     /// Answer the scratch draft the client asked for with `draft`.
@@ -7064,6 +7085,205 @@ mod tests {
         );
     }
 
+    /// A handle dragged on one split leaves the others gliding: a pane
+    /// closing in a stack beside it still glides shut.
+    #[gpui::test]
+    fn another_splits_handle_dragged_lets_a_close_finish(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into()), None]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(2));
+        let bounds = |cx: &mut VisualTestContext| -> Vec<gpui::Bounds<Pixels>> {
+            shell.read_with(cx, |shell, cx| {
+                let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+                panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+            })
+        };
+
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        let start = bounds(cx)[2].size.height;
+        let left = bounds(cx)[0];
+        let handle = gpui::point(left.right(), left.center().y);
+        let to = handle - gpui::point(px(120.), px(0.));
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_move(handle, None, none);
+        draw(cx);
+        cx.simulate_mouse_down(handle, MouseButton::Left, none);
+        draw(cx);
+        for step in [handle - gpui::point(px(40.), px(0.)), to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), none);
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx).len(), 3, "still closing");
+        let halfway = bounds(cx)[2].size.height;
+        assert!(
+            px(0.) < halfway && halfway < start - px(1.),
+            "the stack's glide runs on: {start:?} then {halfway:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into())]
+        );
+        let (_, widths) = pane_widths(&shell, cx);
+        assert!(
+            (widths[0] - (to.x - left.left())).abs() < px(1.),
+            "the columns stay where the handle was left: {widths:?}, handle at {to:?}"
+        );
+    }
+
+    /// A pane closed while it still grows in turns back from where it is
+    /// drawn, and the column ends as it was.
+    #[gpui::test]
+    fn a_pane_closed_while_it_grows_in_turns_back_where_it_is(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        draw(cx);
+        let (column, growing) = pane_widths(&shell, cx);
+        assert!(
+            px(1.) < growing[1] && growing[1] < column / 2. - px(1.),
+            "growing: {growing:?} of {column:?}"
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        let (_, turned) = pane_widths(&shell, cx);
+        assert!(
+            growing
+                .iter()
+                .zip(&turned)
+                .all(|(growing, turned)| (*growing - *turned).abs() < px(1.)),
+            "no jump as it turns: {growing:?} then {turned:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 10);
+        draw(cx);
+        let (_, shrinking) = pane_widths(&shell, cx);
+        assert!(
+            shrinking[1] < turned[1],
+            "it narrows from there: {turned:?} then {shrinking:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths.len() == 1 && (widths[0] - column).abs() < px(1.),
+            "{widths:?} of {column:?}"
+        );
+    }
+
+    /// A split made while a pane closes divides what the column will be, from
+    /// where its panes are drawn: nothing jumps, and the close still lands.
+    #[gpui::test]
+    fn a_split_made_while_a_pane_closes_glides_on_from_where_it_is(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        draw(cx);
+        let (column, closing) = pane_widths(&shell, cx);
+        assert!(
+            closing[0] < column / 2. - px(1.) && gpui_base::PANEL_MIN_SIZE < closing[0],
+            "closing: {closing:?} of {column:?}"
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into()), None]
+        );
+        let (_, split) = pane_widths(&shell, cx);
+        assert!(
+            (split[0] - closing[0]).abs() < px(1.)
+                && (split[1] - closing[1]).abs() < px(1.)
+                && split[2] < px(1.),
+            "no jump as it turns: {closing:?} then {split:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into()), None]);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths
+                .iter()
+                .all(|width| (*width - column / 2.).abs() < px(1.)),
+            "landed: {widths:?} of {column:?}"
+        );
+    }
+
+    /// With motion reduced a split and a close land in the frame they are
+    /// made: the panes are at their halves at once, and a closed pane is gone
+    /// rather than left at the dock's floor for a frame.
+    #[gpui::test]
+    fn with_motion_reduced_panes_split_and_close_at_once(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths.len() == 2
+                && widths
+                    .iter()
+                    .all(|width| (*width - column / 2.).abs() < px(1.)),
+            "split: {widths:?} of {column:?}"
+        );
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        let closing = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0].clone()
+        });
+        let half = closing.read_with(cx, |pane, _| pane.bounds());
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        // The keystroke's own frame already leaves it out: it is not drawn
+        // again, not even at the dock's floor for a frame.
+        let last = closing.read_with(cx, |pane, _| pane.bounds());
+        assert_eq!(last, half, "where the closed pane was last drawn");
+        let (column, widths) = pane_widths(&shell, cx);
+        assert!(
+            widths.len() == 1 && (widths[0] - column).abs() < px(1.),
+            "closed: {widths:?} of {column:?}"
+        );
+        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
+    }
+
     /// Closing a pane closes its thread, which stays listed, and the store
     /// moves on to the thread of the pane the keyboard lands in.
     #[gpui::test]
@@ -7139,8 +7359,32 @@ mod tests {
             0. < faded && faded < fading && fading < 1.,
             "the closing pane's content fades: {fading} then {faded}"
         );
+        // The frame the glide lands in no longer draws the pane: no strip at
+        // the floor, its neighbour has the whole column.
+        let strip = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .bounds()
+        });
         cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
+        let (landed, (column, widths)) = frame(cx, |window, cx| {
+            let strip = strip.scale(window.scale_factor());
+            let landed = window
+                .painted_quads()
+                .iter()
+                .filter(|quad| {
+                    let mask = quad.content_mask.bounds;
+                    !mask.is_empty() && mask.intersect(&strip) == mask
+                })
+                .filter_map(|quad| quad.background.as_solid())
+                .map(|fill| fill.a)
+                .fold(0., f32::max);
+            (landed, widths_of(shell.read(cx), cx))
+        });
+        assert!(
+            landed == 0. && widths.len() == 1 && (widths[0] - column).abs() < px(1.),
+            "landed: {landed} drawn in the strip, {widths:?} of {column:?}"
+        );
         assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
@@ -7789,13 +8033,21 @@ mod tests {
     }
 
     fn draw(cx: &mut VisualTestContext) {
+        frame(cx, |_, _| ());
+    }
+
+    /// Draw a frame and `read` it as the screen shows it until the next one:
+    /// before the work it deferred runs, after which the test platform draws
+    /// again at once.
+    fn frame<R>(cx: &mut VisualTestContext, read: impl FnOnce(&mut Window, &mut App) -> R) -> R {
         cx.run_until_parked();
         cx.update(|window, cx| {
             // A frame that reuses any view keeps every debug bound of the
             // previous one, so an element no longer painted would still be found.
             window.refresh();
             _ = window.draw(cx);
-        });
+            read(window, cx)
+        })
     }
 
     fn resize(cx: &mut VisualTestContext, width: f32) {
