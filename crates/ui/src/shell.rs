@@ -4225,7 +4225,9 @@ impl AppShell {
             return div()
                 .id("app-shell")
                 .size_full()
-                .bg(crate::material::canvas(cx))
+                // The theme's tint, not `material::canvas`, which clears it
+                // over the macOS backdrop: this page keeps its tinted glass.
+                .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
                 .child(v_flex().id("hosts").size_full().child(page))
                 .into_any_element();
@@ -7685,48 +7687,50 @@ mod tests {
     /// that runs them.
     #[gpui::test]
     fn pane_commands_show_their_keys(cx: &mut TestAppContext) {
-        use crate::widgets::kbd::Kbd;
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_panes(cx);
-        // A test window cannot read painted text, so the hint's key is read
-        // from the binding the row builds it from; Kbd compares by Debug.
-        let shown = |cx: &mut VisualTestContext| {
-            cx.update(|window, _| {
-                format!("{:?}", Kbd::binding_for_action(&SplitRight, None, window))
-            })
+        // A test window keeps none of the glyphs it paints (only its quads and
+        // underlines), so a hint is read by the width its text was laid out
+        // at. Split right's key (secondary-d) is one key shorter than split
+        // down's (secondary-shift-d), so each list's split-right hint must be
+        // the narrower: a row showing another command's key, or the same key
+        // on every row, is caught.
+        let palette_hint = |label: &str, cx: &mut VisualTestContext| {
+            shell
+                .read_with(cx, |shell, _| shell.window_state())
+                .update(cx, |state, cx| state.open_palette(cx));
+            draw(cx);
+            cx.simulate_input(&format!(">{label}"));
+            draw(cx);
+            let row = cx.debug_bounds("palette-row-0").expect("the command's row");
+            let hint = cx
+                .debug_bounds("palette-row-0-key")
+                .expect("the row shows its key");
+            assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
+            cx.simulate_keystrokes("escape");
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+            hint.size.width
         };
-        let os = cx.update(|_, cx| cx.platform_info().os);
-        let split = format!(
-            "{:?}",
-            Some(Kbd::new(
-                gpui::Keystroke::parse_with_os("secondary-d", os).unwrap()
-            ))
+        let right = palette_hint(&crate::tr!("panes.split_right"), cx);
+        let down = palette_hint(&crate::tr!("panes.split_down"), cx);
+        assert!(
+            right < down,
+            "palette: split right {right:?}, down {down:?}"
         );
-        shell
-            .read_with(cx, |shell, _| shell.window_state())
-            .update(cx, |state, cx| state.open_palette(cx));
-        draw(cx);
-        cx.simulate_input(&format!(">{}", crate::tr!("panes.split_right")));
-        draw(cx);
-        let row = cx.debug_bounds("palette-row-0").expect("the split's row");
-        let hint = cx
-            .debug_bounds("palette-row-0-key")
-            .expect("the row shows its key");
-        assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
-        assert_eq!(shown(cx), split);
-        cx.simulate_keystrokes("escape");
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
 
         let button = cx.debug_bounds("pane-menu").expect("the pane menu");
         cx.simulate_click(button.center(), gpui::Modifiers::default());
         draw(cx);
-        let row = cx.debug_bounds("menu-item-0").expect("the split's row");
-        let hint = cx
-            .debug_bounds("menu-item-0-key")
-            .expect("the row shows its key");
-        assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
-        assert_eq!(shown(cx), split);
+        let menu_hint = |row: &'static str, key: &'static str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds(row).expect("the command's row");
+            let hint = cx.debug_bounds(key).expect("the row shows its key");
+            assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
+            hint.size.width
+        };
+        let right = menu_hint("menu-item-0", "menu-item-0-key", cx);
+        let down = menu_hint("menu-item-1", "menu-item-1-key", cx);
+        assert!(right < down, "menu: split right {right:?}, down {down:?}");
     }
 
     /// Two columns fit beside the sidebar of a 1200pt window, each header
