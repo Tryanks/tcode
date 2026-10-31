@@ -1,5 +1,5 @@
 use super::*;
-use tcode_core::provider_status::ProviderLogin;
+use tcode_core::provider_status::{ProviderLogin, ProviderProbeDiagnostic, ProviderStatusKind};
 use tcode_protocol::{ProviderUpdateAvailable, ProviderUpdateRun};
 use tcode_services::provider_login::{self, LoginEvent, LoginHandle};
 
@@ -672,13 +672,61 @@ impl AppState {
             return;
         }
         let mut settings = self.settings.clone();
-        if settings.profiles.remove(id).is_none() {
+        let Some(profile) = settings.profiles.remove(id) else {
             return;
-        }
+        };
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
         self.providers.provider_secret_names.remove(id);
         self.providers.secret_writes.remove(id);
         self.update_settings(settings, cx);
+
+        // Only the directory Tcode made; a home the user chose is theirs.
+        let home = self.store.root().join("profile-homes").join(id);
+        if profile.settings.home_path.as_ref() != Some(&home) {
+            return;
+        }
+        let removed = cx.unblock(move || match std::fs::remove_dir_all(&home) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+            _ => Ok(()),
+        });
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            if let Err(error) = removed.await {
+                host_cx.enqueue(move |state, cx| {
+                    state.report_error(RuntimeError::ProfileConfig { error }, cx);
+                });
+            }
+        });
+    }
+
+    /// The snapshots as clients see them: a Claude account profile whose CLI
+    /// cannot keep its sign-in apart from the other account profiles' says so.
+    pub(super) fn flag_shared_credentials(
+        &self,
+        snapshots: &mut HashMap<String, ProviderSnapshot>,
+    ) {
+        let accounts: Vec<ResolvedProfile> = self
+            .settings
+            .profiles_for_kind(ProviderKind::ClaudeCode)
+            .into_iter()
+            .filter(ResolvedProfile::supports_account_login)
+            .collect();
+        for profile in &accounts {
+            let Some(snapshot) = snapshots.get_mut(&profile.id) else {
+                continue;
+            };
+            if !claude_shares_credentials(
+                cfg!(target_os = "macos"),
+                snapshot.version.as_deref(),
+                accounts.len(),
+            ) {
+                continue;
+            }
+            if snapshot.status != Some(ProviderStatusKind::Error) {
+                snapshot.status = Some(ProviderStatusKind::Warning);
+            }
+            snapshot.diagnostic = Some(ProviderProbeDiagnostic::SharedCredentials);
+        }
     }
 
     /// Probe every provider profile: is the CLI there, what version, and who is signed
@@ -1596,6 +1644,17 @@ pub(super) fn session_options(
     }
 }
 
+/// Claude Code before 2.1.144 keeps the OAuth sign-in in one macOS Keychain
+/// item shared by every config directory, so signing in one account profile
+/// replaces the others' sign-in.
+fn claude_shares_credentials(macos: bool, version: Option<&str>, account_profiles: usize) -> bool {
+    macos
+        && account_profiles >= 2
+        && version
+            .and_then(provider_updates::parse_version)
+            .is_some_and(|version| version < (2, 1, 144))
+}
+
 #[cfg(test)]
 mod provider_lifecycle_tests {
     use super::*;
@@ -1854,5 +1913,24 @@ mod provider_lifecycle_tests {
         );
         assert_eq!(catalog.provider_usage["claude"].error, None);
         assert_eq!(catalog.provider_usage["claude"].fetched_at, 1_700_001_000);
+    }
+
+    #[test]
+    fn claude_account_profiles_share_one_sign_in_before_2_1_144_on_macos() {
+        for (macos, version, profiles, shared) in [
+            (true, Some("2.1.143"), 2, true),
+            (true, Some("2.0.76"), 3, true),
+            (true, Some("2.1.144"), 2, false),
+            (true, Some("2.1.314"), 2, false),
+            (true, Some("2.1.143"), 1, false),
+            (false, Some("2.1.143"), 2, false),
+            (true, None, 2, false),
+        ] {
+            assert_eq!(
+                claude_shares_credentials(macos, version, profiles),
+                shared,
+                "{macos} {version:?} {profiles}"
+            );
+        }
     }
 }

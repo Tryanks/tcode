@@ -591,6 +591,8 @@ providers:
     unavailable_detail: "该提供商未通过启动检查。"
     available: "可用"
     available_detail: "已安装并就绪，但无法验证认证状态。"
+    same_account_as: "与「%{name}」是同一账号"
+    shared_credentials: "此版本的 Claude Code 在 macOS 上所有配置目录共用同一个登录。请更新到 2.1.144 或更新版本以隔离账号。"
   probe:
     codex_missing: "未安装 Codex CLI（`codex`），或其不在 PATH 中。"
     claude_missing: "未安装 Claude Agent CLI（`claude`），或其不在 PATH 中。"
@@ -1215,7 +1217,7 @@ errors:
   delete_project: "删除项目失败：%{error}"
   persist_session: "保存会话失败：%{error}"
   persist_session_index: "保存会话索引失败：%{error}"
-  profile_config: "准备新配置的配置目录失败：%{error}"
+  profile_config: "准备或删除配置的配置目录失败：%{error}"
   process_gone: "会话进程已结束，请尝试重新打开。"
   provider_start: "启动提供商失败：%{error}"
   provider_closed_reason: "提供商会话意外关闭：%{reason}"

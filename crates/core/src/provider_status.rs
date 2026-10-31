@@ -21,6 +21,9 @@ pub enum ProviderProbeDiagnostic {
     FailedCli,
     Unauthenticated,
     IndeterminateAuth,
+    /// The CLI keeps one sign-in for every config directory, so this
+    /// profile's account login is shared with the other account profiles.
+    SharedCredentials,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

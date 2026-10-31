@@ -11,7 +11,7 @@ use crate::{
     icon::IconName,
     overlay::OverlayExt as _,
     provider_dialog::ProviderDialog,
-    provider_status::{EMAIL_SLOT, StatusDot, redact_email},
+    provider_status::{EMAIL_SLOT, ProviderSnapshot, StatusDot, redact_email, signed_in_account},
     sizing::Sizable as _,
     store::{TopicKind, WorkspaceStore, observe_store_topics},
     theme::ActiveTheme as _,
@@ -110,7 +110,15 @@ impl ProviderCard {
         let name = store.provider_profile_display_name(&self.profile_id);
         let enabled = store.provider_profile_settings(&self.profile_id).enabled;
         let snapshot = store.provider_profile_snapshot(&self.profile_id);
-        let summary = crate::provider_status::summarize(provider, snapshot.as_ref(), enabled);
+        let same_account_as = snapshot
+            .as_ref()
+            .and_then(|snapshot| same_account_profile(store, &self.profile_id, provider, snapshot));
+        let summary = crate::provider_status::summarize(
+            provider,
+            snapshot.as_ref(),
+            enabled,
+            same_account_as.as_deref(),
+        );
         let provider_version = (self.profile_id
             == tcode_core::settings::Settings::builtin_profile_id(provider))
         .then(|| store.provider_version_status(provider))
@@ -453,6 +461,32 @@ impl Render for ProviderCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex().w_full().child(self.render_header(cx))
     }
+}
+
+/// The name of another profile of `provider` signed in to the account this
+/// profile's snapshot is.
+fn same_account_profile(
+    store: &WorkspaceStore,
+    profile_id: &str,
+    provider: ProviderKind,
+    snapshot: &ProviderSnapshot,
+) -> Option<String> {
+    let email = |snapshot: &ProviderSnapshot| {
+        signed_in_account(snapshot)
+            .and_then(|auth| auth.email.as_deref())
+            .map(|email| email.trim().to_lowercase())
+    };
+    let account = email(snapshot)?;
+    store
+        .all_provider_profiles()
+        .into_iter()
+        .filter(|profile| profile.kind == provider && profile.id != profile_id)
+        .find(|profile| {
+            store
+                .provider_profile_snapshot(&profile.id)
+                .is_some_and(|other| email(&other).as_ref() == Some(&account))
+        })
+        .map(|profile| store.provider_profile_display_name(&profile.id))
 }
 
 /// The provider's glyph (the same asset the composer's picker rail uses).

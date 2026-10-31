@@ -26,6 +26,7 @@ use agent::ProviderKind;
 use tcode_core::settings::Settings;
 
 use crate::provider_card::provider_glyph;
+use crate::provider_status::{ProviderSnapshot, redact_email, signed_in_account};
 use crate::settings::provider_label;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
@@ -342,12 +343,28 @@ impl Render for ProviderModelPicker {
                     );
                 }
 
+                let account = store
+                    .read(cx)
+                    .provider_profile_snapshot(&current_profile)
+                    .as_ref()
+                    .and_then(account_caption);
+
                 v_flex()
                     .w(crate::sizing::fit_viewport(
                         390.,
                         window.viewport_size().width,
                     ))
                     .child(tabs)
+                    .when_some(account, |this, account| {
+                        this.child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_secondary(false, cx)
+                                .truncate()
+                                .child(account),
+                        )
+                    })
                     .child(crate::material::faded_hairline(cx))
                     .child(rows)
             })
@@ -418,6 +435,24 @@ fn option_row(
         popover.update(cx, |state, cx| state.dismiss(window, cx));
     })
     .into_any_element()
+}
+
+/// The account a profile tab is signed in to: its redacted email, then its
+/// plan when the provider names one.
+fn account_caption(snapshot: &ProviderSnapshot) -> Option<String> {
+    let auth = signed_in_account(snapshot)?;
+    let email = redact_email(auth.email.as_deref()?.trim());
+    Some(
+        match auth
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+        {
+            Some(label) => format!("{email} · {label}"),
+            None => email,
+        },
+    )
 }
 
 /// The provider glyph tinted with the profile's own accent (falling back to the

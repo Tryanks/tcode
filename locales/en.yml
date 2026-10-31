@@ -593,6 +593,8 @@ providers:
     unavailable_detail: "The provider failed its startup checks."
     available: "Available"
     available_detail: "Installed and ready, but authentication could not be verified."
+    same_account_as: "Same account as «%{name}»"
+    shared_credentials: "This Claude Code version keeps one login for all config directories on macOS. Update to 2.1.144 or newer to keep accounts separate."
   # Probe diagnostics (T3 §3)
   probe:
     codex_missing: "Codex CLI (`codex`) is not installed or not on PATH."
@@ -1222,7 +1224,7 @@ errors:
   delete_project: "Failed to remove project: %{error}"
   persist_session: "Failed to persist session: %{error}"
   persist_session_index: "Failed to persist session index: %{error}"
-  profile_config: "Failed to prepare the new profile's config directory: %{error}"
+  profile_config: "Failed to prepare or remove a profile's config directory: %{error}"
   process_gone: "Session process is gone; try reopening."
   provider_start: "Failed to start provider: %{error}"
   provider_closed_reason: "Provider session closed unexpectedly: %{reason}"

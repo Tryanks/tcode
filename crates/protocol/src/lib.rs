@@ -242,9 +242,10 @@ pub use wire::{
 // SubmitProviderLoginCode, CancelProviderLogin and LogoutProvider commands,
 // and a provider snapshot carries `login`, the sign-in the host runs for that
 // profile. The CreateAccountProfile command answers with the new ProfileId
-// response, CreateThirdPartyProfile carries `inherit_config`, and the
-// ProfileConfig runtime error reports a new profile's config directory that
-// could not be prepared.
+// response, CreateThirdPartyProfile carries `inherit_config`, the
+// ProfileConfig runtime error reports a profile's config directory that could
+// not be prepared or removed, and ProviderProbeDiagnostic adds
+// SharedCredentials.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]
