@@ -241,7 +241,10 @@ pub use wire::{
 // Unreleased: the protocol adds the StartProviderLogin,
 // SubmitProviderLoginCode, CancelProviderLogin and LogoutProvider commands,
 // and a provider snapshot carries `login`, the sign-in the host runs for that
-// profile.
+// profile. The CreateAccountProfile command answers with the new ProfileId
+// response, CreateThirdPartyProfile carries `inherit_config`, and the
+// ProfileConfig runtime error reports a new profile's config directory that
+// could not be prepared.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]

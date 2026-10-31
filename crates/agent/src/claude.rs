@@ -66,6 +66,55 @@ fn effective_permission_mode(internal: &str, extra_args: &[String]) -> String {
     effective
 }
 
+/// The directory the CLI launched with `launch_env` keeps its settings,
+/// sign-in and transcripts in.
+pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
+    let pairs = launch_env.pairs(ProviderKind::ClaudeCode);
+    let child_env = |key: &str| {
+        pairs
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| std::env::var_os(key).map(PathBuf::from))
+    };
+    child_env("CLAUDE_CONFIG_DIR").or_else(|| child_env("HOME").map(|home| home.join(".claude")))
+}
+
+// Credentials and per-account state (`.claude.json`, `projects/`) must not cross accounts.
+const INHERITED_CONFIG: [&str; 6] = [
+    "settings.json",
+    "CLAUDE.md",
+    "agents",
+    "commands",
+    "skills",
+    "plugins",
+];
+
+/// Copy the user's configuration from one config directory into another,
+/// skipping symbolic links. Blocking.
+pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
+    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+        let metadata = match std::fs::symlink_metadata(from) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            metadata => metadata?,
+        };
+        if metadata.is_dir() {
+            std::fs::create_dir_all(to)?;
+            for entry in std::fs::read_dir(from)? {
+                let entry = entry?;
+                copy(&entry.path(), &to.join(entry.file_name()))?;
+            }
+        } else if metadata.is_file() {
+            std::fs::copy(from, to)?;
+        }
+        Ok(())
+    }
+    INHERITED_CONFIG
+        .iter()
+        .try_for_each(|name| copy(&from.join(name), &to.join(name)))
+}
+
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let native_rewind = claude_version(opts.binary_path.as_deref(), &opts.launch_env)
@@ -158,8 +207,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         // top-level invocation.
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT");
-    let launch_pairs = opts.launch_env.pairs(ProviderKind::ClaudeCode);
-    for (key, value) in &launch_pairs {
+    for (key, value) in opts.launch_env.pairs(ProviderKind::ClaudeCode) {
         cmd.env(key, value);
     }
 
@@ -225,17 +273,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         }
     });
 
-    let child_env = |key: &str| {
-        launch_pairs
-            .iter()
-            .rev()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| PathBuf::from(value))
-            .or_else(|| std::env::var_os(key).map(PathBuf::from))
-    };
     let session_config = SessionConfig {
-        claude_dir: child_env("CLAUDE_CONFIG_DIR")
-            .or_else(|| child_env("HOME").map(|home| home.join(".claude"))),
+        claude_dir: config_dir(&opts.launch_env),
         resumed: opts.resume.is_some(),
     };
     smol::spawn(actor_loop(
@@ -3564,6 +3603,34 @@ pub async fn list_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The profile's directory wins over a configured `CLAUDE_CONFIG_DIR`,
+    /// which wins over `HOME`'s `.claude`.
+    #[test]
+    fn config_dir_follows_the_profile_then_the_variable_then_home() {
+        let env = |pairs: &[(&str, &str)], home: Option<&str>| LaunchEnv {
+            env: pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            home: home.map(PathBuf::from),
+        };
+        let configured = [("CLAUDE_CONFIG_DIR", "/configured"), ("HOME", "/home")];
+        assert_eq!(
+            config_dir(&env(&configured, Some("/profile"))),
+            Some(PathBuf::from("/profile"))
+        );
+        assert_eq!(
+            config_dir(&env(&configured, None)),
+            Some(PathBuf::from("/configured"))
+        );
+        assert_eq!(
+            config_dir(&env(&[("HOME", "/home")], None)),
+            std::env::var_os("CLAUDE_CONFIG_DIR")
+                .map(PathBuf::from)
+                .or_else(|| Some(PathBuf::from("/home/.claude")))
+        );
+    }
 
     #[test]
     fn native_permission_switches_publish_only_confirmed_values() {

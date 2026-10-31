@@ -1106,6 +1106,140 @@ fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
     cx.run_until(|state| auth(state) == Some(AuthStatus::Unauthenticated));
 }
 
+/// Another Claude account starts from a copy of the user's own configuration,
+/// never the default account's sign-in or history, and its sign-in runs in its
+/// own config directory. A provider without account sign-in is refused.
+#[cfg(unix)]
+#[test]
+fn another_claude_account_inherits_configuration_but_not_the_account() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use tcode_core::provider_status::ProviderLogin;
+
+    let test_store = TestStore::new("tcode-account-profile-test");
+    let binary = test_store.root().join("claude");
+    let default = test_store.root().join("claude-default");
+    let outside = test_store.root().join("outside");
+    for (path, contents) in [
+        ("settings.json", r#"{"model":"opus"}"#),
+        ("CLAUDE.md", "Answer briefly."),
+        ("commands/ship.md", "Ship it."),
+        ("skills/review/SKILL.md", "Review the diff."),
+        ("plugins/installed_plugins.json", r#"{"plugins":{}}"#),
+        (".credentials.json", r#"{"claudeAiOauth":{}}"#),
+        (
+            ".claude.json",
+            r#"{"oauthAccount":{"emailAddress":"work@example.com"}}"#,
+        ),
+        ("projects/-repo/x.jsonl", "{}"),
+        ("history.jsonl", "{}"),
+    ] {
+        let path = default.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("agent.md"), "outside").unwrap();
+    std::os::unix::fs::symlink(&outside, default.join("agents")).unwrap();
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\n\
+         case \"$*\" in\n\
+         --version) echo '2.1.314 (Claude Code)' ;;\n\
+         'auth status --json') echo '{\"loggedIn\":false}' ;;\n\
+         'auth login')\n\
+           printf 'If the browser did not open, visit: https://claude.com/cai/oauth/authorize?dir=%s\\nPaste code here if prompted > ' \"$CLAUDE_CONFIG_DIR\"\n\
+           read code ;;\n\
+         *) exit 2 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = TestClientState::new((*test_store).clone());
+    let claude = host.settings.provider_mut(ProviderKind::ClaudeCode);
+    claude.binary_path = Some(binary);
+    claude.home_path = Some(default.clone());
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(host);
+    let create = |provider| Command::CreateAccountProfile {
+        provider,
+        name: "Claude Personal".into(),
+        inherit_config: true,
+    };
+
+    state.dispatch_command(cx, 1, create(ProviderKind::Codex));
+    let (code, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Ack {
+            id: 1,
+            result: Err(error),
+        } => Some(error.code.clone()),
+        _ => None,
+    });
+    assert_eq!(code, "no_account_login");
+
+    state.dispatch_command(cx, 2, create(ProviderKind::ClaudeCode));
+    let (id, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Ack {
+            id: 2,
+            result: Ok(CommandResponse::ProfileId(id)),
+        } => Some(id.clone()),
+        _ => None,
+    });
+    let home = test_store.root().join("profile-homes").join(&id);
+    let profile = state.read(|state| state.settings.resolved_profile(&id).unwrap());
+    assert_eq!(profile.kind, ProviderKind::ClaudeCode);
+    assert_eq!(
+        profile.settings.display_name.as_deref(),
+        Some("Claude Personal")
+    );
+    assert_eq!(profile.settings.home_path.as_ref(), Some(&home));
+    assert_eq!(
+        std::fs::read_to_string(home.join(".claude.json")).unwrap(),
+        r#"{"hasCompletedOnboarding":true}"#
+    );
+    for copied in [
+        "settings.json",
+        "CLAUDE.md",
+        "commands/ship.md",
+        "skills/review/SKILL.md",
+        "plugins/installed_plugins.json",
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(home.join(copied)).unwrap(),
+            std::fs::read_to_string(default.join(copied)).unwrap(),
+            "{copied}"
+        );
+    }
+    for kept in [".credentials.json", "projects", "history.jsonl", "agents"] {
+        assert!(!home.join(kept).exists(), "{kept} must not be copied");
+    }
+
+    let login = |state: &TestClientState| {
+        state
+            .providers_status_snapshot()
+            .provider_snapshots
+            .get(&id)
+            .and_then(|snapshot| snapshot.login.clone())
+    };
+    cx.run_until(|state| {
+        login(state)
+            == Some(ProviderLogin::AwaitingCode {
+                url: format!(
+                    "https://claude.com/cai/oauth/authorize?dir={}",
+                    home.display()
+                ),
+            })
+    });
+    state.dispatch_command(
+        cx,
+        3,
+        Command::CancelProviderLogin {
+            profile_id: id.clone(),
+        },
+    );
+    cx.run_until_parked();
+    assert_eq!(state.read(login), None);
+}
+
 #[test]
 fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     let cx = &mut TestAppContext::default();

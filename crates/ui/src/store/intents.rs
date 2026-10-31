@@ -54,6 +54,7 @@ impl WorkspaceStore {
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
                 | Command::CreateThirdPartyProfile { .. }
+                | Command::CreateAccountProfile { .. }
                 | Command::DeleteProfile { .. }
                 | Command::StartProviderLogin { .. }
                 | Command::SubmitProviderLoginCode { .. }
@@ -1042,13 +1043,31 @@ impl WorkspaceStore {
         base_url: String,
         model: Option<String>,
         api_key: String,
+        inherit_config: bool,
     ) {
         self.dispatch(Command::CreateThirdPartyProfile {
             name,
             base_url,
             model,
             api_key,
+            inherit_config,
         });
+    }
+    pub fn create_account_profile(
+        &self,
+        provider: ProviderKind,
+        name: String,
+        inherit_config: bool,
+        cx: &mut App,
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(
+            Command::CreateAccountProfile {
+                provider,
+                name,
+                inherit_config,
+            },
+            cx,
+        )
     }
     pub fn delete_profile(&mut self, profile_id: String) {
         self.dispatch(Command::DeleteProfile { profile_id });

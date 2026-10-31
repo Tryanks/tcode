@@ -1476,6 +1476,45 @@ fn provider_login_commands_and_state_use_their_documented_wire_shapes() {
     }
 }
 
+/// A client adds another account and opens its sign-in from the profile id
+/// the host answers with; a third-party profile from a client without
+/// `inherit_config` copies nothing.
+#[test]
+fn profile_creation_commands_use_their_documented_wire_shapes() {
+    let command = Command::CreateAccountProfile {
+        provider: agent::ProviderKind::ClaudeCode,
+        name: "Claude Personal".into(),
+        inherit_config: true,
+    };
+    let wire = json!({"type": "create_account_profile", "content": {
+        "provider": "claude_code", "name": "Claude Personal", "inherit_config": true
+    }});
+    assert_eq!(serde_json::to_value(&command).unwrap(), wire);
+    assert_eq!(serde_json::from_value::<Command>(wire).unwrap(), command);
+
+    let response = CommandResponse::ProfileId("claude-personal".into());
+    let wire = json!({"type": "profile_id", "content": "claude-personal"});
+    assert_eq!(serde_json::to_value(&response).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<CommandResponse>(wire).unwrap(),
+        response
+    );
+
+    assert_eq!(
+        serde_json::from_value::<Command>(json!({"type": "create_third_party_profile", "content": {
+            "name": "Kimi", "base_url": "https://api.kimi.com/coding/", "model": null, "api_key": "sk"
+        }}))
+        .unwrap(),
+        Command::CreateThirdPartyProfile {
+            name: "Kimi".into(),
+            base_url: "https://api.kimi.com/coding/".into(),
+            model: None,
+            api_key: "sk".into(),
+            inherit_config: false,
+        }
+    );
+}
+
 /// A provider-plugin catalog and a plugin command are read by clients that
 /// render the actions the host computed, so their literal shapes are the
 /// contract; an older providers snapshot still decodes with no catalogs.

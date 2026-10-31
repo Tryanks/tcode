@@ -497,22 +497,19 @@ impl AppState {
     /// URL). Wires the three env vars, registers the model as a custom slug so it
     /// shows in the picker, gives the profile its own `CLAUDE_CONFIG_DIR`
     /// (seeded so `claude` runs non-interactively and never touches the
-    /// official `~/.claude`), and stores the API key in `secrets.json`. Returns
-    /// the id.
+    /// official `~/.claude`), and stores the API key in `secrets.json`.
     pub fn create_third_party_profile(
         &mut self,
         name: &str,
         base_url: &str,
         model: Option<&str>,
         api_key: &str,
+        inherit_config: bool,
         cx: &mut HostCx,
-    ) -> String {
+    ) {
         let name = name.trim();
         let name = if name.is_empty() { "Third-party" } else { name };
         let id = self.settings.allocate_profile_id(name);
-
-        // The CLI reads `.claude.json` from the root of its config dir; seeding
-        // onboarding there starts it straight into API-key mode.
         let home = self.store.root().join("profile-homes").join(&id);
 
         let mut env = vec![EnvVar {
@@ -548,22 +545,23 @@ impl AppState {
                 ..ProviderSettings::default()
             },
         };
-        let result_id = id.clone();
         let api_key = api_key.trim().to_string();
+        // Seeding onboarding starts the CLI straight into API-key mode.
+        let prepared = self.prepare_claude_home(
+            home,
+            r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
+            inherit_config,
+            cx,
+        );
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            host_cx
-                .unblock(move || {
-                    let _ = std::fs::create_dir_all(&home);
-                    let _ = std::fs::write(
-                        home.join(".claude.json"),
-                        r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
-                    );
-                })
-                .await;
+            let prepared = prepared.await;
             host_cx.enqueue(move |state, cx| {
                 if state.settings.profiles.contains_key(&id) {
                     return;
+                }
+                if let Err(error) = prepared {
+                    state.report_error(RuntimeError::ProfileConfig { error }, cx);
                 }
                 let mut settings = state.settings.clone();
                 settings.profiles.insert(id.clone(), profile);
@@ -571,7 +569,99 @@ impl AppState {
                 state.set_profile_secret(&id, "ANTHROPIC_API_KEY", Some(&api_key), cx);
             });
         });
-        result_id
+    }
+
+    /// Add a profile for another account of `provider` in its own config
+    /// directory and start its sign-in. Resolves to the new profile's id.
+    pub fn create_account_profile(
+        &mut self,
+        provider: ProviderKind,
+        name: &str,
+        inherit_config: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<String, ProtocolError>> {
+        let name = name.trim();
+        let name = if name.is_empty() {
+            provider.display_name()
+        } else {
+            name
+        };
+        let id = self.settings.allocate_profile_id(name);
+        let home = self.store.root().join("profile-homes").join(&id);
+        let profile = ProviderProfile {
+            kind: provider,
+            settings: ProviderSettings {
+                display_name: Some(name.to_string()),
+                home_path: Some(home.clone()),
+                // Another account runs the same CLI the default one does.
+                binary_path: self.settings.provider(provider).binary_path,
+                ..ProviderSettings::default()
+            },
+        };
+        let prepared = self.prepare_claude_home(
+            home,
+            r#"{"hasCompletedOnboarding":true}"#,
+            inherit_config,
+            cx,
+        );
+        let host_cx = cx.clone();
+        cx.spawn_background(async move {
+            let prepared = prepared.await;
+            host_cx
+                .enqueue_and_wait(move |state, cx| {
+                    if state.settings.profiles.contains_key(&id) {
+                        return Err(ProtocolError {
+                            code: "profile_exists".into(),
+                            message: "A profile with this name was just added.".into(),
+                        });
+                    }
+                    if let Err(error) = prepared {
+                        state.report_error(RuntimeError::ProfileConfig { error }, cx);
+                    }
+                    let mut settings = state.settings.clone();
+                    settings.profiles.insert(id.clone(), profile);
+                    state.update_settings(settings, cx);
+                    state.start_provider_login(&id, cx);
+                    Ok(id)
+                })
+                .await
+                .map_err(|_| ProtocolError {
+                    code: "transport_closed".into(),
+                    message: "Host stopped before creating the profile.".into(),
+                })?
+        })
+    }
+
+    /// Create a new Claude profile's config directory with `seed` as its
+    /// `.claude.json`, and with `inherit` the user's configuration from the
+    /// built-in profile's config directory.
+    fn prepare_claude_home(
+        &self,
+        home: PathBuf,
+        seed: &'static str,
+        inherit: bool,
+        cx: &HostCx,
+    ) -> impl std::future::Future<Output = Result<(), String>> + use<> {
+        let builtin = inherit.then(|| {
+            self.prepare_profile_env(Settings::builtin_profile_id(ProviderKind::ClaudeCode), cx)
+        });
+        let host_cx = cx.clone();
+        async move {
+            let source = match builtin {
+                Some(launch_env) => agent::claude::config_dir(&launch_env.await?),
+                None => None,
+            };
+            host_cx
+                .unblock(move || {
+                    std::fs::create_dir_all(&home)?;
+                    std::fs::write(home.join(".claude.json"), seed)?;
+                    source.map_or(Ok(()), |source| {
+                        agent::claude::inherit_config(&source, &home)
+                    })
+                })
+                .await
+                .map_err(|error: std::io::Error| error.to_string())
+        }
     }
 
     /// Delete a user profile: remove its card, its secrets, and detach any

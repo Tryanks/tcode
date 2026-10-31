@@ -36,16 +36,29 @@ pub(crate) fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let name = store.read(cx).provider_profile_display_name(&profile_id);
     store.update(cx, |store, _| {
         store.start_provider_login(profile_id.clone())
     });
-    let dialog = cx.new(|cx| ProviderLoginDialog::new(store, provider, profile_id, window, cx));
-    window.open_dialog(cx, move |builder, _, _| {
+    show(store, provider, profile_id, window, cx);
+}
+
+/// Show a sign-in the host started on its own.
+pub(crate) fn show(
+    store: Entity<WorkspaceStore>,
+    provider: ProviderKind,
+    profile_id: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let dialog = cx.new(|cx| {
+        ProviderLoginDialog::new(store.clone(), provider, profile_id.clone(), window, cx)
+    });
+    window.open_dialog(cx, move |builder, _, cx| {
         let content = dialog.clone();
         let cancel = dialog.clone();
+        let name = store.read(cx).provider_profile_display_name(&profile_id);
         builder
-            .title(crate::tr!("providers.login.title", name = name.clone()).into_owned())
+            .title(crate::tr!("providers.login.title", name = name).into_owned())
             .content(move |body, _, _| body.child(content.clone()))
             .on_cancel(move |_, _, cx| {
                 cancel.update(cx, |dialog, cx| dialog.cancel(cx));
