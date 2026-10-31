@@ -877,6 +877,13 @@ impl ChatView {
                 this.selection
                     .update(cx, |selection, cx| selection.clear(cx));
             }),
+            // A press on the view's blank space focuses the view itself; the
+            // keyboard goes on to the composer, as it does from the pane.
+            cx.on_focus(&focus_handle, window, |this, window, cx| {
+                if this.session_id.is_some() {
+                    this.focus_composer(window, cx);
+                }
+            }),
             cx.observe_in(&workspace_store, window, |this, store, window, cx| {
                 this.timeline_stale = true;
                 // Desktop can type immediately after opening the terminal.
