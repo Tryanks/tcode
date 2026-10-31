@@ -748,7 +748,7 @@ mod tests {
         });
         let option = cx.debug_bounds("leaving-option").unwrap();
         let list = cx.debug_bounds("leaving-list").unwrap();
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: list.center(),
             delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-200.))),
             touch_phase: gpui::TouchPhase::Moved,
