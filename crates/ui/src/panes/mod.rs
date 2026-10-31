@@ -26,11 +26,36 @@ use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
-actions!(tcode, [SplitRight, SplitDown, ClosePane, ZoomPane]);
+actions!(
+    tcode,
+    [SplitRight, SplitDown, ClosePane, CloseOtherPanes, ZoomPane]
+);
 
 /// The key context of a pane waiting for a thread beside others, where
 /// Escape closes it.
 pub(crate) const WAITING_CONTEXT: &str = "WaitingPane";
+
+/// A side of a pane, where its spatial neighbour is found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) enum Side {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Side {
+    pub(crate) const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
+
+    pub(crate) fn icon(self) -> IconName {
+        match self {
+            Self::Left => IconName::ArrowLeft,
+            Self::Right => IconName::ArrowRight,
+            Self::Up => IconName::ArrowUp,
+            Self::Down => IconName::ArrowDown,
+        }
+    }
+}
 
 /// Move the keyboard to another pane: the nearest painted one on a side, or
 /// the next or previous one in the layout's order.
@@ -43,6 +68,54 @@ pub(crate) enum FocusPane {
     Down,
     Next,
     Previous,
+}
+
+impl FocusPane {
+    /// The side a spatial move goes to; `None` for the layout's order.
+    pub(crate) fn side(self) -> Option<Side> {
+        match self {
+            Self::Left => Some(Side::Left),
+            Self::Right => Some(Side::Right),
+            Self::Up => Some(Side::Up),
+            Self::Down => Some(Side::Down),
+            Self::Next | Self::Previous => None,
+        }
+    }
+}
+
+/// Exchange the focused pane's thread with its neighbour's on a side; the
+/// keyboard follows the thread. Each pane keeps its colour.
+#[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode, no_json)]
+pub(crate) struct SwapPane(pub(crate) Side);
+
+impl SwapPane {
+    pub(crate) fn label(self) -> std::borrow::Cow<'static, str> {
+        match self.0 {
+            Side::Left => crate::tr!("panes.swap_left"),
+            Side::Right => crate::tr!("panes.swap_right"),
+            Side::Up => crate::tr!("panes.swap_up"),
+            Side::Down => crate::tr!("panes.swap_down"),
+        }
+    }
+}
+
+/// Show the focused pane's thread in its neighbour on a side, in place of
+/// the thread there, which closes; the focused pane closes and the keyboard
+/// follows the thread.
+#[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode, no_json)]
+pub(crate) struct MoveThreadToPane(pub(crate) Side);
+
+impl MoveThreadToPane {
+    pub(crate) fn label(self) -> std::borrow::Cow<'static, str> {
+        match self.0 {
+            Side::Left => crate::tr!("panes.move_left"),
+            Side::Right => crate::tr!("panes.move_right"),
+            Side::Up => crate::tr!("panes.move_up"),
+            Side::Down => crate::tr!("panes.move_down"),
+        }
+    }
 }
 
 /// Show a thread in a new pane right of the focused one, or focus the pane
@@ -191,6 +264,17 @@ impl ThreadPanel {
     /// The thread the pane shows.
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// Show `chat`, as bound, in place of the pane's own, which it returns.
+    pub(crate) fn replace_chat(
+        &mut self,
+        chat: Entity<ChatView>,
+        cx: &mut Context<Self>,
+    ) -> Entity<ChatView> {
+        self.session_id = chat.read(cx).session_id().map(str::to_owned);
+        cx.notify();
+        std::mem::replace(&mut self.chat, chat)
     }
 
     pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
@@ -353,7 +437,10 @@ impl Render for ThreadPanel {
             .on_action(cx.listener(|this, _: &SplitRight, window, cx| this.claim(window, cx)))
             .on_action(cx.listener(|this, _: &SplitDown, window, cx| this.claim(window, cx)))
             .on_action(cx.listener(|this, _: &ClosePane, window, cx| this.claim(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseOtherPanes, window, cx| this.claim(window, cx)))
             .on_action(cx.listener(|this, _: &ZoomPane, window, cx| this.claim(window, cx)))
+            .on_action(cx.listener(|this, _: &SwapPane, window, cx| this.claim(window, cx)))
+            .on_action(cx.listener(|this, _: &MoveThreadToPane, window, cx| this.claim(window, cx)))
             .child(
                 content
                     .render(layers)
@@ -747,25 +834,24 @@ fn column_edges(edges: WindowEdges, ix: usize, count: usize) -> WindowEdges {
     }
 }
 
-/// The pane nearest `from` on `direction`'s side among those beside it
-/// across that axis. `None` for a direction that is not a side.
+/// The pane nearest `from` on `side` among those beside it across that
+/// axis.
 ///
 /// Local because gpui-base's dock has no keyboard navigation between groups
 /// (see `AppShell::focus_pane`).
 pub(crate) fn neighbour(
     from: Bounds<Pixels>,
     panes: &[Bounds<Pixels>],
-    direction: FocusPane,
+    side: Side,
 ) -> Option<usize> {
     let across_rows = |to: &Bounds<Pixels>| to.top() < from.bottom() && to.bottom() > from.top();
     let across_columns = |to: &Bounds<Pixels>| to.left() < from.right() && to.right() > from.left();
     let gap = |to: &Bounds<Pixels>| -> Option<f32> {
-        let (gap, beside) = match direction {
-            FocusPane::Left => (from.left() - to.right(), across_rows(to)),
-            FocusPane::Right => (to.left() - from.right(), across_rows(to)),
-            FocusPane::Up => (from.top() - to.bottom(), across_columns(to)),
-            FocusPane::Down => (to.top() - from.bottom(), across_columns(to)),
-            FocusPane::Next | FocusPane::Previous => return None,
+        let (gap, beside) = match side {
+            Side::Left => (from.left() - to.right(), across_rows(to)),
+            Side::Right => (to.left() - from.right(), across_rows(to)),
+            Side::Up => (from.top() - to.bottom(), across_columns(to)),
+            Side::Down => (to.top() - from.bottom(), across_columns(to)),
         };
         let gap = f32::from(gap);
         (beside && gap >= -1.).then_some(gap)

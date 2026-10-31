@@ -50,7 +50,8 @@ use crate::diff::DiffPanel;
 use crate::icon::{Icon, IconName};
 use crate::palette::CommandPalette;
 use crate::panes::{
-    ClosePane, FocusPane, OpenInNewPane, PaneLayout, SplitDown, SplitRight, ThreadPanel, ZoomPane,
+    CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, OpenInNewPane, PaneLayout, Side,
+    SplitDown, SplitRight, SwapPane, ThreadPanel, ZoomPane,
 };
 use crate::preview_panel::PreviewPanel;
 #[cfg(preview_backend)]
@@ -296,8 +297,23 @@ pub(crate) struct PaneControls {
     pub(crate) split_right: bool,
     pub(crate) split_down: bool,
     pub(crate) close: bool,
+    pub(crate) close_others: bool,
     pub(crate) zoom: bool,
     pub(crate) zoomed: bool,
+    /// The sides, in [`Side::ALL`]'s order, with a pane to swap with.
+    pub(crate) neighbours: [bool; 4],
+    /// Whether the pane shows a thread to move into a neighbour.
+    pub(crate) moves: bool,
+}
+
+impl PaneControls {
+    /// The sides with a pane to swap with.
+    pub(crate) fn sides(self) -> impl Iterator<Item = Side> {
+        Side::ALL
+            .into_iter()
+            .zip(self.neighbours)
+            .filter_map(|(side, beside)| beside.then_some(side))
+    }
 }
 
 /// This window's [`PaneControls`] for the pane showing `session_id`, or the
@@ -327,12 +343,17 @@ pub(crate) fn pane_controls(
         .is_some_and(|group| group.read(cx).is_closable(cx));
     let zoomed = attachment.thread_panes.read(cx).is_zoomed();
     let split = |placement| shell.split_allowed(pane, placement, window, cx);
+    // A zoomed pane is the only one on screen, so it has no neighbours.
+    let neighbours = Side::ALL.map(|side| !zoomed && shell.neighbour_of(pane, side, cx).is_some());
     Some(PaneControls {
         split_right: split(gpui_base::Placement::Right),
         split_down: split(gpui_base::Placement::Bottom),
         close: panes.len() > 1 && (closable || zoomed),
+        close_others: panes.len() > 1,
         zoom: panes.len() > 1,
         zoomed,
+        neighbours,
+        moves: pane.read(cx).session_id().is_some(),
     })
 }
 
@@ -1778,18 +1799,96 @@ impl AppShell {
         let Some(at) = panes.iter().position(|pane| *pane == from) else {
             return;
         };
-        let target = match direction {
-            FocusPane::Next => Some((at + 1) % panes.len()),
-            FocusPane::Previous => Some((at + panes.len() - 1) % panes.len()),
-            _ => {
-                let bounds: Vec<_> = panes.iter().map(|pane| pane.read(cx).bounds()).collect();
-                crate::panes::neighbour(bounds[at], &bounds, direction)
-            }
+        let target = match direction.side() {
+            None if direction == FocusPane::Next => panes.get((at + 1) % panes.len()).cloned(),
+            None => panes.get((at + panes.len() - 1) % panes.len()).cloned(),
+            Some(side) => self.neighbour_of(&from, side, cx),
         };
-        if let Some(target) = target.and_then(|ix| panes.get(ix))
-            && *target != from
+        if let Some(target) = target
+            && target != from
         {
             window.focus(&target.focus_handle(cx), cx);
+        }
+    }
+
+    /// The pane nearest `pane` on `side`, as they were last painted.
+    fn neighbour_of(
+        &self,
+        pane: &Entity<ThreadPanel>,
+        side: Side,
+        cx: &App,
+    ) -> Option<Entity<ThreadPanel>> {
+        let panes = self.attachment.as_ref()?.panes(cx);
+        let bounds: Vec<_> = panes.iter().map(|pane| pane.read(cx).bounds()).collect();
+        let at = panes.iter().position(|held| held == pane)?;
+        crate::panes::neighbour(bounds[at], &bounds, side).map(|ix| panes[ix].clone())
+    }
+
+    /// Close every pane but the acting one, as [`Self::close_pane`] closes
+    /// one: each glides shut and its thread closes once it is taken out.
+    fn close_other_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) {
+            return;
+        }
+        let Some(pane) = self.acting_pane(window, cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
+        let area = attachment.thread_panes.clone();
+        area.update(cx, |area, cx| area.set_zoomed_out(window, cx));
+        for other in attachment.panes(cx) {
+            if other != pane {
+                self.glide_out(&other, cx);
+            }
+        }
+        window.focus(&pane.focus_handle(cx), cx);
+        self.pane_focused(pane, window, cx);
+    }
+
+    /// The acting pane and its neighbour on `side` exchange their
+    /// conversations, each with its own composer, scroll and expanded rows,
+    /// so a half-written message stays with its thread; the panes, their
+    /// slots and colours stay where they are. The keyboard follows the
+    /// acting pane's thread. Returns the neighbour, which now shows it.
+    ///
+    /// The conversations change places in one frame: gpui-base has no
+    /// shared-element transition to carry a view from one place to another.
+    fn swap_pane(
+        &mut self,
+        side: Side,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ThreadPanel>> {
+        if self.compact(cx) || self.attachment.as_ref()?.thread_panes.read(cx).is_zoomed() {
+            return None;
+        }
+        let from = self.acting_pane(window, cx)?;
+        let to = self.neighbour_of(&from, side, cx)?;
+        let chat = from.read(cx).chat();
+        let theirs = to.update(cx, |to, cx| to.replace_chat(chat, cx));
+        from.update(cx, |from, cx| from.replace_chat(theirs, cx));
+        self.attachment.as_mut()?.focused_pane = to.clone();
+        window.focus(&to.focus_handle(cx), cx);
+        self.pane_focused(to.clone(), window, cx);
+        Some(to)
+    }
+
+    /// The acting pane's thread takes over its neighbour on `side`: the two
+    /// exchange conversations as [`Self::swap_pane`] does, and the acting
+    /// pane, now showing the neighbour's thread, closes as
+    /// [`Self::close_pane`] closes one, that thread with it. A pane waiting
+    /// for a thread has none to move.
+    fn move_thread_to_pane(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(from) = self
+            .acting_pane(window, cx)
+            .filter(|pane| pane.read(cx).session_id().is_some())
+        else {
+            return;
+        };
+        if self.swap_pane(side, window, cx).is_some() {
+            self.glide_out(&from, cx);
         }
     }
 
@@ -2438,7 +2537,20 @@ pub(crate) fn init_pane_actions(cx: &mut App) {
         })
     });
     cx.on_action(|_: &ClosePane, cx| act(cx, AppShell::close_pane));
+    cx.on_action(|_: &CloseOtherPanes, cx| act(cx, AppShell::close_other_panes));
     cx.on_action(|_: &ZoomPane, cx| act(cx, AppShell::toggle_zoom));
+    cx.on_action(|swap: &SwapPane, cx| {
+        let side = swap.0;
+        act(cx, move |shell, window, cx| {
+            shell.swap_pane(side, window, cx);
+        })
+    });
+    cx.on_action(|to: &MoveThreadToPane, cx| {
+        let side = to.0;
+        act(cx, move |shell, window, cx| {
+            shell.move_thread_to_pane(side, window, cx)
+        })
+    });
     cx.on_action(|direction: &FocusPane, cx| {
         let direction = *direction;
         act(cx, move |shell, window, cx| {
@@ -6682,7 +6794,8 @@ mod tests {
     /// Two columns from one pane keep its thread on the left and leave the
     /// right waiting; a pane command from the palette hands the keyboard back
     /// to the focused pane's composer, under the focus ring; a single pane
-    /// from two keeps the focused thread and closes the other.
+    /// from two keeps the focused thread and closes the other; ⌥⌘2 lays out
+    /// two columns again.
     #[gpui::test]
     fn a_layout_fills_its_panes_from_the_focused_one(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -6722,6 +6835,10 @@ mod tests {
             assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
             assert!(!store.is_thread_open("thread-1"));
         });
+
+        cx.simulate_keystrokes("secondary-alt-2");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into()), None]);
     }
 
     /// A row of a pane header's menu leaves the keyboard in that pane's
@@ -6968,6 +7085,219 @@ mod tests {
         cx.simulate_keystrokes("escape");
         draw(cx);
         closed(cx, "escape");
+    }
+
+    /// Three panes, the keyboard in the top right one: ⌥⌘W glides the other
+    /// two shut while the keyboard stays, and their threads close, still
+    /// listed.
+    #[gpui::test]
+    fn closing_other_panes_leaves_the_focused_one(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        cx.simulate_keystrokes("secondary-alt-up");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [
+                Some("thread-1".into()),
+                Some("thread-2".into()),
+                Some("draft-1".into())
+            ]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        let (column, start) = pane_widths(&shell, cx);
+
+        cx.simulate_keystrokes("secondary-alt-w");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx).len(), 3, "they glide shut first");
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (_, halfway) = pane_widths(&shell, cx);
+        assert!(
+            start[1] < halfway[1] && halfway[1] < column,
+            "{start:?} then {halfway:?} of {column:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(!store.is_thread_open("thread-1"));
+            assert!(!store.is_thread_open("draft-1"));
+        });
+        assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
+    }
+
+    /// ⇧⌥⌘← exchanges the right pane's thread with the left one's, a
+    /// half-written message going along with it, and the keyboard follows
+    /// the thread; each pane keeps its colour, so the threads swap colours.
+    #[gpui::test]
+    fn swapping_panes_takes_the_thread_and_its_draft_along(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        cx.simulate_input("half a thought");
+        draw(cx);
+        let colours = pane_outlines(&shell, cx);
+
+        cx.simulate_keystrokes("secondary-alt-shift-left");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-2".into()), Some("thread-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .chat()
+                .read(cx)
+                .composer()
+        });
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "half a thought"
+        );
+        let caret = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        cx.update(|window, _| assert!(caret.is_focused(window), "the caret came along"));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-1"));
+        });
+        let row = |selector: &'static str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds(selector).expect("the thread's row");
+            outline_at(row, cx).expect("outlined")
+        };
+        let [Some(left), Some(right)] = colours[..] else {
+            panic!("two panes, each in its colour: {colours:?}");
+        };
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let midway = row("sidebar-thread-thread-2", cx);
+        assert!(
+            midway != left && midway != right,
+            "the moved thread's row glides between the colours: {midway:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_outlines(&shell, cx), colours);
+        assert_eq!(row("sidebar-thread-thread-2", cx), left);
+        assert_eq!(row("sidebar-thread-thread-1", cx), right);
+    }
+
+    /// Moving the right pane's thread left shows it in the left pane, with
+    /// the keyboard, in place of the thread there, which closes as the right
+    /// pane glides shut.
+    #[gpui::test]
+    fn moving_a_thread_takes_over_its_neighbour(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-ctrl-left"
+        } else {
+            "alt-left"
+        });
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-2".into()), Some("thread-1".into())],
+            "the right pane glides shut first, showing what it closes"
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store_of(&shell, cx).read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert!(!store.is_thread_open("thread-1"));
+        });
+        assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
+    }
+
+    /// With the keyboard in a thread's terminal, the pane keys are the
+    /// terminal's: the layout's and the split's keys leave the panes alone.
+    #[gpui::test]
+    fn pane_keys_in_a_terminal_leave_the_panes_alone(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        store_of(&shell, cx).update(cx, |store, cx| store.toggle_terminal_panel(cx));
+        draw(cx);
+        let terminal = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .chat(cx)
+                .read(cx)
+                .terminal_drawer()
+                .focus_handle(cx)
+        });
+        cx.update(|window, cx| window.focus(&terminal, cx));
+        draw(cx);
+        cx.update(|window, _| {
+            assert!(
+                window
+                    .context_stack()
+                    .iter()
+                    .any(|context| context.contains(crate::terminal_drawer::CONTEXT)),
+                "the terminal has the keyboard"
+            )
+        });
+
+        cx.simulate_keystrokes("secondary-alt-2 secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        cx.update(|window, _| assert!(terminal.is_focused(window)));
+    }
+
+    /// The palette's pane commands and the pane menu's rows show the key
+    /// that runs them.
+    #[gpui::test]
+    fn pane_commands_show_their_keys(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        let os = cx.update(|_, cx| cx.platform_info().os);
+        let key = gpui::Keystroke::parse_with_os("secondary-d", os)
+            .unwrap()
+            .unparse(os);
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.open_palette(cx));
+        draw(cx);
+        cx.simulate_input(&format!(">{}", crate::tr!("panes.split_right")));
+        draw(cx);
+        let row = cx.debug_bounds("palette-row-0").expect("the split's row");
+        let hint = cx
+            .debug_bounds(format!("palette-row-0-key-{key}").leak())
+            .expect("the row shows its key");
+        assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
+        cx.simulate_keystrokes("escape");
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+
+        let button = cx.debug_bounds("pane-menu").expect("the pane menu");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        draw(cx);
+        let row = cx.debug_bounds("menu-item-0").expect("the split's row");
+        let hint = cx
+            .debug_bounds(format!("menu-item-0-key-{key}").leak())
+            .expect("the row shows its key");
+        assert!(row.contains(&hint.center()), "{hint:?} in {row:?}");
     }
 
     /// Two columns fit beside the sidebar of a 1200pt window, each header
