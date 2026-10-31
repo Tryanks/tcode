@@ -63,7 +63,10 @@ pub fn canvas(cx: &App) -> Hsla {
 /// Flatten the canvas over fullscreen vibrancy, where its translucent color
 /// would otherwise composite against black.
 pub fn opaque_canvas(cx: &App) -> Hsla {
-    cx.theme().background.opacity(1.)
+    Hsla {
+        a: 1.,
+        ..cx.theme().background
+    }
 }
 
 /// T1 paper: the near-opaque reading plane the chat workspace, right panel and
