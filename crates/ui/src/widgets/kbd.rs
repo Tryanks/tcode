@@ -40,6 +40,10 @@ impl Kbd {
         self
     }
 
+    pub fn keystroke(&self) -> &Keystroke {
+        &self.stroke
+    }
+
     pub fn binding_for_action(
         action: &dyn Action,
         context: Option<&str>,

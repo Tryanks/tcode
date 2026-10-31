@@ -63,29 +63,25 @@ pub(crate) fn init(cx: &mut App) {
     // Later than gpui-base's editor bindings, so these win inside a text
     // field too, where they shadow only its add-cursor keys on macOS and
     // Windows (`secondary-alt-up`/`-down`).
-    {
-        use crate::panes::{ClosePane, FocusPane, SplitDown, SplitRight, ZoomPane};
-        let [split_right, split_down, close, zoom, left, right, up, down] = PANE_KEYS;
-        cx.bind_keys([
-            KeyBinding::new(split_right, SplitRight, None),
-            KeyBinding::new(split_down, SplitDown, None),
-            KeyBinding::new(close, ClosePane, None),
-            KeyBinding::new("escape", ClosePane, Some(crate::panes::WAITING_CONTEXT)),
-            KeyBinding::new(zoom, ZoomPane, None),
-            KeyBinding::new(left, FocusPane::Left, None),
-            KeyBinding::new(right, FocusPane::Right, None),
-            KeyBinding::new(up, FocusPane::Up, None),
-            KeyBinding::new(down, FocusPane::Down, None),
-        ]);
-    }
+    let panes = pane_bindings();
     // Bindings dispatch before key-down listeners, and the terminal forwards
     // raw keystrokes (Tab, Ctrl-C as an interrupt) from its listener, so the
     // window root's focus traversal and selection copy must not claim them.
     let terminal = Some(crate::terminal_drawer::CONTEXT);
     let undo = secondary("secondary-z", NoAction, terminal, cx);
-    // A terminal reads every pane key itself (Ctrl-D is EOF), so none is a
-    // binding while it has the keyboard.
-    cx.bind_keys(PANE_KEYS.map(|key| KeyBinding::new(key, NoAction, terminal)));
+    // A terminal reads every pane key itself (Ctrl-D is EOF, Alt-arrows move
+    // by word), so none is a binding while it has the keyboard.
+    let blanks: Vec<_> = panes
+        .iter()
+        .map(|(key, _)| KeyBinding::new(key, NoAction, terminal))
+        .collect();
+    cx.bind_keys(panes.into_iter().map(|(_, binding)| binding));
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        crate::panes::ClosePane,
+        Some(crate::panes::WAITING_CONTEXT),
+    )]);
+    cx.bind_keys(blanks);
     cx.bind_keys([
         undo,
         KeyBinding::new("tab", NoAction, terminal),
@@ -112,17 +108,58 @@ pub(crate) fn secondary<A: Action>(
         .expect("valid keystroke")
 }
 
-/// The chat column's pane commands' keys, in [`init`]'s order.
-const PANE_KEYS: [&str; 8] = [
-    "secondary-d",
-    "secondary-shift-d",
-    "secondary-shift-w",
-    "secondary-shift-enter",
-    "secondary-alt-left",
-    "secondary-alt-right",
-    "secondary-alt-up",
-    "secondary-alt-down",
-];
+/// The chat column's pane commands with their keys. Alt with the secondary
+/// modifier moves the keyboard, with Shift too it swaps, and with a digit it
+/// lays out that many panes. Moving a thread takes Control-Command on macOS;
+/// elsewhere the secondary modifier is Control, where Control-arrows move by
+/// word and Control-Alt is focus, so it takes Alt alone, which gpui-base's
+/// text fields leave unbound there. AltGr typing still reaches a text field:
+/// GPUI prefers the character AltGr makes over a binding.
+fn pane_bindings() -> Vec<(&'static str, KeyBinding)> {
+    use crate::panes::{
+        CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, PaneLayout, Side, SplitDown,
+        SplitRight, SwapPane, ZoomPane,
+    };
+    fn bind(key: &'static str, action: impl gpui::Action) -> (&'static str, KeyBinding) {
+        (key, KeyBinding::new(key, action, None))
+    }
+    #[cfg(target_os = "macos")]
+    const MOVE_THREAD: [&str; 4] = [
+        "secondary-ctrl-left",
+        "secondary-ctrl-right",
+        "secondary-ctrl-up",
+        "secondary-ctrl-down",
+    ];
+    #[cfg(not(target_os = "macos"))]
+    const MOVE_THREAD: [&str; 4] = ["alt-left", "alt-right", "alt-up", "alt-down"];
+    let [move_left, move_right, move_up, move_down] = MOVE_THREAD;
+    vec![
+        bind("secondary-d", SplitRight),
+        bind("secondary-shift-d", SplitDown),
+        bind("secondary-shift-w", ClosePane),
+        bind("secondary-alt-w", CloseOtherPanes),
+        bind("secondary-shift-enter", ZoomPane),
+        bind("secondary-alt-left", FocusPane::Left),
+        bind("secondary-alt-right", FocusPane::Right),
+        bind("secondary-alt-up", FocusPane::Up),
+        bind("secondary-alt-down", FocusPane::Down),
+        bind("secondary-alt-]", FocusPane::Next),
+        bind("secondary-alt-[", FocusPane::Previous),
+        bind("secondary-alt-shift-left", SwapPane(Side::Left)),
+        bind("secondary-alt-shift-right", SwapPane(Side::Right)),
+        bind("secondary-alt-shift-up", SwapPane(Side::Up)),
+        bind("secondary-alt-shift-down", SwapPane(Side::Down)),
+        bind(move_left, MoveThreadToPane(Side::Left)),
+        bind(move_right, MoveThreadToPane(Side::Right)),
+        bind(move_up, MoveThreadToPane(Side::Up)),
+        bind(move_down, MoveThreadToPane(Side::Down)),
+        bind("secondary-alt-1", PaneLayout::Single),
+        bind("secondary-alt-2", PaneLayout::Columns),
+        bind("secondary-alt-3", PaneLayout::OneBesideTwo),
+        bind("secondary-alt-4", PaneLayout::Grid),
+        bind("secondary-alt-5", PaneLayout::SpreadAgents),
+    ]
+}
 
 /// Format a shortcut using GPUI's semantic secondary modifier.
 pub(crate) fn format_secondary_shortcut(key: &str, cx: &App) -> String {

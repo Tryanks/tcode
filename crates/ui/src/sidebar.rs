@@ -2724,14 +2724,24 @@ impl SessionsSidebar {
             cx,
         );
         // Among several panes, the thread's pane's colour outlines the row.
-        // It fades in and out, and keeps its colour while it fades out.
+        // It fades in and out, and keeps its colour while it fades out; a
+        // thread that moves to another pane glides to that pane's colour.
         let outline = crate::motion::shown(
             SharedString::from(format!("{row_id}-pane-outline")),
             crate::shell::pane_colour(&meta.id, cx),
             window,
             cx,
         )
-        .map(|shown| shown.value.opacity(shown.progress()));
+        .map(|shown| {
+            let colour = transition(
+                (row_id.clone(), "pane-outline-colour"),
+                shown.value,
+                settle(),
+                window,
+                cx,
+            );
+            colour.opacity(shown.progress())
+        });
         let radius = cx.theme().tokens.radius.md;
         let row = crate::material::accessible_clickable(
             base.bg(fill)
