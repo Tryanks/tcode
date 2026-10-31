@@ -232,7 +232,9 @@ fn agents_cue_dot(
 
 /// The pane commands `panes` allows, as menu rows.
 fn pane_items(menu: PopupMenu, panes: crate::shell::PaneControls) -> PopupMenu {
-    use crate::panes::{ClosePane, SplitDown, SplitRight, ZoomPane};
+    use crate::panes::{
+        CloseOtherPanes, ClosePane, MoveThreadToPane, SplitDown, SplitRight, SwapPane, ZoomPane,
+    };
     let (zoom, zoom_icon) = if panes.zoomed {
         (crate::tr!("panes.unzoom"), IconName::Minimize2)
     } else {
@@ -258,6 +260,27 @@ fn pane_items(menu: PopupMenu, panes: crate::shell::PaneControls) -> PopupMenu {
         Box::new(ClosePane),
         panes.close,
     )
+    .menu_with_icon_and_enable(
+        crate::tr!("panes.close_others").into_owned(),
+        IconName::Close,
+        Box::new(CloseOtherPanes),
+        panes.close_others,
+    )
+    // Only the sides with a pane: four rows each that do nothing would
+    // bury the ones that do.
+    .when(panes.neighbours.contains(&true), |menu| {
+        let swaps = panes.sides().fold(menu.separator(), |menu, side| {
+            let swap = SwapPane(side);
+            menu.menu_with_icon(swap.label().into_owned(), side.icon(), Box::new(swap))
+        });
+        panes
+            .sides()
+            .filter(|_| panes.moves)
+            .fold(swaps, |menu, side| {
+                let to = MoveThreadToPane(side);
+                menu.menu_with_icon(to.label().into_owned(), side.icon(), Box::new(to))
+            })
+    })
 }
 
 /// Vertical rhythm between turns. Turns are separated by space and typographic

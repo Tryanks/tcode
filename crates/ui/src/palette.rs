@@ -64,8 +64,6 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     (qi == q.len()).then_some(score)
 }
 
-type PaneAction = fn() -> Box<dyn gpui::Action>;
-
 /// A concrete action a palette row triggers.
 #[derive(Clone)]
 enum Action {
@@ -93,9 +91,8 @@ enum Action {
         session_id: String,
         turn: Option<usize>,
     },
-    /// A pane command, which the shell answers.
-    Pane(PaneAction),
-    Layout(crate::panes::PaneLayout),
+    /// A pane command or layout, which the shell answers.
+    Pane(Rc<dyn gpui::Action>),
 }
 
 /// One rendered palette row.
@@ -390,27 +387,38 @@ impl CommandPalette {
                 Action::OpenPreview,
             );
         }
+        let pane = |action: Box<dyn gpui::Action>| Action::Pane(action.into());
         if let Some(panes) = crate::shell::pane_controls(None, window, cx) {
-            use crate::panes::{ClosePane, FocusPane, SplitDown, SplitRight, ZoomPane};
+            use crate::panes::{
+                CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, SplitDown, SplitRight,
+                SwapPane, ZoomPane,
+            };
             if panes.split_right {
                 push_action(
                     crate::tr!("panes.split_right").into_owned(),
                     IconName::Columns2,
-                    Action::Pane(|| Box::new(SplitRight)),
+                    pane(Box::new(SplitRight)),
                 );
             }
             if panes.split_down {
                 push_action(
                     crate::tr!("panes.split_down").into_owned(),
                     IconName::Rows2,
-                    Action::Pane(|| Box::new(SplitDown)),
+                    pane(Box::new(SplitDown)),
                 );
             }
             if panes.close {
                 push_action(
                     crate::tr!("panes.close").into_owned(),
                     IconName::Close,
-                    Action::Pane(|| Box::new(ClosePane)),
+                    pane(Box::new(ClosePane)),
+                );
+            }
+            if panes.close_others {
+                push_action(
+                    crate::tr!("panes.close_others").into_owned(),
+                    IconName::Close,
+                    pane(Box::new(CloseOtherPanes)),
                 );
             }
             if panes.zoom {
@@ -419,41 +427,53 @@ impl CommandPalette {
                 } else {
                     (crate::tr!("panes.zoom"), IconName::Maximize2)
                 };
-                push_action(
-                    label.into_owned(),
-                    icon,
-                    Action::Pane(|| Box::new(ZoomPane)),
-                );
+                push_action(label.into_owned(), icon, pane(Box::new(ZoomPane)));
             }
             if panes.zoom && !panes.zoomed {
-                let moves: [(_, _, PaneAction); 6] = [
-                    (crate::tr!("panes.focus_left"), IconName::ArrowLeft, || {
-                        Box::new(FocusPane::Left)
-                    }),
+                let moves = [
+                    (
+                        crate::tr!("panes.focus_left"),
+                        IconName::ArrowLeft,
+                        FocusPane::Left,
+                    ),
                     (
                         crate::tr!("panes.focus_right"),
                         IconName::ArrowRight,
-                        || Box::new(FocusPane::Right),
+                        FocusPane::Right,
                     ),
-                    (crate::tr!("panes.focus_up"), IconName::ArrowUp, || {
-                        Box::new(FocusPane::Up)
-                    }),
-                    (crate::tr!("panes.focus_down"), IconName::ArrowDown, || {
-                        Box::new(FocusPane::Down)
-                    }),
+                    (
+                        crate::tr!("panes.focus_up"),
+                        IconName::ArrowUp,
+                        FocusPane::Up,
+                    ),
+                    (
+                        crate::tr!("panes.focus_down"),
+                        IconName::ArrowDown,
+                        FocusPane::Down,
+                    ),
                     (
                         crate::tr!("panes.focus_next"),
                         IconName::ChevronRight,
-                        || Box::new(FocusPane::Next),
+                        FocusPane::Next,
                     ),
                     (
                         crate::tr!("panes.focus_previous"),
                         IconName::ChevronLeft,
-                        || Box::new(FocusPane::Previous),
+                        FocusPane::Previous,
                     ),
                 ];
                 for (label, icon, action) in moves {
-                    push_action(label.into_owned(), icon, Action::Pane(action));
+                    push_action(label.into_owned(), icon, pane(Box::new(action)));
+                }
+            }
+            for side in panes.sides() {
+                let swap = SwapPane(side);
+                push_action(swap.label().into_owned(), side.icon(), pane(Box::new(swap)));
+            }
+            if panes.moves {
+                for side in panes.sides() {
+                    let to = MoveThreadToPane(side);
+                    push_action(to.label().into_owned(), side.icon(), pane(Box::new(to)));
                 }
             }
         }
@@ -461,7 +481,7 @@ impl CommandPalette {
             push_action(
                 layout.label().into_owned(),
                 layout.icon(),
-                Action::Layout(layout),
+                pane(Box::new(layout)),
             );
         }
         if store.scope().is_full() {
@@ -668,12 +688,7 @@ impl CommandPalette {
             Action::Pane(action) => {
                 self.close(cx);
                 crate::shell::focus_focused_pane(window, cx);
-                window.dispatch_action(action(), cx);
-            }
-            Action::Layout(layout) => {
-                self.close(cx);
-                crate::shell::focus_focused_pane(window, cx);
-                window.dispatch_action(Box::new(layout), cx);
+                window.dispatch_action(action.boxed_clone(), cx);
             }
             Action::OpenThread { session_id, turn } => {
                 self.store.update(cx, |store, cx| {
@@ -718,6 +733,7 @@ impl CommandPalette {
         row: &Row,
         items: &[Item],
         compact: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -736,6 +752,12 @@ impl CommandPalette {
         let item = &items[index];
         let is_sel = index == self.selected;
         let action = item.action.clone();
+        let key = match &item.action {
+            Action::Pane(action) => {
+                crate::widgets::kbd::Kbd::binding_for_action(action.as_ref(), None, window)
+            }
+            _ => None,
+        };
         // Every result takes the two-line row, so the list's uniform height
         // hint holds whether or not a result has a subtitle.
         let row = crate::material::selectable_row_two_line(
@@ -816,6 +838,16 @@ impl CommandPalette {
                             .child(provider_glyph(provider)),
                     )
                 })
+                .when_some(key, |this, key| {
+                    let stroke = key.keystroke().unparse(cx.platform_info().os);
+                    this.child(
+                        div()
+                            .flex_none()
+                            .debug_selector(move || format!("palette-row-{index}-key-{stroke}"))
+                            .text_secondary(compact, cx)
+                            .child(key.appearance(false)),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.activate(action.clone(), window, cx);
                 })),
@@ -893,8 +925,14 @@ impl Render for CommandPalette {
                     .child(
                         list(
                             self.list_state.clone(),
-                            cx.processor(move |this, ix: usize, _, cx| {
-                                this.render_row(&results.rows[ix], &results.items, compact, cx)
+                            cx.processor(move |this, ix: usize, window, cx| {
+                                this.render_row(
+                                    &results.rows[ix],
+                                    &results.items,
+                                    compact,
+                                    window,
+                                    cx,
+                                )
                             }),
                         )
                         .size_full(),

@@ -374,13 +374,17 @@ impl Render for PopupMenu {
                     label,
                     icon,
                     render,
-                    action: _,
+                    action,
                     disabled,
                     checked,
                 } => {
                     let selected = self.selected == Some(index);
                     let disabled = *disabled;
                     let content = render.as_ref().map(|render| render(window, cx));
+                    // A touch menu has no keyboard to hint at.
+                    let key = (!self.touch)
+                        .then(|| super::Kbd::binding_for_action(action.as_ref(), None, window))
+                        .flatten();
                     items = items.child(
                         crate::material::menu_item_frame(self.touch, cx)
                             .text_body(self.touch, cx)
@@ -404,7 +408,21 @@ impl Render for PopupMenu {
                                 },
                             ))
                             .when_some(label.clone(), |el, label| el.child(label))
-                            .when_some(content, |el, content| el.child(content)),
+                            .when_some(content, |el, content| el.child(content))
+                            .when_some(key, |el, key| {
+                                let stroke = key.keystroke().unparse(cx.platform_info().os);
+                                el.child(
+                                    div()
+                                        .debug_selector(move || {
+                                            format!("menu-item-{index}-key-{stroke}")
+                                        })
+                                        .flex_none()
+                                        .ml_auto()
+                                        .pl(cx.theme().tokens.spacing.md)
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(key.appearance(false)),
+                                )
+                            }),
                     );
                 }
             }
