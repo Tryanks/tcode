@@ -7625,11 +7625,8 @@ mod tests {
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
 
-        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
-            "cmd-ctrl-left"
-        } else {
-            "alt-left"
-        });
+        let mac = cx.update(|_, cx| cx.platform_info().is_mac());
+        cx.simulate_keystrokes(if mac { "cmd-ctrl-left" } else { "alt-left" });
         draw(cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
