@@ -994,7 +994,8 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
 }
 
 /// A Claude Code stand-in that keeps its sign-in in `CLAUDE_CONFIG_DIR` and
-/// answers `auth login` the way claude 2.1.314 does without a terminal.
+/// answers `auth status` and, without a terminal, `auth login` the way
+/// claude 2.1.314 does.
 #[cfg(unix)]
 #[test]
 fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
@@ -1013,7 +1014,7 @@ fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
          'auth status --json')\n\
            if [ -f \"$CLAUDE_CONFIG_DIR/signed-in\" ]; then\n\
              echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"dev@example.com\"}'\n\
-           else echo '{\"loggedIn\":false}'; fi ;;\n\
+           else echo '{\"loggedIn\":false}'; exit 1; fi ;;\n\
          'auth login')\n\
            printf 'Opening browser to sign in\\nIf the browser did not open, visit: https://claude.com/cai/oauth/authorize?code=true&state=S\\nPaste code here if prompted > '\n\
            read code\n\
@@ -1157,7 +1158,7 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
         "#!/bin/sh\n\
          case \"$*\" in\n\
          --version) echo '2.1.314 (Claude Code)' ;;\n\
-         'auth status --json') echo '{\"loggedIn\":false}' ;;\n\
+         'auth status --json') echo '{\"loggedIn\":false}'; exit 1 ;;\n\
          'auth login')\n\
            printf 'If the browser did not open, visit: https://claude.com/cai/oauth/authorize?dir=%s\\nPaste code here if prompted > ' \"$CLAUDE_CONFIG_DIR\"\n\
            read code ;;\n\
