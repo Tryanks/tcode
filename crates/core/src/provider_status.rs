@@ -40,6 +40,23 @@ pub struct ProviderSnapshot {
     pub diagnostic: Option<ProviderProbeDiagnostic>,
     pub message: Option<String>,
     pub checking: bool,
+    #[serde(default)]
+    pub login: Option<ProviderLogin>,
+}
+
+/// Where a sign-in the host runs through the provider CLI stands.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ProviderLogin {
+    Starting,
+    /// The CLI printed its sign-in page and waits for the code that page shows.
+    AwaitingCode {
+        url: String,
+    },
+    Finishing,
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

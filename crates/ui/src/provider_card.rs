@@ -30,6 +30,7 @@ use gpui::{Styled as _, rgb};
 use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
+use tcode_core::provider_status::AuthStatus;
 use tcode_core::settings::builtin_provider_color;
 
 /// The card's dialog asked to manage this profile's plugins.
@@ -284,7 +285,48 @@ impl ProviderCard {
         }
         // Row wrapper so the chip left-aligns and hugs its content instead of
         // being stretched to the column width by the surrounding v_flex.
-        h_flex().w_full().min_w_0().child(line).into_any_element()
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .items_center()
+            .child(line)
+            .children(self.render_account_action(cx))
+            .into_any_element()
+    }
+
+    /// Sign in or out, where Tcode runs the profile's own account sign-in.
+    fn render_account_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let store = self.store.read(cx);
+        if !store.provider_profile_supports_account_login(&self.profile_id) {
+            return None;
+        }
+        let snapshot = store.provider_profile_snapshot(&self.profile_id)?;
+        let button = match snapshot.auth.map(|auth| auth.status) {
+            Some(AuthStatus::Authenticated) => Button::new("provider-sign-out")
+                .ghost()
+                .label(crate::tr!("providers.login.sign_out"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let profile_id = this.profile_id.clone();
+                    this.store
+                        .update(cx, |store, _| store.logout_provider(profile_id));
+                })),
+            Some(AuthStatus::Unauthenticated) | None if snapshot.installed => {
+                Button::new("provider-sign-in")
+                    .label(crate::tr!("providers.login.sign_in"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        crate::provider_login_dialog::open(
+                            this.store.clone(),
+                            this.provider,
+                            this.profile_id.clone(),
+                            window,
+                            cx,
+                        );
+                    }))
+            }
+            _ => return None,
+        };
+        Some(button.xsmall().into_any_element())
     }
 
     /// The update-available icon + its popover.

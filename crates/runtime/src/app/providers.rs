@@ -1,5 +1,7 @@
 use super::*;
+use tcode_core::provider_status::ProviderLogin;
 use tcode_protocol::{ProviderUpdateAvailable, ProviderUpdateRun};
+use tcode_services::provider_login::{self, LoginEvent, LoginHandle};
 
 #[derive(Default)]
 struct VersionCheckRound {
@@ -27,6 +29,13 @@ struct SecretWrite {
     result: Option<Result<(), String>>,
 }
 
+/// A sign-in the host is running; the handle arrives once the CLI spawned.
+struct RunningLogin {
+    generation: u64,
+    handle: Option<LoginHandle>,
+    url: Option<String>,
+}
+
 type SecretWrites = HashMap<String, HashMap<String, Arc<smol::lock::Mutex<SecretWrite>>>>;
 
 pub struct ProviderCatalog {
@@ -45,6 +54,8 @@ pub struct ProviderCatalog {
     profile_revisions: HashMap<String, u64>,
     secret_writes: SecretWrites,
     pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
+    logins: HashMap<String, RunningLogin>,
+    next_login: u64,
 }
 
 impl ProviderCatalog {
@@ -66,6 +77,8 @@ impl ProviderCatalog {
             profile_revisions: HashMap::new(),
             secret_writes: HashMap::new(),
             provider_secret_names,
+            logins: HashMap::new(),
+            next_login: 0,
         }
     }
 
@@ -105,8 +118,10 @@ impl ProviderCatalog {
         true
     }
 
+    /// A sign-in begun under the old configuration ends with it.
     pub(super) fn invalidate_profile_reads(&mut self, id: &str) {
         self.provider_snapshots.remove(id);
+        self.logins.remove(id);
         self.provider_usage.remove(id);
         self.usage_checking.remove(id);
         *self.profile_revisions.entry(id.to_owned()).or_default() += 1;
@@ -583,62 +598,237 @@ impl AppState {
     /// indeterminate auth state until their model/session requests run.
     pub fn refresh_provider_status(&mut self, cx: &mut HostCx) {
         for profile in self.all_profiles() {
-            let profile_id = profile.id.clone();
-            let provider = profile.kind;
-            let revision = self
-                .providers
-                .profile_revisions
-                .get(&profile_id)
-                .copied()
-                .unwrap_or(0);
-            let snapshot = self
-                .providers
-                .provider_snapshots
-                .entry(profile_id.clone())
-                .or_default();
-            if snapshot.checking {
-                continue;
-            }
-            snapshot.checking = true;
-            let binary = self.resolve_profile_binary(&profile_id);
-            let launch_env = self.prepare_profile_env(&profile_id, cx);
-            let host_cx = cx.clone();
-            HostCx::spawn_detached(cx, async move {
-                let snapshot = match launch_env.await {
-                    Ok(launch_env) => Ok(probe_provider(provider, binary, launch_env).await),
-                    Err(error) => Err(error),
-                };
-                log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
-                host_cx.enqueue(move |state, cx| {
-                    if state
-                        .providers
-                        .profile_revisions
-                        .get(&profile_id)
-                        .copied()
-                        .unwrap_or(0)
-                        != revision
-                        || state.settings.resolved_profile(&profile_id).as_ref() != Some(&profile)
-                    {
-                        return;
+            self.refresh_profile_status(profile, cx);
+        }
+    }
+
+    fn refresh_profile_status(&mut self, profile: ResolvedProfile, cx: &mut HostCx) {
+        let profile_id = profile.id.clone();
+        let provider = profile.kind;
+        let revision = self
+            .providers
+            .profile_revisions
+            .get(&profile_id)
+            .copied()
+            .unwrap_or(0);
+        let snapshot = self
+            .providers
+            .provider_snapshots
+            .entry(profile_id.clone())
+            .or_default();
+        if snapshot.checking {
+            return;
+        }
+        snapshot.checking = true;
+        let binary = self.resolve_profile_binary(&profile_id);
+        let launch_env = self.prepare_profile_env(&profile_id, cx);
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let snapshot = match launch_env.await {
+                Ok(launch_env) => Ok(probe_provider(provider, binary, launch_env).await),
+                Err(error) => Err(error),
+            };
+            log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
+            host_cx.enqueue(move |state, cx| {
+                if state
+                    .providers
+                    .profile_revisions
+                    .get(&profile_id)
+                    .copied()
+                    .unwrap_or(0)
+                    != revision
+                    || state.settings.resolved_profile(&profile_id).as_ref() != Some(&profile)
+                {
+                    return;
+                }
+                let snapshots = &mut state.providers.provider_snapshots;
+                match snapshot {
+                    Ok(snapshot) => {
+                        let login = snapshots
+                            .remove(&profile_id)
+                            .and_then(|previous| previous.login);
+                        snapshots.insert(profile_id, ProviderSnapshot { login, ..snapshot });
                     }
-                    match snapshot {
-                        Ok(snapshot) => {
-                            state
-                                .providers
-                                .provider_snapshots
-                                .insert(profile_id, snapshot);
+                    Err(error) => {
+                        if let Some(snapshot) = snapshots.get_mut(&profile_id) {
+                            snapshot.checking = false;
                         }
-                        Err(error) => {
-                            if let Some(snapshot) =
-                                state.providers.provider_snapshots.get_mut(&profile_id)
-                            {
-                                snapshot.checking = false;
-                            }
-                            state.report_error(RuntimeError::PersistSettings { error }, cx);
-                        }
+                        state.report_error(RuntimeError::PersistSettings { error }, cx);
                     }
-                });
+                }
             });
+        });
+    }
+
+    fn set_provider_login(&mut self, profile_id: &str, login: Option<ProviderLogin>) {
+        self.providers
+            .provider_snapshots
+            .entry(profile_id.to_owned())
+            .or_default()
+            .login = login;
+    }
+
+    /// Run the CLI's own sign-in for a profile. Its progress is the profile
+    /// snapshot's `login`; a sign-in already running is left alone.
+    pub fn start_provider_login(&mut self, profile_id: &str, cx: &mut HostCx) {
+        let Some(profile) = self
+            .settings
+            .resolved_profile(profile_id)
+            .filter(|profile| profile.supports_account_login())
+        else {
+            return;
+        };
+        if self.providers.logins.contains_key(profile_id) {
+            return;
+        }
+        let generation = self.providers.next_login;
+        self.providers.next_login += 1;
+        self.providers.logins.insert(
+            profile_id.to_owned(),
+            RunningLogin {
+                generation,
+                handle: None,
+                url: None,
+            },
+        );
+        self.set_provider_login(profile_id, Some(ProviderLogin::Starting));
+        let binary = self
+            .resolve_profile_binary(profile_id)
+            .unwrap_or_else(|| default_program(profile.kind).into());
+        let launch_env = self.prepare_profile_env(profile_id, cx);
+        let profile_id = profile_id.to_owned();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let started = match launch_env.await {
+                Ok(launch_env) => provider_login::start_login(&binary, &launch_env)
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            };
+            let mut run = match started {
+                Ok((handle, run)) => {
+                    let profile_id = profile_id.clone();
+                    host_cx.enqueue(move |state, _cx| {
+                        if let Some(login) = state
+                            .providers
+                            .logins
+                            .get_mut(&profile_id)
+                            .filter(|login| login.generation == generation)
+                        {
+                            login.handle = Some(handle);
+                        }
+                    });
+                    run
+                }
+                Err(error) => {
+                    let event = LoginEvent::Finished(Err(error));
+                    host_cx.enqueue(move |state, cx| {
+                        state.apply_provider_login_event(&profile_id, generation, event, cx)
+                    });
+                    return;
+                }
+            };
+            while let Some(event) = run.next().await {
+                let profile_id = profile_id.clone();
+                host_cx.enqueue(move |state, cx| {
+                    state.apply_provider_login_event(&profile_id, generation, event, cx)
+                });
+            }
+        });
+    }
+
+    fn apply_provider_login_event(
+        &mut self,
+        profile_id: &str,
+        generation: u64,
+        event: LoginEvent,
+        cx: &mut HostCx,
+    ) {
+        let Some(login) = self
+            .providers
+            .logins
+            .get_mut(profile_id)
+            .filter(|login| login.generation == generation)
+        else {
+            return;
+        };
+        match event {
+            LoginEvent::Url(url) => login.url = Some(url),
+            LoginEvent::AwaitingCode => {
+                if let Some(url) = login.url.clone() {
+                    self.set_provider_login(profile_id, Some(ProviderLogin::AwaitingCode { url }));
+                }
+            }
+            LoginEvent::Finished(Ok(())) => self.provider_account_changed(profile_id, cx),
+            LoginEvent::Finished(Err(message)) => {
+                self.providers.logins.remove(profile_id);
+                self.set_provider_login(profile_id, Some(ProviderLogin::Failed { message }));
+            }
+        }
+    }
+
+    pub fn submit_provider_login_code(&mut self, profile_id: &str, code: &str) {
+        let code = code.trim();
+        let Some(handle) = self
+            .providers
+            .logins
+            .get(profile_id)
+            .and_then(|login| login.handle.as_ref())
+        else {
+            return;
+        };
+        if code.is_empty() {
+            return;
+        }
+        handle.submit_code(code.to_owned());
+        self.set_provider_login(profile_id, Some(ProviderLogin::Finishing));
+    }
+
+    /// Stop a running sign-in, or dismiss a failed one.
+    pub fn cancel_provider_login(&mut self, profile_id: &str) {
+        if let Some(login) = self.providers.logins.remove(profile_id)
+            && let Some(handle) = login.handle
+        {
+            handle.cancel();
+        }
+        if let Some(snapshot) = self.providers.provider_snapshots.get_mut(profile_id) {
+            snapshot.login = None;
+        }
+    }
+
+    /// Sign a profile out of its native account through its CLI.
+    pub fn logout_provider(&mut self, profile_id: &str, cx: &mut HostCx) {
+        let Some(profile) = self
+            .settings
+            .resolved_profile(profile_id)
+            .filter(|profile| profile.supports_account_login())
+        else {
+            return;
+        };
+        let binary = self
+            .resolve_profile_binary(profile_id)
+            .unwrap_or_else(|| default_program(profile.kind).into());
+        let launch_env = self.prepare_profile_env(profile_id, cx);
+        let profile_id = profile_id.to_owned();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = match launch_env.await {
+                Ok(launch_env) => provider_login::logout(&binary, &launch_env).await,
+                Err(error) => Err(error),
+            };
+            host_cx.enqueue(move |state, cx| match result {
+                Ok(()) => state.provider_account_changed(&profile_id, cx),
+                Err(message) => state.report_error(RuntimeError::ProviderMessage(message), cx),
+            });
+        });
+    }
+
+    /// The profile signed in or out: what was read under the old account is
+    /// dropped and read again.
+    fn provider_account_changed(&mut self, profile_id: &str, cx: &mut HostCx) {
+        self.providers.invalidate_profile_reads(profile_id);
+        if let Some(profile) = self.settings.resolved_profile(profile_id) {
+            self.refresh_profile_status(profile, cx);
+            self.refresh_provider_usage_if_stale(cx);
         }
     }
 

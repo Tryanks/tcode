@@ -34,14 +34,11 @@ pub async fn run_capture_env(
     args: &[&str],
     env: &[(String, String)],
 ) -> Option<String> {
-    let mut cmd = crate::process::async_command(program);
-    cmd.args(args)
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT");
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
-    let output = cmd.output().await.ok()?;
+    let output = provider_command(program, env)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -53,6 +50,18 @@ pub async fn run_capture_env(
     // exit with empty stdout is still a successful run.
     let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+/// A provider CLI child with the profile's environment applied, never told
+/// it runs inside another Claude Code session.
+pub(crate) fn provider_command(program: &str, env: &[(String, String)]) -> smol::process::Command {
+    let mut cmd = crate::process::async_command(program);
+    cmd.env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT");
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    cmd
 }
 
 /// Probe one provider's installation, version, and authentication state.
@@ -219,6 +228,7 @@ fn finalize_probe(
         diagnostic,
         message: None,
         checking: false,
+        login: None,
     }
 }
 

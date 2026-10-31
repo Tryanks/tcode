@@ -92,6 +92,8 @@ pub struct Caps {
     pub plugin_management: PluginManagement,
     /// Where [`SessionOptions::instructions`] reach the model.
     pub instruction_channel: InstructionChannel,
+    /// The CLI signs a profile in and out of its native account itself.
+    pub account_login: bool,
 }
 
 /// What a harness lets a client do with its standing goal.
@@ -190,6 +192,7 @@ impl ProviderKind {
                     marketplaces: true,
                 },
                 instruction_channel: InstructionChannel::SessionAppend,
+                account_login: true,
             },
             ProviderKind::Codex => Caps {
                 supports_steering: true,
@@ -220,6 +223,7 @@ impl ProviderKind {
                     marketplaces: true,
                 },
                 instruction_channel: InstructionChannel::DeveloperContext,
+                account_login: false,
             },
             ProviderKind::Acp => Caps {
                 supports_steering: false,
@@ -240,6 +244,7 @@ impl ProviderKind {
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
+                account_login: false,
             },
             ProviderKind::Pi => Caps {
                 supports_steering: true,
@@ -258,6 +263,7 @@ impl ProviderKind {
                 trust_project_extensions: true,
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::None,
+                account_login: false,
             },
             ProviderKind::OpenCode => Caps {
                 supports_steering: false,
@@ -276,6 +282,7 @@ impl ProviderKind {
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::PerPromptSystem,
+                account_login: false,
             },
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
@@ -294,6 +301,7 @@ impl ProviderKind {
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
+                account_login: false,
             },
             ProviderKind::Grok => Caps {
                 supports_steering: true,
@@ -319,6 +327,7 @@ impl ProviderKind {
                     marketplaces: true,
                 },
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
+                account_login: false,
             },
         }
     }

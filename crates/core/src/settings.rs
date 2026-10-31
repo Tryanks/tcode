@@ -370,6 +370,12 @@ pub struct ResolvedProfile {
 }
 
 impl ResolvedProfile {
+    /// Whether Tcode signs this profile in and out of its native account
+    /// through the CLI.
+    pub fn supports_account_login(&self) -> bool {
+        self.kind.caps().account_login && self.supports_account_usage()
+    }
+
     /// Whether this endpoint/auth configuration can query native account limits.
     pub fn supports_account_usage(&self) -> bool {
         let (endpoint_key, native_endpoint, credentials, backends): (&str, &str, &[&str], &[&str]) =

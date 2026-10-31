@@ -2779,6 +2779,12 @@ impl WorkspaceStore {
         self.settings_replica.profile_display_name(profile_id)
     }
 
+    pub fn provider_profile_supports_account_login(&self, profile_id: &str) -> bool {
+        self.settings_replica
+            .resolved_profile(profile_id)
+            .is_some_and(|profile| profile.supports_account_login())
+    }
+
     pub fn provider_profile_snapshot(&self, profile_id: &str) -> Option<ProviderSnapshot> {
         self.providers_replica
             .provider_snapshots

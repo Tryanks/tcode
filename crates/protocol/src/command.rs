@@ -156,6 +156,21 @@ pub enum Command {
     DeleteProfile {
         profile_id: String,
     },
+    /// Run the profile's CLI sign-in on the host; its progress is the profile
+    /// snapshot's `login`.
+    StartProviderLogin {
+        profile_id: String,
+    },
+    SubmitProviderLoginCode {
+        profile_id: String,
+        code: String,
+    },
+    CancelProviderLogin {
+        profile_id: String,
+    },
+    LogoutProvider {
+        profile_id: String,
+    },
     RefreshProviderStatus,
     /// Re-fetch account usage / rate-limit windows for every usage-capable
     /// provider profile (Codex, Claude Code).
@@ -693,6 +708,7 @@ impl Command {
             Self::SetHostToken { .. }
                 | Self::SetProfileSecret { .. }
                 | Self::CreateThirdPartyProfile { .. }
+                | Self::SubmitProviderLoginCode { .. }
         )
     }
 

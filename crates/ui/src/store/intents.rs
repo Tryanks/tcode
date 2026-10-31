@@ -55,6 +55,10 @@ impl WorkspaceStore {
                 | Command::UpdateProfileSettings { .. }
                 | Command::CreateThirdPartyProfile { .. }
                 | Command::DeleteProfile { .. }
+                | Command::StartProviderLogin { .. }
+                | Command::SubmitProviderLoginCode { .. }
+                | Command::CancelProviderLogin { .. }
+                | Command::LogoutProvider { .. }
                 | Command::RefreshProviderStatus
                 | Command::RefreshProviderUsage
                 | Command::CheckProviderVersions
@@ -1048,6 +1052,18 @@ impl WorkspaceStore {
     }
     pub fn delete_profile(&mut self, profile_id: String) {
         self.dispatch(Command::DeleteProfile { profile_id });
+    }
+    pub fn start_provider_login(&mut self, profile_id: String) {
+        self.dispatch(Command::StartProviderLogin { profile_id });
+    }
+    pub fn submit_provider_login_code(&mut self, profile_id: String, code: String) {
+        self.dispatch(Command::SubmitProviderLoginCode { profile_id, code });
+    }
+    pub fn cancel_provider_login(&mut self, profile_id: String) {
+        self.dispatch(Command::CancelProviderLogin { profile_id });
+    }
+    pub fn logout_provider(&mut self, profile_id: String) {
+        self.dispatch(Command::LogoutProvider { profile_id });
     }
     pub fn update_providers(&mut self, providers: Vec<ProviderKind>) {
         self.dispatch(Command::UpdateProviders { providers });

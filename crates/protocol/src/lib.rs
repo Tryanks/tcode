@@ -237,6 +237,11 @@ pub use wire::{
 //
 // Version 23 (v0.3.4): the assistant_message item carries `summarized`, set
 // when the provider delivered a summary of the message rather than its text.
+//
+// Unreleased: the protocol adds the StartProviderLogin,
+// SubmitProviderLoginCode, CancelProviderLogin and LogoutProvider commands,
+// and a provider snapshot carries `login`, the sign-in the host runs for that
+// profile.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]

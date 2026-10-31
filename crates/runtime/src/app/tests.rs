@@ -993,6 +993,119 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     )));
 }
 
+/// A Claude Code stand-in that keeps its sign-in in `CLAUDE_CONFIG_DIR` and
+/// answers `auth login` the way claude 2.1.314 does without a terminal.
+#[cfg(unix)]
+#[test]
+fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use tcode_core::provider_status::{AuthStatus, ProviderLogin};
+
+    let test_store = TestStore::new("tcode-provider-login-test");
+    let binary = test_store.root().join("claude");
+    let home = test_store.root().join("claude-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\n\
+         case \"$*\" in\n\
+         --version) echo '2.1.314 (Claude Code)' ;;\n\
+         'auth status --json')\n\
+           if [ -f \"$CLAUDE_CONFIG_DIR/signed-in\" ]; then\n\
+             echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"dev@example.com\"}'\n\
+           else echo '{\"loggedIn\":false}'; fi ;;\n\
+         'auth login')\n\
+           printf 'Opening browser to sign in\\nIf the browser did not open, visit: https://claude.com/cai/oauth/authorize?code=true&state=S\\nPaste code here if prompted > '\n\
+           read code\n\
+           if [ \"$code\" = good ]; then touch \"$CLAUDE_CONFIG_DIR/signed-in\"; echo 'Login successful.'; exit 0; fi\n\
+           echo 'Invalid code' >&2; exit 1 ;;\n\
+         'auth logout') rm -f \"$CLAUDE_CONFIG_DIR/signed-in\" ;;\n\
+         *) exit 2 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = TestClientState::new((*test_store).clone());
+    let claude = host.settings.provider_mut(ProviderKind::ClaudeCode);
+    claude.binary_path = Some(binary);
+    claude.home_path = Some(home);
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(host);
+    let snapshot = |state: &TestClientState, id: &str| {
+        state
+            .providers_status_snapshot()
+            .provider_snapshots
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let login = |state: &TestClientState| snapshot(state, "claude").login;
+    let awaiting = |state: &TestClientState| {
+        login(state)
+            == Some(ProviderLogin::AwaitingCode {
+                url: "https://claude.com/cai/oauth/authorize?code=true&state=S".into(),
+            })
+    };
+    let auth = |state: &TestClientState| snapshot(state, "claude").auth.map(|auth| auth.status);
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::StartProviderLogin {
+            profile_id: "codex".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert_eq!(state.read(|state| snapshot(state, "codex").login), None);
+
+    let start = || Command::StartProviderLogin {
+        profile_id: "claude".into(),
+    };
+    let submit = |code: &str| Command::SubmitProviderLoginCode {
+        profile_id: "claude".into(),
+        code: code.into(),
+    };
+    state.dispatch_command(cx, 2, start());
+    cx.run_until(awaiting);
+    state.dispatch_command(
+        cx,
+        3,
+        Command::CancelProviderLogin {
+            profile_id: "claude".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert_eq!(state.read(login), None);
+
+    state.dispatch_command(cx, 4, start());
+    cx.run_until(awaiting);
+    state.dispatch_command(cx, 5, submit("bad"));
+    cx.run_until(|state| {
+        login(state)
+            == Some(ProviderLogin::Failed {
+                message: "Invalid code".into(),
+            })
+    });
+
+    state.dispatch_command(cx, 6, start());
+    cx.run_until(awaiting);
+    state.dispatch_command(cx, 7, submit("good"));
+    cx.run_until(|state| login(state).is_none() && auth(state) == Some(AuthStatus::Authenticated));
+    assert_eq!(
+        state.read(|state| snapshot(state, "claude").auth.unwrap().email),
+        Some("dev@example.com".into())
+    );
+
+    state.dispatch_command(
+        cx,
+        8,
+        Command::LogoutProvider {
+            profile_id: "claude".into(),
+        },
+    );
+    cx.run_until(|state| auth(state) == Some(AuthStatus::Unauthenticated));
+}
+
 #[test]
 fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     let cx = &mut TestAppContext::default();

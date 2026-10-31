@@ -128,6 +128,10 @@ impl AppState {
             Command::SetProfileSecret { profile_id, .. }
             | Command::UpdateProfileSettings { profile_id, .. }
             | Command::DeleteProfile { profile_id }
+            | Command::StartProviderLogin { profile_id }
+            | Command::SubmitProviderLoginCode { profile_id, .. }
+            | Command::CancelProviderLogin { profile_id }
+            | Command::LogoutProvider { profile_id }
                 if self.settings.resolved_profile(profile_id).is_none() =>
             {
                 return Err(error(

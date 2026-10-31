@@ -1167,6 +1167,10 @@ mod tests {
                 model: None,
                 api_key: "fixture-private-token".into(),
             },
+            Command::SubmitProviderLoginCode {
+                profile_id: "claude".into(),
+                code: "fixture-private-token".into(),
+            },
         ] {
             link.dispatch(command.clone()).unwrap();
             let request =

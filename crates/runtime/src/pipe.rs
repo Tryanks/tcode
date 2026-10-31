@@ -628,6 +628,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.create_third_party_profile(&name, &base_url, model.as_deref(), &api_key, cx);
         }
         Command::DeleteProfile { profile_id } => app.delete_profile(&profile_id, cx),
+        Command::StartProviderLogin { profile_id } => app.start_provider_login(&profile_id, cx),
+        Command::SubmitProviderLoginCode { profile_id, code } => {
+            app.submit_provider_login_code(&profile_id, &code)
+        }
+        Command::CancelProviderLogin { profile_id } => app.cancel_provider_login(&profile_id),
+        Command::LogoutProvider { profile_id } => app.logout_provider(&profile_id, cx),
         Command::RefreshProviderStatus => app.refresh_provider_status(cx),
         Command::RefreshProviderUsage => app.refresh_provider_usage(cx),
         Command::CheckProviderVersions => app.check_provider_versions(cx),

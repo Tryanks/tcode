@@ -18,6 +18,7 @@ pub mod process;
 pub mod project_config;
 pub mod project_icons;
 pub mod provider_auth;
+pub mod provider_login;
 pub mod provider_probe;
 pub mod provider_usage;
 pub mod relaunch;
