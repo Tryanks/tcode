@@ -2576,7 +2576,7 @@ impl SessionsSidebar {
                 .into_any_element(),
             GroupedListRow::Thread(meta) => item
                 .child({
-                    let active = self.store.read(cx).roster_session_id();
+                    let active = self.selected_row(window, cx);
                     self.render_thread(
                         meta,
                         flags,
@@ -2696,6 +2696,15 @@ impl SessionsSidebar {
                         ),
                 ),
         )
+    }
+
+    /// The thread whose row is drawn selected: the store's focused one, or
+    /// its lead, as far as the panes let it show (`shell::shows_selection`).
+    fn selected_row(&self, window: &Window, cx: &App) -> Option<String> {
+        self.store
+            .read(cx)
+            .roster_session_id()
+            .filter(|_| crate::shell::shows_selection(window, cx))
     }
 
     /// `base` carries the row's selectable surface, selected when `is_active`.
@@ -4669,7 +4678,7 @@ impl Render for SessionsSidebar {
             let flags = session_flags(&sessions, store);
             (
                 store.sidebar_layout(),
-                store.roster_session_id(),
+                self.selected_row(window, cx),
                 store.grouped_sessions(),
                 store.flat_sessions(),
                 flags,
