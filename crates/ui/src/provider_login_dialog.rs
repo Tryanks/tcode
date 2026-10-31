@@ -177,7 +177,7 @@ impl ProviderLoginDialog {
 
 enum Shown {
     Waiting,
-    Code(String),
+    Code(Option<String>),
     Failed(Option<String>),
 }
 
@@ -209,7 +209,6 @@ impl Render for ProviderLoginDialog {
                         .label(crate::tr!("providers.login.continue"))
                         .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                 );
-                let copy = url.clone();
                 v_flex()
                     .gap_4()
                     .child(
@@ -217,25 +216,28 @@ impl Render for ProviderLoginDialog {
                             .text_secondary(false, cx)
                             .child(crate::tr!("providers.login.instructions")),
                     )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("provider-login-open")
-                                    .label(crate::tr!("providers.login.open_browser"))
-                                    .on_click(move |_, _, cx| cx.open_url(&url)),
-                            )
-                            .child(
-                                Button::new("provider-login-copy")
-                                    .ghost()
-                                    .label(crate::tr!("providers.login.copy_link"))
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy.clone(),
-                                        ))
-                                    }),
-                            ),
-                    )
+                    .when_some(url, |body, url| {
+                        let copy = url.clone();
+                        body.child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("provider-login-open")
+                                        .label(crate::tr!("providers.login.open_browser"))
+                                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                                )
+                                .child(
+                                    Button::new("provider-login-copy")
+                                        .ghost()
+                                        .label(crate::tr!("providers.login.copy_link"))
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy.clone(),
+                                            ))
+                                        }),
+                                ),
+                        )
+                    })
                     .child(
                         v_flex()
                             .gap_1p5()

@@ -401,10 +401,22 @@ impl AcpPanel {
                         );
                     }
                     Ok(other) => {
+                        log::error!("unexpected create-account response: {other:?}");
                         this.account_error =
-                            Some(format!("unexpected create-account response: {other:?}"));
+                            Some(crate::tr!("providers.account.create_failed").into_owned());
                     }
-                    Err(error) => this.account_error = Some(error.message),
+                    Err(error) => {
+                        this.account_error = Some(match error.code.as_str() {
+                            "profile_exists" => {
+                                crate::tr!("providers.account.profile_exists").into_owned()
+                            }
+                            _ => crate::tr!(
+                                "providers.account.create_failed_reason",
+                                reason = error.message
+                            )
+                            .into_owned(),
+                        });
+                    }
                 }
                 cx.notify();
             });

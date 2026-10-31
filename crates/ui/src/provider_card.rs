@@ -9,7 +9,7 @@ use crate::icon::Icon;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
     icon::IconName,
-    overlay::OverlayExt as _,
+    overlay::{DialogButtons, OverlayExt as _},
     provider_dialog::ProviderDialog,
     provider_status::{EMAIL_SLOT, ProviderSnapshot, StatusDot, redact_email, signed_in_account},
     sizing::Sizable as _,
@@ -17,7 +17,7 @@ use crate::{
     theme::ActiveTheme as _,
     typography::TextRole as _,
     widgets::{
-        button::{Button, ButtonVariants as _},
+        button::{Button, ButtonVariant, ButtonVariants as _},
         switch::Switch,
     },
 };
@@ -314,11 +314,7 @@ impl ProviderCard {
             Some(AuthStatus::Authenticated) => Button::new("provider-sign-out")
                 .ghost()
                 .label(crate::tr!("providers.login.sign_out"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let profile_id = this.profile_id.clone();
-                    this.store
-                        .update(cx, |store, _| store.logout_provider(profile_id));
-                })),
+                .on_click(cx.listener(|this, _, window, cx| this.confirm_sign_out(window, cx))),
             Some(AuthStatus::Unauthenticated) | None if snapshot.installed => {
                 Button::new("provider-sign-in")
                     .label(crate::tr!("providers.login.sign_in"))
@@ -335,6 +331,33 @@ impl ProviderCard {
             _ => return None,
         };
         Some(button.xsmall().into_any_element())
+    }
+
+    fn confirm_sign_out(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let profile_id = self.profile_id.clone();
+        let name = store.read(cx).provider_profile_display_name(&profile_id);
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let store = store.clone();
+            let profile_id = profile_id.clone();
+            alert
+                .title(
+                    crate::tr!("providers.login.sign_out_confirm_title", name = name).into_owned(),
+                )
+                .description(crate::tr!("providers.login.sign_out_confirm_body"))
+                .button_props(
+                    DialogButtons::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(crate::tr!("providers.login.sign_out"))
+                        .cancel_text(crate::tr!("settings.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    let profile_id = profile_id.clone();
+                    store.update(cx, |store, _| store.logout_provider(profile_id));
+                    true
+                })
+        });
     }
 
     /// The update-available icon + its popover.

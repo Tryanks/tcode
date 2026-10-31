@@ -157,8 +157,8 @@ pub enum Command {
     },
     /// Add a profile for another account of `provider`, in its own config
     /// directory, and start its sign-in. Answers with the new profile's id.
-    /// `inherit_config` copies the user's settings, skills, commands, agents
-    /// and plugins from the built-in profile's config directory, never its
+    /// `inherit_config` copies the user's settings, skills, commands and
+    /// agents from the built-in profile's config directory, never its
     /// credentials.
     CreateAccountProfile {
         provider: ProviderKind,

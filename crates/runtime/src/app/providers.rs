@@ -705,6 +705,9 @@ impl AppState {
         &self,
         snapshots: &mut HashMap<String, ProviderSnapshot>,
     ) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
         let accounts: Vec<ResolvedProfile> = self
             .settings
             .profiles_for_kind(ProviderKind::ClaudeCode)
@@ -715,17 +718,15 @@ impl AppState {
             let Some(snapshot) = snapshots.get_mut(&profile.id) else {
                 continue;
             };
-            if !claude_shares_credentials(
-                cfg!(target_os = "macos"),
-                snapshot.version.as_deref(),
-                accounts.len(),
-            ) {
+            if !claude_shares_credentials(snapshot.version.as_deref(), accounts.len()) {
                 continue;
             }
             if snapshot.status != Some(ProviderStatusKind::Error) {
                 snapshot.status = Some(ProviderStatusKind::Warning);
             }
-            snapshot.diagnostic = Some(ProviderProbeDiagnostic::SharedCredentials);
+            snapshot
+                .diagnostic
+                .get_or_insert(ProviderProbeDiagnostic::SharedCredentials);
         }
     }
 
@@ -892,9 +893,8 @@ impl AppState {
         match event {
             LoginEvent::Url(url) => login.url = Some(url),
             LoginEvent::AwaitingCode => {
-                if let Some(url) = login.url.clone() {
-                    self.set_provider_login(profile_id, Some(ProviderLogin::AwaitingCode { url }));
-                }
+                let url = login.url.clone();
+                self.set_provider_login(profile_id, Some(ProviderLogin::AwaitingCode { url }));
             }
             LoginEvent::Finished(Ok(())) => self.provider_account_changed(profile_id, cx),
             LoginEvent::Finished(Err(message)) => {
@@ -942,6 +942,7 @@ impl AppState {
         else {
             return;
         };
+        self.cancel_provider_login(profile_id);
         let binary = self
             .resolve_profile_binary(profile_id)
             .unwrap_or_else(|| default_program(profile.kind).into());
@@ -1647,9 +1648,8 @@ pub(super) fn session_options(
 /// Claude Code before 2.1.144 keeps the OAuth sign-in in one macOS Keychain
 /// item shared by every config directory, so signing in one account profile
 /// replaces the others' sign-in.
-fn claude_shares_credentials(macos: bool, version: Option<&str>, account_profiles: usize) -> bool {
-    macos
-        && account_profiles >= 2
+fn claude_shares_credentials(version: Option<&str>, account_profiles: usize) -> bool {
+    account_profiles >= 2
         && version
             .and_then(provider_updates::parse_version)
             .is_some_and(|version| version < (2, 1, 144))
@@ -1916,20 +1916,18 @@ mod provider_lifecycle_tests {
     }
 
     #[test]
-    fn claude_account_profiles_share_one_sign_in_before_2_1_144_on_macos() {
-        for (macos, version, profiles, shared) in [
-            (true, Some("2.1.143"), 2, true),
-            (true, Some("2.0.76"), 3, true),
-            (true, Some("2.1.144"), 2, false),
-            (true, Some("2.1.314"), 2, false),
-            (true, Some("2.1.143"), 1, false),
-            (false, Some("2.1.143"), 2, false),
-            (true, None, 2, false),
+    fn claude_account_profiles_share_one_sign_in_before_2_1_144() {
+        for (version, profiles, shared) in [
+            (Some("2.1.143"), 2, true),
+            (Some("2.0.76"), 3, true),
+            (Some("2.1.144"), 2, false),
+            (Some("2.1.143"), 1, false),
+            (None, 2, false),
         ] {
             assert_eq!(
-                claude_shares_credentials(macos, version, profiles),
+                claude_shares_credentials(version, profiles),
                 shared,
-                "{macos} {version:?} {profiles}"
+                "{version:?} {profiles}"
             );
         }
     }

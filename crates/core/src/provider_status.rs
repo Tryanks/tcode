@@ -52,9 +52,10 @@ pub struct ProviderSnapshot {
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ProviderLogin {
     Starting,
-    /// The CLI printed its sign-in page and waits for the code that page shows.
+    /// The CLI waits for the code its sign-in page shows; `url` is that page
+    /// when the CLI printed one.
     AwaitingCode {
-        url: String,
+        url: Option<String>,
     },
     Finishing,
     Failed {

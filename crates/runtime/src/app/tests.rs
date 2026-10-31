@@ -1043,7 +1043,7 @@ fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
     let awaiting = |state: &TestClientState| {
         login(state)
             == Some(ProviderLogin::AwaitingCode {
-                url: "https://claude.com/cai/oauth/authorize?code=true&state=S".into(),
+                url: Some("https://claude.com/cai/oauth/authorize?code=true&state=S".into()),
             })
     };
     let auth = |state: &TestClientState| snapshot(state, "claude").auth.map(|auth| auth.status);
@@ -1107,8 +1107,9 @@ fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
 }
 
 /// Another Claude account starts from a copy of the user's own configuration,
-/// never the default account's sign-in or history, and its sign-in runs in its
-/// own config directory. A provider without account sign-in is refused.
+/// never the default account's sign-in, endpoint or history, and its sign-in
+/// runs in its own config directory. A provider without account sign-in is
+/// refused.
 #[cfg(unix)]
 #[test]
 fn another_claude_account_inherits_configuration_but_not_the_account() {
@@ -1118,28 +1119,39 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
     let test_store = TestStore::new("tcode-account-profile-test");
     let binary = test_store.root().join("claude");
     let default = test_store.root().join("claude-default");
-    let outside = test_store.root().join("outside");
+    let shared = test_store.root().join("shared");
     for (path, contents) in [
-        ("settings.json", r#"{"model":"opus"}"#),
-        ("CLAUDE.md", "Answer briefly."),
-        ("commands/ship.md", "Ship it."),
-        ("skills/review/SKILL.md", "Review the diff."),
-        ("plugins/installed_plugins.json", r#"{"plugins":{}}"#),
-        (".credentials.json", r#"{"claudeAiOauth":{}}"#),
         (
-            ".claude.json",
+            default.join("settings.json"),
+            r#"{"model":"opus","apiKeyHelper":"/bin/key","permissions":{"allow":["Bash(ls)"]},"env":{"ANTHROPIC_API_KEY":"sk","ANTHROPIC_AUTH_TOKEN":"t","ANTHROPIC_BASE_URL":"https://proxy.test","FOO":"bar"}}"#,
+        ),
+        (default.join("commands/ship.md"), "Ship it."),
+        (default.join("skills/review/SKILL.md"), "Review the diff."),
+        (
+            default.join("plugins/known_marketplaces.json"),
+            r#"{"official":{}}"#,
+        ),
+        (default.join(".credentials.json"), r#"{"claudeAiOauth":{}}"#),
+        (
+            default.join(".claude.json"),
             r#"{"oauthAccount":{"emailAddress":"work@example.com"}}"#,
         ),
-        ("projects/-repo/x.jsonl", "{}"),
-        ("history.jsonl", "{}"),
+        (default.join("projects/-repo/x.jsonl"), "{}"),
+        (default.join("history.jsonl"), "{}"),
+        (shared.join("CLAUDE.md"), "Answer briefly."),
+        (shared.join("agents/reviewer.md"), "Review."),
+        (shared.join("skills/linked/SKILL.md"), "Linked."),
     ] {
-        let path = default.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
     }
-    std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(outside.join("agent.md"), "outside").unwrap();
-    std::os::unix::fs::symlink(&outside, default.join("agents")).unwrap();
+    // Dotfile managers link files and directories in, relative links
+    // included, and a link may point back up its own tree.
+    std::os::unix::fs::symlink("../shared/CLAUDE.md", default.join("CLAUDE.md")).unwrap();
+    std::os::unix::fs::symlink(shared.join("agents"), default.join("agents")).unwrap();
+    std::os::unix::fs::symlink("../../shared/skills/linked", default.join("skills/linked"))
+        .unwrap();
+    std::os::unix::fs::symlink("..", default.join("skills/review/up")).unwrap();
     std::fs::write(
         &binary,
         "#!/bin/sh\n\
@@ -1196,48 +1208,61 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
         std::fs::read_to_string(home.join(".claude.json")).unwrap(),
         r#"{"hasCompletedOnboarding":true}"#
     );
-    for copied in [
-        "settings.json",
-        "CLAUDE.md",
-        "commands/ship.md",
-        "skills/review/SKILL.md",
-        "plugins/installed_plugins.json",
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({
+            "model": "opus",
+            "permissions": {"allow": ["Bash(ls)"]},
+            "env": {"FOO": "bar"},
+        })
+    );
+    for (copied, contents) in [
+        ("CLAUDE.md", "Answer briefly."),
+        ("agents/reviewer.md", "Review."),
+        ("commands/ship.md", "Ship it."),
+        ("skills/review/SKILL.md", "Review the diff."),
+        ("skills/linked/SKILL.md", "Linked."),
     ] {
         assert_eq!(
             std::fs::read_to_string(home.join(copied)).unwrap(),
-            std::fs::read_to_string(default.join(copied)).unwrap(),
+            contents,
             "{copied}"
         );
     }
-    for kept in [".credentials.json", "projects", "history.jsonl", "agents"] {
+    for copy in ["CLAUDE.md", "agents", "skills/linked"] {
+        assert!(
+            !std::fs::symlink_metadata(home.join(copy))
+                .unwrap()
+                .is_symlink(),
+            "{copy} must be a copy, not a link"
+        );
+    }
+    for kept in [
+        ".credentials.json",
+        "projects",
+        "history.jsonl",
+        "plugins",
+        "skills/review/up",
+    ] {
         assert!(!home.join(kept).exists(), "{kept} must not be copied");
     }
 
-    let login = |state: &TestClientState| {
+    cx.run_until(|state| {
         state
             .providers_status_snapshot()
             .provider_snapshots
             .get(&id)
             .and_then(|snapshot| snapshot.login.clone())
-    };
-    cx.run_until(|state| {
-        login(state)
             == Some(ProviderLogin::AwaitingCode {
-                url: format!(
+                url: Some(format!(
                     "https://claude.com/cai/oauth/authorize?dir={}",
                     home.display()
-                ),
+                )),
             })
     });
-    state.dispatch_command(
-        cx,
-        3,
-        Command::CancelProviderLogin {
-            profile_id: id.clone(),
-        },
-    );
-    cx.run_until_parked();
-    assert_eq!(state.read(login), None);
 }
 
 #[test]

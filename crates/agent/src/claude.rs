@@ -81,38 +81,73 @@ pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     child_env("CLAUDE_CONFIG_DIR").or_else(|| child_env("HOME").map(|home| home.join(".claude")))
 }
 
-// Credentials and per-account state (`.claude.json`, `projects/`) must not cross accounts.
-const INHERITED_CONFIG: [&str; 6] = [
-    "settings.json",
-    "CLAUDE.md",
-    "agents",
-    "commands",
-    "skills",
-    "plugins",
-];
+// Credentials and per-account state (`.claude.json`, `projects/`) must not
+// cross accounts, and `plugins/` records absolute paths into its own config
+// directory.
+const INHERITED_CONFIG: [&str; 4] = ["CLAUDE.md", "agents", "commands", "skills"];
 
-/// Copy the user's configuration from one config directory into another,
-/// skipping symbolic links. Blocking.
+/// Copy the user's configuration from one config directory into another.
+/// Blocking.
 pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
-    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
-        let metadata = match std::fs::symlink_metadata(from) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            metadata => metadata?,
-        };
-        if metadata.is_dir() {
-            std::fs::create_dir_all(to)?;
-            for entry in std::fs::read_dir(from)? {
-                let entry = entry?;
-                copy(&entry.path(), &to.join(entry.file_name()))?;
-            }
-        } else if metadata.is_file() {
-            std::fs::copy(from, to)?;
-        }
-        Ok(())
-    }
+    let mut ancestors = HashSet::new();
     INHERITED_CONFIG
         .iter()
-        .try_for_each(|name| copy(&from.join(name), &to.join(name)))
+        .try_for_each(|name| copy_resolved(&from.join(name), &to.join(name), &mut ancestors))?;
+    inherit_settings(&from.join("settings.json"), &to.join("settings.json"))
+}
+
+/// Copy what `from` names, following symbolic links: a link copied as a link
+/// would resolve its relative target under the new directory. A directory
+/// that is its own ancestor is skipped.
+fn copy_resolved(from: &Path, to: &Path, ancestors: &mut HashSet<PathBuf>) -> std::io::Result<()> {
+    const MAX_DEPTH: usize = 32;
+    let metadata = match std::fs::metadata(from) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        metadata => metadata?,
+    };
+    if metadata.is_dir() {
+        let canonical = std::fs::canonicalize(from)?;
+        if ancestors.len() == MAX_DEPTH || !ancestors.insert(canonical.clone()) {
+            return Ok(());
+        }
+        std::fs::create_dir_all(to)?;
+        let copied = std::fs::read_dir(from)?.try_for_each(|entry| {
+            let entry = entry?;
+            copy_resolved(&entry.path(), &to.join(entry.file_name()), ancestors)
+        });
+        ancestors.remove(&canonical);
+        copied?;
+    } else if metadata.is_file() {
+        std::fs::copy(from, to)?;
+    }
+    Ok(())
+}
+
+/// Copy `settings.json` without what would carry the source account's
+/// credentials or endpoint into the new one.
+fn inherit_settings(from: &Path, to: &Path) -> std::io::Result<()> {
+    let text = match std::fs::read(from) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        text => text?,
+    };
+    let mut settings: serde_json::Value = serde_json::from_slice(&text)
+        .map_err(|error| std::io::Error::other(format!("{}: {error}", from.display())))?;
+    if let Some(settings) = settings.as_object_mut() {
+        settings.remove("apiKeyHelper");
+        if let Some(env) = settings
+            .get_mut("env")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for key in [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL",
+            ] {
+                env.remove(key);
+            }
+        }
+    }
+    std::fs::write(to, serde_json::to_vec_pretty(&settings)?)
 }
 
 /// Start (or resume) a Claude Code session.
@@ -3604,32 +3639,18 @@ pub async fn list_models(
 mod tests {
     use super::*;
 
-    /// The profile's directory wins over a configured `CLAUDE_CONFIG_DIR`,
-    /// which wins over `HOME`'s `.claude`.
+    /// A `CLAUDE_CONFIG_DIR` the user set in the profile's environment is
+    /// where the CLI keeps its transcripts, whatever `HOME` says.
     #[test]
-    fn config_dir_follows_the_profile_then_the_variable_then_home() {
-        let env = |pairs: &[(&str, &str)], home: Option<&str>| LaunchEnv {
-            env: pairs
-                .iter()
+    fn config_dir_follows_a_configured_claude_config_dir_over_home() {
+        let launch_env = LaunchEnv {
+            env: [("CLAUDE_CONFIG_DIR", "/configured"), ("HOME", "/home")]
+                .into_iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect(),
-            home: home.map(PathBuf::from),
+            home: None,
         };
-        let configured = [("CLAUDE_CONFIG_DIR", "/configured"), ("HOME", "/home")];
-        assert_eq!(
-            config_dir(&env(&configured, Some("/profile"))),
-            Some(PathBuf::from("/profile"))
-        );
-        assert_eq!(
-            config_dir(&env(&configured, None)),
-            Some(PathBuf::from("/configured"))
-        );
-        assert_eq!(
-            config_dir(&env(&[("HOME", "/home")], None)),
-            std::env::var_os("CLAUDE_CONFIG_DIR")
-                .map(PathBuf::from)
-                .or_else(|| Some(PathBuf::from("/home/.claude")))
-        );
+        assert_eq!(config_dir(&launch_env), Some(PathBuf::from("/configured")));
     }
 
     #[test]

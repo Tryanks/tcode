@@ -2,6 +2,8 @@
 //! `claude auth logout`), run for one profile's config directory.
 
 use std::path::Path;
+use std::process::ExitStatus;
+use std::time::Duration;
 
 use agent::{LaunchEnv, ProviderKind};
 use futures_lite::{AsyncReadExt as _, AsyncWriteExt as _, future};
@@ -39,6 +41,7 @@ impl LoginHandle {
 /// The CLI's side of a login; [`LoginRun::next`] drives it.
 pub struct LoginRun {
     child: Child,
+    exit: future::Boxed<std::io::Result<ExitStatus>>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
@@ -64,8 +67,10 @@ pub fn start_login(
         .kill_on_drop(true)
         .spawn()?;
     let (sender, codes) = smol::channel::unbounded();
+    let stdin = child.stdin.take();
     let run = LoginRun {
-        stdin: child.stdin.take(),
+        exit: Box::pin(child.status()),
+        stdin,
         stdout: child.stdout.take(),
         stderr: child.stderr.take(),
         child,
@@ -83,7 +88,12 @@ enum Step {
     Stdout(Option<Vec<u8>>),
     Stderr(Option<Vec<u8>>),
     Code(Option<String>),
+    Exited(std::io::Result<ExitStatus>),
 }
+
+/// How long output the CLI wrote before exiting is still read; a process it
+/// started may hold its pipes open long after.
+const DRAIN: Duration = Duration::from_secs(1);
 
 impl LoginRun {
     /// The next event; `None` after [`LoginEvent::Finished`].
@@ -95,37 +105,31 @@ impl LoginRun {
             if self.finished {
                 return None;
             }
-            if self.stdout.is_none() && self.stderr.is_none() {
-                self.finished = true;
-                let status = self.child.status().await;
-                let result = match status {
-                    Ok(status) if status.success() => Ok(()),
-                    Ok(status) => Err(self.failure(&status.to_string())),
-                    Err(error) => Err(error.to_string()),
-                };
-                return Some(LoginEvent::Finished(result));
-            }
-            let (stdout, stderr, codes) = (&mut self.stdout, &mut self.stderr, &self.codes);
+            let (stdout, stderr, codes, exit) = (
+                &mut self.stdout,
+                &mut self.stderr,
+                &self.codes,
+                &mut self.exit,
+            );
             let cancelled = self.cancelled;
             let step = future::or(
                 future::or(
                     async move { Step::Stdout(read_chunk(stdout).await) },
                     async move { Step::Stderr(read_chunk(stderr).await) },
                 ),
-                async move {
-                    if cancelled {
-                        future::pending().await
-                    } else {
-                        Step::Code(codes.recv().await.ok())
-                    }
-                },
+                future::or(
+                    async move {
+                        if cancelled {
+                            future::pending().await
+                        } else {
+                            Step::Code(codes.recv().await.ok())
+                        }
+                    },
+                    async move { Step::Exited(exit.await) },
+                ),
             )
             .await;
             match step {
-                Step::Stdout(Some(chunk)) => self.pending.extend(self.output.feed(&chunk)),
-                Step::Stdout(None) => self.stdout = None,
-                Step::Stderr(Some(chunk)) => self.errors.extend_from_slice(&chunk),
-                Step::Stderr(None) => self.stderr = None,
                 Step::Code(Some(code)) => {
                     if let Some(stdin) = &mut self.stdin {
                         let line = format!("{code}\n");
@@ -140,6 +144,49 @@ impl LoginRun {
                     self.cancelled = true;
                     let _ = self.child.kill();
                 }
+                Step::Exited(status) => {
+                    self.drain().await;
+                    self.finished = true;
+                    let result = match status {
+                        Ok(status) if status.success() => Ok(()),
+                        Ok(status) => Err(self.failure(&status.to_string())),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    self.pending.push_back(LoginEvent::Finished(result));
+                }
+                output => self.take_output(output),
+            }
+        }
+    }
+
+    fn take_output(&mut self, step: Step) {
+        match step {
+            Step::Stdout(Some(chunk)) => self.pending.extend(self.output.feed(&chunk)),
+            Step::Stdout(None) => self.stdout = None,
+            Step::Stderr(Some(chunk)) => self.errors.extend_from_slice(&chunk),
+            Step::Stderr(None) => self.stderr = None,
+            Step::Code(_) | Step::Exited(_) => {}
+        }
+    }
+
+    async fn drain(&mut self) {
+        let mut deadline = smol::Timer::after(DRAIN);
+        while self.stdout.is_some() || self.stderr.is_some() {
+            let (stdout, stderr) = (&mut self.stdout, &mut self.stderr);
+            let step = future::or(
+                future::or(
+                    async move { Some(Step::Stdout(read_chunk(stdout).await)) },
+                    async move { Some(Step::Stderr(read_chunk(stderr).await)) },
+                ),
+                async {
+                    (&mut deadline).await;
+                    None
+                },
+            )
+            .await;
+            match step {
+                Some(step) => self.take_output(step),
+                None => break,
             }
         }
     }
@@ -262,5 +309,39 @@ mod tests {
             }
             assert_eq!(events, expected);
         }
+    }
+
+    /// A browser the CLI launched keeps its stdout open; the sign-in still
+    /// finishes when the CLI exits.
+    #[cfg(unix)]
+    #[test]
+    fn login_finishes_when_the_cli_exits_though_a_process_it_started_holds_its_output() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("tcode-login-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("claude");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nsleep 30 &\nread code\necho 'Login successful.'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = std::time::Instant::now();
+        let finished = smol::block_on(async {
+            let (handle, mut run) = start_login(&binary, &LaunchEnv::default()).unwrap();
+            handle.submit_code("code".into());
+            let mut finished = None;
+            while let Some(event) = run.next().await {
+                if let LoginEvent::Finished(result) = event {
+                    finished = Some(result);
+                }
+            }
+            finished
+        });
+        assert_eq!(finished, Some(Ok(())));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

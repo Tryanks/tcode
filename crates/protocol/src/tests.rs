@@ -1453,9 +1453,13 @@ fn provider_login_commands_and_state_use_their_documented_wire_shapes() {
         ),
         (
             tcode_core::provider_status::ProviderLogin::AwaitingCode {
-                url: "https://claude.com/cai/oauth/authorize".into(),
+                url: Some("https://claude.com/cai/oauth/authorize".into()),
             },
             json!({"type": "awaiting_code", "content": {"url": "https://claude.com/cai/oauth/authorize"}}),
+        ),
+        (
+            tcode_core::provider_status::ProviderLogin::AwaitingCode { url: None },
+            json!({"type": "awaiting_code", "content": {"url": null}}),
         ),
         (
             tcode_core::provider_status::ProviderLogin::Finishing,
