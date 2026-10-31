@@ -1,9 +1,11 @@
 //! A pane zoomed over the chat column.
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Styled as _, Window, div, point, px,
+    AnyElement, App, Bounds, ElementId, Entity, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Styled as _, Window, div,
+    point, px,
 };
+use gpui_base::FocusTrapElement as _;
 use gpui_base::motion::Interpolate as _;
 
 use super::ThreadPanel;
@@ -27,6 +29,9 @@ use super::ThreadPanel;
 /// meanwhile (`ThreadTabs::render_active_panel`). Being drawn under another
 /// parent, the pane's own keyed state starts over in each of those two frames
 /// (see `ThreadPanes`); the panes beneath it and its slot keep theirs.
+///
+/// The panes beneath stay laid out with their tab stops, so the pane is a
+/// focus trap while it is drawn over them: Tab cycles inside it.
 #[derive(Default)]
 pub(crate) struct Zoom {
     current: Option<Zoomed>,
@@ -40,6 +45,8 @@ struct Zoomed {
     generation: u64,
     /// How far it has grown out of its slot, as last sampled.
     progress: f32,
+    /// The focus trap it is drawn in.
+    trap: FocusHandle,
 }
 
 /// How a zoom of the column leaves one pane.
@@ -73,13 +80,14 @@ impl Zoom {
 
     /// Zoom `pane` in from its slot, taking any other pane drawn over the
     /// column back into its slot at once.
-    pub(crate) fn zoom_in(&mut self, pane: Entity<ThreadPanel>) {
+    pub(crate) fn zoom_in(&mut self, pane: Entity<ThreadPanel>, cx: &App) {
         self.generation += 1;
         self.current = Some(Zoomed {
             pane,
             zoomed: true,
             generation: self.generation,
             progress: 0.,
+            trap: cx.focus_handle(),
         });
     }
 
@@ -117,13 +125,19 @@ impl Zoom {
         if sample.should_render() {
             zoomed.progress = sample.progress;
         } else {
+            // Back in its slot the pane's keyed state starts over, a focused
+            // button's handle with it, so a keyboard inside goes to the pane.
+            if zoomed.trap.contains_focused(window, cx) {
+                window.focus(&zoomed.pane.focus_handle(cx), cx);
+            }
             self.current = None;
         }
     }
 
     /// What is drawn over the column painted at `area`: a shield over the
     /// panes beneath, and the zoomed pane at its progress from the slot it was
-    /// last laid out in to the whole column, laid out at the column's size.
+    /// last laid out in to the whole column, laid out at the column's size and
+    /// place, so the growing pane uncovers its content rather than moving it.
     pub(crate) fn render(&self, area: Bounds<Pixels>, cx: &App) -> Option<AnyElement> {
         let zoomed = self.current.as_ref()?;
         let slot = zoomed.pane.read(cx).slot();
@@ -137,7 +151,6 @@ impl Zoom {
                 .child(crate::motion::shield())
                 .child(
                     div()
-                        .id("pane-zoom")
                         .debug_selector(|| "zoomed-pane".into())
                         .absolute()
                         .left(at.origin.x)
@@ -151,13 +164,18 @@ impl Zoom {
                         .bg(crate::material::opaque_canvas(cx)
                             .blend(crate::material::content_surface(cx)))
                         .shadow_sm()
+                        // The content stays where the column puts it while
+                        // the pane grows over it or shrinks off it.
                         .child(
                             div()
-                                .flex_none()
+                                .absolute()
+                                .left(-at.origin.x)
+                                .top(-at.origin.y)
                                 .w(area.size.width)
                                 .h(area.size.height)
                                 .child(zoomed.pane.clone()),
-                        ),
+                        )
+                        .focus_trap("pane-zoom", &zoomed.trap),
                 )
                 .into_any_element(),
         )

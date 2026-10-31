@@ -88,7 +88,8 @@ impl FocusPane {
 }
 
 /// Exchange the focused pane's thread with its neighbour's on a side; the
-/// keyboard follows the thread. Each pane keeps its colour.
+/// keyboard stays in the pane, which now shows the neighbour's thread. Each
+/// pane keeps its colour.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
 pub(crate) struct SwapPane(pub(crate) Side);
@@ -104,9 +105,10 @@ impl SwapPane {
     }
 }
 
-/// Show the focused pane's thread in its neighbour on a side, in place of
-/// the thread there, which closes; the focused pane closes and the keyboard
-/// follows the thread.
+/// Move the focused pane's thread to its neighbour on a side, the thread
+/// there coming back into the focused pane, and the keyboard with the moved
+/// thread: [`SwapPane`]'s exchange, with the keyboard following instead of
+/// staying. Nothing closes.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
 pub(crate) struct MoveThreadToPane(pub(crate) Side);

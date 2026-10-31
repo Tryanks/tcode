@@ -839,11 +839,10 @@ impl CommandPalette {
                     )
                 })
                 .when_some(key, |this, key| {
-                    let stroke = key.keystroke().unparse(cx.platform_info().os);
                     this.child(
                         div()
                             .flex_none()
-                            .debug_selector(move || format!("palette-row-{index}-key-{stroke}"))
+                            .debug_selector(move || format!("palette-row-{index}-key"))
                             .text_secondary(compact, cx)
                             .child(key.appearance(false)),
                     )

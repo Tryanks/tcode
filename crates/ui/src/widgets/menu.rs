@@ -410,12 +410,9 @@ impl Render for PopupMenu {
                             .when_some(label.clone(), |el, label| el.child(label))
                             .when_some(content, |el, content| el.child(content))
                             .when_some(key, |el, key| {
-                                let stroke = key.keystroke().unparse(cx.platform_info().os);
                                 el.child(
                                     div()
-                                        .debug_selector(move || {
-                                            format!("menu-item-{index}-key-{stroke}")
-                                        })
+                                        .debug_selector(move || format!("menu-item-{index}-key"))
                                         .flex_none()
                                         .ml_auto()
                                         .pl(cx.theme().tokens.spacing.md)
