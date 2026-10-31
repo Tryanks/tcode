@@ -281,6 +281,9 @@ impl ProviderCard {
                                 crate::tr!("providers.reveal_email")
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
+                                // The card body around this line opens the
+                                // editor on click; this press is not for it.
+                                cx.stop_propagation();
                                 this.email_revealed = !this.email_revealed;
                                 cx.notify();
                             })),
@@ -304,6 +307,8 @@ impl ProviderCard {
     }
 
     /// Sign in or out, where Tcode runs the profile's own account sign-in.
+    /// Its press stops propagating so the card body does not also open the
+    /// editor.
     fn render_account_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let store = self.store.read(cx);
         if !store.provider_profile_supports_account_login(&self.profile_id) {
@@ -314,11 +319,15 @@ impl ProviderCard {
             Some(AuthStatus::Authenticated) => Button::new("provider-sign-out")
                 .ghost()
                 .label(crate::tr!("providers.login.sign_out"))
-                .on_click(cx.listener(|this, _, window, cx| this.confirm_sign_out(window, cx))),
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.confirm_sign_out(window, cx);
+                })),
             Some(AuthStatus::Unauthenticated) | None if snapshot.installed => {
                 Button::new("provider-sign-in")
                     .label(crate::tr!("providers.login.sign_in"))
                     .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
                         crate::provider_login_dialog::open(
                             this.store.clone(),
                             this.provider,
