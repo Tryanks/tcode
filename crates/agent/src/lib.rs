@@ -798,7 +798,7 @@ pub struct SessionOptions {
     /// Enabled tcode HTTP MCP servers to register with this session.
     pub mcp_servers: Vec<McpRegistration>,
     /// Per-provider environment (Settings → Providers): extra variables merged
-    /// into the child's environment, plus the home-directory override. See
+    /// into the child's environment, plus the config-directory override. See
     /// [`LaunchEnv`].
     pub launch_env: LaunchEnv,
     /// Extra CLI arguments appended at spawn for providers whose settings card
@@ -820,9 +820,10 @@ pub struct LaunchEnv {
     /// Extra `KEY=VALUE` pairs merged into the child's environment. Later
     /// entries win, and these override anything inherited from the parent.
     pub env: Vec<(String, String)>,
-    /// Home-directory override. Provider-specific: Claude gets `HOME`, Codex
-    /// gets `CODEX_HOME`, pi gets `PI_CODING_AGENT_DIR`, Cursor gets
-    /// `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` and Grok gets `GROK_HOME`.
+    /// Config-directory override. Provider-specific: Claude gets
+    /// `CLAUDE_CONFIG_DIR`, Codex gets `CODEX_HOME`, pi gets
+    /// `PI_CODING_AGENT_DIR`, Cursor gets `CURSOR_CONFIG_DIR` and
+    /// `CURSOR_DATA_DIR` and Grok gets `GROK_HOME`.
     /// OpenCode has no supported single-directory override, so its value is
     /// ignored. Cursor reads its login from `$XDG_CONFIG_HOME/cursor` or
     /// `~/.config/cursor` whatever these say; moving either would also move
@@ -839,7 +840,7 @@ impl LaunchEnv {
         let mut pairs = self.env.clone();
         if let Some(home) = &self.home {
             let keys: &[&str] = match provider {
-                ProviderKind::ClaudeCode => &["HOME"],
+                ProviderKind::ClaudeCode => &["CLAUDE_CONFIG_DIR"],
                 ProviderKind::Codex => &["CODEX_HOME"],
                 ProviderKind::Pi => &["PI_CODING_AGENT_DIR"],
                 ProviderKind::Cursor => &["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"],
@@ -2486,7 +2487,7 @@ mod launch_env_tests {
     #[test]
     fn home_override_is_provider_specific_and_wins_over_configured_pairs() {
         for (provider, variable) in [
-            (ProviderKind::ClaudeCode, Some("HOME")),
+            (ProviderKind::ClaudeCode, Some("CLAUDE_CONFIG_DIR")),
             (ProviderKind::Codex, Some("CODEX_HOME")),
             (ProviderKind::Pi, Some("PI_CODING_AGENT_DIR")),
             (ProviderKind::OpenCode, None),

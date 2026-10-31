@@ -158,9 +158,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         // top-level invocation.
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT");
-    // Per-provider environment (Settings → Providers): custom variables and the
-    // `HOME` override that relocates `.claude.json` / `.claude`.
-    for (key, value) in opts.launch_env.pairs(ProviderKind::ClaudeCode) {
+    let launch_pairs = opts.launch_env.pairs(ProviderKind::ClaudeCode);
+    for (key, value) in &launch_pairs {
         cmd.env(key, value);
     }
 
@@ -226,21 +225,17 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         }
     });
 
+    let child_env = |key: &str| {
+        launch_pairs
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| std::env::var_os(key).map(PathBuf::from))
+    };
     let session_config = SessionConfig {
-        claude_dir: opts
-            .launch_env
-            .home
-            .clone()
-            .or_else(|| {
-                opts.launch_env
-                    .env
-                    .iter()
-                    .rev()
-                    .find(|(key, _)| key == "HOME")
-                    .map(|(_, value)| PathBuf::from(value))
-            })
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .map(|home| home.join(".claude")),
+        claude_dir: child_env("CLAUDE_CONFIG_DIR")
+            .or_else(|| child_env("HOME").map(|home| home.join(".claude"))),
         resumed: opts.resume.is_some(),
     };
     smol::spawn(actor_loop(

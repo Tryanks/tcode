@@ -768,8 +768,8 @@ mod tests {
         PluginContext {
             binary_path: Some(PathBuf::from("/opt/claude/bin/claude")),
             launch_env: crate::LaunchEnv {
-                env: vec![("CLAUDE_CONFIG_DIR".into(), "/tmp/isolated/.claude".into())],
-                home: Some(PathBuf::from("/tmp/isolated")),
+                env: Vec::new(),
+                home: Some(PathBuf::from("/tmp/isolated/.claude")),
             },
             cwd: cwd.to_path_buf(),
             project,
@@ -1118,7 +1118,11 @@ mod tests {
                     "{var} must be removed"
                 );
             }
-            assert!(envs.contains(&("HOME".as_ref(), Some("/tmp/isolated".as_ref()))));
+            assert!(envs.contains(&(
+                "CLAUDE_CONFIG_DIR".as_ref(),
+                Some("/tmp/isolated/.claude".as_ref())
+            )));
+            assert!(!envs.iter().any(|(key, _)| *key == "HOME"));
         }
         assert!(
             op_args(&PluginOp::AddMarketplace {

@@ -3085,7 +3085,10 @@ fn provider_binary_home_and_launch_arguments_follow_the_selected_profile() {
                 "ANTHROPIC_BASE_URL".to_string(),
                 "https://proxy.test".to_string()
             ),
-            ("HOME".to_string(), "/tmp/claude-home".to_string()),
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/tmp/claude-home".to_string()
+            ),
         ]
     );
 

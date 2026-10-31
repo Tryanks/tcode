@@ -244,8 +244,9 @@ pub struct ProviderSettings {
     /// Override for the CLI binary (`None` = resolve from PATH).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<PathBuf>,
-    /// The provider's home variable ([`agent::LaunchEnv::home`]). OpenCode
-    /// ignores this field because it has no single-home override.
+    /// The provider's config-directory variable ([`agent::LaunchEnv::home`]),
+    /// `CLAUDE_CONFIG_DIR` for Claude. OpenCode ignores this field because it
+    /// has no single-directory override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_path: Option<PathBuf>,
     /// Native-provider CLI arguments appended on session start (ignored for Codex).
@@ -339,7 +340,7 @@ impl ProviderSettings {
 /// one protocol, which is how a session can talk to the official Anthropic API
 /// *and* a third-party Anthropic-compatible endpoint at the same time: both are
 /// `ProviderKind::ClaudeCode`, each with its own `ANTHROPIC_BASE_URL` /
-/// `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` env and its own isolated home.
+/// `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` env and its own config directory.
 ///
 /// The built-in profiles are not stored here — they
 /// remain in [`Settings::providers`] under their [`provider_key`]. Only extra,

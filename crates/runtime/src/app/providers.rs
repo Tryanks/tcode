@@ -480,9 +480,10 @@ impl AppState {
     /// Create a first-class *third-party* Claude Code profile from the Add-agent
     /// dialog: a named endpoint (Kimi preset or a custom Anthropic-compatible
     /// URL). Wires the three env vars, registers the model as a custom slug so it
-    /// shows in the picker, gives the profile its own isolated `HOME` (seeded so
-    /// `claude` runs non-interactively and never touches the official
-    /// `~/.claude`), and stores the API key in `secrets.json`. Returns the id.
+    /// shows in the picker, gives the profile its own `CLAUDE_CONFIG_DIR`
+    /// (seeded so `claude` runs non-interactively and never touches the
+    /// official `~/.claude`), and stores the API key in `secrets.json`. Returns
+    /// the id.
     pub fn create_third_party_profile(
         &mut self,
         name: &str,
@@ -495,9 +496,8 @@ impl AppState {
         let name = if name.is_empty() { "Third-party" } else { name };
         let id = self.settings.allocate_profile_id(name);
 
-        // Each third-party Claude profile gets an isolated HOME so its auth /
-        // config never collides with the official Claude login. Seed onboarding
-        // so the CLI starts straight into API-key mode.
+        // The CLI reads `.claude.json` from the root of its config dir; seeding
+        // onboarding there starts it straight into API-key mode.
         let home = self.store.root().join("profile-homes").join(&id);
 
         let mut env = vec![EnvVar {
