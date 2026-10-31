@@ -136,6 +136,9 @@ pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 560.;
 /// button measure 295pt. It holds no text but the title, so it measures the
 /// same in every locale.
 pub(crate) const HEADER_OVERFLOW_MIN_WIDTH: f32 = 300.;
+/// Among several panes every tier also holds the pane's close button at its
+/// right end: a 24pt button and the 4pt gap before it.
+pub(crate) const PANE_CLOSE_WIDTH: f32 = 28.;
 /// The way back to the parent thread, each with the 8pt gap that follows it.
 /// Its arrow alone measures 20pt. With the parent's title cut to its
 /// 24-character maximum it measured 215pt for an ordinary title; 265pt leaves
@@ -577,6 +580,10 @@ pub struct ChatView {
     /// The thread this view shows and acts on.
     session_id: Option<String>,
     edges: WindowEdges,
+    /// The close button at the header's right end, while the conversation's
+    /// pane shares the column: the pane's focus handle, faded in and out by
+    /// the shell, which samples it above the dock.
+    pane_close: Option<crate::motion::Shown<gpui::FocusHandle>>,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -925,6 +932,7 @@ impl ChatView {
             workspace_store,
             session_id,
             edges: WindowEdges::BOTH,
+            pane_close: None,
             window_state,
             composer,
             terminal_drawer,
@@ -970,8 +978,6 @@ impl ChatView {
         self.session_id.as_deref()
     }
 
-    /// Show `session_id`'s thread, or none; the next sync finds the thread
-    /// changed.
     pub(crate) fn set_edges(&mut self, edges: WindowEdges, cx: &mut Context<Self>) {
         if self.edges != edges {
             self.edges = edges;
@@ -979,6 +985,24 @@ impl ChatView {
         }
     }
 
+    pub(crate) fn set_pane_close(
+        &mut self,
+        close: Option<crate::motion::Shown<gpui::FocusHandle>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane_close != close {
+            self.pane_close = close;
+            cx.notify();
+        }
+    }
+
+    /// Whether the keyboard is in the composer's field, which its card shows.
+    pub(crate) fn composer_has_keyboard(&self, window: &Window, cx: &App) -> bool {
+        self.composer.read(cx).has_keyboard(window, cx)
+    }
+
+    /// Show `session_id`'s thread, or none; the next sync finds the thread
+    /// changed.
     pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
         if self.session_id == session_id {
             return;
@@ -3031,13 +3055,20 @@ impl ChatView {
                 right_tab,
             );
         let under_traffic_lights = collapsed && self.edges.left;
+        // The pane's close button holds the right end in every tier, so each
+        // tier makes room for it while it is drawn.
+        let close_width = if self.pane_close.is_some() {
+            PANE_CLOSE_WIDTH
+        } else {
+            0.
+        };
         let labelled_extra = header_extra_width_for(
             self.workspace_store.read(cx),
             self.session_id.as_deref(),
             under_traffic_lights,
             window.is_fullscreen(),
             true,
-        );
+        ) + close_width;
         let labelled = width - labelled_extra >= HEADER_LABELS_MIN_WIDTH;
         let compact_extra = header_extra_width_for(
             self.workspace_store.read(cx),
@@ -3045,11 +3076,12 @@ impl ChatView {
             under_traffic_lights,
             window.is_fullscreen(),
             false,
-        ) + if hosts_caption {
-            window_caption::RIGHT_PANEL_CAPTION_WIDTH
-        } else {
-            0.
-        };
+        ) + close_width
+            + if hosts_caption {
+                window_caption::RIGHT_PANEL_CAPTION_WIDTH
+            } else {
+                0.
+            };
         let overflow = width - compact_extra < HEADER_COMPACT_MIN_WIDTH;
         let traffic_lights = window_caption::traffic_light_inset(window);
         // One cue for either tier, so a tier change leaves it as it was.
@@ -3378,6 +3410,14 @@ impl ChatView {
                             ),
                     )
             })
+            // After every tier's controls, so it keeps the right end however
+            // the header folds.
+            .children(self.pane_close.as_ref().map(|close| {
+                close.fade(crate::panes::close_button(
+                    "pane-close",
+                    close.value.clone(),
+                ))
+            }))
             // Last child, so the header's own actions keep their places to the
             // left of it.
             .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)));

@@ -227,6 +227,17 @@ impl Composer {
         }
     }
 
+    /// Whether the keyboard is in the field of a conversation that takes
+    /// text, which the card's hairline shows.
+    pub(crate) fn has_keyboard(&self, window: &Window, cx: &App) -> bool {
+        !self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref())
+            .conversation_read_only
+            && self.input.read(cx).focus_handle(cx).is_focused(window)
+    }
+
     #[cfg(test)]
     pub(crate) fn input_focus_handle(&self, cx: &App) -> gpui::FocusHandle {
         self.input.read(cx).focus_handle(cx)
@@ -1330,7 +1341,7 @@ impl Render for Composer {
 
         // Focus swaps the hairline to primary in one frame. Geometry stays
         // fixed: focus never changes border width, radius, or layout.
-        let composer_focused = !readonly && self.input.read(cx).focus_handle(cx).is_focused(window);
+        let composer_focused = self.has_keyboard(window, cx);
         let card = v_flex()
             .debug_selector(|| "composer-card".into())
             .w_full()

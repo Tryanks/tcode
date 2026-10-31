@@ -406,9 +406,8 @@ impl Render for ThreadPanel {
         .fill();
         let mut layers = Vec::new();
         if content.shows(WAITING) {
-            // A waiting pane draws no chat header, so no pane menu: this is
-            // its way to close, as the menu's row is.
-            let pane = self.focus_handle.clone();
+            // A waiting pane draws no chat header, so its close button sits in
+            // its corner instead.
             let spacing = cx.theme().tokens.spacing.sm;
             layers.push((
                 WAITING,
@@ -423,19 +422,14 @@ impl Render for ThreadPanel {
                         cx,
                     ))
                     .child(
-                        div().absolute().top(spacing).right(spacing).child(
-                            Button::new("waiting-pane-close")
-                                .debug_selector(|| "waiting-pane-close".into())
-                                .ghost()
-                                .small()
-                                .compact()
-                                .icon(IconName::Close)
-                                .tooltip(crate::tr!("panes.close"))
-                                .on_click(move |_, window, cx| {
-                                    window.focus(&pane, cx);
-                                    window.dispatch_action(Box::new(ClosePane), cx);
-                                }),
-                        ),
+                        div()
+                            .absolute()
+                            .top(spacing)
+                            .right(spacing)
+                            .child(close_button(
+                                "waiting-pane-close",
+                                self.focus_handle.clone(),
+                            )),
                     )
                     .into_any_element(),
             ));
@@ -496,6 +490,26 @@ impl Panel for ThreadPanel {
     }
 }
 
+/// A pane's close button, at the right end of its chat header or in the
+/// corner of a waiting pane: it gives the keyboard to the pane `pane` focuses
+/// and raises [`ClosePane`] there, as the pane menu's row does, so the pane
+/// glides out.
+pub(crate) fn close_button(id: &'static str, pane: FocusHandle) -> Button {
+    Button::new(id)
+        .debug_selector(move || id.into())
+        // A press must not arm a header's window drag region.
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .ghost()
+        .small()
+        .compact()
+        .icon(IconName::Close)
+        .tooltip(crate::tr!("panes.close"))
+        .on_click(move |_, window, cx| {
+            window.focus(&pane, cx);
+            window.dispatch_action(Box::new(ClosePane), cx);
+        })
+}
+
 /// Whether a thread dragged over a pane would land there: the pane's content
 /// bounds and the edge it would open on, `None` for the pane itself.
 pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window, &App) -> bool>;
@@ -512,9 +526,9 @@ pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window
 /// `("dock-split", node)`, a merge or a close lifts it back out, and a layout
 /// builds every group anew. Element state is keyed by the full id path from
 /// the window root, so every pane that moves in the tree starts over: its
-/// colour outline, its focus ring and its waiting-hint cross-fade snap to
-/// their targets in the frame of a split, of a layout, or the frame a closing
-/// pane is taken out once its glide has played, and its chat loses its
+/// colour outline and its waiting-hint cross-fade snap to their targets in
+/// the frame of a split, of a layout, or the frame a closing pane is taken
+/// out once its glide has played, and its chat loses its
 /// handle-less stateful scrolls, such as the header's `chat-header-scroll`,
 /// and any other keyed state under it. A zoom moves no group, only the
 /// zoomed pane's own view: its keyed state starts over as it leaves its slot
@@ -574,14 +588,12 @@ impl TabGroupRenderer for ThreadTabs {
         Empty.into_any_element()
     }
 
-    /// Among several panes, each wears the outline of its colour, and the
-    /// one holding the keyboard the focus ring on top of it; while a pane is
-    /// zoomed the column is that pane alone, so none does.
-    /// `TabGroupContext` carries no focus state of its own; the displayed
-    /// panel's focus handle answers. A group that may close is one with a
-    /// neighbour; a pane whose last neighbour is closing is alone already.
-    /// The pane drawn over the column leaves a placeholder of its slot's size
-    /// here (see [`Zoom`]).
+    /// Among several panes, each wears the outline of its colour; while a
+    /// pane is zoomed the column is that pane alone, so none does. Which pane
+    /// holds the keyboard shows in its composer and in the threads list, not
+    /// here. A group that may close is one with a neighbour; a pane whose
+    /// last neighbour is closing is alone already. The pane drawn over the
+    /// column leaves a placeholder of its slot's size here (see [`Zoom`]).
     fn render_active_panel(
         &self,
         panel: AnyView,
@@ -589,10 +601,9 @@ impl TabGroupRenderer for ThreadTabs {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        // Both always sampled, so they glide in and out while the panes
-        // stay where they are: the ring as the keyboard moves between them,
-        // both out as the last neighbour starts closing or a pane zooms. A
-        // split or a layout re-parents the group and they snap (see
+        // Always sampled, so it glides in and out while the panes stay where
+        // they are: out as the last neighbour starts closing or a pane zooms.
+        // A split or a layout re-parents the group and it snaps (see
         // `ThreadPanes`).
         let pane = panel.clone().downcast::<ThreadPanel>().ok();
         let (zoom, slot) = pane.as_ref().map_or_else(
@@ -605,10 +616,6 @@ impl TabGroupRenderer for ThreadTabs {
         let shared = !zoom.zoomed
             && group.is_closable()
             && pane.as_ref().is_some_and(|pane| pane.read(cx).among_others);
-        let focused = shared
-            && group
-                .active_panel()
-                .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx));
         let outline = match pane
             .and_then(|pane| pane.read(cx).colour)
             .map(|slot| crate::material::pane_colour(slot, cx))
@@ -620,18 +627,6 @@ impl TabGroupRenderer for ThreadTabs {
         let outline = gpui_base::motion::transition(
             gpui::ElementId::NamedInteger("pane-outline".into(), panel.entity_id().as_u64()),
             outline,
-            crate::motion::settle(),
-            window,
-            cx,
-        );
-        let ring = crate::material::focus_ring(cx);
-        let color = gpui_base::motion::transition(
-            gpui::ElementId::NamedInteger("pane-focus-ring".into(), panel.entity_id().as_u64()),
-            if focused {
-                ring.color
-            } else {
-                ring.color.opacity(0.)
-            },
             crate::motion::settle(),
             window,
             cx,
@@ -648,17 +643,6 @@ impl TabGroupRenderer for ThreadTabs {
             })
             .when(outline.a > 0., |this| {
                 this.child(div().absolute().inset_0().border_1().border_color(outline))
-            })
-            .when(color.a > 0., |this| {
-                this.child(
-                    div()
-                        .when(focused, |ring| {
-                            ring.debug_selector(|| "focused-pane".into())
-                        })
-                        .absolute()
-                        .inset_0()
-                        .shadow(vec![gpui::BoxShadow { color, ..ring }]),
-                )
             })
             .into_any_element()
     }
