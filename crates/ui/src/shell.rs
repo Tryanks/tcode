@@ -181,6 +181,10 @@ struct ShellAttachment {
     thread_panes: Entity<DockArea>,
     /// The column's splits gliding toward the layout an edit made.
     glides: crate::panes::Glides,
+    /// The pane zoomed over the column.
+    zoom: crate::panes::Zoom,
+    /// A layout being put in while the column fades.
+    scene: crate::panes::Scene,
     /// Set by the panes' renderer in a frame that draws a split's handle
     /// held by the pointer: the handle's axis and where the pointer was.
     split_handle_held: crate::panes::HandleHeld,
@@ -341,10 +345,12 @@ pub(crate) fn pane_controls(
         .read(cx)
         .group()
         .is_some_and(|group| group.read(cx).is_closable(cx));
-    let zoomed = attachment.thread_panes.read(cx).is_zoomed();
+    let zoomed = attachment.zoom.is_zoomed();
     let split = |placement| shell.split_allowed(pane, placement, window, cx);
-    // A zoomed pane is the only one on screen, so it has no neighbours.
-    let neighbours = Side::ALL.map(|side| !zoomed && shell.neighbour_of(pane, side, cx).is_some());
+    // The panes beneath a zoomed one, or one on its way back to its slot,
+    // are covered, so it has no neighbours.
+    let covered = attachment.zoom.pane().is_some();
+    let neighbours = Side::ALL.map(|side| !covered && shell.neighbour_of(pane, side, cx).is_some());
     Some(PaneControls {
         split_right: split(gpui_base::Placement::Right),
         split_down: split(gpui_base::Placement::Bottom),
@@ -432,7 +438,7 @@ pub(crate) fn pane_colour(session_id: &str, cx: &App) -> Option<gpui::Hsla> {
     let shell = current_shell(cx)?;
     let shell = shell.read(cx);
     let attachment = shell.attachment.as_ref()?;
-    if shell.compact(cx) || attachment.thread_panes.read(cx).is_zoomed() {
+    if shell.compact(cx) || attachment.zoom.is_zoomed() {
         return None;
     }
     let panes = attachment.panes(cx);
@@ -1122,6 +1128,8 @@ impl AppShell {
         self.attachment = Some(ShellAttachment {
             thread_panes,
             glides: Default::default(),
+            zoom: Default::default(),
+            scene: Default::default(),
             split_handle_held,
             held_split: None,
             focused_pane: thread_panel,
@@ -1218,16 +1226,9 @@ impl AppShell {
                 Some(pane) if pane != attachment.focused_pane => {
                     attachment.focused_pane = pane.clone();
                     if !compact {
-                        let area = attachment.thread_panes.clone();
-                        let group = pane.read(cx).group().map(|group| group.read(cx).node());
-                        area.update(cx, |area, cx| {
-                            if area
-                                .zoomed_group()
-                                .is_some_and(|zoomed| Some(zoomed) != group)
-                            {
-                                area.set_zoomed_out(window, cx);
-                            }
-                        });
+                        if attachment.zoom.pane().is_some_and(|zoomed| *zoomed != pane) {
+                            attachment.zoom.zoom_out();
+                        }
                         window.focus(&pane.focus_handle(cx), cx);
                     }
                 }
@@ -1391,9 +1392,9 @@ impl AppShell {
         let area = attachment.thread_panes.clone();
         let pane = self.new_pane(&store, window, cx);
         pane.update(cx, |pane, cx| pane.set_session(None, cx));
+        self.attachment.as_mut()?.zoom.zoom_out();
         let before = self.glide_before_edit(window, cx);
         area.update(cx, |area, cx| {
-            area.set_zoomed_out(window, cx);
             // `DockArea::split_at` splits only a panel the area already
             // holds, and base has no other way to register one: the pane
             // joins the area, then moves beside `node`.
@@ -1529,7 +1530,9 @@ impl AppShell {
         let Some(session_id) = attachment.sidebar.read(cx).dragged_session() else {
             return false;
         };
-        if self.pane_showing(session_id, cx).is_some() {
+        // The panes beneath a zoomed one are covered, and it is in no tab
+        // group to drop on.
+        if attachment.zoom.pane().is_some() || self.pane_showing(session_id, cx).is_some() {
             return false;
         }
         attachment
@@ -1551,14 +1554,13 @@ impl AppShell {
         let Some(pane) = self.acting_pane(window, cx) else {
             return;
         };
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
-        let area = attachment.thread_panes.clone();
         let Some(group) = pane.read(cx).group() else {
             return;
         };
-        area.update(cx, |area, cx| area.set_zoomed_out(window, cx));
+        attachment.zoom.zoom_out();
         let panes = attachment.panes(cx);
         if panes.len() < 2 || !group.read(cx).is_closable(cx) {
             return;
@@ -1727,7 +1729,7 @@ impl AppShell {
     }
 
     /// Land every glide at once and take out the panes closing, for an edit
-    /// that does not divide what they leave: a zoom, a whole layout.
+    /// that does not divide what they leave: a zoom, a layout put in.
     fn land_glides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(attachment) = self.attachment.as_mut() else {
             return;
@@ -1756,29 +1758,78 @@ impl AppShell {
         self.remove_closed(window, cx);
     }
 
+    /// Zoom the acting pane over the column (see [`crate::panes::Zoom`]), or
+    /// turn the zoomed one back into its slot from where it is; running
+    /// glides land first.
     fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.compact(cx) {
             return;
         }
+        let Some(pane) = self.acting_pane(window, cx) else {
+            return;
+        };
         let Some(attachment) = self.attachment.as_ref() else {
             return;
         };
-        if attachment.panes(cx).len() < 2 {
+        let zoomed = attachment.zoom.pane() == Some(&pane);
+        if !zoomed && attachment.panes(cx).len() < 2 {
             return;
         }
-        let Some(group) = self
-            .acting_pane(window, cx)
-            .and_then(|pane| pane.read(cx).group())
-        else {
+        self.land_glides(window, cx);
+        let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
-        self.land_glides(window, cx);
-        group.update(cx, |group, cx| group.toggle_zoom(window, cx));
+        if zoomed {
+            attachment.zoom.toggle();
+        } else {
+            attachment.zoom.zoom_in(pane);
+        }
+        cx.notify();
+    }
+
+    /// This frame of the zoom. A zoomed pane that left the column, or is the
+    /// only one left in it, is back in its slot at once, and the compact
+    /// layout, which draws no panes, zooms none.
+    fn zoom_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.compact(cx);
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        let gone = attachment.zoom.pane().is_some_and(|pane| {
+            let panes = attachment.all_panes(cx);
+            panes.len() < 2 || !panes.contains(pane)
+        });
+        if compact || gone {
+            attachment.zoom.land();
+        }
+        attachment.zoom.sample(window, cx);
+    }
+
+    /// The chat column: the dock of panes, faded while a layout goes in,
+    /// under the pane zoomed over it. The panes fading out to be replaced
+    /// take no pointer.
+    fn render_chat_column(&self, cx: &App) -> AnyElement {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return gpui::Empty.into_any_element();
+        };
+        let area = attachment.thread_panes.read(cx).bounds();
+        div()
+            .relative()
+            .size_full()
+            .when_some(attachment.scene.opacity(), |column, opacity| {
+                column.opacity(opacity)
+            })
+            .child(attachment.thread_panes.clone())
+            .children(attachment.zoom.render(area, cx))
+            .when(attachment.scene.leaving(), |column| {
+                column.child(crate::motion::shield())
+            })
+            .into_any_element()
     }
 
     /// Spatial moves go to the nearest pane painted on that side; Next and
-    /// Previous follow the layout's order and wrap. A zoomed pane is the only
-    /// one on screen, so nothing moves.
+    /// Previous follow the layout's order and wrap. While a pane is drawn
+    /// over the column the others are covered, so nothing moves.
     ///
     /// Written here because gpui-base's dock has no keyboard navigation
     /// between groups; it goes once the dock offers one.
@@ -1789,7 +1840,7 @@ impl AppShell {
         let Some(attachment) = self.attachment.as_ref() else {
             return;
         };
-        if attachment.thread_panes.read(cx).is_zoomed() {
+        if attachment.zoom.pane().is_some() {
             return;
         }
         let Some(from) = self.acting_pane(window, cx) else {
@@ -1833,11 +1884,10 @@ impl AppShell {
         let Some(pane) = self.acting_pane(window, cx) else {
             return;
         };
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
-        let area = attachment.thread_panes.clone();
-        area.update(cx, |area, cx| area.set_zoomed_out(window, cx));
+        attachment.zoom.zoom_out();
         for other in attachment.panes(cx) {
             if other != pane {
                 self.glide_out(&other, cx);
@@ -1861,7 +1911,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<ThreadPanel>> {
-        if self.compact(cx) || self.attachment.as_ref()?.thread_panes.read(cx).is_zoomed() {
+        if self.compact(cx) || self.attachment.as_ref()?.zoom.pane().is_some() {
             return None;
         }
         let from = self.acting_pane(window, cx)?;
@@ -2104,14 +2154,97 @@ impl AppShell {
         })
     }
 
-    /// Install `layout` at once. Panes it leaves out close with their
-    /// threads; the focused pane keeps the keyboard.
+    /// Choose `layout` for the column. It goes in as a change of scene (see
+    /// [`crate::panes::Scene`]): the column fades out, the layout is put in at
+    /// the bottom of the fade and the column fades back in. A layout that
+    /// would leave every pane where it is drawn, none zoomed, changes
+    /// nothing. The focused pane keeps the keyboard.
     fn apply_layout(&mut self, layout: PaneLayout, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((tree, slots)) = self.plan_layout(layout, window, cx) else {
+        let Some(plan) = self.plan_layout(layout, window, cx) else {
             return;
         };
-        self.land_glides(window, cx);
+        let unchanged = self.layout_unchanged(&plan, cx);
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        if !(unchanged && attachment.zoom.pane().is_none() && attachment.scene.is_idle()) {
+            attachment.scene.choose(layout);
+        }
+        let focused = attachment.focused_pane.clone();
+        self.pane_focused(focused.clone(), window, cx);
+        window.focus(&focused.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// This frame of a layout's change of scene: the layout goes in at the
+    /// bottom of the fade. The compact layout draws no panes, so a change of
+    /// scene stops there.
+    fn switch_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.compact(cx);
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        if compact {
+            attachment.scene.land();
+            return;
+        }
+        if let Some(layout) = attachment.scene.sample(window, cx) {
+            self.install_layout(layout, window, cx);
+        }
+    }
+
+    /// Whether `plan` would leave every pane where the dock lays it out:
+    /// nothing gliding or closing, and the same panes in the same splits at
+    /// the same shares.
+    fn layout_unchanged(
+        &self,
+        (tree, slots): &(gpui_base::dock::PaneTree, Vec<(PanelId, Slot)>),
+        cx: &App,
+    ) -> bool {
         let Some(attachment) = self.attachment.as_ref() else {
+            return false;
+        };
+        let area = attachment.thread_panes.read(cx);
+        let Some(now) = area.layout(DockPlacement::Center) else {
+            return false;
+        };
+        if !attachment.glides.is_idle()
+            || attachment
+                .all_panes(cx)
+                .iter()
+                .any(|pane| pane.read(cx).is_closing())
+        {
+            return false;
+        }
+        let shown = |planned: PanelId| match slots.iter().find(|(panel, _)| *panel == planned) {
+            Some((_, Slot::Pane(pane))) => Some(PanelId::from(pane.entity_id())),
+            _ => None,
+        };
+        crate::panes::same_layout(
+            now.root(),
+            tree.root(),
+            &|now, planned| shown(planned) == Some(now),
+            area.bounds().size,
+        )
+    }
+
+    /// Put `layout` in at once, as the panes are now: running glides land,
+    /// the zoomed pane is back in its slot, and the panes the layout leaves
+    /// out close with their threads; the focused pane keeps the keyboard.
+    fn install_layout(&mut self, layout: PaneLayout, window: &mut Window, cx: &mut Context<Self>) {
+        self.land_glides(window, cx);
+        let Some(plan) = self.plan_layout(layout, window, cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        attachment.zoom.land();
+        if self.layout_unchanged(&plan, cx) {
+            return;
+        }
+        let (tree, slots) = plan;
+        let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
         let store = attachment.link.store.clone();
@@ -2134,16 +2267,13 @@ impl AppShell {
             };
             panes.insert(panel, pane);
         }
-        let laid_out = self.glide_before_edit(window, cx);
         area.update(cx, |area, cx| {
-            area.set_zoomed_out(window, cx);
             area.set_center(
                 crate::panes::layout_of(tree.root(), &|panel| panes.get(&panel).cloned()),
                 window,
                 cx,
             );
         });
-        self.glide_after_edit(laid_out, cx);
         for pane in before {
             if !panes.values().any(|kept| *kept == pane)
                 && let Some(session_id) = pane.read(cx).session_id().map(str::to_owned)
@@ -2186,24 +2316,29 @@ impl AppShell {
         }
     }
 
-    /// Tell each pane whether it shares the column, and its conversation
-    /// which window edges its header runs along. The layout's tree decides
-    /// both, so they hold from the frame a split lands; a zoomed pane is the
+    /// Tell each pane whether it shares the column and how a zoom leaves it,
+    /// and its conversation which window edges its header runs along. The
+    /// layout's tree decides the first and the last, so they hold from the
+    /// frame a split lands; a pane drawn over the column is laid out as the
     /// whole column.
     fn sync_panes(&self, cx: &mut App) {
         let Some(attachment) = self.attachment.as_ref() else {
             return;
         };
         let compact = self.compact(cx);
-        let zoomed = attachment.thread_panes.read(cx).is_zoomed();
+        for pane in attachment.all_panes(cx) {
+            let zoom = attachment.zoom.of(&pane);
+            pane.update(cx, |pane, cx| pane.set_zoom(zoom, cx));
+        }
         let tree = attachment.final_layout(cx);
         let edges: Vec<_> = attachment
             .panes(cx)
             .into_iter()
             .map(|pane| {
+                let overlaid = attachment.zoom.pane() == Some(&pane);
                 let edges = tree
                     .as_ref()
-                    .filter(|_| !compact && !zoomed)
+                    .filter(|_| !compact && !overlaid)
                     .and_then(|tree| {
                         crate::panes::edges_of(
                             tree.root(),
@@ -4306,13 +4441,7 @@ impl AppShell {
             .when(right_docked, |panel| {
                 panel.size_range(chat_min..Pixels::MAX)
             })
-            .child(
-                self.attachment
-                    .as_ref()
-                    .expect("attachment checked above")
-                    .thread_panes
-                    .clone(),
-            );
+            .child(self.render_chat_column(cx));
         let attachment = self.attachment.as_ref().expect("attachment checked above");
         // Beside the chat, `flex_none`: whatever the group's sizes leave over or
         // lack goes to the chat, so the panel is exactly the width restored
@@ -4579,6 +4708,8 @@ impl Render for AppShell {
         // first frame, or an inset change that narrowed the content box).
         self.sync_layout(window, cx);
         self.glide_panes(window, cx);
+        self.switch_scene(window, cx);
+        self.zoom_panes(window, cx);
         self.colour_panes(cx);
         self.sync_panes(cx);
         if let Some(attachment) = &self.attachment {
@@ -6795,12 +6926,17 @@ mod tests {
     /// right waiting; a pane command from the palette hands the keyboard back
     /// to the focused pane's composer, under the focus ring; a single pane
     /// from two keeps the focused thread and closes the other; ⌥⌘2 lays out
-    /// two columns again.
+    /// two columns again. Each layout goes in as its fade plays.
     #[gpui::test]
     fn a_layout_fills_its_panes_from_the_focused_one(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
+        let settle = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+        };
         choose_from_palette(&shell, &PaneLayout::Columns.label(), cx);
+        settle(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
         assert!(cx.debug_bounds("waiting-pane").is_some());
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
@@ -6815,6 +6951,7 @@ mod tests {
         );
         for command in [crate::tr!("panes.zoom"), crate::tr!("panes.unzoom")] {
             choose_from_palette(&shell, &command, cx);
+            settle(cx);
             assert_eq!(keyboard_pane(&shell, cx), Some(1), "{command}");
         }
         assert!(cx.debug_bounds("focused-pane").is_some());
@@ -6830,6 +6967,7 @@ mod tests {
         cx.update(|window, _| assert!(composer.is_focused(window), "the caret is back"));
 
         choose_from_palette(&shell, &PaneLayout::Single.label(), cx);
+        settle(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
             assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
@@ -6838,6 +6976,7 @@ mod tests {
 
         cx.simulate_keystrokes("secondary-alt-2");
         draw(cx);
+        settle(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into()), None]);
     }
 
@@ -6866,7 +7005,7 @@ mod tests {
                 .composer()
                 .read(cx)
                 .input_focus_handle(cx);
-            (attachment.thread_panes.read(cx).is_zoomed(), composer)
+            (attachment.zoom.is_zoomed(), composer)
         });
         assert!(zoomed, "the row ran");
         assert_eq!(keyboard_pane(&shell, cx), Some(pane));
@@ -6902,6 +7041,8 @@ mod tests {
         draw(cx);
 
         choose_from_palette(&shell, &PaneLayout::SpreadAgents.label(), cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [
@@ -6910,6 +7051,190 @@ mod tests {
                 Some("agent-old".into())
             ]
         );
+    }
+
+    /// How opaque the chat column is painted, read from its frame's fill, and
+    /// how many panes it draws, in the frame drawn now.
+    fn column_scene(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> (f32, usize) {
+        frame(cx, |window, cx| {
+            let attachment = shell.read(cx).attachment.as_ref().expect("attached");
+            let column = attachment
+                .thread_panes
+                .read(cx)
+                .bounds()
+                .scale(window.scale_factor());
+            let alpha = window
+                .painted_quads()
+                .iter()
+                .find(|quad| quad.bounds == column)
+                .and_then(|quad| quad.background.as_solid())
+                .expect("the column's fill")
+                .a;
+            (alpha, attachment.all_panes(cx).len())
+        })
+    }
+
+    /// A layout goes in as a change of scene: the column fades out, the new
+    /// panes are put in during the frame it is faintest, and it fades back
+    /// in. A layout chosen meanwhile is the one put in, the fade going on
+    /// from where it is: down to the bottom while it falls, turning back
+    /// down while it rises. One that changes nothing does not fade.
+    #[gpui::test]
+    fn a_layout_goes_in_while_the_column_is_faded_out(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        let settle = crate::edge_back::SETTLE;
+        let (rest, _) = column_scene(&shell, cx);
+        let at = |after: Duration, cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(after);
+            column_scene(&shell, cx)
+        };
+
+        cx.simulate_keystrokes("secondary-alt-2");
+        assert_eq!(column_scene(&shell, cx), (rest, 1), "the key's own frame");
+        let (falling, panes) = at(settle / 4, cx);
+        assert!(falling < rest && panes == 1, "falling: {falling} of {rest}");
+        let (lower, panes) = at(settle / 4 - Duration::from_millis(1), cx);
+        assert!(
+            lower < falling && panes == 1,
+            "lower: {lower}, {panes} panes"
+        );
+        let (lowest, panes) = at(Duration::from_millis(1), cx);
+        assert!(
+            lowest < lower && panes == 2,
+            "lowest: {lowest}, {panes} panes"
+        );
+        let (rising, panes) = at(settle / 4, cx);
+        assert!(
+            lowest < rising && rising < rest && panes == 2,
+            "rising: {rising}"
+        );
+        assert_eq!(at(settle, cx), (rest, 2), "back at rest");
+
+        // The keyboard stayed in the left pane, so two columns again leave
+        // every pane where it is.
+        let before = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)
+        });
+        cx.simulate_keystrokes("secondary-alt-2");
+        draw(cx);
+        assert_eq!(
+            at(settle / 4, cx),
+            (rest, 2),
+            "nothing changes, nothing fades"
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| {
+                shell.attachment.as_ref().expect("attached").all_panes(cx)
+            }),
+            before
+        );
+
+        // Falling toward four panes, one beside two is chosen instead.
+        cx.simulate_keystrokes("secondary-alt-4");
+        draw(cx);
+        let (falling, _) = at(settle / 4, cx);
+        cx.simulate_keystrokes("secondary-alt-3");
+        assert_eq!(
+            column_scene(&shell, cx),
+            (falling, 2),
+            "no jump as it goes on"
+        );
+        let (lowest, panes) = at(settle / 4, cx);
+        assert!(lowest < falling && panes == 3, "{lowest}, {panes} panes");
+
+        // Rising, one pane is chosen.
+        let (rising, _) = at(settle / 4, cx);
+        cx.simulate_keystrokes("secondary-alt-1");
+        assert_eq!(column_scene(&shell, cx), (rising, 3), "no jump as it turns");
+        let (turned, panes) = at(settle / 10, cx);
+        assert!(turned < rising && panes == 3, "turned back down: {turned}");
+        let (_, panes) = at(settle, cx);
+        assert_eq!(panes, 1);
+        assert_eq!(at(settle, cx), (rest, 1), "back at rest");
+    }
+
+    /// ⇧⌘↩ grows the right pane out of its slot over the column, the left
+    /// pane still drawn where it was beneath it, taking neither the pointer
+    /// nor the keyboard; zoomed, the pane fills the column. ⇧⌘↩ again
+    /// shrinks it back into its slot.
+    #[gpui::test]
+    fn a_zoomed_pane_grows_over_the_column_and_back_into_its_slot(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        let painted = |cx: &mut VisualTestContext| {
+            frame(cx, |_, cx| {
+                let attachment = shell.read(cx).attachment.as_ref().expect("attached");
+                let panes: Vec<_> = attachment
+                    .all_panes(cx)
+                    .iter()
+                    .map(|pane| pane.read(cx).bounds())
+                    .collect();
+                (attachment.thread_panes.read(cx).bounds(), panes)
+            })
+        };
+        let (column, slots) = painted(cx);
+        let between = |zoomed: gpui::Bounds<Pixels>| {
+            zoomed.intersect(&column) == zoomed
+                && slots[1].intersect(&zoomed) == slots[1]
+                && slots[1].size.width + px(1.) < zoomed.size.width
+                && zoomed.size.width < column.size.width - px(1.)
+        };
+        let settle = crate::edge_back::SETTLE;
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(settle / 2);
+        let (_, panes) = painted(cx);
+        let zoomed = cx
+            .debug_bounds("zoomed-pane")
+            .expect("drawn over the column");
+        assert!(
+            between(zoomed),
+            "growing: {zoomed:?} from {slots:?} to {column:?}"
+        );
+        assert_eq!(panes, [slots[0], zoomed], "the left pane where it was");
+        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the zoomed pane's keys");
+        let beneath = cx.update(|window, _| {
+            let left = slots[0].scale(window.scale_factor());
+            window.painted_quads().iter().any(|quad| {
+                quad.bounds.intersect(&left) == quad.bounds
+                    && quad.background.as_solid().is_some_and(|fill| fill.a > 0.)
+            })
+        });
+        assert!(beneath, "the left pane is still painted beneath");
+        let uncovered = gpui::point((column.left() + zoomed.left()) / 2., column.center().y);
+        cx.simulate_click(uncovered, gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the click is swallowed");
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(
+            keyboard_pane(&shell, cx),
+            Some(1),
+            "nor does it take the keys"
+        );
+
+        cx.executor().advance_clock(settle);
+        let (_, panes) = painted(cx);
+        assert_eq!(cx.debug_bounds("zoomed-pane"), Some(column));
+        assert_eq!(panes, [slots[0], column], "zoomed, it fills the column");
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        cx.executor().advance_clock(settle / 2);
+        draw(cx);
+        let zoomed = cx
+            .debug_bounds("zoomed-pane")
+            .expect("still over the column");
+        assert!(between(zoomed), "shrinking: {zoomed:?}");
+        cx.executor().advance_clock(settle);
+        let (_, panes) = painted(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_none());
+        assert_eq!(panes, slots, "both back in their slots");
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
     }
 
     /// Splitting a thread puts a draft beside it, in the thread's place in
@@ -7619,11 +7944,13 @@ mod tests {
         );
     }
 
-    /// With motion reduced a split and a close land in the frame they are
-    /// made: the panes are at their halves at once, and a closed pane is gone
-    /// rather than left at the dock's floor for a frame.
+    /// With motion reduced a split, a zoom, a layout and a close land in the
+    /// frame they are made: the panes are at their halves at once, a zoomed
+    /// pane fills the column and is back in its slot, a layout is in with
+    /// the column at rest, and a closed pane is gone rather than left at the
+    /// dock's floor for a frame.
     #[gpui::test]
-    fn with_motion_reduced_panes_split_and_close_at_once(cx: &mut TestAppContext) {
+    fn with_motion_reduced_panes_split_zoom_lay_out_and_close_at_once(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, host, cx) = mount_panes(cx);
@@ -7641,6 +7968,34 @@ mod tests {
         cx.simulate_keystrokes("secondary-alt-left");
         draw(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        let (column, halves) = shell.read_with(cx, |shell, cx| {
+            let attachment = shell.attachment.as_ref().expect("attached");
+            let panes = attachment.all_panes(cx);
+            (
+                attachment.thread_panes.read(cx).bounds(),
+                panes
+                    .iter()
+                    .map(|pane| pane.read(cx).bounds())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        assert_eq!(cx.debug_bounds("zoomed-pane"), Some(column), "zoomed");
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_none(), "unzoomed");
+        let (rest, _) = column_scene(&shell, cx);
+        cx.simulate_keystrokes("secondary-alt-3");
+        assert_eq!(column_scene(&shell, cx), (rest, 3), "one beside two");
+        cx.simulate_keystrokes("secondary-alt-2");
+        assert_eq!(column_scene(&shell, cx), (rest, 2), "two columns");
+        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
+            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
+        });
+        assert_eq!(panes, halves);
 
         let closing = shell.read_with(cx, |shell, cx| {
             shell.attachment.as_ref().expect("attached").all_panes(cx)[0].clone()

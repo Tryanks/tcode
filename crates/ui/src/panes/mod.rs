@@ -4,10 +4,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    Action, AnyElement, AnyView, App, Axis, Bounds, Context, Div, Empty, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Point, Render, Stateful, Styled as _, Subscription, WeakEntity, Window, actions, div,
-    prelude::FluentBuilder as _, px,
+    Action, Along as _, AnyElement, AnyView, App, Axis, Bounds, Context, Div, Empty, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Point, Render, Size, Stateful, Styled as _, Subscription, WeakEntity, Window, actions,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::dock::{
     DockAreaRenderer, DockLayout, DropIndicator, NodeId, PaneNode, PaneRef, Panel, PanelEvent,
@@ -17,8 +17,12 @@ use gpui_base::{ElementExt as _, Placement, ResizeHandleContext, v_flex};
 use serde::Deserialize;
 
 mod glide;
+mod scene;
+mod zoom;
 
 pub(crate) use glide::{Before, Glides, Held};
+pub(crate) use scene::Scene;
+pub(crate) use zoom::{PaneZoom, Zoom};
 
 use crate::chat::{ChatView, WindowEdges};
 use crate::icon::{Icon, IconName};
@@ -124,9 +128,9 @@ impl MoveThreadToPane {
 #[action(namespace = tcode, no_json)]
 pub(crate) struct OpenInNewPane(pub(crate) String);
 
-/// Lay the whole column out at once. The panes there fill the new slots in
-/// the layout's order, the focused one first; panes left over close, and
-/// slots left over wait for a thread.
+/// Lay the whole column out anew, as a change of scene (see [`Scene`]). The
+/// panes there fill the new slots in the layout's order, the focused one
+/// first; panes left over close, and slots left over wait for a thread.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
 pub(crate) enum PaneLayout {
@@ -206,7 +210,11 @@ pub(crate) struct ThreadPanel {
     focus_handle: FocusHandle,
     group: Option<WeakEntity<TabGroup>>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Where the dock last laid the pane's slot out, as far as it shows: its
+    /// placeholder's bounds while the pane is drawn over the column.
+    slot: Rc<Cell<Bounds<Pixels>>>,
     among_others: bool,
+    zoom: PaneZoom,
     /// The palette slot of the pane's outline, given by the shell when the
     /// pane joins the column and kept while it changes thread and while it
     /// leaves.
@@ -248,7 +256,9 @@ impl ThreadPanel {
             focus_handle,
             group: None,
             bounds: Rc::default(),
+            slot: Rc::default(),
             among_others: false,
+            zoom: PaneZoom::default(),
             colour: None,
             closing: false,
             held: Held::default(),
@@ -290,6 +300,19 @@ impl ThreadPanel {
             self.among_others = among_others;
             cx.notify();
         }
+    }
+
+    /// How a zoom of the column leaves the pane.
+    pub(crate) fn set_zoom(&mut self, zoom: PaneZoom, cx: &mut Context<Self>) {
+        if self.zoom != zoom {
+            self.zoom = zoom;
+            cx.notify();
+        }
+    }
+
+    /// Where the dock last laid the pane's slot out.
+    pub(crate) fn slot(&self) -> Bounds<Pixels> {
+        self.slot.get()
     }
 
     /// The palette slot of the pane's outline, once it has one.
@@ -427,10 +450,13 @@ impl Render for ThreadPanel {
             .size_full()
             // A waiting pane has no composer to hold the keyboard, so the
             // pane holds it, and pane commands and Escape reach it there.
-            .when(waiting, |pane| {
+            // Drawn over the column, the pane is outside its tab group, which
+            // tracks the pane's focus in the slot, so it tracks it itself and
+            // the keyboard inside it is still the pane's.
+            .when(waiting || self.zoom.overlaid, |pane| {
                 pane.track_focus(&self.focus_handle)
-                    .key_context(WAITING_CONTEXT)
             })
+            .when(waiting, |pane| pane.key_context(WAITING_CONTEXT))
             .on_prepaint(move |painted, window, _| {
                 bounds.set(painted.intersect(&window.content_mask().bounds))
             })
@@ -474,19 +500,23 @@ pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window
 
 /// The panes' appearance: the area is the chat column's reading surface.
 ///
-/// A pane opening or closing glides its split's slots (see [`Glides`]); a
-/// zoom and the widths a window resize redistributes land at once.
+/// A pane opening or closing glides its split's slots (see [`Glides`]), a
+/// zoomed pane grows over the column out of its slot (see [`Zoom`]), a
+/// layout is put in while the column is faded out (see [`Scene`]); the
+/// widths a window resize redistributes land at once.
 ///
 /// The dock re-parents a group whenever the tree around it changes: a
 /// lone group sits in the area's frame, a split puts it under
-/// `("dock-split", node)`, a merge or a close lifts it back out, and zoom
-/// draws it straight into the frame. Element state is keyed by the full id
-/// path from the window root, so every pane that moves in the tree starts
-/// over: its colour outline, its focus ring and its waiting-hint
-/// cross-fade snap to their targets in the frame of a split, of a zoom, or
-/// the frame a closing pane is taken out once its glide has played, and its
-/// chat loses its handle-less stateful scrolls, such as the header's
-/// `chat-header-scroll`, and any other keyed state under it.
+/// `("dock-split", node)`, a merge or a close lifts it back out, and a layout
+/// builds every group anew. Element state is keyed by the full id path from
+/// the window root, so every pane that moves in the tree starts over: its
+/// colour outline, its focus ring and its waiting-hint cross-fade snap to
+/// their targets in the frame of a split, of a layout, or the frame a closing
+/// pane is taken out once its glide has played, and its chat loses its
+/// handle-less stateful scrolls, such as the header's `chat-header-scroll`,
+/// and any other keyed state under it. A zoom moves no group, only the
+/// zoomed pane's own view: its keyed state starts over as it leaves its slot
+/// and again as it is back.
 pub(crate) struct ThreadPanes {
     lands: DropLands,
     handle_held: HandleHeld,
@@ -543,11 +573,13 @@ impl TabGroupRenderer for ThreadTabs {
     }
 
     /// Among several panes, each wears the outline of its colour, and the
-    /// one holding the keyboard the focus ring on top of it.
+    /// one holding the keyboard the focus ring on top of it; while a pane is
+    /// zoomed the column is that pane alone, so none does.
     /// `TabGroupContext` carries no focus state of its own; the displayed
     /// panel's focus handle answers. A group that may close is one with a
-    /// neighbour, and a zoomed group may not; a pane whose last neighbour is
-    /// closing is alone already.
+    /// neighbour; a pane whose last neighbour is closing is alone already.
+    /// The pane drawn over the column leaves a placeholder of its slot's size
+    /// here (see [`Zoom`]).
     fn render_active_panel(
         &self,
         panel: AnyView,
@@ -557,11 +589,20 @@ impl TabGroupRenderer for ThreadTabs {
     ) -> AnyElement {
         // Both always sampled, so they glide in and out while the panes
         // stay where they are: the ring as the keyboard moves between them,
-        // both out as the last neighbour starts closing. A split or a zoom
-        // re-parents the group and they snap (see `ThreadPanes`).
+        // both out as the last neighbour starts closing or a pane zooms. A
+        // split or a layout re-parents the group and they snap (see
+        // `ThreadPanes`).
         let pane = panel.clone().downcast::<ThreadPanel>().ok();
-        let shared =
-            group.is_closable() && pane.as_ref().is_some_and(|pane| pane.read(cx).among_others);
+        let (zoom, slot) = pane.as_ref().map_or_else(
+            || (PaneZoom::default(), Rc::default()),
+            |pane| {
+                let pane = pane.read(cx);
+                (pane.zoom, pane.slot.clone())
+            },
+        );
+        let shared = !zoom.zoomed
+            && group.is_closable()
+            && pane.as_ref().is_some_and(|pane| pane.read(cx).among_others);
         let focused = shared
             && group
                 .active_panel()
@@ -596,7 +637,13 @@ impl TabGroupRenderer for ThreadTabs {
         div()
             .relative()
             .size_full()
-            .child(panel)
+            .on_prepaint(move |painted, window, _| {
+                slot.set(painted.intersect(&window.content_mask().bounds))
+            })
+            .map(|this| match zoom.overlaid {
+                true => this.child(div().size_full()),
+                false => this.child(panel),
+            })
             .when(outline.a > 0., |this| {
                 this.child(div().absolute().inset_0().border_1().border_color(outline))
             })
@@ -664,6 +711,60 @@ impl TabGroupRenderer for ThreadTabs {
                 .bg(accent.opacity(0.1))
                 .into_any_element(),
         )
+    }
+}
+
+/// Whether `now` and `planned`, drawn at `size`, put the same panes in the
+/// same places: the same splits, their slots a pixel apart at most, each
+/// group's panels paired by `same`.
+pub(crate) fn same_layout(
+    now: &PaneNode,
+    planned: &PaneNode,
+    same: &impl Fn(PanelId, PanelId) -> bool,
+    size: Size<Pixels>,
+) -> bool {
+    match (now.kind(), planned.kind()) {
+        (
+            PaneRef::Tabs { panels: now, .. },
+            PaneRef::Tabs {
+                panels: planned, ..
+            },
+        ) => {
+            now.len() == planned.len()
+                && now
+                    .iter()
+                    .zip(planned)
+                    .all(|(now, planned)| same(*now, *planned))
+        }
+        (
+            PaneRef::Split {
+                axis,
+                children: now,
+                sizes: now_sizes,
+            },
+            PaneRef::Split {
+                axis: planned_axis,
+                children: planned,
+                sizes: planned_sizes,
+            },
+        ) if axis == planned_axis && now.len() == planned.len() => {
+            let extent = size.along(axis);
+            let shares = glide::tree_shares(now_sizes, extent);
+            let planned_shares = glide::tree_shares(planned_sizes, extent);
+            now.iter()
+                .zip(planned)
+                .zip(shares.iter().zip(&planned_shares))
+                .all(|((now, planned), (share, planned_share))| {
+                    (extent * (share - planned_share)).abs() < px(1.)
+                        && same_layout(
+                            now,
+                            planned,
+                            same,
+                            size.apply_along(axis, |_| extent * *share),
+                        )
+                })
+        }
+        _ => false,
     }
 }
 

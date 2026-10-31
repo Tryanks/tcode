@@ -443,7 +443,7 @@ fn first_panel(node: &PaneNode, counts: &dyn Fn(PanelId) -> bool) -> Option<Pane
 /// The shares a split's tree `sizes` give its slots across `extent`. Sizes
 /// all named divide in proportion, as the dock rescales them to its
 /// container; unnamed ones share what the named ones leave.
-fn tree_shares(sizes: &[Option<Pixels>], extent: Pixels) -> Vec<f32> {
+pub(super) fn tree_shares(sizes: &[Option<Pixels>], extent: Pixels) -> Vec<f32> {
     let count = sizes.len().max(1) as f32;
     if sizes.iter().all(Option::is_some) {
         let total: f32 = sizes.iter().flatten().map(|size| f32::from(*size)).sum();
