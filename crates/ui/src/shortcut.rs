@@ -110,11 +110,18 @@ pub(crate) fn secondary<A: Action>(
 
 /// The chat column's pane commands with their keys. Alt with the secondary
 /// modifier moves the keyboard, with Shift too it swaps, and with a digit it
-/// lays out that many panes. Moving a thread takes Control-Command on macOS;
-/// elsewhere the secondary modifier is Control, where Control-arrows move by
-/// word and Control-Alt is focus, so it takes Alt alone, which gpui-base's
-/// text fields leave unbound there. AltGr typing still reaches a text field:
-/// GPUI prefers the character AltGr makes over a binding.
+/// picks a layout: 1–4 by pane count, 5 spreads the agents. Moving a thread
+/// takes Control-Command on macOS; elsewhere the secondary modifier is
+/// Control, where Control-arrows move by word and Control-Alt is focus, so it
+/// takes Alt alone, which gpui-base's text fields leave unbound there. AltGr
+/// typing still reaches a text field: GPUI prefers the character AltGr makes
+/// over a binding.
+///
+/// GNOME keeps Control-Alt-Left/Right (switch workspace) and
+/// Control-Alt-Shift-Left/Right (move the window to a workspace) for itself,
+/// so there focusing left or right is reached only by next/previous or from
+/// the palette, and swapping left or right only from the palette or the
+/// pane menu.
 fn pane_bindings() -> Vec<(&'static str, KeyBinding)> {
     use crate::panes::{
         CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, PaneLayout, Side, SplitDown,
