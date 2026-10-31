@@ -5993,10 +5993,14 @@ mod tests {
             "the recorded events are the log's only rows: {page:?}"
         );
         let window_state = cx.new(|_| WindowState::new(false));
-        let (_, cx) =
+        let (chat, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
+        // The shell binds its pane to the thread the link opens.
+        chat.update(cx, |chat, cx| {
+            chat.set_session(Some(session_id.clone()), cx)
+        });
 
         let opened = |cx: &mut VisualTestContext| {
             let view = cx.update(|window, _| window.root::<ChatView>().flatten())?;
