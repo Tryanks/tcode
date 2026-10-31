@@ -18,11 +18,11 @@ use crate::{
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, Hsla, InteractiveElement,
     IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Stateful,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, canvas, div, point,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div, point,
     prelude::FluentBuilder, px,
 };
 use gpui_base::motion::{Interpolate as _, Transition, transition};
-use gpui_base::{StyledExt as _, Tab, Tabs};
+use gpui_base::{ElementExt as _, StyledExt as _, Tab, Tabs};
 use std::{cell::RefCell, rc::Rc};
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -317,11 +317,11 @@ impl Glide {
     /// Records where item `ix` lands this frame. `el` must be positioned.
     pub(crate) fn measure<E: ParentElement>(&self, ix: usize, el: E) -> E {
         let measured = self.measured.clone();
-        el.child(pinned_canvas(move |bounds| {
+        el.on_prepaint(move |bounds, _, _| {
             if let Some(slot) = measured.borrow_mut().get_mut(ix) {
                 *slot = Some(bounds);
             }
-        }))
+        })
     }
 
     /// Turns this frame's measurements into the next frame's geometry. Goes
@@ -329,7 +329,7 @@ impl Glide {
     /// all been measured. `list` must be positioned.
     pub(crate) fn observe<E: ParentElement>(&self, list: E) -> E {
         let (measured, geometry) = (self.measured.clone(), self.geometry.clone());
-        list.child(pinned_canvas_cx(move |list, cx| {
+        list.on_prepaint(move |list, _, cx| {
             let items: Option<Vec<_>> = measured
                 .borrow()
                 .iter()
@@ -342,7 +342,7 @@ impl Glide {
                     cx.notify();
                 }
             });
-        }))
+        })
     }
 
     /// The segment pill under the selected segment, for the list's first
@@ -362,23 +362,6 @@ impl Glide {
             .when(dim, |this| this.opacity(0.5));
         Some(pill.into_any_element())
     }
-}
-
-/// A canvas covering its parent's padding box that reports the parent's
-/// bounds at prepaint. `gpui_base::ElementExt::on_prepaint` leaves its canvas
-/// at the static position, which a padded parent offsets by its padding.
-fn pinned_canvas(on_bounds: impl FnOnce(Bounds<Pixels>) + 'static) -> impl IntoElement {
-    pinned_canvas_cx(move |bounds, _| on_bounds(bounds))
-}
-
-fn pinned_canvas_cx(
-    on_bounds: impl FnOnce(Bounds<Pixels>, &mut App) + 'static,
-) -> impl IntoElement {
-    canvas(move |bounds, _, cx| on_bounds(bounds, cx), |_, _, _, _| {})
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
 }
 
 /// A selected label's colour, gliding with the selection.
