@@ -6,7 +6,7 @@ use std::rc::Rc;
 use gpui::{
     Action, AnyElement, AnyView, App, Axis, Bounds, Context, Div, Empty, Entity, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, Stateful, Styled as _, Subscription, WeakEntity, Window, actions, div,
+    Point, Render, Stateful, Styled as _, Subscription, WeakEntity, Window, actions, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::dock::{
@@ -387,13 +387,15 @@ pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window
 /// and any other keyed state under it.
 pub(crate) struct ThreadPanes {
     lands: DropLands,
-    handle_held: Rc<Cell<bool>>,
+    handle_held: HandleHeld,
 }
 
+/// Set in every frame that draws a split's handle held by the pointer: the
+/// handle's axis and where the pointer was, for [`held_split`].
+pub(crate) type HandleHeld = Rc<Cell<Option<(Axis, Point<Pixels>)>>>;
+
 impl ThreadPanes {
-    /// `handle_held` is set in every frame that draws a split's handle held
-    /// by the pointer.
-    pub(crate) fn new(lands: DropLands, handle_held: Rc<Cell<bool>>) -> Self {
+    pub(crate) fn new(lands: DropLands, handle_held: HandleHeld) -> Self {
         Self { lands, handle_held }
     }
 }
@@ -412,16 +414,17 @@ impl DockAreaRenderer for ThreadPanes {
         })
     }
 
-    /// Base's own line. A handle the pointer holds takes the split's sizes
-    /// over, so the shell stops a glide there (see [`Glides::stop`]).
+    /// Base's own line. A handle the pointer holds takes its split's sizes
+    /// over, so the shell stops that split's glide (see [`Glides::stop`]).
     fn render_split_handle(
         &self,
         handle: &ResizeHandleContext,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut App,
     ) -> Option<AnyElement> {
         if handle.is_active() {
-            self.handle_held.set(true);
+            self.handle_held
+                .set(Some((handle.axis(), window.mouse_position())));
         }
         None
     }
@@ -591,6 +594,88 @@ pub(crate) fn min_width(
             .iter()
             .map(|child| min_width(child, edges, pane_min))
             .fold(0., f32::max),
+    }
+}
+
+/// The split under `node` whose handle the pointer took at `at`: of the
+/// splits along `axis`, the one with a seam between two slots nearest `at`,
+/// preferring those whose extent across the seam holds `at`. `painted` is
+/// where each panel was last drawn.
+///
+/// gpui-base's `ResizeHandleContext` names a handle's axis and drag state
+/// but not its split, so the split is found from where the hold began: the
+/// pointer is on the handle's seam then. The dock splices a split nested
+/// along its parent's axis into the parent, so another split's seam along
+/// that axis lies inside one of its slots, at least a slot's floor away,
+/// or beside it across.
+pub(crate) fn held_split(
+    node: &PaneNode,
+    axis: Axis,
+    at: Point<Pixels>,
+    painted: &impl Fn(PanelId) -> Option<Bounds<Pixels>>,
+) -> Option<NodeId> {
+    let mut nearest = None;
+    seams(node, axis, at, painted, &mut nearest);
+    nearest.map(|(_, _, split)| split)
+}
+
+/// Where `node` was drawn, noting in `nearest` its seams along `axis`: how
+/// far each is from `at`, whether `at` is off its extent across, and its
+/// split.
+fn seams(
+    node: &PaneNode,
+    axis: Axis,
+    at: Point<Pixels>,
+    painted: &impl Fn(PanelId) -> Option<Bounds<Pixels>>,
+    nearest: &mut Option<(bool, Pixels, NodeId)>,
+) -> Option<Bounds<Pixels>> {
+    let union = |bounds: &mut dyn Iterator<Item = Bounds<Pixels>>| {
+        bounds
+            .filter(|bounds| !bounds.is_empty())
+            .reduce(|all, bounds| all.union(&bounds))
+    };
+    match node.kind() {
+        PaneRef::Tabs { panels, .. } => {
+            union(&mut panels.iter().filter_map(|panel| painted(*panel)))
+        }
+        PaneRef::Split {
+            axis: along,
+            children,
+            ..
+        } => {
+            let slots: Vec<_> = children
+                .iter()
+                .map(|child| seams(child, axis, at, painted, nearest))
+                .collect();
+            let drawn = union(&mut slots.iter().flatten().copied());
+            if along == axis
+                && let Some(drawn) = drawn
+            {
+                let (pointer, off) = match axis {
+                    Axis::Horizontal => (at.x, at.y < drawn.top() || at.y > drawn.bottom()),
+                    Axis::Vertical => (at.y, at.x < drawn.left() || at.x > drawn.right()),
+                };
+                let span = |slot: &Bounds<Pixels>| match axis {
+                    Axis::Horizontal => (slot.left(), slot.right()),
+                    Axis::Vertical => (slot.top(), slot.bottom()),
+                };
+                for pair in slots.windows(2) {
+                    let seam = [
+                        pair[0].map(|slot| span(&slot).1),
+                        pair[1].map(|slot| span(&slot).0),
+                    ];
+                    for seam in seam.into_iter().flatten() {
+                        let away = (seam - pointer).abs();
+                        if nearest
+                            .is_none_or(|(was_off, was_away, _)| (off, away) < (was_off, was_away))
+                        {
+                            *nearest = Some((off, away, node.id()));
+                        }
+                    }
+                }
+            }
+            drawn
+        }
     }
 }
 

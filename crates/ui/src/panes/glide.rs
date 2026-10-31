@@ -315,18 +315,17 @@ impl Glides {
     /// Land every glide at once: the sizes they were heading for.
     pub(crate) fn land(&mut self, tree: &PaneTree, size: Size<Pixels>) -> GlideFrame {
         let sizes = self.targets(tree, size);
-        self.stop();
+        self.splits.clear();
         GlideFrame {
             sizes,
             ..GlideFrame::default()
         }
     }
 
-    /// Stop every glide where it is, writing nothing: a drag on a split's
-    /// handle has taken the sizes over.
-    pub(crate) fn stop(&mut self) -> GlideFrame {
-        self.splits.clear();
-        GlideFrame::default()
+    /// Stop the split `node`'s glide where it is: a drag on its handle has
+    /// taken its sizes over. Other splits glide on.
+    pub(crate) fn stop(&mut self, node: NodeId) {
+        self.splits.remove(&node);
     }
 
     fn frame(&self, tree: &PaneTree, size: Size<Pixels>, target: bool) -> GlideFrame {
