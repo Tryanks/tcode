@@ -2697,3 +2697,5 @@ tools:
   links: "%{count} 个链接"
   copy_url: "复制网址"
   copy_query: "复制查询"
+  steps_done: "已完成 %{done}/%{total}"
+  copy_plan: "复制计划"
