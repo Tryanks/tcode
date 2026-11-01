@@ -10,11 +10,20 @@
 //! generic window. A provider that names a capability differently simply
 //! gets the generic window until a matcher accepts its name and shape.
 
+pub(in crate::chat) mod desktop;
 pub(in crate::chat) mod diff;
 pub(in crate::chat) mod generic;
+pub(in crate::chat) mod harness;
+pub(in crate::chat) mod other;
+pub(in crate::chat) mod outline;
+pub(in crate::chat) mod preview;
+pub(in crate::chat) mod question;
 pub(in crate::chat) mod read;
+pub(in crate::chat) mod run;
+pub(in crate::chat) mod script;
 pub(in crate::chat) mod search;
 pub(in crate::chat) mod shell;
+pub(in crate::chat) mod threads;
 pub(in crate::chat) mod todo;
 pub(in crate::chat) mod web;
 pub(in crate::chat) mod window;
@@ -80,6 +89,18 @@ impl<'a> Call<'a> {
                 .any(|name| self.name.tool.eq_ignore_ascii_case(name))
     }
 
+    /// Whether the call is to one of `servers`' tools named one of `names`.
+    /// A transcript imported without its MCP namespace keeps only the tool's
+    /// name, so `bare` also accepts the name alone, for names no harness
+    /// gives a tool of its own.
+    pub(in crate::chat) fn served(&self, servers: &[&str], names: &[&str], bare: bool) -> bool {
+        let server = match self.name.server {
+            Some(server) => servers.contains(&server),
+            None => bare,
+        };
+        server && names.contains(&self.name.tool)
+    }
+
     /// The input as a view's typed fields, borrowing its strings; `None`
     /// when the input is not that shape.
     pub(in crate::chat) fn input<T: Deserialize<'a>>(&self) -> Option<T> {
@@ -117,7 +138,21 @@ const FAMILIES: &[Matcher] = &[
     search::tool_call,
     web::tool_call,
     todo::tool_call,
+    script::tool_call,
+    desktop::tool_call,
+    preview::tool_call,
+    threads::tool_call,
+    harness::tool_call,
+    question::tool_call,
 ];
+
+/// Whether `call` drives a computer — a desktop app or the preview
+/// browser — which a run of such calls is counted and grouped as.
+pub(in crate::chat) fn drives_computer(call: &Call<'_>) -> bool {
+    script::tool_call(call).is_some()
+        || desktop::tool_call(call).is_some()
+        || preview::tool_call(call).is_some()
+}
 
 pub(in crate::chat) fn view<'a>(call: &Call<'a>) -> Box<dyn ToolView + 'a> {
     FAMILIES
@@ -134,6 +169,8 @@ pub(in crate::chat) enum Family {
     Edit(Vec<String>),
     Read,
     Search,
+    /// An action on a computer: a desktop app or the preview browser.
+    Computer,
     Tool,
     Agent,
 }
@@ -160,11 +197,16 @@ pub(in crate::chat) fn family(entry: &TimelineEntry) -> Option<Family> {
                 Family::Read
             } else if search::tool_call(&call).is_some() {
                 Family::Search
+            } else if drives_computer(&call) {
+                Family::Computer
             } else {
                 Family::Tool
             }
         }
         ItemContent::ImageRead { .. } => Family::Read,
+        ItemContent::Other { provider_kind, .. } if other::is_image_view(provider_kind) => {
+            Family::Read
+        }
         ItemContent::WebSearch { .. } | ItemContent::Other { .. } => Family::Tool,
         ItemContent::Subagent { .. } => Family::Agent,
         ItemContent::UserMessage { .. }
@@ -262,11 +304,10 @@ pub(in crate::chat) fn activity(
         ItemContent::Other {
             provider_kind,
             summary,
-        } => {
-            let mut items = Vec::new();
-            copy(&mut items, "chat.copy_text", summary);
-            settled(generic::other_header(provider_kind, summary), items)
-        }
+        } => settled(
+            other::header(provider_kind, summary, cwd),
+            other::copy_items(provider_kind, summary),
+        ),
         _ => settled(Header::bare(crate::icon::IconName::Info), Vec::new()),
     }
 }
@@ -321,6 +362,15 @@ pub(in crate::chat) fn copy_items(entry: &TimelineEntry) -> Vec<(String, String)
     match Call::of(entry) {
         Some(call) => view(&call).copy_items(&call),
         None => Vec::new(),
+    }
+}
+
+/// A count as it reads: the `{key}_one` label for one, else `key`'s.
+pub(in crate::chat) fn counted(key: &str, count: usize) -> String {
+    if count == 1 {
+        crate::tr!(&format!("{key}_one")).into_owned()
+    } else {
+        crate::tr!(key, count = count).into_owned()
     }
 }
 
@@ -533,9 +583,6 @@ pub(in crate::chat) fn bounded_text(
     )
 }
 
-/// The call's output as text: the whole fetched one when the reader loaded
-/// it, JSON pretty-printed once the call is done (a half result is not
-/// JSON), danger-tinted when the call failed.
 /// The call's output as this client holds it — the whole one once the
 /// reader loaded it — and, while the record carried only a preview, the
 /// control that loads the rest.
@@ -561,10 +608,24 @@ pub(in crate::chat) fn full_text(
     (text, control)
 }
 
+/// The call's output as text: the whole fetched one when the reader loaded
+/// it, JSON pretty-printed once the call is done (a half result is not
+/// JSON), danger-tinted when the call failed.
 pub(in crate::chat) fn output_section(
     call: &Call<'_>,
     limit: Bound,
     ctx: &mut ToolCtx<'_, '_>,
+) -> Option<AnyElement> {
+    output_section_with(call, limit, ctx, |text| text)
+}
+
+/// [`output_section`] over the part of the output `part` takes from it:
+/// what a script printed, past its harness's report.
+pub(in crate::chat) fn output_section_with(
+    call: &Call<'_>,
+    limit: Bound,
+    ctx: &mut ToolCtx<'_, '_>,
+    part: impl FnOnce(&str) -> &str,
 ) -> Option<AnyElement> {
     let elided = ctx.elided(call.entry);
     let loaded = match &elided {
@@ -576,6 +637,7 @@ pub(in crate::chat) fn output_section(
         (None, Some(output)) => output.to_owned(),
         (None, None) => return None,
     };
+    let text = part(&text).to_owned();
     let text = if call.status != ItemStatus::InProgress {
         pretty_json(&text).unwrap_or(text)
     } else {
@@ -677,6 +739,15 @@ fn elided_control(elided: ElidedOutput, id: &str, cx: &App) -> Option<AnyElement
 
 /// The images a call was shown, as thumbnails that open the image viewer.
 pub(in crate::chat) fn thumbnails(call: &Call<'_>, ctx: &ToolCtx<'_, '_>) -> Option<AnyElement> {
+    thumbnails_titled(call, call.name.tool, ctx)
+}
+
+/// [`thumbnails`], each titled in the viewer by `title` and its place.
+pub(in crate::chat) fn thumbnails_titled(
+    call: &Call<'_>,
+    title: &str,
+    ctx: &ToolCtx<'_, '_>,
+) -> Option<AnyElement> {
     if call.images.is_empty() || !ctx.images_inline {
         return None;
     }
@@ -686,7 +757,7 @@ pub(in crate::chat) fn thumbnails(call: &Call<'_>, ctx: &ToolCtx<'_, '_>) -> Opt
         super::components::images::item_tile(
             call.entry,
             index,
-            format!("{} · {}", call.name.tool, index + 1),
+            format!("{title} · {}", index + 1),
             None,
             &session_id,
             cx,
@@ -700,6 +771,67 @@ pub(in crate::chat) fn thumbnails(call: &Call<'_>, ctx: &ToolCtx<'_, '_>) -> Opt
             .children(tiles)
             .into_any_element(),
     )
+}
+
+/// Code a call ran, folded to its size until asked for, then highlighted
+/// whole as `language` in a capped scroll.
+pub(in crate::chat) fn code_section(
+    call: &Call<'_>,
+    code: &str,
+    language: &str,
+    ctx: &mut ToolCtx<'_, '_>,
+) -> AnyElement {
+    let key = format!("tool-code-{}", call.id());
+    let open = ctx.is_open(&key);
+    let on_click = ctx.toggle(call.entry, key.clone());
+    let lines = code.lines().count().max(1);
+    let label = if open {
+        crate::tr!("tools.hide_code")
+    } else {
+        crate::tr!("tools.code_lines", count = lines)
+    };
+    let cx = ctx.app();
+    let theme = cx.theme();
+    let toggle = format!("{key}-toggle");
+    let control = h_flex().child(
+        div()
+            .debug_selector({
+                let toggle = toggle.clone();
+                move || toggle.clone()
+            })
+            .child(super::components::changed_files::quiet_control(
+                SharedString::from(toggle),
+                label.into_owned().into(),
+                on_click,
+                cx,
+            )),
+    );
+    let code_block = open.then(|| {
+        let mut end = code.len().min(MAX_SHOWN_CHARS);
+        while !code.is_char_boundary(end) {
+            end -= 1;
+        }
+        let source = code[..end].trim_end().to_owned();
+        let runs = crate::highlight::highlight_source(&source, language, &theme.highlight_theme);
+        div()
+            .id(SharedString::from(key.clone()))
+            .debug_selector(move || key.clone())
+            .w_full()
+            .min_w_0()
+            .max_h(px(OPEN_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .font_family(theme.mono_font_family.clone())
+            .text_token(&theme.tokens.typography.xs)
+            .text_color(theme.foreground)
+            .child(gpui::StyledText::new(source).with_highlights(runs))
+    });
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1()
+        .child(control)
+        .children(code_block)
+        .into_any_element()
 }
 
 /// `path` as the workspace shows it.
