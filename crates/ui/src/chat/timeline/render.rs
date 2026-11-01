@@ -1291,7 +1291,7 @@ fn injected_context_label(context: &str) -> String {
 mod tests {
     use super::*;
     use crate::chat::tests::*;
-    use crate::test_frames::draw_settled;
+    use crate::test_frames::{draw, draw_settled};
     use agent::ItemStatus;
     use gpui::TestAppContext;
     use tcode_core::session::TurnMeta;
@@ -2207,5 +2207,73 @@ This begins after the hard break."#;
                 .collect();
             assert_eq!(shown, offered, "{provider:?} turn {turn}");
         }
+    }
+
+    /// A running turn's working indicator keeps its pulse when the turn
+    /// grows a new last row and the indicator moves into it.
+    #[gpui::test]
+    fn the_working_pulse_carries_on_when_its_turn_grows_a_row(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![entry("user", user_item("go")), command_with_output("first")];
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        let (_view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(900.)));
+        // The pulse never rests while the turn runs: frames as a display
+        // spaces them, on both clocks.
+        let frames = |count: usize, cx: &mut VisualTestContext| {
+            for _ in 0..count {
+                std::thread::sleep(Duration::from_millis(16));
+                cx.executor().advance_clock(Duration::from_millis(16));
+                draw(cx);
+            }
+        };
+        // The indicator's nine cells, in reading order.
+        let cells = |cx: &mut VisualTestContext| {
+            let status = cx
+                .debug_bounds("working-status-0")
+                .expect("the running turn's status");
+            cx.update(|window, _| {
+                let scale = window.scale_factor();
+                let status = status.scale(scale);
+                let cell = px(4.).scale(scale);
+                let mut cells = window
+                    .painted_quads()
+                    .into_iter()
+                    .filter(|quad| {
+                        quad.bounds.size.width == cell
+                            && quad.bounds.size.height == cell
+                            && status.contains(&quad.bounds.origin)
+                    })
+                    .map(|quad| (quad.bounds.origin.y, quad.bounds.origin.x, quad.background))
+                    .collect::<Vec<_>>();
+                cells.sort_by(|a, b| a.0.0.total_cmp(&b.0.0).then(a.1.0.total_cmp(&b.1.0)));
+                cells.into_iter().map(|cell| cell.2).collect::<Vec<_>>()
+            })
+        };
+
+        frames(20, cx);
+        let before = cells(cx);
+        assert_eq!(before.len(), 9, "the indicator's pixel grid");
+        timeline
+            .entries
+            .push(entry("reply", assistant("Looked at it.")));
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(
+            cells(cx),
+            before,
+            "the pulse restarted when the indicator moved into the new row"
+        );
     }
 }
