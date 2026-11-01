@@ -40,8 +40,8 @@ use crate::{
     FileChangeKind, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
     ResumeCursor, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
-    TokenUsage, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion, selection_bool,
-    selection_str,
+    TokenUsage, ToolOutput, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
+    selection_bool, selection_str,
 };
 
 /// First Claude Code build whose headless control protocol is verified to
@@ -1205,7 +1205,7 @@ fn user_message(text: &str, attachments: &[Attachment]) -> Value {
 
 /// Remembers what kind of tool-use item a `tool_use_id` refers to, so that when
 /// the matching `tool_result` arrives we can emit the right `ItemCompleted`.
-enum ToolItem {
+pub(crate) enum ToolItem {
     Command {
         command: String,
         output: String,
@@ -1233,6 +1233,124 @@ enum ToolItem {
 }
 
 impl ToolItem {
+    /// The in-progress item for a call that is not an `Agent` spawn,
+    /// `TodoWrite` or `ExitPlanMode`, and the state its result completes.
+    /// Calls made at the top level and inside a subagent map alike.
+    pub(crate) fn started(name: String, input: Value) -> (Self, ItemContent) {
+        if name == "Bash" {
+            let command = input
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            (
+                ToolItem::Command {
+                    command: command.clone(),
+                    output: String::new(),
+                },
+                ItemContent::CommandExecution {
+                    command,
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::InProgress,
+                },
+            )
+        } else if is_file_tool(&name) {
+            let changes = file_changes(&name, &input);
+            (
+                ToolItem::File {
+                    changes: changes.clone(),
+                },
+                ItemContent::FileChange {
+                    changes,
+                    status: ItemStatus::InProgress,
+                },
+            )
+        } else {
+            (
+                ToolItem::Tool {
+                    name: name.clone(),
+                    input: input.clone(),
+                },
+                ItemContent::ToolCall {
+                    image_reads: Vec::new(),
+                    name,
+                    input,
+                    output: None,
+                    status: ItemStatus::InProgress,
+                },
+            )
+        }
+    }
+
+    /// The finished item for a call from its `tool_result` block and the
+    /// message's `tool_use_result` (`toolUseResult` in transcript files).
+    pub(crate) fn finished(self, block: &Value, tool_use_result: Option<&Value>) -> ItemContent {
+        let is_error = block
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let status = if is_error {
+            ItemStatus::Failed
+        } else {
+            ItemStatus::Completed
+        };
+        let ToolOutput { text, images } =
+            ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null));
+        match self {
+            ToolItem::Command { command, .. } => ItemContent::CommandExecution {
+                command,
+                output: text,
+                exit_code: Some(i32::from(is_error)),
+                status,
+            },
+            ToolItem::File { mut changes } => {
+                if let Some(structured_patch) =
+                    tool_use_result.and_then(|result| result.get("structuredPatch"))
+                {
+                    let diff = render_structured_patch(structured_patch);
+                    let path = tool_use_result
+                        .and_then(|result| result.get("filePath"))
+                        .and_then(Value::as_str);
+                    for change in &mut changes {
+                        if let Some(path) = path {
+                            change.path = path.to_owned();
+                        }
+                        // Successful writes can report `structuredPatch: []`;
+                        // that omission must not erase the input-derived diff.
+                        if let Some(diff) = &diff {
+                            change.diff = Some(diff.clone());
+                        }
+                    }
+                }
+                ItemContent::FileChange { changes, status }
+            }
+            ToolItem::Tool { name, input } => ItemContent::ToolCall {
+                image_reads: images,
+                name,
+                input,
+                output: Some(text),
+                status,
+            },
+            ToolItem::Plan { markdown } => ItemContent::Plan { markdown },
+            ToolItem::Subagent {
+                agent_type,
+                description,
+                summary,
+                model,
+                effort,
+                ..
+            } => ItemContent::Subagent {
+                agent_type,
+                description,
+                status,
+                summary,
+                model,
+                effort,
+            },
+        }
+    }
+
     fn subagent(content: &ItemContent, parent_item_id: Option<String>) -> Option<Self> {
         let ItemContent::Subagent {
             agent_type,
@@ -2567,24 +2685,6 @@ impl Mapper {
             let content = spawned_subagent(&input);
             let item = ToolItem::subagent(&content, None).expect("a spawn snapshot is a Subagent");
             (item, content)
-        } else if name == "Bash" {
-            let command = input
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            (
-                ToolItem::Command {
-                    command: command.clone(),
-                    output: String::new(),
-                },
-                ItemContent::CommandExecution {
-                    command,
-                    output: String::new(),
-                    exit_code: None,
-                    status: ItemStatus::InProgress,
-                },
-            )
         } else if name == EXIT_PLAN_MODE {
             let markdown = plan_markdown(&input);
             (
@@ -2593,31 +2693,8 @@ impl Mapper {
                 },
                 ItemContent::Plan { markdown },
             )
-        } else if is_file_tool(&name) {
-            let changes = file_changes(&name, &input);
-            (
-                ToolItem::File {
-                    changes: changes.clone(),
-                },
-                ItemContent::FileChange {
-                    changes,
-                    status: ItemStatus::InProgress,
-                },
-            )
         } else {
-            (
-                ToolItem::Tool {
-                    name: name.clone(),
-                    input: input.clone(),
-                },
-                ItemContent::ToolCall {
-                    image_reads: Vec::new(),
-                    name,
-                    input,
-                    output: None,
-                    status: ItemStatus::InProgress,
-                },
-            )
+            ToolItem::started(name, input)
         };
 
         self.tool_items.insert(tool_use_id.clone(), item);
@@ -2688,7 +2765,8 @@ impl Mapper {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let output = tool_result_text(block.get("content"));
+            let output =
+                ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null)).text;
             let status = if is_error {
                 ItemStatus::Failed
             } else {
@@ -2711,46 +2789,10 @@ impl Mapper {
                         status: ItemStatus::InProgress,
                     }
                 }
-                ToolItem::Command { command, .. } => ItemContent::CommandExecution {
-                    command,
-                    output,
-                    exit_code: if is_error { Some(1) } else { Some(0) },
-                    status,
-                },
-                ToolItem::File { mut changes } => {
-                    if let Some(structured_patch) = msg.pointer("/tool_use_result/structuredPatch")
-                    {
-                        let diff = render_structured_patch(structured_patch);
-                        let path = msg
-                            .pointer("/tool_use_result/filePath")
-                            .and_then(Value::as_str);
-                        for change in &mut changes {
-                            if let Some(path) = path {
-                                change.path = path.to_owned();
-                            }
-                            // Successful writes can report `structuredPatch: []`;
-                            // that omission must not erase the input-derived diff.
-                            if let Some(diff) = &diff {
-                                change.diff = Some(diff.clone());
-                            }
-                        }
-                    }
-                    ItemContent::FileChange { changes, status }
-                }
-                ToolItem::Plan { markdown } => ItemContent::Plan { markdown },
-                ToolItem::Tool { name, input } => ItemContent::ToolCall {
-                    image_reads: if !is_error && crate::image_reads::is_read_tool(&name) {
-                        crate::image_reads::content_images(
-                            block.get("content").unwrap_or(&Value::Null),
-                        )
-                    } else {
-                        Vec::new()
-                    },
-                    name,
-                    input,
-                    output: Some(output),
-                    status,
-                },
+                item @ (ToolItem::Command { .. }
+                | ToolItem::File { .. }
+                | ToolItem::Tool { .. }
+                | ToolItem::Plan { .. }) => item.finished(block, msg.get("tool_use_result")),
                 ToolItem::Subagent {
                     agent_type,
                     description,
@@ -3539,26 +3581,6 @@ fn render_structured_patch(value: &Value) -> Option<String> {
         );
     }
     (!rendered.is_empty()).then(|| rendered.join("\n"))
-}
-
-/// Flatten a `tool_result` content field (string or block array) into text.
-fn tool_result_text(content: Option<&Value>) -> String {
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => {
-            let mut parts = Vec::new();
-            for block in blocks {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    parts.push(text.to_string());
-                } else {
-                    parts.push(block.to_string());
-                }
-            }
-            parts.join("\n")
-        }
-        Some(other) => other.to_string(),
-        None => String::new(),
-    }
 }
 
 fn result_status(msg: &Value, stop_reason: Option<&str>) -> TurnStatus {
@@ -5145,42 +5167,76 @@ mod tests {
         }
     }
 
+    /// Recorded from Claude Code 2.1.316 (`claude -p --output-format
+    /// stream-json --verbose --model haiku` in a scratch directory holding an
+    /// 8x8 blue PNG and `a.txt`): a Read of the image, then a subagent that
+    /// runs Bash, reads and edits `a.txt`. The image is the result's only
+    /// content and reaches `image_reads` alone; the subagent's Bash and Edit
+    /// map as they do at the top level.
     #[test]
-    fn image_read_results_exclude_failed_reads_and_image_generation() {
-        for (name, failed, expected) in [
-            ("Read", false, 1),
-            ("Read", true, 0),
-            ("generate_image", false, 0),
-            ("mcp__browser__preview_screenshot", false, 1),
-        ] {
-            let mut mapper = Mapper::new();
-            feed(&mut mapper, &json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"read","name":name,"input":{"file_path":"/tmp/image.png"}}]}}).to_string());
-            let events = feed(&mut mapper, &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"read","is_error":failed,"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}}]}]}}).to_string());
-            let AgentEvent::ItemCompleted(ThreadItem {
-                content:
-                    ItemContent::ToolCall {
-                        image_reads,
-                        status,
-                        ..
-                    },
-                ..
-            }) = &events[0]
-            else {
-                panic!("tool completion: {events:?}")
-            };
-            assert_eq!(image_reads.len(), expected, "{name}, failed={failed}");
-            assert_eq!(
-                *status,
-                if failed {
-                    ItemStatus::Failed
-                } else {
-                    ItemStatus::Completed
+    fn recorded_image_read_and_subagent_tools_map_like_top_level_calls() {
+        let mut mapper = Mapper::new();
+        let mut completed = Vec::new();
+        for line in include_str!("../tests/fixtures/claude/tool_results_recorded.jsonl").lines() {
+            for event in feed(&mut mapper, line) {
+                if let AgentEvent::ItemCompleted(item) = event {
+                    completed.push(item);
                 }
-            );
-            if expected != 0 {
-                assert_eq!(image_reads[0].data_base64, "AQID");
             }
         }
+        let item = |id: &str| {
+            completed
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap_or_else(|| panic!("{id} never completed: {completed:#?}"))
+        };
+        assert_eq!(
+            item("toolu_01HG34Q57eKf3Vmy7mipKtqD").content,
+            ItemContent::ToolCall {
+                image_reads: vec![Attachment {
+                    media_type: "image/png".into(),
+                    data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==".into(),
+                    source_path: None,
+                }],
+                name: "Read".into(),
+                input: json!({"file_path": "blue.png"}),
+                output: Some(String::new()),
+                status: ItemStatus::Completed,
+            }
+        );
+        let child = |id: &str| {
+            let item = item(&format!("toolu_01DEp56X845RWkeSRLr9oGhE:{id}"));
+            assert_eq!(
+                item.parent_item_id.as_deref(),
+                Some("toolu_01DEp56X845RWkeSRLr9oGhE")
+            );
+            &item.content
+        };
+        assert_eq!(
+            child("toolu_014AnXC7pBrAgEgqpWymetDS"),
+            &ItemContent::CommandExecution {
+                command: "echo hi".into(),
+                output: "hi".into(),
+                exit_code: Some(0),
+                status: ItemStatus::Completed,
+            }
+        );
+        assert_eq!(
+            child("toolu_01QkfKor1fX5xFDBvWR1ZUEX"),
+            &ItemContent::FileChange {
+                changes: vec![FileChange {
+                    path: "/private/tmp/b2rec/claude/a.txt".into(),
+                    kind: FileChangeKind::Modify,
+                    diff: Some("-hello\n+bye".into()),
+                }],
+                status: ItemStatus::Completed,
+            }
+        );
+        assert!(matches!(
+            child("toolu_01KLtmHwybFdAVQGeGUZEfvP"),
+            ItemContent::ToolCall { name, output: Some(output), .. }
+                if name == "Read" && output == "1\thello\n2\tworld\n3\t"
+        ));
     }
 
     #[test]
