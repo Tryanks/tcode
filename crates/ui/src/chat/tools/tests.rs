@@ -109,7 +109,7 @@ impl StoredThread {
     /// The window of `id`, as its header reads.
     pub(in crate::chat) fn header(&self, id: &str, cx: &mut VisualTestContext) -> Read {
         let entry = self.entry(id, cx);
-        cx.update(|_, cx| Read::of(&activity(&entry, false, cx)))
+        Read::of(&activity(&entry, false))
     }
 
     /// Opens the turn's folded Work Log, as a reader does.
@@ -266,5 +266,97 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
     let other = "exec-5bd102db-8280-4811-a3c3-6146bd58a20c";
     click(cx, &format!("activity-row-{other}"));
     assert!(!shows(cx, &format!("tool-detail-{other}")));
+    thread.shutdown(cx);
+}
+
+/// A command reads as the command it ran and how it exited: a failure by
+/// its exit code and the first line it printed past the harness's own
+/// `Exit code N`, a declined one as asked for and declined, never run. A
+/// shell run as a tool — Codex's `exec_command` and `write_stdin`, a
+/// subagent's `Bash` — reads the same, its exit code taken from the report
+/// its harness wraps the output in, and opens on that output alone.
+#[gpui::test]
+fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/shell.jsonl"), 1_024.);
+    let ran = |argument: &str, chips: Vec<Chip>, error: Option<&str>| Read {
+        chips,
+        ..read("Ran", None, Some(argument), error)
+    };
+    let declined = "exec-1886810a-4a55-4708-8ae0-6005349e79e8";
+    let exec = "call_SwgyPy31gqrEcphvMeyBJsST";
+    let stdin = "call_HODo1V5SY8J2DrCNPTJqiTc7";
+    for (id, expected) in [
+        (
+            "toolu_01RQ9kdsaRsD7Vh9QGznNJwT",
+            ran(
+                "git status --short && git log --oneline -3 && ls",
+                vec![],
+                None,
+            ),
+        ),
+        (
+            "toolu_01RNnVjDHfMoqLkL2otV6JiC",
+            ran(
+                "ls /Users/me/project/src",
+                vec![Chip::Exit(1)],
+                Some("ls: /Users/me/project/src: No such file or directory"),
+            ),
+        ),
+        (
+            "exec-a4d9d295-690b-4905-9427-20acfcd6d992",
+            ran(
+                "/bin/zsh -lc \"sed -n '1,130p' .github/scripts/check-architecture.sh\"",
+                vec![Chip::Exit(1)],
+                Some("sed: .github/scripts/check-architecture.sh: No such file or directory"),
+            ),
+        ),
+        (
+            declined,
+            read(
+                "Run",
+                None,
+                Some(
+                    "/bin/zsh -c '/opt/homebrew/bin/adb -t 1 shell cmd appops set \
+                     org.koreader.launcher MANAGE_EXTERNAL_STORAGE allow'",
+                ),
+                None,
+            ),
+        ),
+        (exec, ran("git status --short", vec![], None)),
+        (
+            stdin,
+            Read {
+                chips: vec![Chip::Exit(-1)],
+                ..read("Sent input", None, Some("session 17856"), None)
+            },
+        ),
+        (
+            "tool_mJeTs4Cc0I6gPcCx5W0BlgpT",
+            ran("ls -la /Users/me/project", vec![], None),
+        ),
+    ] {
+        assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+    let child = "toolu_01GZcgPu9J81FC9d5KiL2geW:toolu_015f228ibAN81Gb9q9mdmffs";
+    let header = thread.header(child, cx);
+    assert_eq!(header.verb.as_deref(), Some("Ran"));
+    assert!(
+        header
+            .argument
+            .is_some_and(|argument| argument.starts_with("cd /Users/me/project/SampleGame/")),
+    );
+
+    thread.open_work_log("toolu_01RQ9kdsaRsD7Vh9QGznNJwT", cx);
+    assert!(shows(cx, &format!("tool-status-chip-{declined}")));
+    assert!(shows(cx, "tool-error-toolu_01RNnVjDHfMoqLkL2otV6JiC"));
+    // A shell call opens on its command line and what it printed; one that
+    // printed nothing says so instead of showing its harness's report.
+    click(cx, &format!("activity-row-{exec}"));
+    assert!(shows(cx, &format!("tool-shell-{exec}")));
+    assert!(!shows(cx, &format!("tool-text-{exec}-output")));
+    click(cx, &format!("activity-row-{child}"));
+    assert!(shows(cx, &format!("tool-text-{child}-output")));
     thread.shutdown(cx);
 }

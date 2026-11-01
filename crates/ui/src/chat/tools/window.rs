@@ -44,7 +44,8 @@ impl Verb {
 pub(in crate::chat) struct Argument {
     pub(in crate::chat) text: String,
     pub(in crate::chat) mono: bool,
-    pub(in crate::chat) highlights: Vec<(Range<usize>, HighlightStyle)>,
+    /// Ranges painted faint: the marks that stand for line breaks.
+    pub(in crate::chat) markers: Vec<Range<usize>>,
     /// Muted context after the argument: where a search looked.
     pub(in crate::chat) detail: Option<String>,
 }
@@ -94,6 +95,8 @@ pub(in crate::chat) struct Header {
     /// The line a failure is told by, verbatim. `None` takes the output's
     /// first line.
     pub(in crate::chat) error: Option<String>,
+    /// How long the call took, as its harness reports it.
+    pub(in crate::chat) elapsed_ms: Option<u64>,
 }
 
 impl Header {
@@ -110,6 +113,7 @@ impl Header {
             argument: None,
             chips: Vec::new(),
             error: None,
+            elapsed_ms: None,
         }
     }
 
@@ -144,6 +148,15 @@ impl Header {
     pub(in crate::chat) fn error(mut self, error: Option<String>) -> Self {
         self.error = error;
         self
+    }
+
+    /// The header as one line of words, for assistive technology.
+    pub(in crate::chat) fn label(&self, status: ItemStatus) -> String {
+        let mut words: Vec<String> = Vec::new();
+        words.extend(self.verb.map(|verb| verb.text(status).to_string()));
+        words.extend(self.subject.as_ref().map(|subject| subject.to_string()));
+        words.extend(self.argument.as_ref().map(|argument| argument.text.clone()));
+        words.join(" ")
     }
 }
 
@@ -214,9 +227,15 @@ pub(in crate::chat) struct WindowSpec {
     pub(in crate::chat) copy: Vec<(String, String)>,
 }
 
-/// How long the call took, when its start and its end were both seen.
-pub(in crate::chat) fn elapsed(entry: &tcode_core::session::TimelineEntry) -> Option<u64> {
-    Some(entry.finished_ts?.saturating_sub(entry.ts?))
+/// How long the call took: as its harness reports it, else when its start
+/// and its end were both seen.
+pub(in crate::chat) fn elapsed(
+    header: &Header,
+    entry: &tcode_core::session::TimelineEntry,
+) -> Option<u64> {
+    header
+        .elapsed_ms
+        .or_else(|| Some(entry.finished_ts?.saturating_sub(entry.ts?)))
 }
 
 /// A whole window: the header, a click on which toggles the body, then the
@@ -242,6 +261,7 @@ pub(in crate::chat) fn tool_window(
         Detail::Open(_) => true,
         Detail::None | Detail::Shut => false,
     };
+    let label = header.label(status);
     let row = header_row(
         &key, header, status, elapsed_ms, compact, expandable, open, cx,
     );
@@ -250,7 +270,7 @@ pub(in crate::chat) fn tool_window(
             row,
             SharedString::from(format!("activity-row-{key}")),
             Role::Button,
-            crate::tr!("chat.activity_details"),
+            label,
             cx,
         )
         .debug_selector({
@@ -401,9 +421,14 @@ fn header_row(
                     let Argument {
                         text,
                         mono: monospace,
-                        highlights,
+                        markers,
                         detail,
                     } = argument;
+                    let faint = HighlightStyle {
+                        color: Some(muted.opacity(0.45)),
+                        ..Default::default()
+                    };
+                    let highlights = markers.into_iter().map(move |range| (range, faint));
                     let key = key.to_owned();
                     row.child(
                         div()
@@ -428,7 +453,7 @@ fn header_row(
                 }),
         )
         .children(chips.into_iter().map(|chip| chip_element(key, chip, cx)))
-        .when_some(status_chip(status, cx), |row, chip| row.child(chip))
+        .when_some(status_chip(key, status, cx), |row, chip| row.child(chip))
         .when_some(
             elapsed_ms.filter(|elapsed| *elapsed >= 100),
             |row, elapsed| {
@@ -487,7 +512,7 @@ fn chip_element(key: &str, chip: Chip, cx: &App) -> AnyElement {
 
 /// Interrupted and declined calls say so in words: neither failed, and a
 /// declined one never ran.
-fn status_chip(status: ItemStatus, cx: &App) -> Option<AnyElement> {
+fn status_chip(key: &str, status: ItemStatus, cx: &App) -> Option<AnyElement> {
     let theme = cx.theme();
     let (label, color) = match status {
         ItemStatus::Interrupted => (crate::tr!("tools.status.interrupted"), theme.warning),
@@ -496,6 +521,10 @@ fn status_chip(status: ItemStatus, cx: &App) -> Option<AnyElement> {
     };
     Some(
         crate::material::semantic_chip(label.into_owned(), color.opacity(0.12), color, cx)
+            .debug_selector({
+                let key = key.to_owned();
+                move || format!("tool-status-chip-{key}")
+            })
             .into_any_element(),
     )
 }

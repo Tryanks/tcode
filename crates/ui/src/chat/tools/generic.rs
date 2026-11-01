@@ -226,12 +226,14 @@ fn value_element(
                 ctx.app(),
             )
             .font_family(ctx.app().theme().mono_font_family.clone());
-            let control = div()
-                .debug_selector({
-                    let fold_key = fold_key.clone();
-                    move || fold_key.clone()
-                })
-                .child(control);
+            let control = h_flex().child(
+                div()
+                    .debug_selector({
+                        let fold_key = fold_key.clone();
+                        move || fold_key.clone()
+                    })
+                    .child(control),
+            );
             if !open {
                 return control.into_any_element();
             }
