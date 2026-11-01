@@ -15,7 +15,7 @@ use gpui_base::{h_flex, v_flex};
 
 use tcode_core::session::{TimelineEntry, TurnMeta};
 
-use super::super::model::RowPart;
+use super::super::timeline::rows::RowPart;
 
 pub(crate) type WorkLogArgs<'a> = (
     usize,
