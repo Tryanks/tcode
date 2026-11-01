@@ -47,6 +47,7 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     env_logger::init();
+    tcode_services::process::raise_open_file_limit();
     if let Err(error) = run(std::env::args().skip(1).collect()) {
         eprintln!("tcode-headless: {error}");
         std::process::exit(1);
