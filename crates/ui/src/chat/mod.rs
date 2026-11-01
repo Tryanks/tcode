@@ -1590,7 +1590,7 @@ impl ChatView {
             key,
             enabled,
             recency,
-            Instant::now(),
+            cx.background_executor().now(),
         );
         if let Some((generation, delay)) = auto.collapse {
             let collapse_key = key.to_string();
@@ -4906,12 +4906,7 @@ const TIMELINE_EDGE_PADDING: f32 = 8.;
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_MIN_VISIBILITY, AutoActivityExpansion,
-        AutoActivityExpansions,
-        AutoActivityRecency::{ImmediatelySuperseded, Latest, Older},
-        ChatView, RowPart,
-    };
+    use super::{ASYNC_MARKDOWN_THRESHOLD_BYTES, ChatView, RowPart};
     use crate::store::WorkspaceStore;
     use crate::test_frames::{draw, draw_settled};
     use crate::window_state::WindowState;
@@ -4924,178 +4919,10 @@ mod tests {
     use std::time::{Duration, Instant};
     use tcode_core::session::{EntryContent, Timeline, TimelineEntry, TurnMeta};
 
-    const AUTO_ACTIVITY_TEST_SESSION: &str = "session-a";
     static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
-    #[test]
-    fn activity_visibility_tracks_successors_and_the_remaining_minimum_window() {
-        let first_seen = Instant::now();
-        for (seen_as_latest, elapsed, delay, becomes_older) in [
-            (true, 200, Some(300), false),
-            (true, 500, None, false),
-            (true, 1_000, None, false),
-            (false, 0, Some(500), false),
-            (true, 100, Some(400), true),
-        ] {
-            let mut expansions = AutoActivityExpansions::default();
-            if seen_as_latest {
-                let latest = expansions.observe(
-                    AUTO_ACTIVITY_TEST_SESSION,
-                    "activity",
-                    true,
-                    Latest,
-                    first_seen,
-                );
-                assert!(latest.expanded);
-                assert_eq!(latest.collapse, None);
-                let still_latest = expansions.observe(
-                    AUTO_ACTIVITY_TEST_SESSION,
-                    "activity",
-                    true,
-                    Latest,
-                    first_seen + Duration::from_millis(elapsed),
-                );
-                assert!(still_latest.expanded);
-                assert_eq!(still_latest.collapse, None);
-            }
-            let superseded = expansions.observe(
-                AUTO_ACTIVITY_TEST_SESSION,
-                "activity",
-                true,
-                ImmediatelySuperseded,
-                first_seen + Duration::from_millis(elapsed),
-            );
-            assert_eq!(superseded.expanded, delay.is_some());
-            assert_eq!(
-                superseded.collapse.map(|(_, delay)| delay),
-                delay.map(Duration::from_millis)
-            );
-            if let Some((generation, _)) = superseded.collapse {
-                let repeated = expansions.observe(
-                    AUTO_ACTIVITY_TEST_SESSION,
-                    "activity",
-                    true,
-                    ImmediatelySuperseded,
-                    first_seen + Duration::from_millis(elapsed),
-                );
-                assert!(repeated.expanded);
-                assert_eq!(
-                    repeated.collapse, None,
-                    "a repaint must not enqueue a second timer"
-                );
-                if becomes_older {
-                    expansions.observe(
-                        AUTO_ACTIVITY_TEST_SESSION,
-                        "next",
-                        true,
-                        Latest,
-                        first_seen + Duration::from_millis(100),
-                    );
-                    let older = expansions.observe(
-                        AUTO_ACTIVITY_TEST_SESSION,
-                        "activity",
-                        true,
-                        Older,
-                        first_seen + Duration::from_millis(200),
-                    );
-                    assert!(!older.expanded);
-                    assert_eq!(older.collapse, None);
-                    assert!(!expansions.finish_collapse(
-                        AUTO_ACTIVITY_TEST_SESSION,
-                        "activity",
-                        generation,
-                    ));
-                    let first_old = expansions.observe(
-                        AUTO_ACTIVITY_TEST_SESSION,
-                        "next",
-                        true,
-                        ImmediatelySuperseded,
-                        first_seen + Duration::from_millis(200),
-                    );
-                    assert!(first_old.expanded);
-                    assert_eq!(
-                        first_old.collapse.map(|(_, delay)| delay),
-                        Some(Duration::from_millis(400))
-                    );
-                    assert!(
-                        expansions
-                            .observe(
-                                AUTO_ACTIVITY_TEST_SESSION,
-                                "current",
-                                true,
-                                Latest,
-                                first_seen + Duration::from_millis(200),
-                            )
-                            .expanded
-                    );
-                    continue;
-                }
-                assert!(expansions.finish_collapse(
-                    AUTO_ACTIVITY_TEST_SESSION,
-                    "activity",
-                    generation
-                ));
-                assert!(!expansions.finish_collapse(
-                    AUTO_ACTIVITY_TEST_SESSION,
-                    "activity",
-                    generation
-                ));
-                assert!(
-                    !expansions
-                        .observe(
-                            AUTO_ACTIVITY_TEST_SESSION,
-                            "activity",
-                            true,
-                            ImmediatelySuperseded,
-                            first_seen + Duration::from_secs(1)
-                        )
-                        .expanded
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn returning_session_restarts_latest_activity_visibility_window() {
-        let mut expansions = AutoActivityExpansions::default();
-        let first_seen = Instant::now();
-        expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            Latest,
-            first_seen,
-        );
-
-        let returned_at = first_seen + Duration::from_secs(10);
-        expansions.activate_session(Some(AUTO_ACTIVITY_TEST_SESSION));
-        expansions.hydrate_session_snapshot(
-            AUTO_ACTIVITY_TEST_SESSION,
-            ["activity-command".to_string()].into(),
-        );
-        let returned = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            Latest,
-            returned_at,
-        );
-        assert!(returned.expanded);
-
-        let superseded = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            ImmediatelySuperseded,
-            returned_at + Duration::from_millis(200),
-        );
-        assert!(superseded.expanded);
-        assert_eq!(
-            superseded.collapse.map(|(_, delay)| delay),
-            Some(Duration::from_millis(300))
-        );
-    }
-
+    /// Opening a running thread opens the detail of its latest command only;
+    /// the commands before it were already superseded.
     #[gpui::test]
     fn running_session_snapshot_renders_only_latest_command_expanded(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px, size};
@@ -5105,52 +4932,94 @@ mod tests {
             running: true,
             ..TurnMeta::default()
         }];
-        // TurnMeta drives the live Work Log rendering under test. Keep the
-        // timeline-wide ticker idle so no perpetual clock task outlives this
-        // finite visual test.
         timeline.entries.push(entry("user", user_item("go")));
         for index in 1..=5 {
-            timeline.entries.push(entry(
-                &format!("command-{index}"),
-                EntryContent::Item(ItemContent::CommandExecution {
-                    command: format!("command {index}"),
-                    output: format!("output {index}"),
-                    exit_code: Some(0),
-                    status: ItemStatus::Completed,
-                }),
-            ));
+            timeline
+                .entries
+                .push(command_with_output(&format!("command-{index}")));
         }
 
-        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) = cx
+        let (_view, cx) = cx
             .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
 
-        let states = view.read_with(cx, |chat, _| {
-            let entries = chat
-                .auto_activity_expansions
-                .entries_by_session
-                .get(&session_id)
-                .expect("rendered session expansion state");
-            (1..=5)
-                .map(|index| entries.get(&format!("activity-command-{index}")).copied())
-                .collect::<Vec<_>>()
-        });
-        for (index, state) in states[..4].iter().enumerate() {
-            assert_eq!(
-                *state,
-                Some(AutoActivityExpansion::Collapsed),
-                "historical command {} reopened",
-                index + 1
+        for index in 1..=4 {
+            assert!(
+                command_open(cx, &format!("command-{index}")).is_none(),
+                "historical command {index} reopened"
             );
         }
-        assert!(matches!(
-            states[4],
-            Some(AutoActivityExpansion::Expanded { .. })
-        ));
+        assert!(command_open(cx, "command-5").is_some());
+    }
+
+    /// The latest command's detail opens by itself. Once a newer command
+    /// starts it stays open until it has shown for half a second, unless a
+    /// second newer one has started, and a newer one that goes away leaves it
+    /// the latest again.
+    #[gpui::test]
+    fn the_latest_command_stays_open_for_half_a_second_after_the_next_starts(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![entry("user", user_item("go")), command_with_output("first")];
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (_view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(900.)));
+        let mut show = |commands: &[&str], cx: &mut VisualTestContext| {
+            timeline.entries.truncate(1);
+            timeline
+                .entries
+                .extend(commands.iter().map(|id| command_with_output(id)));
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+                cx.notify();
+            });
+            draw_settled(cx);
+        };
+        let open = |cx: &mut VisualTestContext, ids: &[&str]| {
+            ["first", "second", "third", "fourth"]
+                .into_iter()
+                .filter(|id| command_open(cx, id).is_some())
+                .collect::<Vec<_>>()
+                == ids
+        };
+        let wait = |duration: u64, cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(duration));
+            draw_settled(cx);
+        };
+
+        show(&["first"], cx);
+        assert!(open(cx, &["first"]));
+        show(&["first", "second"], cx);
+        assert!(open(cx, &["first", "second"]), "first folded on its own");
+        wait(400, cx);
+        assert!(open(cx, &["first", "second"]), "first folded early");
+        wait(100, cx);
+        assert!(open(cx, &["second"]), "first stayed past its minimum");
+
+        show(&["first", "second", "third", "fourth"], cx);
+        assert!(
+            open(cx, &["third", "fourth"]),
+            "second kept its minimum behind two newer commands"
+        );
+
+        // The newest goes again: the one before it is the latest once more.
+        show(&["first", "second", "third"], cx);
+        wait(1_000, cx);
+        assert!(open(cx, &["third"]), "the latest folded");
     }
 
     /// A user turn's rewind popover offers exactly the scopes its harness
@@ -6372,122 +6241,6 @@ mod tests {
             )
         );
         driver.shutdown(cx, &store, &host);
-    }
-
-    #[test]
-    fn pending_collapse_is_scoped_to_its_session() {
-        let first_seen = Instant::now();
-        for elapsed in [100, 500] {
-            let mut expansions = AutoActivityExpansions::default();
-            expansions.observe("session-a", "activity-command", true, Latest, first_seen);
-            let superseded = expansions.observe(
-                "session-a",
-                "activity-command",
-                true,
-                ImmediatelySuperseded,
-                first_seen + Duration::from_millis(elapsed),
-            );
-            assert_eq!(superseded.expanded, elapsed < 500);
-            assert_eq!(superseded.collapse.is_some(), elapsed < 500);
-            let other = expansions.observe(
-                "session-b",
-                "activity-command",
-                true,
-                Latest,
-                first_seen + Duration::from_millis(600),
-            );
-            assert!(other.expanded);
-            if let Some((generation, _)) = superseded.collapse {
-                assert!(expansions.finish_collapse("session-a", "activity-command", generation));
-            }
-            let other = expansions.observe(
-                "session-b",
-                "activity-command",
-                true,
-                Latest,
-                first_seen + Duration::from_millis(700),
-            );
-            assert!(
-                other.expanded,
-                "session B after session A collapsed at {elapsed}ms"
-            );
-            assert_eq!(other.collapse, None);
-            let revisited = expansions.observe(
-                "session-a",
-                "activity-command",
-                true,
-                ImmediatelySuperseded,
-                first_seen + Duration::from_millis(700),
-            );
-            assert!(
-                !revisited.expanded,
-                "session A after returning at {elapsed}ms"
-            );
-            assert_eq!(revisited.collapse, None);
-        }
-    }
-
-    #[test]
-    fn reactivated_activity_cancels_its_stale_delayed_collapse() {
-        let mut expansions = AutoActivityExpansions::default();
-        let first_seen = Instant::now();
-        expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            Latest,
-            first_seen,
-        );
-        let (generation, _) = expansions
-            .observe(
-                AUTO_ACTIVITY_TEST_SESSION,
-                "activity-command",
-                true,
-                ImmediatelySuperseded,
-                first_seen + Duration::from_millis(100),
-            )
-            .collapse
-            .expect("supersession should schedule a collapse");
-
-        assert!(
-            expansions
-                .observe(
-                    AUTO_ACTIVITY_TEST_SESSION,
-                    "activity-command",
-                    true,
-                    Latest,
-                    first_seen + Duration::from_millis(200),
-                )
-                .expanded
-        );
-        assert!(!expansions.finish_collapse(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            generation
-        ));
-        assert!(
-            !expansions
-                .observe(
-                    AUTO_ACTIVITY_TEST_SESSION,
-                    "activity-command",
-                    true,
-                    ImmediatelySuperseded,
-                    first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
-                )
-                .expanded
-        );
-
-        assert!(
-            !expansions
-                .observe(
-                    AUTO_ACTIVITY_TEST_SESSION,
-                    "activity-command",
-                    false,
-                    Latest,
-                    first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
-                )
-                .expanded
-        );
     }
 
     #[gpui::test]
@@ -8664,6 +8417,27 @@ This begins after the hard break."#;
                 status: agent::ItemStatus::Completed,
             }),
         )
+    }
+
+    fn command_with_output(id: &str) -> Arc<TimelineEntry> {
+        entry(
+            id,
+            EntryContent::Item(ItemContent::CommandExecution {
+                command: format!("run {id}"),
+                output: format!("output of {id}\n"),
+                exit_code: Some(0),
+                status: ItemStatus::Completed,
+            }),
+        )
+    }
+
+    /// The output of the command `id`'s open detail, painted in the last
+    /// frame.
+    fn command_open(
+        cx: &mut gpui::VisualTestContext,
+        id: &str,
+    ) -> Option<gpui::Bounds<gpui::Pixels>> {
+        cx.debug_bounds(format!("command-output-{id}").leak())
     }
 
     fn at_turn(mut entry: Arc<TimelineEntry>, turn: usize) -> Arc<TimelineEntry> {
