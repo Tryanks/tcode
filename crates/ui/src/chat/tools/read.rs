@@ -162,9 +162,10 @@ impl ToolView for Read<'_> {
                 .flatten();
             return super::body(output.into_iter().chain(images));
         }
-        let content = self.content(text);
+        let (text, control) = super::full_output(call, ctx);
+        let content = self.content(&text);
         let lines = code(call, self.input.file_path, &content, ctx);
-        super::body(std::iter::once(lines).chain(images))
+        super::body(std::iter::once(lines).chain(control).chain(images))
     }
 
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {

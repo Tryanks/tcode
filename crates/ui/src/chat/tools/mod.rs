@@ -488,6 +488,22 @@ pub(in crate::chat) fn bounded_text(
 /// The call's output as text: the whole fetched one when the reader loaded
 /// it, JSON pretty-printed once the call is done (a half result is not
 /// JSON), danger-tinted when the call failed.
+/// The call's output as this client holds it — the whole one once the
+/// reader loaded it — and, while the record carried only a preview, the
+/// control that loads the rest.
+pub(in crate::chat) fn full_output(
+    call: &Call<'_>,
+    ctx: &mut ToolCtx<'_, '_>,
+) -> (String, Option<AnyElement>) {
+    let elided = ctx.elided(call.entry);
+    let text = match &elided {
+        Some(ElidedOutput::Loaded(full)) => full.to_string(),
+        _ => call.output.unwrap_or_default().to_owned(),
+    };
+    let control = elided.and_then(|elided| elided_control(elided, call.id(), ctx.app()));
+    (text, control)
+}
+
 pub(in crate::chat) fn output_section(
     call: &Call<'_>,
     limit: Bound,
@@ -563,11 +579,14 @@ fn elided_control(elided: ElidedOutput, id: &str, cx: &App) -> Option<AnyElement
             .into_any_element()
     };
     let load = |on_load: ClickHandler| {
-        super::components::changed_files::quiet_control(
-            control_id.clone(),
-            crate::tr!("chat.load_full_output").into_owned().into(),
-            on_load,
-            cx,
+        let selector = control_id.to_string();
+        div().debug_selector(move || selector.clone()).child(
+            super::components::changed_files::quiet_control(
+                control_id.clone(),
+                crate::tr!("chat.load_full_output").into_owned().into(),
+                on_load,
+                cx,
+            ),
         )
     };
     Some(match elided {
