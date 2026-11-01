@@ -45,6 +45,8 @@ pub use process::keep_own_stdio_from_children;
 mod subagent_tail;
 mod tool_name;
 pub use tool_name::ToolName;
+mod tool_output;
+pub use tool_output::ToolOutput;
 
 use std::path::PathBuf;
 

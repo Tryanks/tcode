@@ -19,7 +19,7 @@ use crate::{
     GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
     PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor,
     SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnOptions, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
+    ToolOutput, TurnOptions, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
     file_changes_from_unified_diff, permission_control, selection_str,
 };
 
@@ -1581,17 +1581,15 @@ impl Actor {
         let path = self.cwd.join(path);
         match smol::fs::read(&path).await {
             Ok(bytes) => {
-                *image = Some(crate::Attachment {
-                    media_type: match path.extension().and_then(|ext| ext.to_str()) {
+                *image = crate::tool_output::image(
+                    Some(match path.extension().and_then(|ext| ext.to_str()) {
                         Some("jpg" | "jpeg") => "image/jpeg",
                         Some("webp") => "image/webp",
                         Some("gif") => "image/gif",
                         _ => "image/png",
-                    }
-                    .into(),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                    source_path: None,
-                });
+                    }),
+                    &base64::engine::general_purpose::STANDARD.encode(bytes),
+                );
                 self.items.insert(item.id.clone(), item.clone());
             }
             Err(error) => log::warn!("could not preserve image read {}: {error}", path.display()),
@@ -3607,40 +3605,36 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .unwrap_or_default(),
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
-        "mcpToolCall" | "dynamicToolCall" => ItemContent::ToolCall {
-            image_reads: if item.get("status").and_then(Value::as_str) == Some("completed")
-                && item.get("error").is_none_or(Value::is_null)
-                && item.get("success").and_then(Value::as_bool) != Some(false)
-                && item.pointer("/result/isError").and_then(Value::as_bool) != Some(true)
-                && crate::image_reads::is_read_tool(&string_field(item, "tool"))
-            {
-                crate::image_reads::content_images(
-                    item.pointer("/result/content")
-                        .or_else(|| item.get("contentItems"))
-                        .unwrap_or(&Value::Null),
-                )
-            } else {
-                Vec::new()
-            },
-            name: if provider_kind == "mcpToolCall" {
-                format!(
-                    "{}/{}",
-                    string_field(item, "server"),
+        "mcpToolCall" | "dynamicToolCall" => {
+            let result = item
+                .get(if provider_kind == "mcpToolCall" {
+                    "result"
+                } else {
+                    "contentItems"
+                })
+                .filter(|value| !value.is_null());
+            let ToolOutput { text, images } =
+                result.map(ToolOutput::from_content).unwrap_or_default();
+            ItemContent::ToolCall {
+                image_reads: images,
+                name: if provider_kind == "mcpToolCall" {
+                    format!(
+                        "{}/{}",
+                        string_field(item, "server"),
+                        string_field(item, "tool")
+                    )
+                } else {
                     string_field(item, "tool")
-                )
-            } else {
-                string_field(item, "tool")
-            },
-            input: item.get("arguments").cloned().unwrap_or(Value::Null),
-            output: if provider_kind == "mcpToolCall" {
-                tool_output(item)
-            } else {
-                item.get("contentItems")
-                    .filter(|v| !v.is_null())
-                    .map(Value::to_string)
-            },
-            status: map_status(item.get("status").and_then(Value::as_str)),
-        },
+                },
+                input: item.get("arguments").cloned().unwrap_or(Value::Null),
+                output: item
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or(result.map(|_| text)),
+                status: map_status(item.get("status").and_then(Value::as_str)),
+            }
+        }
         "collabAgentToolCall" => ItemContent::ToolCall {
             image_reads: Vec::new(),
             name: string_field(item, "tool"),
@@ -3775,15 +3769,6 @@ fn notification_turn_id(params: &Value, active_turn: &Option<String>) -> Option<
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| active_turn.clone())
-}
-
-fn tool_output(item: &Value) -> Option<String> {
-    if let Some(message) = item.pointer("/error/message").and_then(Value::as_str) {
-        return Some(message.into());
-    }
-    item.get("result")
-        .filter(|v| !v.is_null())
-        .map(Value::to_string)
 }
 
 /// Map one `turn/plan/updated` step, falling back to `pending` status and
@@ -6188,30 +6173,64 @@ mod tests {
         assert_eq!(codex_service_tier(&explicit).as_deref(), Some("flex"));
     }
 
+    /// MCP results recorded from the app-server (each `result` as Tcode
+    /// stored it, base64 swapped for a 1x1 JPEG): the timeline keeps the text
+    /// the model read and moves image parts into `image_reads`, typed by their
+    /// bytes, whatever the tool.
     #[test]
-    fn image_read_results_exclude_failed_reads_and_image_generation() {
-        for (name, status, expected) in [
-            ("read_image", "completed", 1),
-            ("read_image", "failed", 0),
-            ("generate_image", "completed", 0),
-        ] {
-            for kind in ["mcpToolCall", "dynamicToolCall"] {
-                let mut wire = json!({"type":kind,"id":"read","server":"files","tool":name,"status":status,
-                    "result":{"content":[{"type":"image","mimeType":"image/png","data":"AQID"}]},
-                    "contentItems":[{"type":"inputImage","imageUrl":"data:image/png;base64,AQID"}]});
-                if kind == "dynamicToolCall" {
-                    wire.as_object_mut().unwrap().remove("result");
-                }
-                let item = map_item(&wire).unwrap();
-                let ItemContent::ToolCall { image_reads, .. } = item.content else {
-                    panic!("tool")
-                };
-                assert_eq!(image_reads.len(), expected, "{kind}, {name}, {status}");
-                if expected != 0 {
-                    assert_eq!(image_reads[0].data_base64, "AQID");
+    fn mcp_results_keep_their_text_and_move_images_into_image_reads() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for line in include_str!("../tests/fixtures/codex/mcp_tool_results.jsonl").lines() {
+                actor.handle_line(line).await;
+            }
+            let mut completed = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if let AgentEvent::ItemCompleted(ThreadItem {
+                    content:
+                        ItemContent::ToolCall {
+                            name,
+                            output,
+                            image_reads,
+                            status,
+                            ..
+                        },
+                    ..
+                }) = event
+                {
+                    let images: Vec<_> = image_reads
+                        .iter()
+                        .map(|image| (image.media_type.clone(), image.data_base64.len()))
+                        .collect();
+                    completed.push((name, output.unwrap(), images, status));
                 }
             }
-        }
+            assert_eq!(
+                completed,
+                [
+                    (
+                        "cua_repl/js".to_owned(),
+                        "The following is a diff from the previous accessibility tree for Window: \"\" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.\nRemoved element IDs: 1-30\n+41 window Secondary Actions: Raise\nThe focused UI element is 41 window Secondary Actions: Raise".to_owned(),
+                        vec![("image/jpeg".to_owned(), 216)],
+                        ItemStatus::Completed,
+                    ),
+                    (
+                        "cua_repl/js".to_owned(),
+                        "Computer Use server error -10005: noWindowsAvailable".to_owned(),
+                        vec![],
+                        ItemStatus::Failed,
+                    ),
+                    (
+                        "codex_apps/github.search_installed_repositories_v2".to_owned(),
+                        "Action completed.\n{\"repositories\":[]}".to_owned(),
+                        vec![],
+                        ItemStatus::Completed,
+                    ),
+                ]
+            );
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
     }
 
     #[test]
