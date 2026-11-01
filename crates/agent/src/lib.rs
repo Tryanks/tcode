@@ -113,12 +113,11 @@ pub struct GoalControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionChannel {
-    /// Appended to the system prompt once per process, on creation and resume alike.
+    /// Part of the session's system instructions, set at every start, on creation and resume
+    /// alike (Claude Code's appended system prompt, an OpenCode session instruction entry).
     SessionAppend,
     /// Developer context Codex re-sends when it changes; restored after a compaction.
     DeveloperContext,
-    /// The system field of every prompt.
-    PerPromptSystem,
     /// A content block of its own after the user's text on every prompt that is not a native
     /// `/command`, while the session attached Tcode's MCP servers.
     PerPromptUserBlock,
@@ -269,14 +268,14 @@ impl ProviderKind {
                 account_login: false,
             },
             ProviderKind::OpenCode => Caps {
-                supports_steering: false,
-                supports_fork: false,
-                native_rewind: false,
-                manual_compaction: false,
+                supports_steering: true,
+                supports_fork: true,
+                native_rewind: true,
+                manual_compaction: true,
                 goals: None,
                 per_turn_effort: true,
                 options_apply_live: false,
-                live_option_push: LiveOptionPush::None,
+                live_option_push: LiveOptionPush::Only(&["agent"]),
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
@@ -284,7 +283,7 @@ impl ProviderKind {
                 home_path: false,
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
-                instruction_channel: InstructionChannel::PerPromptSystem,
+                instruction_channel: InstructionChannel::SessionAppend,
                 account_login: false,
             },
             ProviderKind::Cursor => Caps {

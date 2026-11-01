@@ -1818,7 +1818,6 @@ pull_requests:
   agent_instructions: "指令"
   agent_not_attached: "已提供，未接入：此智能体不支持 HTTP MCP 服务器，因此既没有这些工具，也没有相应指令。"
   channel_system: "系统指令"
-  channel_system_per_prompt: "系统指令，每次提示"
   channel_developer_context: "开发者上下文"
   channel_per_turn_block: "每轮附加块，位于你的消息之后"
   channel_mcp_server: "MCP 服务器指令 · %{name}"

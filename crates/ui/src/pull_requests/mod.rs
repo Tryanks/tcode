@@ -1549,9 +1549,6 @@ pub(crate) fn agent_sees_body(
                     InjectedChannel::Linking(InstructionChannel::SessionAppend) => {
                         crate::tr!("pull_requests.channel_system").into_owned()
                     }
-                    InjectedChannel::Linking(InstructionChannel::PerPromptSystem) => {
-                        crate::tr!("pull_requests.channel_system_per_prompt").into_owned()
-                    }
                     InjectedChannel::Linking(InstructionChannel::DeveloperContext) => {
                         crate::tr!("pull_requests.channel_developer_context").into_owned()
                     }
