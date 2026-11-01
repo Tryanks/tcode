@@ -33,3 +33,5 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

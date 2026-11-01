@@ -452,6 +452,7 @@ impl LocalKernel {
 
 fn main() {
     env_logger::init();
+    tcode_services::process::raise_open_file_limit();
 
     if std::env::args().any(|arg| arg == "--cu-smoke") {
         use std::io::Write as _;
