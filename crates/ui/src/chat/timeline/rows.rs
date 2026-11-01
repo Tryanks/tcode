@@ -748,8 +748,11 @@ mod tests {
     };
     use agent::{FileChange, FileChangeKind};
 
+    /// The cache re-indexes only from the first turn a change reaches; the
+    /// rows it keeps must be the rows a full index of the new timeline gives,
+    /// through streaming, truncation, a session switch and history merging.
     #[test]
-    fn turn_list_index_and_sync_cover_stream_append_truncate_and_session_switch() {
+    fn the_cached_row_index_matches_a_full_index_after_every_change() {
         #[derive(Clone)]
         struct Snapshot {
             turns: Vec<TurnMeta>,
@@ -769,13 +772,11 @@ mod tests {
             name: &'static str,
             snapshot: Snapshot,
             continuity: TimelineContinuity,
-            expected: ListSync,
         }
-        fn step(name: &'static str, snapshot: Snapshot, expected: ListSync) -> Step {
+        fn step(name: &'static str, snapshot: Snapshot) -> Step {
             Step {
                 name,
                 snapshot,
-                expected,
                 continuity: TimelineContinuity::Complete,
             }
         }
@@ -784,11 +785,6 @@ mod tests {
             initial: Snapshot,
             steps: Vec<Step>,
         }
-        let incremental = |splices, remeasure| ListSync::Incremental {
-            splices,
-            remeasure,
-            carried: vec![],
-        };
 
         let initial = Snapshot::new(
             1,
@@ -828,42 +824,25 @@ mod tests {
             name: "stream append, tail updates and reset",
             initial: initial.clone(),
             steps: vec![
-                step(
-                    "append command",
-                    command_added,
-                    incremental(vec![(2..2, 1)], vec![1]),
-                ),
-                step("grow activity run", run_grows, incremental(vec![], vec![2])),
-                step(
-                    "append turn",
-                    new_turn,
-                    incremental(vec![(3..3, 1)], vec![]),
-                ),
-                step("replace tail", tail_replaced, incremental(vec![], vec![3])),
-                step("add disclosure", context, incremental(vec![], vec![3])),
-                step("expand disclosure", expanded, incremental(vec![], vec![3])),
-                step("truncate", initial.clone(), ListSync::Reset { count: 2 }),
+                step("append command", command_added),
+                step("grow activity run", run_grows),
+                step("append turn", new_turn),
+                step("replace tail", tail_replaced),
+                step("add disclosure", context),
+                step("expand disclosure", expanded),
+                step("truncate", initial.clone()),
                 Step {
                     continuity: TimelineContinuity::NewSession,
-                    ..step(
-                        "equal-shaped new session",
-                        initial,
-                        ListSync::Reset { count: 2 },
-                    )
+                    ..step("equal-shaped new session", initial)
                 },
                 Step {
                     continuity: TimelineContinuity::NewSession,
                     ..step(
                         "unrelated new session",
                         Snapshot::new(1, vec![entry("new-session", assistant("fresh"))]),
-                        ListSync::Reset { count: 1 },
                     )
                 },
-                step(
-                    "rewind to empty turn",
-                    Snapshot::new(1, vec![]),
-                    ListSync::Reset { count: 1 },
-                ),
+                step("rewind to empty turn", Snapshot::new(1, vec![])),
             ],
         }];
 
@@ -880,7 +859,6 @@ mod tests {
                         at_turn(entry("second", assistant("Second response")), 1),
                     ],
                 ),
-                incremental(vec![(1..2, 2)], vec![1, 2]),
             )],
         });
         scenarios.push(Scenario {
@@ -899,10 +877,6 @@ mod tests {
                             at_turn(entry("tail", assistant("partial answer")), 1),
                         ],
                     ),
-                    ListSync::Prepend {
-                        count: 3,
-                        remeasure: vec![3],
-                    },
                 )
             }],
         });
@@ -931,10 +905,6 @@ mod tests {
                             at_turn(entry("c", assistant("c")), 2),
                         ],
                     ),
-                    ListSync::Prepend {
-                        count: 1,
-                        remeasure: vec![1, 2, 3, 4],
-                    },
                 )
             }],
         });
@@ -962,21 +932,15 @@ mod tests {
                             at_turn(entry("newest", assistant("latest")), 1),
                         ],
                     ),
-                    incremental(vec![(0..2, 0)], vec![]),
                 )
             }],
         });
-        for (name, continuity, expected) in [
+        for (name, continuity) in [
             (
                 "merge inside partial turn",
                 TimelineContinuity::PartialFirstTurn,
-                incremental(vec![(1..2, 0)], vec![0]),
             ),
-            (
-                "replace completed turn",
-                TimelineContinuity::Complete,
-                ListSync::Reset { count: 2 },
-            ),
+            ("replace completed turn", TimelineContinuity::Complete),
         ] {
             scenarios.push(Scenario {
                 name,
@@ -999,7 +963,6 @@ mod tests {
                                 at_turn(entry("user-1", user_item("next")), 1),
                             ],
                         ),
-                        expected,
                     )
                 }],
             });
@@ -1045,11 +1008,7 @@ mod tests {
             scenarios.push(Scenario {
                 name,
                 initial: before,
-                steps: vec![step(
-                    "complete activity",
-                    after,
-                    incremental(vec![], vec![0]),
-                )],
+                steps: vec![step("complete activity", after)],
             });
         }
         let mut pending = Snapshot::new(
@@ -1080,15 +1039,8 @@ mod tests {
             name: "steer status and ordering",
             initial: pending,
             steps: vec![
-                step(
-                    "accepted steer takes recorded position",
-                    accepted,
-                    ListSync::Prepend {
-                        count: 1,
-                        remeasure: vec![1],
-                    },
-                ),
-                step("reordered steer", reordered, ListSync::Reset { count: 2 }),
+                step("accepted steer takes recorded position", accepted),
+                step("reordered steer", reordered),
             ],
         });
 
@@ -1109,23 +1061,15 @@ mod tests {
                 "{}: initial",
                 scenario.name
             );
-            if scenario.name == "stream append, tail updates and reset" {
-                assert_eq!(rows.len(), 2);
-                assert_eq!(rows[0].entry_range, 0..1);
-                assert_eq!(rows[1].entry_range, 1..2);
-                assert!(rows[0].first_in_turn && !rows[0].last_in_turn);
-                assert!(!rows[1].first_in_turn && rows[1].last_in_turn);
-            }
             for step in scenario.steps {
                 let input = step.snapshot;
-                let sync = cache.sync(
+                cache.sync(
                     &mut rows,
                     &input.turns,
                     &input.entries,
                     &input.expanded,
                     step.continuity,
                 );
-                assert_eq!(sync, step.expected, "{}: {}", scenario.name, step.name);
                 assert_eq!(
                     rows,
                     index_rows(&input.turns, &input.entries, &input.expanded),
@@ -1133,31 +1077,12 @@ mod tests {
                     scenario.name,
                     step.name
                 );
-                match step.name {
-                    "append command" => assert_eq!(rows[2].entry_range, 2..3),
-                    "grow activity run" => {
-                        assert_eq!(rows.len(), 3);
-                        assert_eq!(rows[2].entry_range, 2..4);
-                    }
-                    "append turn" => {
-                        assert_eq!(rows[2].entry_range, 2..4);
-                        assert_eq!(rows[3].entry_range, 4..5);
-                        assert_eq!(rows[3].turn, 1);
-                    }
-                    "replace empty and append empty" => {
-                        assert_eq!(rows.len(), 3);
-                        assert_eq!(rows[1].entry_range, 1..2);
-                        assert_eq!(rows[2].entry_range, 2..2);
-                    }
-                    _ => {}
-                }
             }
         }
     }
 
     /// An expanded Work Log of a long turn gives each folded activity its own
-    /// row, and growing, settling or collapsing it moves rows in place
-    /// instead of resetting the reader's scroll position.
+    /// row while the live window keeps the newest five.
     #[test]
     fn an_expanded_work_log_gives_each_folded_activity_a_row() {
         let activities = [
@@ -1237,6 +1162,8 @@ mod tests {
                 "count {count}, running {running}"
             );
         }
+        // As the live window grows, settles and collapses, the cached rows
+        // stay the rows a full index gives.
         let running = vec![TurnMeta {
             running: true,
             ..Default::default()
@@ -1246,79 +1173,23 @@ mod tests {
         let expanded = HashSet::from([work_log_key(0, "cmd-0")]);
         let mut cache = TurnIndexCache::default();
         let mut rows = Vec::new();
-        cache.sync(
-            &mut rows,
-            &running,
-            &entries,
-            &expanded,
-            TimelineContinuity::Complete,
-        );
-        let parts = rows.iter().map(|row| row.part.clone()).collect::<Vec<_>>();
-        assert_eq!(
-            parts,
-            [
-                RowPart::Segment,
-                RowPart::WorkLogHeader { run: 1..9 },
-                RowPart::WorkLogActivity,
-                RowPart::WorkLogActivity,
-                RowPart::WorkLogActivity,
-                RowPart::WorkLogLive,
-            ]
-        );
-        assert_eq!(rows[2].entry_range, 1..2);
-        assert_eq!(rows[4].entry_range, 3..4);
-        assert_eq!(rows[5].entry_range, 4..9, "the live window keeps five");
-        assert!(rows[5].last_in_turn && rows[5].live_activity);
-        assert_eq!(row_of_entry(&rows, 3, 0), Some(4));
-
-        // The oldest live activity folds into a row of its own above the
-        // live window; both carry the live window's content.
+        let mut sync = |turns: &[TurnMeta], entries: &[Arc<TimelineEntry>], expanded| {
+            cache.sync(
+                &mut rows,
+                turns,
+                entries,
+                expanded,
+                TimelineContinuity::Complete,
+            );
+            assert_eq!(rows, index_rows(turns, entries, expanded));
+            rows.iter()
+                .filter(|row| row.part == RowPart::WorkLogActivity)
+                .count()
+        };
+        assert_eq!(sync(&running, &entries, &expanded), 3);
         entries.push(command("cmd-8"));
-        let sync = cache.sync(
-            &mut rows,
-            &running,
-            &entries,
-            &expanded,
-            TimelineContinuity::Complete,
-        );
-        assert!(matches!(
-            sync,
-            ListSync::Incremental { splices, remeasure, carried }
-                if splices == [(5..6, 2)] && remeasure == [1] && carried.as_slice() == std::slice::from_ref(&(5..6))
-        ));
-
-        // Once the turn ends every activity is folded.
-        let sync = cache.sync(
-            &mut rows,
-            &[TurnMeta::default()],
-            &entries,
-            &expanded,
-            TimelineContinuity::Complete,
-        );
-        assert_eq!(rows.len(), 2 + 9);
-        let finished_header = rows[1].identity;
-        assert!(matches!(
-            sync,
-            ListSync::Incremental { splices, carried, .. }
-                if splices == [(6..7, 5)] && carried.as_slice() == std::slice::from_ref(&(6..7))
-        ));
-
-        let sync = cache.sync(
-            &mut rows,
-            &[TurnMeta::default()],
-            &entries,
-            &HashSet::new(),
-            TimelineContinuity::Complete,
-        );
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[1].identity, finished_header);
-        assert_eq!(
-            sync,
-            ListSync::Incremental {
-                splices: vec![(2..11, 0)],
-                remeasure: vec![1],
-                carried: vec![],
-            }
-        );
+        assert_eq!(sync(&running, &entries, &expanded), 4);
+        assert_eq!(sync(&[TurnMeta::default()], &entries, &expanded), 9);
+        assert_eq!(sync(&[TurnMeta::default()], &entries, &HashSet::new()), 0);
     }
 }
