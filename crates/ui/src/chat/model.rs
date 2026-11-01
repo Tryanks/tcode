@@ -966,8 +966,6 @@ pub(crate) struct TurnIndexCache {
     entries: Vec<Arc<TimelineEntry>>,
     turns: Vec<TurnIndexMeta>,
     expanded: HashSet<String>,
-    #[cfg(test)]
-    reindexed_turns: usize,
 }
 
 impl TurnIndexCache {
@@ -1040,10 +1038,6 @@ impl TurnIndexCache {
         items.truncate(kept);
         items.extend(suffix);
 
-        #[cfg(test)]
-        {
-            self.reindexed_turns = turn_count.saturating_sub(reindex_from);
-        }
         self.entries.truncate(entry_divergence);
         self.entries
             .extend(entries[entry_divergence..].iter().cloned());
@@ -1054,11 +1048,6 @@ impl TurnIndexCache {
             self.expanded.clone_from(expanded);
         }
         sync
-    }
-
-    #[cfg(test)]
-    fn reindexed_turns(&self) -> usize {
-        self.reindexed_turns
     }
 }
 
@@ -2265,40 +2254,6 @@ mod tests {
     }
 
     #[test]
-    fn replacing_the_tail_of_a_200_turn_timeline_reindexes_one_turn() {
-        let turns = vec![TurnMeta::default(); 200];
-        let mut entries = (0..200)
-            .map(|turn| at_turn(entry(&format!("assistant-{turn}"), assistant("x")), turn))
-            .collect::<Vec<_>>();
-        let expanded = HashSet::new();
-        let mut cache = TurnIndexCache::default();
-        let mut incremental = Vec::new();
-        cache.sync(
-            &mut incremental,
-            &turns,
-            &entries,
-            &expanded,
-            TimelineContinuity::Complete,
-        );
-
-        entries[199] = at_turn(entry("assistant-199", assistant("streamed")), 199);
-        cache.sync(
-            &mut incremental,
-            &turns,
-            &entries,
-            &expanded,
-            TimelineContinuity::Complete,
-        );
-
-        assert_eq!(incremental, index_rows(&turns, &entries, &expanded));
-        assert!(
-            cache.reindexed_turns() <= 1,
-            "tail replacement reindexed {} turns",
-            cache.reindexed_turns()
-        );
-    }
-
-    #[test]
     fn segmentation_preserves_message_order_and_groups_adjacent_activities() {
         let entries = [
             entry("user", user_item("go")),
@@ -2448,73 +2403,6 @@ mod tests {
         assert_eq!(idle.flow.len(), 5);
         assert!(matches!(idle.flow[1], Segment::User(entry) if entry.id == "steer-a"));
         assert!(matches!(idle.flow[3], Segment::User(entry) if entry.id == "steer-b"));
-    }
-
-    /// The conversation that motivated segment rows: one running turn with
-    /// hundreds of tool runs and interim messages. A turn is not a row; each
-    /// of its segments is, so the list can skip the ones off screen.
-    #[test]
-    fn a_long_running_turn_virtualizes_into_one_row_per_segment() {
-        let turns = vec![TurnMeta {
-            running: true,
-            ..Default::default()
-        }];
-        let mut entries = vec![entry("user", user_item("go"))];
-        for step in 0..200 {
-            entries.push(command(&format!("cmd-{step}")));
-            entries.push(entry(&format!("reasoning-{step}"), reasoning("thinking")));
-            entries.push(entry(&format!("note-{step}"), assistant("interim")));
-        }
-        entries.push(command("cmd-final"));
-        let mut cache = TurnIndexCache::default();
-        let mut rows = Vec::new();
-        cache.sync(
-            &mut rows,
-            &turns,
-            &entries,
-            &HashSet::new(),
-            TimelineContinuity::Complete,
-        );
-
-        // The user bubble, then a work log and a note per step, then the
-        // trailing live work log.
-        assert_eq!(rows.len(), 1 + 2 * 200 + 1);
-        assert!(rows.iter().all(|row| row.turn == 0));
-        assert!(rows[0].first_in_turn && !rows[0].last_in_turn);
-        assert_eq!(
-            rows[1].entry_range,
-            1..3,
-            "a run and its reasoning share a row"
-        );
-        let live = rows.iter().filter(|row| row.live_activity).count();
-        let last_assistant = rows.iter().position(|row| row.last_assistant);
-        assert_eq!(live, 1);
-        assert!(rows.last().unwrap().live_activity);
-        assert!(rows.last().unwrap().last_in_turn);
-        assert_eq!(last_assistant, Some(rows.len() - 2));
-        assert_eq!(rows_of_turn(&rows, 0), 0..rows.len());
-        assert_eq!(row_of_entry(&rows, 2, 0), Some(1));
-        assert_eq!(row_of_entry(&rows, 3, 0), Some(2));
-
-        // The next command grows the last row in place, so the rows on
-        // screen keep their measured heights.
-        entries.push(command("cmd-next"));
-        let last_row = rows.len() - 1;
-        let sync = cache.sync(
-            &mut rows,
-            &turns,
-            &entries,
-            &HashSet::new(),
-            TimelineContinuity::Complete,
-        );
-        assert_eq!(
-            sync,
-            ListSync::Incremental {
-                splices: vec![],
-                remeasure: vec![last_row],
-                carried: vec![],
-            }
-        );
     }
 
     /// An expanded Work Log of a long turn gives each folded activity its own

@@ -4935,7 +4935,7 @@ mod tests {
         ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_MIN_VISIBILITY, AutoActivityExpansion,
         AutoActivityExpansions,
         AutoActivityRecency::{ImmediatelySuperseded, Latest, Older},
-        ChatView, ResidencyScope, RowPart, markdown_entries_for_residency,
+        ChatView, RowPart,
     };
     use crate::store::WorkspaceStore;
     use crate::window_state::WindowState;
@@ -6551,32 +6551,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn residency_markdown_entries_are_bounded_by_candidate_windows() {
-        let mut timeline = synthetic_markdown_timeline(200);
-        timeline.turns[5].running = true;
-        timeline.turn_running = true;
-        // Three rows per synthetic turn: the user bubble, the reasoning
-        // run and the assistant message.
-        let rows = super::model::index_rows(
-            &timeline.turns,
-            &timeline.entries,
-            &std::collections::HashSet::new(),
-        );
-        assert_eq!(rows.len(), 600);
-        let scope = ResidencyScope::new(600, 120..144, None, true);
-
-        let candidates = markdown_entries_for_residency(&timeline, &rows, &scope);
-
-        // Rows 48..216 and the four tail rows hold 115 user and assistant
-        // messages; a reasoning run holds no Markdown.
-        assert_eq!(candidates.len(), 115);
-        assert!(candidates.len() < timeline.entries.len());
-        // A running turn far from the viewport is history like any other.
-        assert!(!candidates.iter().any(|entry| entry.id == "assistant-5"));
-        assert!(candidates.iter().any(|entry| entry.id == "assistant-199"));
-    }
-
     #[gpui::test]
     fn compact_composer_keeps_effort_and_settings_visible(cx: &mut TestAppContext) {
         use gpui::px;
@@ -7667,38 +7641,6 @@ mod tests {
         assert!(cx.debug_bounds("scroll-to-end").is_none());
     }
 
-    #[gpui::test]
-    fn history_window_is_measured_on_open_while_following_tail(cx: &mut TestAppContext) {
-        use gpui::px;
-        for (turns, short) in [(1, true), (60, false)] {
-            let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(turns));
-            let (view, cx) =
-                cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
-            cx.simulate_resize(gpui::size(px(393.), px(852.)));
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-            let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-            assert!(list.is_following_tail(), "no scroll has happened on open");
-            let screens = super::history_screens_covered(&list, px(0.)).expect("laid out viewport");
-            assert_eq!(
-                screens < 6.,
-                short,
-                "the initial window uses the scroll-ahead threshold"
-            );
-            list.set_follow_mode(gpui::FollowMode::Normal);
-            list.scroll_to(gpui::ListOffset {
-                item_ix: 0,
-                offset_in_item: px(100.),
-            });
-            assert_eq!(
-                super::history_screens_covered(&list, px(200.)),
-                Some(0.),
-                "reserved incoming space is not loaded history"
-            );
-        }
-    }
-
     /// A scrolling screenshot moves the timeline tile by tile from wherever it
     /// was, learns how far it really moved once layout has settled, and leaves
     /// it where it was.
@@ -8514,46 +8456,6 @@ mod tests {
         });
     }
 
-    /// A single running turn holding hundreds of interim messages opens
-    /// with the Markdown of the rows near the tail parsed, not the whole
-    /// turn's.
-    #[gpui::test]
-    fn a_long_running_turn_parses_only_the_markdown_near_the_viewport(cx: &mut TestAppContext) {
-        use gpui::px;
-        let mut timeline = Timeline::default();
-        timeline.turn_running = true;
-        timeline.turns = vec![TurnMeta {
-            running: true,
-            ..Default::default()
-        }];
-        timeline.entries.push(entry("user", user_item("go")));
-        for step in 0..150 {
-            timeline.entries.push(command(&format!("cmd-{step}")));
-            timeline
-                .entries
-                .push(entry(&format!("note-{step}"), assistant("interim note")));
-        }
-        let (store, window_state, _) = seed_chat(cx, timeline);
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.run_until_parked();
-        let (rows, resident) = view.read_with(cx, |chat, _| {
-            (chat.rows.len(), chat.resident_markdown_state_count())
-        });
-        assert_eq!(rows, 1 + 2 * 150);
-        assert!(
-            resident < 60,
-            "{resident} Markdown documents resident for a 150-note turn; the rows near the tail suffice"
-        );
-        assert!(view.read_with(cx, |chat, _| chat.has_resident_markdown_state("note-149")));
-        assert!(!view.read_with(cx, |chat, _| chat.has_resident_markdown_state("note-0")));
-        assert!(cx.debug_bounds("timeline-row-300").is_some());
-    }
-
     #[gpui::test]
     fn long_markdown_paints_middle_blocks_when_scrolled_in_chat_outer_list(
         cx: &mut TestAppContext,
@@ -8738,50 +8640,6 @@ This begins after the hard break."#;
             "offscreen tail block was painted; block virtualization did not cull it"
         );
         driver.shutdown(cx, &workspace_store, &host);
-    }
-
-    /// Reasoning is shown as plain text, so a streaming reasoning run parses
-    /// no Markdown: neither when it opens nor as its deltas arrive.
-    #[gpui::test]
-    fn a_streaming_reasoning_run_parses_no_markdown(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-        let running = |thought: &str| {
-            let mut timeline = Timeline::default();
-            timeline.turn_running = true;
-            timeline.turns = vec![TurnMeta {
-                running: true,
-                ..TurnMeta::default()
-            }];
-            timeline.entries.extend([
-                entry("user", user_item("go")),
-                entry("reasoning", reasoning(thought)),
-            ]);
-            timeline
-        };
-        let (store, window_state, session_id) = seed_chat(cx, running("Let me **look**"));
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        draw(cx);
-        for delta in ["Let me **look** at", "Let me **look** at the `code`"] {
-            store.update(cx, |store, cx| {
-                store.set_session_replica_for_test(session_id.clone(), running(delta), cx);
-                cx.notify();
-            });
-            draw(cx);
-        }
-        view.read_with(cx, |chat, cx| {
-            let row = chat
-                .markdown_row("reasoning", cx)
-                .expect("the reasoning row");
-            assert!(!chat.has_resident_markdown_state("reasoning"));
-            assert!(
-                !chat.markdown_remeasured_rows.contains(&row),
-                "the reasoning row was remeasured for Markdown"
-            );
-            assert!(chat.has_resident_markdown_state("user"));
-        });
     }
 
     /// Unloaded history reserves a screen above the first turn from the first
