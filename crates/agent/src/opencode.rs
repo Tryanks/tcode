@@ -22,7 +22,7 @@ use crate::{
     FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
     ResumeCursor, RewindMode, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, UserInputDelivery, UserInputOption, UserInputQuestion,
+    ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
 };
 
 /// The first release with the server API this adapter speaks; 1.x servers
@@ -145,10 +145,7 @@ async fn run_actor(
     let model_id = setup.model.as_ref().map(ModelRef::id);
     let mut mapper = Mapper::new(
         setup.session_id.clone(),
-        opts.mcp_servers
-            .iter()
-            .map(|server| server.name.clone())
-            .collect(),
+        setup.mcp_servers,
         setup.context_windows,
     );
     mapper.served_model = model_id.clone();
@@ -214,6 +211,7 @@ struct SessionSetup {
     agents: Vec<AgentInfo>,
     commands: Vec<ProviderCommand>,
     context_windows: HashMap<String, u64>,
+    mcp_servers: Vec<String>,
 }
 
 fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, AgentError> {
@@ -306,6 +304,7 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
             .get("/api/model")
             .map(|models| context_windows(&models["data"]))
             .unwrap_or_default(),
+        mcp_servers: mcp_servers(&http),
         session_id,
         http,
         model,
@@ -377,6 +376,17 @@ fn map_agents(agents: &Value) -> Vec<AgentInfo> {
                 id,
             })
         })
+        .collect()
+}
+
+/// The MCP servers configured for the session's location, Tcode's included.
+fn mcp_servers(http: &Http) -> Vec<String> {
+    http.get("/api/mcp")
+        .ok()
+        .and_then(|servers| servers["data"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|server| server["name"].as_str().map(str::to_owned))
         .collect()
 }
 
@@ -979,6 +989,7 @@ impl OpenCodeActor {
                         .await;
                 }
             }
+            "mcp.status.changed" => self.mapper.mcp_servers = mcp_servers(&self.http),
             "agent.updated" => {
                 if let Ok(agents) = self.http.get("/api/agent") {
                     self.agents = map_agents(&agents["data"]);
@@ -1354,7 +1365,7 @@ struct ToolCall {
 
 struct Mapper {
     root: String,
-    /// Tcode's own MCP servers, whose tools OpenCode names `<server>_<tool>`.
+    /// The session's MCP servers, whose tools OpenCode names `<server>_<tool>`.
     mcp_servers: Vec<String>,
     /// Child session → the subagent call that runs it, once known.
     children: HashMap<String, Option<String>>,
@@ -1585,7 +1596,7 @@ impl Mapper {
             }
             "session.tool.input.started" => {
                 let item_id = tool_item_id(message_id, data);
-                let name = data["name"].as_str().unwrap_or("tool").to_owned();
+                let name = self.tool_name(data["name"].as_str().unwrap_or("tool"));
                 self.tools.insert(
                     item_id.clone(),
                     ToolCall {
@@ -1757,9 +1768,11 @@ impl Mapper {
             // The todo list is the session's plan, not a timeline row.
             return None;
         }
-        let content = result.map(|result| &result["content"]);
         let metadata = result.map(|result| &result["metadata"]);
-        let text = content.and_then(content_text);
+        let ToolOutput { text, images } = result
+            .map(|result| ToolOutput::from_content(&result["content"]))
+            .unwrap_or_default();
+        let text = (!text.is_empty()).then_some(text);
         let input = &tool.input;
         let content = match tool.name.as_str() {
             "shell" => ItemContent::CommandExecution {
@@ -1793,14 +1806,7 @@ impl Mapper {
                 effort: None,
             },
             name => ItemContent::ToolCall {
-                image_reads: match (status, content) {
-                    (ItemStatus::Completed, Some(content))
-                        if crate::image_reads::is_read_tool(self.unprefixed(name)) =>
-                    {
-                        image_reads(content)
-                    }
-                    _ => Vec::new(),
-                },
+                image_reads: images,
                 name: name.to_owned(),
                 input: input.clone(),
                 output: if status == ItemStatus::Completed {
@@ -1818,12 +1824,32 @@ impl Mapper {
         })
     }
 
-    /// A tool of one of Tcode's own MCP servers by its bare tool name.
-    fn unprefixed<'a>(&self, name: &'a str) -> &'a str {
+    /// OpenCode names an MCP tool `<server>_<tool>`, which cannot be split
+    /// again (server names contain underscores); the session's servers are
+    /// known here, so the call is named `server/tool`, the spelling
+    /// [`crate::ToolName`] reads, and Tcode's own tools stay recognizable.
+    fn tool_name(&self, wire: &str) -> String {
         self.mcp_servers
             .iter()
-            .find_map(|server| name.strip_prefix(server.as_str())?.strip_prefix('_'))
-            .unwrap_or(name)
+            .filter_map(|server| {
+                let namespace: String = server
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                let tool = wire.strip_prefix(&namespace)?.strip_prefix('_')?;
+                (!tool.is_empty()).then_some((namespace.len(), server, tool))
+            })
+            .max_by_key(|(length, _, _)| *length)
+            .map_or_else(
+                || wire.to_owned(),
+                |(_, server, tool)| format!("{server}/{tool}"),
+            )
     }
 
     fn approval_kind(&self, data: &Value) -> ApprovalKind {
@@ -1918,38 +1944,6 @@ fn text_item(
 /// A tool call id is unique only within its assistant message.
 fn tool_item_id(message_id: &str, data: &Value) -> String {
     format!("{message_id}:{}", data["id"].as_str().unwrap_or_default())
-}
-
-/// The model-facing text of a tool result, one block per text part.
-fn content_text(content: &Value) -> Option<String> {
-    let parts: Vec<&str> = content
-        .as_array()?
-        .iter()
-        .filter(|part| part["type"] == "text")
-        .filter_map(|part| part["text"].as_str())
-        .map(|text| text.trim_end_matches('\n'))
-        .collect();
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
-}
-
-fn image_reads(content: &Value) -> Vec<Attachment> {
-    content
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|part| part["type"] == "file")
-        .filter_map(|part| {
-            let mime = part["mime"].as_str()?;
-            let data = part["uri"]
-                .as_str()?
-                .strip_prefix(&format!("data:{mime};base64,"))?;
-            (mime.starts_with("image/") && !data.is_empty()).then(|| Attachment {
-                media_type: mime.into(),
-                data_base64: data.into(),
-                source_path: None,
-            })
-        })
-        .collect()
 }
 
 /// The subagent's reply inside the `<subagent …>` envelope OpenCode hands the
@@ -3006,7 +3000,7 @@ cat > /dev/null
                     json!({"type": "item_updated", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "", "exit_code": null, "status": "in_progress"}}),
                     json!({"type": "delta", "item_id": id, "kind": "command_output", "text": "one\n"}),
                     json!({"type": "delta", "item_id": id, "kind": "command_output", "text": "two\n"}),
-                    json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "one\ntwo", "exit_code": 0, "status": "completed"}}),
+                    json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "echo one; sleep 6; echo two", "output": "one\ntwo\n", "exit_code": 0, "status": "completed"}}),
                     json!({"type": "item_started", "id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "content": {"kind": "assistant_message", "text": ""}}),
                     json!({"type": "delta", "item_id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "kind": "assistant_text", "text": "DONE"}),
                     json!({"type": "item_completed", "id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "content": {"kind": "assistant_message", "text": "DONE"}}),
@@ -3119,6 +3113,37 @@ cat > /dev/null
                     json!({"type": "item_updated", "id": read, "content": {"kind": "tool_call", "name": "read", "input": {"path": "blue.png"}, "output": null, "status": "in_progress"}}),
                     json!({"type": "item_completed", "id": read, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="}], "name": "read", "input": {"path": "blue.png"}, "output": "Image read successfully", "status": "completed"}}),
                 ]
+            );
+            shut_down(handle).await;
+        });
+    }
+
+    #[test]
+    fn an_mcp_call_names_its_server_and_tool_and_carries_its_text_and_images() {
+        smol::block_on(async {
+            let fixture = fixture(
+                script("mcp_turn.jsonl", &[("session.inbox.enqueued", PROMPT, 1)]),
+                vec![
+                    (
+                        "GET /api/mcp",
+                        200,
+                        r#"{"location":{"directory":"/work/project"},"data":[{"name":"tcode_probe","status":{"status":"connected"}}]}"#.into(),
+                    ),
+                    (PROMPT, 200, inbox("msg_198d2d16b001pV9qJ5Qo7JvzVe")),
+                ],
+            );
+            let handle = open(fixture.options.clone()).await;
+            send(&handle, turn("Call echo_upper with hello")).await;
+            let call = "msg_198d2e71d001VpxRG5X5z2lMvh:chatcmpl-tool-a75c2f7c0101d202";
+            let completed = until(&handle, |event| {
+                matches!(event, AgentEvent::ItemCompleted(ThreadItem { id, .. }) if id == call)
+            })
+            .await;
+            assert_eq!(
+                completed.last(),
+                Some(
+                    &json!({"type": "item_completed", "id": call, "content": {"kind": "tool_call", "image_reads": [{"media_type": "image/png", "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGP4z8AARwzEcQCukw/x0F8jngAAAABJRU5ErkJggg=="}], "name": "tcode_probe/echo_upper", "input": {"text": "hello"}, "output": "HELLO", "status": "completed"}})
+                )
             );
             shut_down(handle).await;
         });
