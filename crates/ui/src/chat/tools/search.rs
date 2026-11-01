@@ -190,7 +190,7 @@ impl ToolView for Search<'_> {
             }
         };
         let count = (call.status == agent::ItemStatus::Completed)
-            .then(|| call.output)
+            .then_some(call.output)
             .flatten()
             .map(|output| self.results(output).0.len())
             .filter(|count| *count > 0)
