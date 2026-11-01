@@ -2909,6 +2909,8 @@ tools:
   copy_plan: "Copy plan"
   code_lines: "Show code · %{count} lines"
   hide_code: "Hide code"
+  show_raw: "Show raw output"
+  hide_raw: "Hide raw output"
   copy_code: "Copy code"
   elements_one: "1 element"
   elements: "%{count} elements"

@@ -610,11 +610,18 @@ impl ToolView for Desktop<'_> {
         let tree = |nodes: &[Node], count: String, ctx: &mut ToolCtx<'_, '_>| {
             outline::section_of(call, nodes, &crate::tr!("tools.ui_tree"), count, ctx)
         };
-        let rest = |rest: &str, ctx: &mut ToolCtx<'_, '_>| {
-            (!rest.is_empty()).then(|| {
-                let text = bounded_text(call.entry, "output", rest, true, Bound::HEAD, ctx);
-                section(&crate::tr!("tools.output"), text, ctx.app()).into_any_element()
-            })
+        // The output a structured view was read from stays one click away;
+        // with nothing read from it, it shows open.
+        let raw = |structured: bool, ctx: &mut ToolCtx<'_, '_>| {
+            let raw = text.trim();
+            if raw.is_empty() {
+                None
+            } else if structured {
+                Some(super::raw_section(call, raw, ctx))
+            } else {
+                let body = bounded_text(call.entry, "output", raw, true, Bound::HEAD, ctx);
+                Some(section(&crate::tr!("tools.output"), body, ctx.app()).into_any_element())
+            }
         };
         let sections: Vec<AnyElement> = match &self.tool {
             Tool::FindRoots(_) => {
@@ -627,49 +634,53 @@ impl ToolView for Desktop<'_> {
                     super::counted("tools.windows", n),
                     ctx,
                 );
-                let rest = (nodes.is_empty()).then(|| rest(text.trim(), ctx)).flatten();
-                list.into_iter().chain(rest).collect()
+                let structured = list.is_some();
+                list.into_iter().chain(raw(structured, ctx)).collect()
             }
             Tool::Observe(_) | Tool::Expand(_) => {
-                let split = outline::split(&text);
-                let n = count(&text, "elements").unwrap_or(split.nodes.len());
-                let tree = tree(&split.nodes, super::counted("tools.elements", n), ctx);
+                let nodes = outline::nodes(&text);
+                let n = count(&text, "elements").unwrap_or(nodes.len());
+                let tree = tree(&nodes, super::counted("tools.elements", n), ctx);
+                let structured = tree.is_some();
                 images
                     .into_iter()
                     .chain(tree)
-                    .chain(rest(&split.rest, ctx))
+                    .chain(raw(structured, ctx))
                     .collect()
             }
             Tool::Search(_) => {
-                let split = outline::split(&text);
-                let n = count(&text, "matches").unwrap_or(split.nodes.len());
-                let tree = tree(&split.nodes, super::counted("tools.matches", n), ctx);
-                tree.into_iter().chain(rest(&split.rest, ctx)).collect()
+                let nodes = outline::nodes(&text);
+                let n = count(&text, "matches").unwrap_or(nodes.len());
+                let tree = tree(&nodes, super::counted("tools.matches", n), ctx);
+                let structured = tree.is_some();
+                tree.into_iter().chain(raw(structured, ctx)).collect()
             }
             Tool::Act(act) => {
                 let steps = self.steps(call, act, ctx);
                 let after = report(&text).map_or(text.as_str(), |(_, rest)| rest);
-                let split = outline::split(after);
-                let label = super::counted("tools.elements", split.nodes.len());
-                let tree = tree(&split.nodes, label, ctx);
+                let nodes = outline::nodes(after);
+                let label = super::counted("tools.elements", nodes.len());
+                let tree = tree(&nodes, label, ctx);
                 std::iter::once(steps)
                     .chain(images)
                     .chain(tree)
-                    .chain(rest(&split.rest, ctx))
+                    .chain(raw(true, ctx))
                     .collect()
             }
             Tool::Wait(_) => {
                 let after = report(&text).map_or(text.as_str(), |(_, rest)| rest);
-                let split = outline::split(after);
-                let label = super::counted("tools.elements", split.nodes.len());
-                let tree = tree(&split.nodes, label, ctx);
-                tree.into_iter().chain(rest(&split.rest, ctx)).collect()
+                let nodes = outline::nodes(after);
+                let label = super::counted("tools.elements", nodes.len());
+                let tree = tree(&nodes, label, ctx);
+                let structured = tree.is_some();
+                tree.into_iter().chain(raw(structured, ctx)).collect()
             }
             Tool::ReadText(_) => {
                 let page = text
                     .split_once("\n---\n")
                     .map_or(text.as_str(), |(_, page)| page);
-                rest(page, ctx).into_iter().collect()
+                let body = bounded_text(call.entry, "output", page, true, Bound::HEAD, ctx);
+                vec![section(&crate::tr!("tools.output"), body, ctx.app()).into_any_element()]
             }
             Tool::Inspect(_) => output_section(call, Bound::HEAD, ctx).into_iter().collect(),
         };

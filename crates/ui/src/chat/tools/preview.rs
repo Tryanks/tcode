@@ -276,7 +276,14 @@ impl ToolView for Preview<'_> {
                     let text = bounded_text(call.entry, "visible", text, false, Bound::HEAD, ctx);
                     section(&crate::tr!("tools.visible_text"), text, ctx.app()).into_any_element()
                 });
-                super::body(elements.into_iter().chain(visible).chain(control))
+                let raw = super::raw_section(call, text.trim(), ctx);
+                super::body(
+                    elements
+                        .into_iter()
+                        .chain(visible)
+                        .chain([raw])
+                        .chain(control),
+                )
             }
             Tool::Evaluate(js) => {
                 let code = code_section(

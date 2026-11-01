@@ -2902,6 +2902,8 @@ tools:
   copy_plan: "复制计划"
   code_lines: "显示代码 · %{count} 行"
   hide_code: "隐藏代码"
+  show_raw: "显示原始输出"
+  hide_raw: "隐藏原始输出"
   copy_code: "复制代码"
   elements_one: "1 个元素"
   elements: "%{count} 个元素"
