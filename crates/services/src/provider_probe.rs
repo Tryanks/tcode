@@ -7,7 +7,9 @@ use tcode_core::provider_status::{
     AuthStatus, ProviderAuth, ProviderProbeDiagnostic, ProviderSnapshot, ProviderStatusKind,
 };
 
-use crate::provider_auth::{parse_aggregator_auth, parse_claude_auth, parse_codex_auth};
+use crate::provider_auth::{
+    parse_aggregator_auth, parse_claude_auth, parse_codex_auth, parse_opencode_auth,
+};
 
 /// The bare command name for a provider (fallback when no path resolves).
 pub fn default_program(provider: ProviderKind) -> String {
@@ -131,18 +133,16 @@ pub async fn probe_provider(
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_aggregator_auth)
         }
-        ProviderKind::OpenCode => {
-            let xdg_data = env
-                .iter()
-                .rev()
-                .find(|(key, _)| key == "XDG_DATA_HOME")
-                .map(|(_, value)| PathBuf::from(value))
-                .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
-                .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")));
-            let path = xdg_data.map(|home| home.join("opencode/auth.json"));
-            let json = path.and_then(|path| std::fs::read_to_string(path).ok());
-            json.as_deref().and_then(parse_aggregator_auth)
-        }
+        // OpenCode 2.x keeps credentials in its database; a private server
+        // lists them without starting the shared background service.
+        ProviderKind::OpenCode => run_capture_env(
+            &program,
+            &["auth", "list", "--standalone", "--format", "json"],
+            &env,
+        )
+        .await
+        .as_deref()
+        .and_then(parse_opencode_auth),
         ProviderKind::Cursor => run_capture_env(&program, &["status", "--format", "json"], &env)
             .await
             .as_deref()
