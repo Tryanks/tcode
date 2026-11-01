@@ -13,6 +13,7 @@
 pub(in crate::chat) mod diff;
 pub(in crate::chat) mod generic;
 pub(in crate::chat) mod read;
+pub(in crate::chat) mod search;
 pub(in crate::chat) mod shell;
 pub(in crate::chat) mod window;
 
@@ -66,12 +67,15 @@ impl<'a> Call<'a> {
         })
     }
 
-    /// Whether the tool's own name is one of `names`, in any case: harnesses
-    /// spell the same tool `Read` and `read`.
+    /// Whether the call is to the harness's own tool by one of `names`, in
+    /// any case: harnesses spell the same tool `Read` and `read`. An MCP
+    /// server's tool of the same name (tcode_control's `search` and `read`)
+    /// is that server's, not the family's.
     pub(in crate::chat) fn named(&self, names: &[&str]) -> bool {
-        names
-            .iter()
-            .any(|name| self.name.tool.eq_ignore_ascii_case(name))
+        self.name.server.is_none()
+            && names
+                .iter()
+                .any(|name| self.name.tool.eq_ignore_ascii_case(name))
     }
 
     /// The input as a view's typed fields, borrowing its strings; `None`
@@ -105,7 +109,7 @@ type Matcher = for<'a> fn(&Call<'a>) -> Option<Box<dyn ToolView + 'a>>;
 
 /// Every family that claims calls by name and shape, in the order they are
 /// asked. The generic window takes whatever none accepts.
-const FAMILIES: &[Matcher] = &[shell::tool_call, read::tool_call];
+const FAMILIES: &[Matcher] = &[shell::tool_call, read::tool_call, search::tool_call];
 
 pub(in crate::chat) fn view<'a>(call: &Call<'a>) -> Box<dyn ToolView + 'a> {
     FAMILIES

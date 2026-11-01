@@ -657,3 +657,83 @@ fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
     assert!(shows(cx, &format!("tool-text-{pi}-content")));
     thread.shutdown(cx);
 }
+
+/// A search reads as the pattern, where it looked and how much it found,
+/// and opens on what it found: matches by file and line, paths, a
+/// listing's names, each opening its file. The one recorded search is a
+/// Claude Grep its harness refused; no recorded thread holds a search that
+/// returned results, so the others are calls in the shapes OpenCode's glob
+/// and grep and pi's grep and ls return.
+#[gpui::test]
+fn a_search_reads_as_its_pattern_and_opens_on_what_it_found(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/search.jsonl"), 1_024.);
+    let refused = "toolu_013SmuYY5FGMfM9pME2Nkb6n:toolu_01Cx6kFav4s5Rsv4vhYkPark";
+    let found = |verb: &str, argument: &str, detail: Option<&str>, count: Option<&str>| Read {
+        detail: detail.map(str::to_owned),
+        chips: count
+            .map(|count| vec![Chip::Count(count.to_owned())])
+            .unwrap_or_default(),
+        ..read(verb, None, Some(argument), None)
+    };
+    for (id, expected) in [
+        (
+            refused,
+            Read {
+                detail: Some(
+                    ".claude/worktrees/agent-ab2974c16489ddc88/crates/app/src/pages/nodes/chains"
+                        .to_owned(),
+                ),
+                ..read(
+                    "Searched",
+                    None,
+                    Some("CHAINS_TAB|DEFAULT_GROUP_ID|tab\\.set|Import|import_"),
+                    Some(
+                        "<tool_use_error>Error: No such tool available: Grep. Grep is not \
+                         available in this session — search file contents with `grep` via the \
+                         Bash tool instead.</tool_use_error>",
+                    ),
+                )
+            },
+        ),
+        (
+            "shape-opencode-glob",
+            found("Found", "**/*.rs", Some("crates/term"), Some("3 results")),
+        ),
+        (
+            "shape-opencode-grep",
+            found(
+                "Searched",
+                "fn new",
+                Some("crates/term/src · *.rs"),
+                Some("3 results"),
+            ),
+        ),
+        (
+            "shape-pi-grep",
+            found("Searched", "TODO", Some("src"), Some("20 results")),
+        ),
+        ("shape-pi-ls", found("Listed", ".", None, Some("4 results"))),
+    ] {
+        assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+
+    thread.open_work_log(refused, cx);
+    assert!(shows(cx, &format!("tool-error-{refused}")));
+    click(cx, "activity-row-shape-opencode-grep");
+    for index in 0..3 {
+        assert!(shows(
+            cx,
+            &format!("tool-result-shape-opencode-grep-{index}")
+        ));
+    }
+    click(cx, "activity-row-shape-opencode-grep");
+    // Twenty matches show their first twelve until asked for the rest.
+    click(cx, "activity-row-shape-pi-grep");
+    assert!(shows(cx, "tool-result-shape-pi-grep-11"));
+    assert!(!shows(cx, "tool-result-shape-pi-grep-12"));
+    click(cx, "tool-results-shape-pi-grep-more");
+    assert!(shows(cx, "tool-result-shape-pi-grep-12"));
+    thread.shutdown(cx);
+}
