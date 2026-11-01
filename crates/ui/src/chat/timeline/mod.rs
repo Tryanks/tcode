@@ -1,6 +1,7 @@
 use super::*;
 
 mod expansion;
+mod glide;
 mod list;
 mod render;
 mod residency;
@@ -9,6 +10,8 @@ pub(super) mod rows;
 pub(super) use expansion::{
     AutoActivityExpansions, AutoActivityRecency, auto_activity_snapshot_keys,
 };
+pub(super) use glide::RowArrival;
+use glide::{Arrival, Glide, RowGlide};
 pub(super) use render::{ActivityRow, FullOutput};
 pub(super) use residency::{
     PendingMarkdownBuild, tail_row_window, transcript_selection, viewport_row_window,
@@ -134,6 +137,8 @@ impl ChatView {
                 following,
                 origin: list.logical_scroll_top(),
             });
+            // Rows still rising settle at once: a tile shows each row whole.
+            self.arrivals.clear();
             self.reservation_scroll_back = None;
             cx.notify();
         }
@@ -220,6 +225,23 @@ impl ChatView {
         } else {
             TimelineContinuity::Complete
         };
+        let old_len = self.rows.len();
+        let old_last_turn = self.rows.last().map(|row| row.turn);
+        let folds = self
+            .workspace_store
+            .read(cx)
+            .timeline_folds_for(self.session_id.as_deref());
+        // Rows arrive live only from records streamed into the timeline the
+        // reader is looking at. A fold (opening the thread, catching up on
+        // what it missed, a page of history) brings rows that were already
+        // there; the store holds the timeline still while it catches up, and
+        // folds once it has.
+        let live = !session_changed
+            && folds == self.timeline_folds
+            && !std::mem::take(&mut self.rows_regrouped)
+            && self.capture.is_none()
+            && !cx.reduce_motion();
+        self.timeline_folds = folds;
         let (list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
@@ -257,6 +279,7 @@ impl ChatView {
             .as_deref()
             .and_then(|session_id| self.workspace_store.read(cx).pending_chat_turn(session_id));
         if session_changed {
+            self.arrivals.clear();
             self.md_states.clear();
             self.selection
                 .update(cx, |selection, cx| selection.clear(cx));
@@ -332,6 +355,11 @@ impl ChatView {
                 let carried_offset = (!self.list_state.is_following_tail()
                     && carried.iter().any(|range| range.contains(&anchor.item_ix)))
                 .then_some(anchor.offset_in_item);
+                let arrived = if live {
+                    glide::arrived_rows(&splices, &carried, old_len)
+                } else {
+                    Vec::new()
+                };
                 for (range, count) in splices.into_iter().rev() {
                     // The row above a splice changes its padding (the former
                     // last row hands its edge padding to the new one); its
@@ -356,6 +384,7 @@ impl ChatView {
                     });
                     self.carried_anchor = true;
                 }
+                self.stamp_arrivals(arrived, old_last_turn, cx);
             }
         }
 

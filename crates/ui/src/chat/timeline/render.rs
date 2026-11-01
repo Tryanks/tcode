@@ -11,6 +11,13 @@ pub(in crate::chat) enum FullOutput {
     Failed(String),
 }
 
+/// A timeline row as drawn: what its segment shows, and on the turn's last
+/// row the turn's trailer below it, with whether a gap separates the two.
+pub(in crate::chat) struct RenderedRow {
+    pub(in crate::chat) content: AnyElement,
+    pub(in crate::chat) trailer: Option<(gpui::Div, bool)>,
+}
+
 /// How one activity row is drawn where it stands.
 pub(in crate::chat) struct ActivityRow {
     pub(in crate::chat) compact: bool,
@@ -35,7 +42,7 @@ impl ChatView {
         args: RowRenderArgs<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> RenderedRow {
         let (row, turn, cwd, own, entries, pinned) = args;
         let index = row.turn;
         let mut column = v_flex().w_full().gap(px(SEGMENT_GAP));
@@ -341,10 +348,16 @@ impl ChatView {
                 }
             }
         }
+        let content = column.into_any_element();
 
         if !row.last_in_turn {
-            return column.into_any_element();
+            return RenderedRow {
+                content,
+                trailer: None,
+            };
         }
+        let mut column = v_flex().w_full().gap(px(SEGMENT_GAP));
+        let mut trailing = false;
 
         // Changed-file evidence is the turn's settled summary: while the turn
         // still runs, the live per-file rows inside the work log carry this
@@ -374,6 +387,7 @@ impl ChatView {
                     })
                     .collect(),
             };
+            trailing = true;
             column = column.child(components::changed_files::changed_files(
                 index,
                 cwd,
@@ -395,6 +409,7 @@ impl ChatView {
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
                     .map(str::to_owned);
+            trailing = true;
             column = column.child(
                 div()
                     .id(("working-status", index))
@@ -411,6 +426,7 @@ impl ChatView {
                 .workspace_store
                 .read(cx)
                 .chat_requested_model_for(self.session_id.as_deref());
+            trailing = true;
             column = column.child(components::indicator::finished_turn_time(
                 ts,
                 turn,
@@ -424,6 +440,7 @@ impl ChatView {
         // order holds without making their request-time position look
         // model-visible.
         for entry in segment_entries(entries, turn.running).pending_steers {
+            trailing = true;
             column = column.child(self.compose_user_entry(
                 (index, entry, cwd, pinned.0 == Some(entry.id.as_str())),
                 window,
@@ -431,7 +448,10 @@ impl ChatView {
             ));
         }
 
-        column.into_any_element()
+        RenderedRow {
+            content,
+            trailer: trailing.then_some((column, !segments.is_empty())),
+        }
     }
 
     pub(in crate::chat) fn on_rewind_turn(

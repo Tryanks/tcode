@@ -25,6 +25,8 @@ impl ChatView {
 
         let item_count = self.rows.len();
         let item_cwd = cwd.to_path_buf();
+        // Read before the list lays out, which holds its state.
+        let following = self.list_state.is_following_tail();
         list(
             self.list_state.clone(),
             cx.processor(move |this, index: usize, window, cx| {
@@ -80,6 +82,55 @@ impl ChatView {
                 let continued = this.rows.get(index + 1).is_some_and(|next| {
                     matches!(next.part, RowPart::WorkLogActivity | RowPart::WorkLogLive)
                 });
+                let now = cx.background_executor().now();
+                let moving = !cx.reduce_motion() && this.capture.is_none();
+                let arrival = |row: &TimelineRow| {
+                    let arrival = this.arrivals.get(&row.identity)?;
+                    (moving && !arrival.settled(now)).then(|| (*arrival, arrival.progress(now)))
+                };
+                let entering = arrival(&row);
+                // The row below took the end's padding from this one; this
+                // one gives it up as that one rises.
+                let below = this
+                    .rows
+                    .get(index + 1)
+                    .and_then(arrival)
+                    .filter(|(next, _)| next.arrival == Arrival::Appended)
+                    .map(|(_, progress)| progress);
+                if entering.is_some() || below.is_some() {
+                    window.request_animation_frame();
+                }
+                let glide = match entering {
+                    Some((_, progress)) => Glide::Enter(progress),
+                    None if moving && turn.running && index + 1 == item_count && following => {
+                        Glide::Tail {
+                            content: row.content,
+                        }
+                    }
+                    None => Glide::Rest,
+                };
+                // What arrives in place of a row, or between two, opens its
+                // own room; what arrives at the end takes the end's padding
+                // from the row above.
+                let opening = entering
+                    .filter(|(arrival, _)| arrival.arrival != Arrival::Appended)
+                    .map_or(1., |(_, progress)| progress);
+                let padding = below.unwrap_or(1.) * opening;
+                // A row that opens its turn brings the turn's trailer with it;
+                // otherwise the trailer was on screen, and moves down to it.
+                let trailer = rendered.trailer.map(|(trailer, gap)| {
+                    let (trailer_glide, gap_scale) = match entering {
+                        Some((arrival, progress)) if arrival.brings_turn => {
+                            (Glide::Enter(progress), 1.)
+                        }
+                        _ => (Glide::Rest, opening),
+                    };
+                    RowGlide::new(
+                        ("timeline-trailer-glide", row.identity),
+                        trailer_glide,
+                        trailer.when(gap, |trailer| trailer.pt(px(SEGMENT_GAP) * gap_scale)),
+                    )
+                });
                 let painted = this.painted_rows.clone();
                 v_flex()
                     .id(("timeline-row", row.identity))
@@ -103,17 +154,16 @@ impl ChatView {
                             .bg(cx.theme().list_active)
                     })
                     .when(index == 0, |item| item.pt(px(TIMELINE_EDGE_PADDING)))
-                    .map(|item| {
-                        if index + 1 == item_count {
-                            item.pb(px(TIMELINE_EDGE_PADDING) + this.phone_strip_height)
+                    .pb(padding
+                        * if index + 1 == item_count {
+                            px(TIMELINE_EDGE_PADDING) + this.phone_strip_height
                         } else if row.last_in_turn {
-                            item.pb(px(TURN_GAP))
+                            px(TURN_GAP)
                         } else if continued {
-                            item.pb_1()
+                            gpui::rems(0.25).to_pixels(window.rem_size())
                         } else {
-                            item.pb(px(SEGMENT_GAP))
-                        }
-                    })
+                            px(SEGMENT_GAP)
+                        })
                     // `min_w_0`: a turn holds nowrap content (diff rows, command
                     // output). Without it this flex item grows to that content
                     // and the column runs past the page inset instead of
@@ -158,7 +208,14 @@ impl ChatView {
                             .w_full()
                             .min_w_0()
                             .max_w(px(CONTENT_MAX_WIDTH))
-                            .child(rendered),
+                            .flex()
+                            .flex_col()
+                            .child(RowGlide::new(
+                                ("timeline-row-glide", row.identity),
+                                glide,
+                                rendered.content,
+                            ))
+                            .children(trailer),
                     )
                     .into_any_element()
             }),
