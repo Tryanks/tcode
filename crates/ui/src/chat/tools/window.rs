@@ -76,8 +76,14 @@ impl Argument {
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::chat) enum Chip {
     Count(String),
-    Lines { added: u32, deleted: u32 },
+    Lines {
+        added: u32,
+        deleted: u32,
+    },
     Exit(i32),
+    /// An outcome the call itself reports short of success, in its words: a
+    /// wait that timed out, an action that did not work.
+    Warning(String),
 }
 
 /// The header of one window.
@@ -90,6 +96,9 @@ pub(in crate::chat) struct Header {
     /// A name the verb applies to, in the verb's weight: a tool the window
     /// knows only by name.
     pub(in crate::chat) subject: Option<SharedString>,
+    /// The call's own words for what it does, verbatim, in the verb's weight
+    /// and in its place: the title a computer-use script was given.
+    pub(in crate::chat) title: Option<SharedString>,
     pub(in crate::chat) argument: Option<Argument>,
     pub(in crate::chat) chips: Vec<Chip>,
     /// The line a failure is told by, verbatim. `None` takes the output's
@@ -110,6 +119,7 @@ impl Header {
             verb: Some(verb),
             shimmer: false,
             subject: None,
+            title: None,
             argument: None,
             chips: Vec::new(),
             error: None,
@@ -135,6 +145,13 @@ impl Header {
         self
     }
 
+    /// The call's own title, which stands for the verb.
+    pub(in crate::chat) fn title(mut self, title: impl Into<SharedString>) -> Self {
+        self.verb = None;
+        self.title = Some(title.into());
+        self
+    }
+
     pub(in crate::chat) fn argument(mut self, argument: Option<Argument>) -> Self {
         self.argument = argument;
         self
@@ -155,6 +172,7 @@ impl Header {
         let mut words: Vec<String> = Vec::new();
         words.extend(self.verb.map(|verb| verb.text(status).to_string()));
         words.extend(self.subject.as_ref().map(|subject| subject.to_string()));
+        words.extend(self.title.as_ref().map(|title| title.to_string()));
         words.extend(self.argument.as_ref().map(|argument| argument.text.clone()));
         words.join(" ")
     }
@@ -378,6 +396,7 @@ fn header_row(
         verb,
         shimmer,
         subject,
+        title,
         argument,
         chips,
         ..
@@ -431,6 +450,18 @@ fn header_row(
                             .font_medium()
                             .text_color(theme.foreground)
                             .child(crate::widgets::fade_text(subject)),
+                    )
+                })
+                .when_some(title, |row, title| {
+                    let key = key.to_owned();
+                    row.child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .font_medium()
+                            .text_color(theme.foreground)
+                            .debug_selector(move || format!("tool-title-{key}"))
+                            .child(crate::widgets::fade_text(title)),
                     )
                 })
                 .when_some(argument, |row, argument| {
@@ -520,6 +551,10 @@ fn chip_element(key: &str, chip: Chip, cx: &App) -> AnyElement {
         )
         .font_family(mono)
         .into_any_element(),
+        Chip::Warning(text) => {
+            crate::material::semantic_chip(text, theme.warning.opacity(0.12), theme.warning, cx)
+                .into_any_element()
+        }
     };
     div()
         .flex_none()

@@ -175,13 +175,13 @@ struct ToolShell<'a> {
 /// A tool shell's result as its harness reports it: some put a header of
 /// `Key: value` lines (`Process exited with code 0`, `Wall time: …`) before
 /// an `Output:` line, then what the command printed.
-struct Report<'o> {
-    exit_code: Option<i32>,
-    wall_ms: Option<u64>,
-    output: &'o str,
+pub(in crate::chat) struct Report<'o> {
+    pub(in crate::chat) exit_code: Option<i32>,
+    pub(in crate::chat) wall_ms: Option<u64>,
+    pub(in crate::chat) output: &'o str,
 }
 
-fn report(output: &str) -> Report<'_> {
+pub(in crate::chat) fn report(output: &str) -> Report<'_> {
     let mut report = Report {
         exit_code: None,
         wall_ms: None,
