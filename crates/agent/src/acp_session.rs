@@ -36,7 +36,8 @@ use crate::{
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
     McpRegistration, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
     ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, TurnStatus, UserInputDelivery, UserInputQuestion,
+    SessionOptions, ThreadItem, TokenUsage, ToolOutput, TurnStatus, UserInputDelivery,
+    UserInputQuestion,
 };
 
 /// Option-descriptor ids. The composer renders an ACP agent's own
@@ -1757,6 +1758,9 @@ fn descriptor_id(descriptor: &OptionDescriptor) -> &str {
 /// merged state lives here and every update re-renders the whole item.
 #[derive(Debug, Clone, Default)]
 struct ToolState {
+    /// The tool's own name when the wire carries one; `title` is the agent's
+    /// human description of the call.
+    name: Option<String>,
     title: String,
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
@@ -1995,6 +1999,7 @@ impl State {
                 let mut events = self.flush_text();
                 let id = call.tool_call_id.0.to_string();
                 let tool = ToolState {
+                    name: tool_name(call.meta.as_ref(), call.raw_input.as_ref()),
                     title: call.title,
                     kind: call.kind,
                     status: call.status,
@@ -2042,6 +2047,9 @@ impl State {
                 }
                 if let Some(raw_output) = fields.raw_output {
                     entry.raw_output = Some(raw_output);
+                }
+                if let Some(name) = tool_name(update.meta.as_ref(), entry.raw_input.as_ref()) {
+                    entry.name = Some(name);
                 }
                 let announced = std::mem::replace(&mut entry.announced, true);
                 let status = entry.status;
@@ -2147,6 +2155,9 @@ impl State {
         for content in &tool.content {
             match content {
                 acp::ToolCallContent::Content(block) => {
+                    if matches!(block.content, acp::ContentBlock::Image(_)) {
+                        continue;
+                    }
                     let text = content_text(&block.content);
                     if !text.is_empty() {
                         parts.push(text);
@@ -2250,41 +2261,53 @@ fn command_of(tool: &ToolState) -> String {
 }
 
 fn tool_call_content(tool: &ToolState, status: ItemStatus, output: String) -> ItemContent {
+    let mut image_reads: Vec<_> = tool
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            acp::ToolCallContent::Content(block) => match &block.content {
+                acp::ContentBlock::Image(image) => {
+                    crate::tool_output::image(Some(&image.mime_type), &image.data)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    if image_reads.is_empty()
+        && let Some(raw) = &tool.raw_output
+    {
+        image_reads = ToolOutput::from_content(raw.get("content").unwrap_or(raw)).images;
+    }
     ItemContent::ToolCall {
-        image_reads: if tool.kind == acp::ToolKind::Read && status == ItemStatus::Completed {
-            let images: Vec<_> = tool
-                .content
-                .iter()
-                .filter_map(|content| match content {
-                    acp::ToolCallContent::Content(block) => match &block.content {
-                        acp::ContentBlock::Image(image)
-                            if image.mime_type.starts_with("image/") && !image.data.is_empty() =>
-                        {
-                            Some(Attachment {
-                                media_type: image.mime_type.clone(),
-                                data_base64: image.data.clone(),
-                                source_path: None,
-                            })
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                })
-                .collect();
-            if images.is_empty() {
-                let raw = tool.raw_output.as_ref().unwrap_or(&Value::Null);
-                crate::image_reads::content_images(raw.get("content").unwrap_or(raw))
-            } else {
-                images
-            }
-        } else {
-            Vec::new()
-        },
-        name: tool.title.clone(),
+        image_reads,
+        name: tool.name.clone().unwrap_or_else(|| tool.title.clone()),
         input: tool.raw_input.clone().unwrap_or(Value::Null),
         output: (!output.is_empty()).then_some(output),
         status,
     }
+}
+
+/// The tool's own name, where the wire has one: Grok's `_meta["x.ai/tool"]`
+/// (whose `use_tool` dispatches the MCP tool named in its input), Cursor's
+/// `rawInput._toolName`.
+fn tool_name(meta: Option<&acp::Meta>, raw_input: Option<&Value>) -> Option<String> {
+    let input = |key: &str| {
+        raw_input
+            .and_then(|input| input.get(key))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+    };
+    let name = match meta
+        .and_then(|meta| meta.get("x.ai/tool"))
+        .and_then(|tool| tool.get("name"))
+        .and_then(Value::as_str)
+    {
+        Some("use_tool") => input("tool_name").or(Some("use_tool")),
+        Some(name) => Some(name),
+        None => input("_toolName"),
+    };
+    name.map(str::to_owned)
 }
 
 /// `diff` content blocks → canonical [`FileChange`]s (with a unified diff, so
@@ -2307,6 +2330,7 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
                         &path,
                         diff.old_text.as_deref().unwrap_or(""),
                         &diff.new_text,
+                        hunk_start(diff.meta.as_ref()),
                     )),
                     path,
                 })
@@ -2332,10 +2356,38 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
     changes
 }
 
-/// A whole-file unified diff. ACP hands us before/after text rather than a
-/// patch, and the diff panel wants `@@` hunks; a single hunk covering the file
+/// Where a diff's texts begin in the old and new file, when the agent says;
+/// ACP's own diff is whole-file text. Grok sends hunk-sized texts with
+/// `_meta.old_line` / `new_line` while asking, and with one
+/// `_meta.details[]` entry per replacement once applied.
+fn hunk_start(meta: Option<&acp::Meta>) -> (usize, usize) {
+    let lines = meta.and_then(|meta| match meta.get("details").and_then(Value::as_array) {
+        Some(details) => match details.as_slice() {
+            [only] => only.as_object(),
+            _ => None,
+        },
+        None => Some(meta),
+    });
+    let line = |key: &str| {
+        lines
+            .and_then(|lines| lines.get(key))
+            .and_then(Value::as_u64)
+            .and_then(|line| usize::try_from(line).ok())
+            .filter(|line| *line > 0)
+            .unwrap_or(1)
+    };
+    (line("old_line"), line("new_line"))
+}
+
+/// A unified diff of one before/after pair. ACP hands us texts rather than a
+/// patch, and the diff panel wants `@@` hunks; a single hunk covering the pair
 /// is exactly what the panel's full-file path already renders.
-fn unified_diff(path: &str, old: &str, new: &str) -> String {
+fn unified_diff(
+    path: &str,
+    old: &str,
+    new: &str,
+    (old_start, new_start): (usize, usize),
+) -> String {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let mut out = String::new();
@@ -2352,9 +2404,9 @@ fn unified_diff(path: &str, old: &str, new: &str) -> String {
     let _ = writeln!(
         out,
         "@@ -{},{} +{},{} @@",
-        usize::from(!old_lines.is_empty()),
+        if old_lines.is_empty() { 0 } else { old_start },
         old_lines.len(),
-        usize::from(!new_lines.is_empty()),
+        if new_lines.is_empty() { 0 } else { new_start },
         new_lines.len()
     );
     // Trim the common prefix/suffix so the (very common) single-line edit does
@@ -2469,7 +2521,8 @@ fn approval_request(
             ApprovalKind::FileRead { detail: title }
         }
         _ => ApprovalKind::ToolUse {
-            name: title.clone(),
+            name: tool_name(tool.meta.as_ref(), fields.raw_input.as_ref())
+                .unwrap_or_else(|| title.clone()),
             input: raw_input,
             detail: title,
         },
@@ -3158,27 +3211,34 @@ mod tests {
         );
     }
 
+    /// ACP carries a tool's images as `image` content blocks: they become
+    /// the item's images whatever the tool's kind, never text.
     #[test]
-    fn image_read_results_follow_partial_updates_and_exclude_generation() {
-        for (kind, name, status, expected) in [
-            ("read", "file", "completed", 1),
-            ("read", "file", "failed", 0),
-            ("other", "generate_image", "completed", 0),
-        ] {
+    fn image_content_blocks_become_image_reads() {
+        for kind in ["read", "other"] {
             let mut mapper = state();
-            mapper.apply_update(update(json!({"sessionUpdate":"tool_call","toolCallId":"read","title":"Image operation","kind":kind,"name":name,"status":"in_progress"})));
-            let events = mapper.apply_update(update(json!({"sessionUpdate":"tool_call_update","toolCallId":"read","status":status,"content":[{"type":"content","content":{"type":"image","mimeType":"image/png","data":"AQID"}}]})));
-            let AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::ToolCall { image_reads, .. },
-                ..
-            }) = &events[0]
+            mapper.apply_update(update(json!({"sessionUpdate":"tool_call","toolCallId":"shot","title":"Screenshot","kind":kind,"status":"in_progress"})));
+            let events = mapper.apply_update(update(json!({"sessionUpdate":"tool_call_update","toolCallId":"shot","status":"completed","content":[
+                {"type":"content","content":{"type":"text","text":"captured"}},
+                {"type":"content","content":{"type":"image","mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg=="}}
+            ]})));
+            let [
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content:
+                        ItemContent::ToolCall {
+                            image_reads,
+                            output,
+                            ..
+                        },
+                    ..
+                }),
+            ] = &events[..]
             else {
                 panic!("tool completion: {events:?}")
             };
-            assert_eq!(image_reads.len(), expected, "{kind}, {name}, {status}");
-            if expected != 0 {
-                assert_eq!(image_reads[0].data_base64, "AQID");
-            }
+            assert_eq!(output.as_deref(), Some("captured"), "{kind}");
+            assert_eq!(image_reads.len(), 1, "{kind}");
+            assert_eq!(image_reads[0].media_type, "image/png");
         }
     }
 
