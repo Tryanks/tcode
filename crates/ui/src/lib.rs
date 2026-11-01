@@ -69,6 +69,8 @@ mod source_control_settings;
 pub mod store;
 mod terminal_drawer;
 mod terminal_key_bar;
+#[cfg(test)]
+mod test_frames;
 pub mod theme;
 mod thread_export;
 pub mod time;

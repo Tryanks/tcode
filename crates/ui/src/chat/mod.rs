@@ -4938,6 +4938,7 @@ mod tests {
         ChatView, RowPart,
     };
     use crate::store::WorkspaceStore;
+    use crate::test_frames::{draw, draw_settled};
     use crate::window_state::WindowState;
     use agent::{ItemContent, ItemStatus};
     use gpui::{AppContext as _, Entity, TestAppContext};
@@ -4950,33 +4951,6 @@ mod tests {
 
     const AUTO_ACTIVITY_TEST_SESSION: &str = "session-a";
     static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
-
-    /// Draws a full frame. A frame that reuses any view keeps every debug
-    /// bound of the previous one, so an element no longer painted would still
-    /// be found.
-    fn draw(cx: &mut gpui::VisualTestContext) {
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.refresh();
-            let _ = window.draw(cx);
-        });
-    }
-
-    /// Delivers frames for as long as the window asks for them, spaced as a
-    /// display spaces them: gpui-base's scrollbar motion reads the wall clock,
-    /// and GPUI's animations the test clock.
-    fn settle_frames(cx: &mut gpui::VisualTestContext) {
-        const FRAME_BUDGET: usize = 320;
-        for _ in 0..FRAME_BUDGET {
-            cx.run_until_parked();
-            if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(16));
-            cx.executor().advance_clock(Duration::from_millis(16));
-        }
-        panic!("the window kept asking for frames after the {FRAME_BUDGET}-frame budget");
-    }
 
     #[test]
     fn activity_visibility_tracks_successors_and_the_remaining_minimum_window() {
@@ -5173,13 +5147,12 @@ mod tests {
         }
 
         let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = cx
             .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
 
         let states = view.read_with(cx, |chat, _| {
             let entries = chat
@@ -5314,13 +5287,12 @@ mod tests {
         ]);
 
         let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (_view, cx) = cx
             .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
 
         assert!(cx.debug_bounds("steering-steer").is_some());
     }
@@ -5363,11 +5335,12 @@ mod tests {
         ]);
 
         let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (_view, cx) = cx
             .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
-        draw(cx);
+        draw_settled(cx);
 
         for row in [
             "disclosure-pull-request-update-wake",
@@ -5421,21 +5394,22 @@ mod tests {
         }
 
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
-        draw(cx);
+        draw_settled(cx);
         view.update(cx, |chat, cx| {
             chat.list_state.scroll_to(ListOffset::default());
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         let header = cx
             .debug_bounds("worklog-header-0-tool-0")
             .expect("collapsed work log");
         cx.simulate_click(header.center(), Modifiers::default());
-        draw(cx);
+        draw_settled(cx);
         // The reader rests two activities into the live window.
         view.update(cx, |chat, cx| {
             let live = chat
@@ -5449,7 +5423,7 @@ mod tests {
             });
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         let reading = cx
             .debug_bounds("activity-row-tool-18")
             .expect("the activity under the reader")
@@ -5464,8 +5438,8 @@ mod tests {
                 store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
                 cx.notify();
             });
-            draw(cx);
-            draw(cx);
+            draw_settled(cx);
+            draw_settled(cx);
         };
         timeline.entries.push(tool("tool-20"));
         timeline.entries.push(tool("tool-21"));
@@ -5526,7 +5500,7 @@ mod tests {
         ] {
             cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
             cx.simulate_resize(size(px(width), px(900.)));
-            draw(cx);
+            draw_settled(cx);
             let before = [
                 cx.debug_bounds("markdown-block-0").expect("answer start"),
                 cx.debug_bounds("markdown-block-1")
@@ -5538,7 +5512,7 @@ mod tests {
                     .debug_bounds("worklog-header-0-command")
                     .expect("work log toggle");
                 cx.simulate_click(header.center(), Modifiers::default());
-                draw(cx);
+                draw_settled(cx);
                 assert_eq!(
                     cx.debug_bounds("activity-row-command").is_some(),
                     expanded,
@@ -5582,18 +5556,18 @@ mod tests {
             .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
-        draw(cx);
+        draw_settled(cx);
 
         let header = cx
             .debug_bounds("worklog-header-0-command-0")
             .expect("collapsed work log");
         cx.simulate_click(header.center(), Modifiers::default());
-        draw(cx);
+        draw_settled(cx);
         view.update(cx, |chat, cx| {
             chat.list_state.scroll_to(ListOffset::default());
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("activity-row-command-0").is_some());
         assert!(
             cx.debug_bounds("activity-row-command-399").is_none(),
@@ -5604,7 +5578,7 @@ mod tests {
             chat.list_state.set_follow_mode(FollowMode::Tail);
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("activity-row-command-399").is_some());
         assert!(cx.debug_bounds("activity-row-command-0").is_none());
 
@@ -5614,7 +5588,7 @@ mod tests {
             chat.list_state.scroll_to(ListOffset::default());
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         let last = view.read_with(cx, |chat, _| chat.rows.len() - 1);
         let measured = |cx: &mut VisualTestContext| {
             view.read_with(cx, |chat, _| {
@@ -5626,7 +5600,7 @@ mod tests {
             .debug_bounds("activity-row-command-0")
             .expect("the first activity");
         cx.simulate_click(row.center(), Modifiers::default());
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("activity-detail").is_some());
         assert!(
             measured(cx),
@@ -5667,11 +5641,12 @@ mod tests {
             }),
         ));
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(600.), px(900.)));
-        draw(cx);
+        draw_settled(cx);
 
         assert!(cx.debug_bounds("file-edit-diff-line-0").is_some());
         assert!(
@@ -5703,7 +5678,7 @@ mod tests {
                     ..Default::default()
                 });
             }
-            draw(cx);
+            draw_settled(cx);
         };
         wheel(point(px(0.), px(-2_000.)), cx);
         assert!(cx.debug_bounds("file-edit-diff-line-0").is_none());
@@ -5737,7 +5712,7 @@ mod tests {
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
         });
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("file-edit-diff-line-1").is_some());
         assert!(cx.debug_bounds("file-edit-diff-line-2").is_none());
     }
@@ -5840,16 +5815,17 @@ mod tests {
                 entry("first", EntryContent::Item(item.clone())),
             ];
             let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+            cx.update(|cx| cx.set_reduce_motion(true));
             let (_, cx) = cx.add_window_view(|window, cx| {
                 ChatView::new(store.clone(), window_state, window, cx)
             });
             cx.simulate_resize(size(px(1_024.), px(900.)));
-            draw(cx);
+            draw_settled(cx);
 
             assert!(cx.debug_bounds(detail_selector).is_some());
             let header = cx.debug_bounds(selector).expect("activity toggle");
             cx.simulate_click(header.center(), gpui::Modifiers::default());
-            draw(cx);
+            draw_settled(cx);
             assert!(
                 cx.debug_bounds(detail_selector).is_none(),
                 "{selector} did not close"
@@ -5872,7 +5848,7 @@ mod tests {
                 store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
                 cx.notify();
             });
-            draw(cx);
+            draw_settled(cx);
             assert!(
                 cx.debug_bounds(detail_selector).is_none(),
                 "{selector} reopened on an activity update"
@@ -5880,11 +5856,11 @@ mod tests {
 
             let header = cx.debug_bounds(selector).unwrap();
             cx.simulate_click(header.center(), gpui::Modifiers::default());
-            draw(cx);
+            draw_settled(cx);
             assert!(cx.debug_bounds(detail_selector).is_some());
             let header = cx.debug_bounds(selector).unwrap();
             cx.simulate_click(header.center(), gpui::Modifiers::default());
-            draw(cx);
+            draw_settled(cx);
             assert!(cx.debug_bounds(detail_selector).is_none());
 
             timeline
@@ -5894,7 +5870,7 @@ mod tests {
                 store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
                 cx.notify();
             });
-            draw(cx);
+            draw_settled(cx);
             assert!(
                 cx.debug_bounds(detail_selector).is_some(),
                 "the next {selector} did not open automatically"
@@ -5912,6 +5888,7 @@ mod tests {
         use tcode_protocol::{Topic, terminal::TerminalColor};
 
         let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let seeded_id = session_id.clone();
         let other_id = smol::block_on(host.update_state_for_test(move |state, cx| {
             state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
@@ -6010,7 +5987,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 driver.step(cx, &store);
-                draw(cx);
+                draw_settled(cx);
                 if ready(cx) {
                     return;
                 }
@@ -6263,7 +6240,7 @@ mod tests {
             while opened(cx).as_deref() != Some(expected.as_str()) {
                 assert!(Instant::now() < deadline, "waiting for {expected}");
                 driver.step(cx, &store);
-                draw(cx);
+                draw_settled(cx);
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
@@ -6373,7 +6350,7 @@ mod tests {
             while decision.is_none() {
                 assert!(Instant::now() < deadline, "waiting for {what}");
                 driver.step(cx, &store);
-                draw(cx);
+                draw_settled(cx);
                 if let Ok(agent::SessionCommand::RespondApproval {
                     request_id,
                     decision: answer,
@@ -6391,7 +6368,7 @@ mod tests {
             while cx.debug_bounds("plan-decision").is_none() {
                 assert!(Instant::now() < deadline, "waiting for the plan's decision");
                 driver.step(cx, &store);
-                draw(cx);
+                draw_settled(cx);
                 std::thread::sleep(Duration::from_millis(1));
             }
         };
@@ -6639,9 +6616,7 @@ mod tests {
             view.update(cx, |_, cx| cx.notify());
             for (width, height) in [(360., 780.), (393., 852.)] {
                 cx.simulate_resize(gpui::size(px(width), px(height)));
-                cx.update(|window, cx| {
-                    let _ = window.draw(cx);
-                });
+                draw_settled(cx);
                 let permission = cx.debug_bounds("permission-chip").expect("approval option");
                 let effort = cx
                     .debug_bounds("traits-chip")
@@ -6710,9 +6685,7 @@ mod tests {
                 window_state.update(cx, |state, _| state.compact = compact);
             });
             cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
             let list = view.read_with(cx, |view, cx| view.0.read(cx).list_state.clone());
             let viewport = list.viewport_bounds();
             let tail = list.scroll_px_offset_for_scrollbar().y;
@@ -6721,9 +6694,7 @@ mod tests {
 
             let thumb = point(viewport.right() - px(5.), viewport.bottom() - px(8.));
             cx.simulate_mouse_move(thumb, None, Modifiers::default());
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
             cx.simulate_event(MouseDownEvent {
                 position: thumb,
                 button: MouseButton::Left,
@@ -6736,9 +6707,7 @@ mod tests {
                 button: MouseButton::Left,
                 ..Default::default()
             });
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
 
             assert!(
                 list.scroll_px_offset_for_scrollbar().y > tail + viewport.size.height,
@@ -6750,14 +6719,10 @@ mod tests {
             // panning the conversation underneath it.
             list.set_follow_mode(gpui::FollowMode::Tail);
             list.scroll_to_end();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
             assert!(list.is_following_tail());
             cx.simulate_mouse_move(thumb, None, Modifiers::default());
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
             for (phase, position) in [
                 (gpui::TouchPhase::Started, thumb),
                 (gpui::TouchPhase::Moved, target),
@@ -6769,9 +6734,7 @@ mod tests {
                     position,
                 });
             }
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
             assert!(
                 list.scroll_px_offset_for_scrollbar().y > tail + viewport.size.height,
                 "touch-dragging the scrollbar must scroll the conversation at width {width}"
@@ -6799,9 +6762,7 @@ mod tests {
         });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
         let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
         let viewport = list.viewport_bounds();
         let height = viewport.size.height;
@@ -6820,7 +6781,7 @@ mod tests {
                     cx,
                 );
             });
-            draw(cx);
+            draw_settled(cx);
         };
 
         // The finger moves down: earlier content comes into view and following
@@ -6865,14 +6826,11 @@ mod tests {
             TouchChat(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
         });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
         let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
         assert!(list.max_offset_for_scrollbar().y > px(0.));
         for at_end in [false, true] {
-            settle_frames(cx);
+            draw_settled(cx);
             list.set_follow_mode(gpui::FollowMode::Normal);
             if at_end {
                 list.scroll_to_end();
@@ -6882,7 +6840,7 @@ mod tests {
                     offset_in_item: px(0.),
                 });
             }
-            draw(cx);
+            draw_settled(cx);
             let resting = list.viewport_bounds();
             let offset = list.scroll_px_offset_for_scrollbar().y;
             let row_selector = if at_end {
@@ -6944,15 +6902,14 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        draw(cx);
+        draw_settled(cx);
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        settle_frames(cx);
         list.set_follow_mode(gpui::FollowMode::Normal);
         list.scroll_to(gpui::ListOffset {
             item_ix: 0,
             offset_in_item: px(0.),
         });
-        draw(cx);
+        draw_settled(cx);
         let resting = list.viewport_bounds();
         // One trackpad packet per displayed frame.
         let packet = |phase, dy: f32, cx: &mut gpui::VisualTestContext| {
@@ -7003,6 +6960,7 @@ mod tests {
                 timeline.turn_running = running;
                 timeline.turns.last_mut().unwrap().running = running;
                 let (store, window_state, _) = seed_chat(cx, timeline);
+                cx.update(|cx| cx.set_reduce_motion(true));
                 let (view, cx) = cx.add_window_view(|window, cx| {
                     ChatRoot(cx.new(|cx| ChatView::new(store, window_state.clone(), window, cx)))
                 });
@@ -7016,9 +6974,7 @@ mod tests {
                 let list = view.read_with(cx, |view, cx| view.0.read(cx).list_state.clone());
                 list.scroll_to_end();
                 cx.run_until_parked();
-                cx.update(|window, cx| {
-                    let _ = window.draw(cx);
-                });
+                draw_settled(cx);
                 let last = cx
                     .debug_bounds("timeline-row-89")
                     .expect("last timeline row");
@@ -7069,6 +7025,7 @@ mod tests {
         timeline.turn_running = true;
         timeline.turns.last_mut().unwrap().running = true;
         let (store, window_state, _) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
         window_state.update(cx, |state, _| state.compact = true);
         let (root, cx) = cx.add_window_view(|window, cx| OccludedChat {
             chat: cx.new(|cx| ChatView::new(store, window_state, window, cx)),
@@ -7089,9 +7046,7 @@ mod tests {
                 });
                 list.scroll_to_end();
                 cx.run_until_parked();
-                cx.update(|window, cx| {
-                    let _ = window.draw(cx);
-                });
+                draw_settled(cx);
                 let status = cx
                     .debug_bounds("working-status-29")
                     .expect("running status after scroll_to_end");
@@ -7104,18 +7059,14 @@ mod tests {
                     touch_phase: gpui::TouchPhase::Started,
                     ..Default::default()
                 });
-                cx.update(|window, cx| {
-                    let _ = window.draw(cx);
-                });
+                draw_settled(cx);
                 cx.simulate_event(gpui::ScrollEvent {
                     position: list.viewport_bounds().center(),
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100000.))),
                     touch_phase: gpui::TouchPhase::Moved,
                     ..Default::default()
                 });
-                cx.update(|window, cx| {
-                    let _ = window.draw(cx);
-                });
+                draw_settled(cx);
                 let status = cx
                     .debug_bounds("working-status-29")
                     .expect("running status row");
@@ -7164,7 +7115,7 @@ mod tests {
         });
         let view = root.read_with(cx, |root, _| root.0.clone());
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        draw(cx);
+        draw_settled(cx);
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         let height = list.viewport_bounds().size.height;
         let scroll = |distance, cx: &mut VisualTestContext| {
@@ -7177,7 +7128,7 @@ mod tests {
         };
         for _ in 0..12 {
             scroll(height / 4., cx);
-            draw(cx);
+            draw_settled(cx);
         }
         assert!(!list.is_following_tail());
         let before = list.logical_scroll_top();
@@ -7203,7 +7154,7 @@ mod tests {
                 window.dispatch_event(gpui::InputEvent::to_platform_input(wheel), cx);
             });
         });
-        draw(cx);
+        draw_settled(cx);
 
         // The row the reader was on sits 60 rows lower and exactly 40px
         // further down the viewport: both the page and the pan applied.
@@ -7238,7 +7189,7 @@ mod tests {
                 TouchChat(cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx)))
             });
             cx.simulate_resize(gpui::size(px(393.), px(852.)));
-            draw(cx);
+            draw_settled(cx);
             let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
             let bottom = list.scroll_px_offset_for_scrollbar().y;
             let scroll = |delta, cx: &mut gpui::VisualTestContext| {
@@ -7250,7 +7201,7 @@ mod tests {
                 });
             };
             scroll(px(120.), cx);
-            draw(cx);
+            draw_settled(cx);
             assert_eq!(list.scroll_px_offset_for_scrollbar().y, bottom + px(120.));
             assert!(!list.is_following_tail());
             assert!(cx.debug_bounds("scroll-to-end").is_none());
@@ -7263,7 +7214,7 @@ mod tests {
                     store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
                     cx.notify();
                 });
-                draw(cx);
+                draw_settled(cx);
                 assert!(!list.is_following_tail(), "late update {update}, {phase:?}");
                 assert_eq!(list.logical_scroll_top().item_ix, anchor.item_ix);
                 assert_eq!(
@@ -7272,7 +7223,7 @@ mod tests {
                 );
             }
             scroll(px(-100000.), cx);
-            draw(cx);
+            draw_settled(cx);
             assert!(
                 list.is_following_tail(),
                 "return to bottom {phase:?}: offset {:?}, max {:?}, anchor {:?}",
@@ -7284,7 +7235,7 @@ mod tests {
                 store.set_session_replica_for_test(session_id, synthetic_markdown_timeline(31), cx);
                 cx.notify();
             });
-            draw(cx);
+            draw_settled(cx);
             assert!(list.is_following_tail());
             assert_eq!(list.logical_scroll_top().item_ix, list.item_count());
         }
@@ -7417,7 +7368,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             driver.step(cx, &store);
-            draw(cx);
+            draw_settled(cx);
             if ready.get() {
                 break;
             }
@@ -7441,7 +7392,7 @@ mod tests {
             touch_phase: TouchPhase::Moved,
             ..Default::default()
         });
-        draw(cx);
+        draw_settled(cx);
         let pill = cx
             .debug_bounds("scroll-to-end")
             .expect("pill above the image");
@@ -7449,13 +7400,13 @@ mod tests {
             cx.simulate_mouse_move(position, None, Modifiers::default());
             cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
             cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
-            draw(cx);
+            draw_settled(cx);
         };
         click(point(pill.center().x, pill.top() - px(40.)), cx);
         let deadline = Instant::now() + Duration::from_secs(5);
         while cx.debug_bounds("image-viewer-image").is_none() {
             driver.step(cx, &store);
-            draw(cx);
+            draw_settled(cx);
             assert!(
                 Instant::now() < deadline,
                 "exposed image finishes its explicit read"
@@ -7467,7 +7418,7 @@ mod tests {
             "exposed image opens the lightbox"
         );
         cx.simulate_keystrokes("escape");
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("image-viewer-image").is_none());
         assert!(!list.is_following_tail());
 
@@ -7506,7 +7457,7 @@ mod tests {
         });
         let view = root.read_with(cx, |root, _| root.0.clone());
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        draw(cx);
+        draw_settled(cx);
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         let height = list.viewport_bounds().size.height;
         assert!(height > px(0.));
@@ -7518,7 +7469,7 @@ mod tests {
                 touch_phase: phase,
                 ..Default::default()
             });
-            draw(cx);
+            draw_settled(cx);
         };
         // Small wheel deltas must accumulate, rather than snapping back while
         // the viewport is still inside the one-screen follow threshold.
@@ -7546,7 +7497,7 @@ mod tests {
             store.set_session_replica_for_test(session_id.clone(), full, cx);
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         assert!(
             cx.debug_bounds("scroll-to-end").is_some(),
             "prepend hides jump"
@@ -7559,7 +7510,7 @@ mod tests {
 
         let button = cx.debug_bounds("scroll-to-end").unwrap();
         cx.simulate_click(button.center(), gpui::Modifiers::default());
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("scroll-to-end").is_none());
         assert!(list.is_following_tail());
         store.update(cx, |store, cx| {
@@ -7570,7 +7521,7 @@ mod tests {
             );
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("scroll-to-end").is_none());
         assert!(list.is_following_tail());
         assert_eq!(
@@ -7596,7 +7547,7 @@ mod tests {
             );
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("scroll-to-end").is_some());
         assert_eq!(
             list.logical_scroll_top().item_ix,
@@ -7616,7 +7567,7 @@ mod tests {
             store.set_session_replica_for_test(session_id.clone(), streaming, cx);
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         assert!(cx.debug_bounds("scroll-to-end").is_some());
         assert_eq!(list.logical_scroll_top().item_ix, before.item_ix);
         assert_eq!(
@@ -7636,7 +7587,7 @@ mod tests {
             store.set_session_replica_for_test(session_id, synthetic_markdown_timeline(123), cx);
             cx.notify();
         });
-        draw(cx);
+        draw_settled(cx);
         assert!(list.is_following_tail());
         assert!(cx.debug_bounds("scroll-to-end").is_none());
     }
@@ -7759,14 +7710,13 @@ mod tests {
         tail.turns = vec![TurnMeta::default()];
         tail.entries = vec![entry("assistant-1", assistant(&long_answer))];
         let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         cx.simulate_resize(gpui::size(px(1024.), px(700.)));
         for _ in 0..2 {
             view.update(cx, |_, cx| cx.notify());
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
         }
         let (list, placeholder, leading) = view.read_with(cx, |chat, _| {
             (
@@ -7782,16 +7732,12 @@ mod tests {
             offset_in_item: leading + px(20.),
         });
         view.update(cx, |_, cx| cx.notify());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, full, cx);
             cx.notify();
         });
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
         let anchor = list.logical_scroll_top();
         // The page adds the earlier turn's three rows and the user bubble
         // above the answer.
@@ -8134,16 +8080,12 @@ mod tests {
                 std::sync::Arc::make_mut(entry).turn -= 20;
             }
             let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
+            cx.update(|cx| cx.set_reduce_motion(true));
             let (view, cx) = cx.add_window_view(|window, cx| {
                 ChatView::new(store.clone(), window_state, window, cx)
             });
             cx.simulate_resize(gpui::size(px(393.), px(852.)));
-            for _ in 0..2 {
-                view.update(cx, |_, cx| cx.notify());
-                cx.update(|window, cx| {
-                    let _ = window.draw(cx);
-                });
-            }
+            draw_settled(cx);
             let (list, placeholder, leading) = view.read_with(cx, |chat, _| {
                 (
                     chat.list_state.clone(),
@@ -8157,10 +8099,7 @@ mod tests {
                 item_ix: 0,
                 offset_in_item: leading - px(100.),
             });
-            view.update(cx, |_, cx| cx.notify());
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
             let content_top = list.bounds_for_item(0).unwrap().top() + leading;
             assert!(content_top > list.viewport_bounds().top());
             store.update(cx, |store, cx| {
@@ -8186,6 +8125,7 @@ mod tests {
                 window.simulate_next_frame(cx);
                 let _ = window.draw(cx);
             });
+            draw_settled(cx);
             let anchor = list.logical_scroll_top();
             assert!(
                 anchor.item_ix < 60 && anchor.offset_in_item >= px(0.),
@@ -8226,18 +8166,14 @@ mod tests {
             let (view, cx) =
                 cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
             cx.simulate_resize(size(px(width), px(700.)));
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
             let list = view.read_with(cx, |chat, _| chat.list_state.clone());
             list.set_offset_from_scrollbar(point(
                 px(0.),
                 list.scroll_px_offset_for_scrollbar().y + px(40.),
             ));
             view.update(cx, |_, cx| cx.notify());
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
             for step in 0..160 {
                 let item = list.logical_scroll_top().item_ix;
                 let before = list.bounds_for_item(item).unwrap().top();
@@ -8247,9 +8183,7 @@ mod tests {
                     touch_phase: gpui::TouchPhase::Moved,
                     ..Default::default()
                 });
-                cx.update(|window, cx| {
-                    let _ = window.draw(cx);
-                });
+                draw_settled(cx);
                 let after = list
                     .bounds_for_item(item)
                     .expect("reading anchor stays visible")
@@ -8274,9 +8208,7 @@ mod tests {
             .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
         let list_state = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(!view.read_with(cx, |chat, _| {
             chat.has_resident_markdown_state("assistant-40")
@@ -8288,9 +8220,7 @@ mod tests {
             offset_in_item: px(7.),
         });
         view.update(cx, |_, cx| cx.notify());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
 
         let (resident, old_rebuilt, distant_tail_evicted, composer_tail_resident) =
             view.read_with(cx, |chat, _| {
@@ -8604,13 +8534,9 @@ This begins after the hard break."#;
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
         cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        draw_settled(cx);
 
         let outer_list = view.read_with(cx, |chat, _| chat.list_state.clone());
         let max_scroll = outer_list.max_offset_for_scrollbar().y;
@@ -8624,9 +8550,7 @@ This begins after the hard break."#;
             let distance = (scroll_step * (step + 1) as f32).min(max_scroll / 2.);
             outer_list.set_offset_from_scrollbar(point(px(0.), -(max_scroll - distance)));
             view.update(cx, |_, cx| cx.notify());
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
+            draw_settled(cx);
         }
 
         let viewport = outer_list.viewport_bounds();
@@ -8687,7 +8611,7 @@ This begins after the hard break."#;
         });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(900.)));
-        settle_frames(cx);
+        draw_settled(cx);
 
         for _ in 0..2 {
             cx.update(|window, _| window.reset_layout_stats());
