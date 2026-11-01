@@ -126,6 +126,54 @@ pub(in crate::chat) fn view<'a>(call: &Call<'a>) -> Box<dyn ToolView + 'a> {
         .unwrap_or_else(|| Box::new(generic::Generic::of(call)))
 }
 
+/// The kind of window an activity shows as, which is what a run of
+/// activities counts it as.
+pub(in crate::chat) enum Family {
+    Command,
+    /// The files it edited.
+    Edit(Vec<String>),
+    Read,
+    Search,
+    Tool,
+    Agent,
+}
+
+/// Which family's window `entry` shows as: its item kind, then for a tool
+/// call the family that claims it, as [`activity`] and the edit rows
+/// dispatch it. `None` for what is not an activity.
+pub(in crate::chat) fn family(entry: &TimelineEntry) -> Option<Family> {
+    let EntryContent::Item(item) = &entry.content else {
+        return None;
+    };
+    Some(match item {
+        ItemContent::CommandExecution { .. } => Family::Command,
+        ItemContent::FileChange { changes, .. } => {
+            Family::Edit(changes.iter().map(|change| change.path.clone()).collect())
+        }
+        ItemContent::ToolCall { .. } => {
+            let call = Call::of(entry)?;
+            if shell::tool_call(&call).is_some() {
+                Family::Command
+            } else if let Some(edit) = diff::edit(entry, Path::new("")) {
+                Family::Edit(edit.files.into_iter().map(|file| file.row.path).collect())
+            } else if read::tool_call(&call).is_some() {
+                Family::Read
+            } else if search::tool_call(&call).is_some() {
+                Family::Search
+            } else {
+                Family::Tool
+            }
+        }
+        ItemContent::ImageRead { .. } => Family::Read,
+        ItemContent::WebSearch { .. } | ItemContent::Other { .. } => Family::Tool,
+        ItemContent::Subagent { .. } => Family::Agent,
+        ItemContent::UserMessage { .. }
+        | ItemContent::AssistantMessage { .. }
+        | ItemContent::Reasoning { .. }
+        | ItemContent::Plan { .. } => return None,
+    })
+}
+
 /// An activity's window as its kind gives it, before its body.
 pub(in crate::chat) struct Activity {
     pub(in crate::chat) header: Header,
@@ -495,12 +543,21 @@ pub(in crate::chat) fn full_output(
     call: &Call<'_>,
     ctx: &mut ToolCtx<'_, '_>,
 ) -> (String, Option<AnyElement>) {
-    let elided = ctx.elided(call.entry);
+    full_text(call.entry, call.output.unwrap_or_default(), ctx)
+}
+
+/// [`full_output`] for any item's output text.
+pub(in crate::chat) fn full_text(
+    entry: &TimelineEntry,
+    output: &str,
+    ctx: &mut ToolCtx<'_, '_>,
+) -> (String, Option<AnyElement>) {
+    let elided = ctx.elided(entry);
     let text = match &elided {
         Some(ElidedOutput::Loaded(full)) => full.to_string(),
-        _ => call.output.unwrap_or_default().to_owned(),
+        _ => output.to_owned(),
     };
-    let control = elided.and_then(|elided| elided_control(elided, call.id(), ctx.app()));
+    let control = elided.and_then(|elided| elided_control(elided, &entry.id, ctx.app()));
     (text, control)
 }
 

@@ -18,7 +18,7 @@ fn status_label(status: GoalStatus) -> String {
 fn usage_line(goal: &Goal) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(secs) = goal.time_used_secs.filter(|secs| *secs > 0) {
-        parts.push(crate::chat::model::format_duration(secs));
+        parts.push(crate::chat::model::format_elapsed(secs * 1000));
     }
     match (goal.tokens_used, goal.token_budget) {
         (used, Some(budget)) => parts.push(

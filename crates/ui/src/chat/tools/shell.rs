@@ -13,8 +13,7 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 use agent::ItemStatus;
 use gpui::{
     AnyElement, App, ContentMask, Hsla, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Rgba, Styled as _, StyledText, Window, canvas, div,
-    prelude::FluentBuilder as _, px,
+    ParentElement as _, Rgba, Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 use serde::Deserialize;
@@ -236,70 +235,164 @@ impl ToolView for ToolShell<'_> {
     }
 
     fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
-        let cx = ctx.app();
-        let theme = cx.theme();
-        let faded = theme.foreground.opacity(0.7);
-        let runs = if self.stdin {
-            Vec::new()
-        } else {
-            highlight::highlight_source(&self.command, "bash", &theme.highlight_theme)
-        };
-        let prompt = div()
-            .w_full()
-            .min_w_0()
-            .font_family(theme.mono_font_family.clone())
-            .text_secondary(false, cx)
-            .text_color(faded)
-            .whitespace_normal()
-            .child(StyledText::new(self.command.clone()).with_highlights(runs));
-        let workdir = self.workdir.map(|workdir| {
-            div()
-                .text_meta_mono(false, cx)
-                .child(super::display_path(workdir, ctx.cwd))
-                .into_any_element()
-        });
-        let (text, elided) = super::full_output(call, ctx);
-        let report = report(&text);
-        let output = (!report.output.trim().is_empty()).then(|| {
-            bounded_text(
-                call.entry,
-                "output",
-                report.output,
-                true,
-                Bound::OUTPUT,
-                ctx,
-            )
-        });
-        let cx = ctx.app();
-        v_flex()
-            .w_full()
-            .min_w_0()
-            .gap_1()
-            .debug_selector({
-                let id = call.id().to_owned();
-                move || format!("tool-shell-{id}")
-            })
-            .children(workdir)
-            .child(prompt)
-            .children(output)
-            .children(elided)
-            .when(
-                report.output.trim().is_empty() && call.output.is_some(),
-                |body| {
-                    body.child(
-                        div()
-                            .text_secondary(false, cx)
-                            .child(crate::tr!("tools.no_output").into_owned()),
-                    )
-                },
-            )
-            .into_any_element()
+        shell_body(
+            ShellRun {
+                entry: call.entry,
+                command: &self.command,
+                workdir: self.workdir,
+                output: call.output.unwrap_or_default(),
+                hosted: false,
+                running: call.status == ItemStatus::InProgress,
+            },
+            ctx,
+        )
     }
 
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)> {
-        let output = report(call.output.unwrap_or_default()).output;
-        command_copy_items(&self.command, output)
+        command_copy_items(&self.command, call.output.unwrap_or_default())
     }
+}
+
+/// One run of a command line, as its window's body shows it.
+pub(in crate::chat) struct ShellRun<'a> {
+    pub(in crate::chat) entry: &'a TimelineEntry,
+    pub(in crate::chat) command: &'a str,
+    pub(in crate::chat) workdir: Option<&'a str>,
+    /// What the command printed, as its harness returned it.
+    pub(in crate::chat) output: &'a str,
+    /// The host renders the command's screen (a `CommandExecution`); a shell
+    /// run as a tool call has only its text, laid out here into the same grid.
+    pub(in crate::chat) hosted: bool,
+    pub(in crate::chat) running: bool,
+}
+
+/// Every shell window's body: where it ran, the command line and the last
+/// screen of what it printed in the terminal grid, and the whole output,
+/// verbatim, a click away.
+pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
+    let ShellRun {
+        entry,
+        command,
+        workdir,
+        output,
+        hosted,
+        running,
+    } = run;
+    let key = format!("tool-text-{}-output", entry.id);
+    let open = ctx.is_open(&key);
+    let (full, elided) = super::full_text(entry, output, ctx);
+    // Opened, the whole output stands in for the screen's tail.
+    let screen_output = if open { "" } else { output };
+    let id = entry.id.clone();
+    let panel = if hosted {
+        let session_id = ctx.chat.session_id.clone();
+        let panel_id = id.clone();
+        let on_cols_change = ctx.cx.listener(move |_this, cols: &u16, window, cx| {
+            // Fires from `on_prepaint`, in the middle of laying the list
+            // out. Subscribe once the frame is done.
+            let cols = *cols;
+            let panel_id = panel_id.clone();
+            let session_id = session_id.clone();
+            cx.defer_in(window, move |this, _window, cx| {
+                this.workspace_store.update(cx, |store, _| {
+                    store.watch_command_output_for(session_id.as_deref(), &panel_id, cols);
+                });
+            });
+        });
+        let store = ctx.chat.workspace_store.read(ctx.cx);
+        let replica = store.command_output_for(ctx.chat.session_id.as_deref(), &id);
+        let watched = replica.and_then(|replica| replica.watched());
+        let frame = replica.and_then(|replica| replica.frame()).cloned();
+        let screen = OutputScreen {
+            watched,
+            frame: frame.as_ref().filter(|_| !open),
+        };
+        ctx.chat.command_panels.borrow_mut().render(
+            entry,
+            command,
+            screen_output,
+            screen,
+            Some(Box::new(on_cols_change)),
+            ctx.cx,
+        )
+    } else {
+        let panel_id = id.clone();
+        let on_cols_change = ctx.cx.listener(move |_this, cols: &u16, window, cx| {
+            let cols = *cols;
+            let panel_id = panel_id.clone();
+            cx.defer_in(window, move |this, _window, cx| {
+                this.command_panels
+                    .borrow_mut()
+                    .set_local_cols(&panel_id, cols);
+                cx.notify();
+            });
+        });
+        ctx.chat.command_panels.borrow_mut().render_local(
+            entry,
+            command,
+            screen_output,
+            Box::new(on_cols_change),
+            ctx.cx,
+        )
+    };
+    let lines = full.lines().count();
+    let shown = ctx.chat.command_panels.borrow().output_rows(&id);
+    let control = if open {
+        Some(bounded_text(
+            entry,
+            "output",
+            &full,
+            true,
+            Bound::OUTPUT,
+            ctx,
+        ))
+    } else if lines > shown {
+        let on_click = ctx.toggle(entry, key.clone());
+        let selector = format!("{key}-more");
+        Some(
+            gpui_base::h_flex()
+                .child(
+                    div().debug_selector(move || selector.clone()).child(
+                        super::super::components::changed_files::quiet_control(
+                            gpui::SharedString::from(format!("{key}-more")),
+                            crate::tr!("tools.all_lines", count = lines)
+                                .into_owned()
+                                .into(),
+                            on_click,
+                            ctx.app(),
+                        ),
+                    ),
+                )
+                .into_any_element(),
+        )
+    } else {
+        None
+    };
+    let cx = ctx.app();
+    let workdir = workdir.map(|workdir| {
+        div()
+            .text_meta_mono(false, cx)
+            .child(super::display_path(workdir, ctx.cwd))
+            .into_any_element()
+    });
+    let silent = full.trim().is_empty() && !running;
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1()
+        .debug_selector(move || format!("tool-shell-{id}"))
+        .children(workdir)
+        .child(panel)
+        .children(control)
+        .children(elided)
+        .when(silent, |body| {
+            body.child(
+                div()
+                    .text_secondary(false, cx)
+                    .child(crate::tr!("tools.no_output").into_owned()),
+            )
+        })
+        .into_any_element()
 }
 
 const DEFAULT_COLS: u16 = 80;
@@ -372,6 +465,56 @@ impl CommandPanelCache {
         panel.render(id, output, screen, on_cols_change, cx)
     }
 
+    /// A command whose output is text this client holds, laid out into the
+    /// grid at the width the panel measured.
+    pub(crate) fn render_local(
+        &mut self,
+        entry: &TimelineEntry,
+        command: &str,
+        output: &str,
+        on_cols_change: ColsChangeHandler,
+        cx: &App,
+    ) -> AnyElement {
+        let id = entry.id.as_str();
+        let panel = self.entries.entry(entry.id.clone()).or_default();
+        panel.turn = entry.turn;
+        panel.rendered = true;
+        if panel.command != command {
+            panel.command = command.to_string();
+            panel.command_model = None;
+        }
+        let cols = panel.local_cols.unwrap_or(DEFAULT_COLS);
+        let stamp = (output.len(), cols);
+        if panel
+            .local_frame
+            .as_ref()
+            .is_none_or(|(built, _)| *built != stamp)
+        {
+            panel.local_frame = Some((stamp, Rc::new(text_frame(output, cols))));
+        }
+        let frame = panel.local_frame.as_ref().map(|(_, frame)| frame.clone());
+        let screen = OutputScreen {
+            watched: panel.local_cols,
+            frame: frame.as_ref().filter(|_| !output.is_empty()),
+        };
+        panel.render(id, output, screen, Some(on_cols_change), cx)
+    }
+
+    /// The width a locally laid-out panel measured itself at.
+    pub(crate) fn set_local_cols(&mut self, id: &str, cols: u16) {
+        if let Some(panel) = self.entries.get_mut(id) {
+            panel.local_cols = Some(cols);
+        }
+    }
+
+    /// The output rows `id`'s panel showed when it last rendered.
+    pub(crate) fn output_rows(&self, id: &str) -> usize {
+        self.entries
+            .get(id)
+            .and_then(|panel| panel.output_model.as_ref())
+            .map_or(0, |model| model.rows)
+    }
+
     /// Call once per painted frame, after the rows were laid out.
     pub(crate) fn settle(&mut self) -> PanelChanges {
         let mut changes = PanelChanges::default();
@@ -422,6 +565,9 @@ struct Panel {
     output_model: Option<OutputModel>,
     shown_rows: Option<usize>,
     resized: bool,
+    /// For a panel laid out here: the width it measured, and its grid.
+    local_cols: Option<u16>,
+    local_frame: Option<((usize, u16), Rc<TerminalFrame>)>,
 }
 
 impl Panel {
@@ -535,6 +681,70 @@ impl Panel {
                 })
             })
             .into_any_element()
+    }
+}
+
+/// Plain text as a terminal of `cols` columns would show it: its last lines,
+/// wrapped, without interpreting anything in them.
+fn text_frame(text: &str, cols: u16) -> TerminalFrame {
+    let cols = usize::from(cols.max(2));
+    let mut tail: Vec<&str> = text.lines().rev().take(MAX_ROWS * 4).collect();
+    tail.reverse();
+    let mut visible = Vec::new();
+    for line in tail {
+        let mut row = TerminalRow::default();
+        let mut col = 0usize;
+        let mut push = |row: &mut TerminalRow, col: &mut usize, text: &str, width: usize| {
+            if *col + width > cols {
+                visible.push(std::mem::replace(
+                    row,
+                    TerminalRow {
+                        wrapped: true,
+                        ..TerminalRow::default()
+                    },
+                ));
+                *col = 0;
+            }
+            row.cells.push(TerminalCell {
+                text: text.to_string(),
+                width: if width == 2 {
+                    CellWidth::Wide
+                } else {
+                    CellWidth::Narrow
+                },
+                ..TerminalCell::default()
+            });
+            if width == 2 {
+                row.cells.push(TerminalCell {
+                    width: CellWidth::Spacer,
+                    ..TerminalCell::default()
+                });
+            }
+            *col += width;
+        };
+        for grapheme in line.graphemes(true) {
+            if grapheme == "\t" {
+                for _ in 0..(8 - col % 8) {
+                    push(&mut row, &mut col, " ", 1);
+                }
+                continue;
+            }
+            let width = grapheme.width().min(2);
+            if width > 0 {
+                push(&mut row, &mut col, grapheme, width);
+            }
+        }
+        visible.push(row);
+    }
+    while visible.last().is_some_and(|row| row.cells.is_empty()) {
+        visible.pop();
+    }
+    TerminalFrame {
+        cols: cols.min(u16::MAX as usize) as u16,
+        rows: visible.len().min(u16::MAX as usize) as u16,
+        styles: vec![TerminalStyle::default()],
+        visible,
+        ..TerminalFrame::default()
     }
 }
 

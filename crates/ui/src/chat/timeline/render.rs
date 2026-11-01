@@ -919,8 +919,7 @@ impl ChatView {
             if capsule_label.is_empty() {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
-            let duration =
-                format_elapsed_deciseconds(activity_run_duration_ms(folded, turn, is_last));
+            let duration = format_elapsed(activity_run_duration_ms(folded, turn, is_last));
             let outcome = work_log_outcome(turn, folded, is_last);
             let rows = if expanded && !header_only {
                 self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, window, cx)
@@ -1150,37 +1149,26 @@ impl ChatView {
         };
         match item {
             ItemContent::CommandExecution {
-                command, output, ..
-            } => {
-                let panel_id = entry.id.clone();
-                let session_id = self.session_id.clone();
-                let on_cols_change = cx.listener(move |_this, cols: &u16, window, cx| {
-                    // Fires from `on_prepaint`, in the middle of laying the
-                    // list out. Subscribe once the frame is done.
-                    let cols = *cols;
-                    let panel_id = panel_id.clone();
-                    let session_id = session_id.clone();
-                    cx.defer_in(window, move |this, _window, cx| {
-                        this.workspace_store.update(cx, |store, _| {
-                            store.watch_command_output_for(session_id.as_deref(), &panel_id, cols);
-                        });
-                    });
-                });
-                let store = self.workspace_store.read(cx);
-                let replica = store.command_output_for(self.session_id.as_deref(), &entry.id);
-                let screen = tools::shell::OutputScreen {
-                    watched: replica.and_then(|replica| replica.watched()),
-                    frame: replica.and_then(|replica| replica.frame()),
-                };
-                self.command_panels.borrow_mut().render(
+                command,
+                output,
+                status,
+                ..
+            } => tools::shell::shell_body(
+                tools::shell::ShellRun {
                     entry,
                     command,
+                    workdir: None,
                     output,
-                    screen,
-                    Some(Box::new(on_cols_change)),
+                    hosted: true,
+                    running: *status == agent::ItemStatus::InProgress,
+                },
+                &mut tools::ToolCtx {
+                    chat: self,
                     cx,
-                )
-            }
+                    cwd,
+                    images_inline,
+                },
+            ),
             ItemContent::ToolCall { .. } => {
                 let call = tools::Call::of(entry).expect("a tool call");
                 let view = tools::view(&call);
