@@ -18,7 +18,7 @@ use crate::window_state::WindowState;
 /// A chat open on a thread whose stored log is `log`.
 pub(in crate::chat) struct StoredThread {
     pub(in crate::chat) store: Entity<WorkspaceStore>,
-    driver: crate::store::tests::LocalHostDriver,
+    pub(in crate::chat) driver: crate::store::tests::LocalHostDriver,
     host: tcode_runtime::pipe::SpawnedHost,
 }
 
@@ -844,5 +844,64 @@ fn a_subagent_keeps_its_pill_and_says_how_it_stands(cx: &mut TestAppContext) {
             "{settled}"
         );
     }
+    thread.shutdown(cx);
+}
+
+/// An output longer than the host sends with a record arrives as a preview:
+/// the window says how much there is and loads the rest when asked, then
+/// shows it whole behind the same bound.
+#[gpui::test]
+fn a_shortened_output_loads_whole_when_asked(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let output = (1..=600)
+        .map(|line| format!("line {line} of the result"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(output.len() > tcode_protocol::OUTPUT_PREVIEW_BYTES);
+    let call = serde_json::json!({
+        "ts": 2_000,
+        "event": {
+            "type": "item_completed",
+            "id": "long",
+            "content": {
+                "kind": "tool_call",
+                "name": "mcp__docs__dump",
+                "input": { "topic": "everything" },
+                "output": output,
+                "status": "completed",
+            },
+        },
+    });
+    let log = [
+        serde_json::json!({ "ts": 1_000, "event": { "type": "turn_started", "turn_id": "t" } }),
+        serde_json::json!({ "ts": 1_001, "event": { "type": "item_completed", "id": "user",
+            "content": { "kind": "user_message", "text": "Dump it." } } }),
+        call,
+        serde_json::json!({ "ts": 3_000, "event": { "type": "turn_completed", "turn_id": "t",
+            "status": "completed", "usage": null } }),
+    ]
+    .map(|line| line.to_string())
+    .join("\n");
+    let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
+    thread.open_work_log("long", cx);
+    click(cx, "activity-row-long");
+    assert!(shows(cx, "load-output-long"), "the preview offers the rest");
+    click(cx, "load-output-long");
+    let store = thread.store.clone();
+    thread
+        .driver
+        .wait_until(cx, &store, "the whole output", |_| true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while shows(cx, "load-output-long") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the output never loaded"
+        );
+        thread.driver.step(cx, &store);
+        draw_settled(cx);
+    }
+    click(cx, "tool-text-long-output-more");
+    assert!(shows(cx, "tool-text-long-output"));
     thread.shutdown(cx);
 }

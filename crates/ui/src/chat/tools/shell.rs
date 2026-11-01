@@ -258,7 +258,8 @@ impl ToolView for ToolShell<'_> {
                 .child(super::display_path(workdir, ctx.cwd))
                 .into_any_element()
         });
-        let report = report(call.output.unwrap_or_default());
+        let (text, elided) = super::full_output(call, ctx);
+        let report = report(&text);
         let output = (!report.output.trim().is_empty()).then(|| {
             bounded_text(
                 call.entry,
@@ -281,6 +282,7 @@ impl ToolView for ToolShell<'_> {
             .children(workdir)
             .child(prompt)
             .children(output)
+            .children(elided)
             .when(
                 report.output.trim().is_empty() && call.output.is_some(),
                 |body| {

@@ -199,8 +199,8 @@ impl ToolView for Search<'_> {
     }
 
     fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
-        let output = call.output.unwrap_or_default();
-        let (results, notes) = self.results(output);
+        let (output, elided) = super::full_output(call, ctx);
+        let (results, notes) = self.results(&output);
         if call.status == agent::ItemStatus::Failed || results.is_empty() {
             let section = output_section(call, Bound::OUTPUT, ctx);
             return super::body(section);
@@ -263,6 +263,7 @@ impl ToolView for Search<'_> {
                     .children(rows),
             )
             .children(control)
+            .children(elided)
             .into_any_element()
     }
 
