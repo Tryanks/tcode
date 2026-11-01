@@ -2691,3 +2691,4 @@ tools:
   items: "[%{count} items]"
   keys: "{%{count} keys}"
   copy_arguments: "Copy arguments"
+  session: "session %{id}"

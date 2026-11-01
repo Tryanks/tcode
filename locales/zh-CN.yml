@@ -2684,3 +2684,4 @@ tools:
   items: "[%{count} 项]"
   keys: "{%{count} 个键}"
   copy_arguments: "复制参数"
+  session: "会话 %{id}"

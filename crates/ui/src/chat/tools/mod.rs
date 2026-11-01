@@ -127,8 +127,7 @@ impl Activity {
 /// The window of one Work Log activity other than a file change or a
 /// subagent: dispatched on its item kind, then for a tool call on the
 /// family that claims it.
-pub(in crate::chat) fn activity(entry: &TimelineEntry, live_reasoning: bool, cx: &App) -> Activity {
-    let muted = cx.theme().muted_foreground;
+pub(in crate::chat) fn activity(entry: &TimelineEntry, live_reasoning: bool) -> Activity {
     let settled = |header, copy| Activity {
         header,
         status: ItemStatus::Completed,
@@ -146,7 +145,7 @@ pub(in crate::chat) fn activity(entry: &TimelineEntry, live_reasoning: bool, cx:
             exit_code,
             status,
         } => Activity {
-            header: shell::command_header(command, output, *exit_code, *status, muted),
+            header: shell::command_header(command, output, *exit_code, *status),
             status: *status,
             output: Some(output.clone()),
             copy: shell::command_copy_items(command, output),
@@ -202,8 +201,9 @@ pub(in crate::chat) fn activity(entry: &TimelineEntry, live_reasoning: bool, cx:
 /// An activity's window drawn outside a chat, for the component gallery:
 /// its header, and a command's terminal when open.
 pub(crate) fn preview_window(entry: &TimelineEntry, open: bool, cx: &App) -> AnyElement {
-    let activity = activity(entry, false, cx);
+    let activity = activity(entry, false);
     let error = activity.failure();
+    let elapsed_ms = window::elapsed(&activity.header, entry);
     let Activity {
         header,
         status,
@@ -214,16 +214,14 @@ pub(crate) fn preview_window(entry: &TimelineEntry, open: bool, cx: &App) -> Any
     let detail = match &entry.content {
         EntryContent::Item(ItemContent::CommandExecution {
             command, output, ..
-        }) if open => window::Detail::Open(
-            super::components::command_panel::CommandPanelCache::new().render(
-                entry,
-                command,
-                output,
-                Default::default(),
-                None,
-                cx,
-            ),
-        ),
+        }) if open => window::Detail::Open(shell::CommandPanelCache::new().render(
+            entry,
+            command,
+            output,
+            Default::default(),
+            None,
+            cx,
+        )),
         _ if expandable => window::Detail::Shut,
         _ => window::Detail::None,
     };
@@ -233,7 +231,7 @@ pub(crate) fn preview_window(entry: &TimelineEntry, open: bool, cx: &App) -> Any
             header,
             status,
             error,
-            elapsed_ms: window::elapsed(entry),
+            elapsed_ms,
             compact: false,
             copy,
         },
@@ -406,13 +404,14 @@ pub(in crate::chat) fn bounded_text(
     let control = |label: String, ctx: &mut ToolCtx<'_, '_>| {
         let on_click = ctx.toggle(entry, key.clone());
         let selector = format!("{key}-more");
-        div()
-            .debug_selector(move || selector.clone())
-            .child(super::components::changed_files::quiet_control(
-                SharedString::from(format!("{key}-more")),
-                label.into(),
-                on_click,
-                ctx.app(),
+        h_flex()
+            .child(div().debug_selector(move || selector.clone()).child(
+                super::components::changed_files::quiet_control(
+                    SharedString::from(format!("{key}-more")),
+                    label.into(),
+                    on_click,
+                    ctx.app(),
+                ),
             ))
             .into_any_element()
     };

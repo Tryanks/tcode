@@ -1052,8 +1052,9 @@ impl ChatView {
             row.auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
         let expanded =
             self.auto_activity_expanded((turn, &entry.id), &key, auto_enabled, row.recency, cx);
-        let activity = tools::activity(entry, row.live_reasoning, cx);
+        let activity = tools::activity(entry, row.live_reasoning);
         let error = activity.failure();
+        let elapsed_ms = tools::window::elapsed(&activity.header, entry);
         let tools::Activity {
             header,
             status,
@@ -1080,7 +1081,7 @@ impl ChatView {
                 header,
                 status,
                 error,
-                elapsed_ms: tools::window::elapsed(entry),
+                elapsed_ms,
                 compact: row.compact,
                 copy,
             },
@@ -1123,7 +1124,7 @@ impl ChatView {
                 });
                 let store = self.workspace_store.read(cx);
                 let replica = store.command_output_for(self.session_id.as_deref(), &entry.id);
-                let screen = components::command_panel::OutputScreen {
+                let screen = tools::shell::OutputScreen {
                     watched: replica.and_then(|replica| replica.watched()),
                     frame: replica.and_then(|replica| replica.frame()),
                 };
@@ -1225,7 +1226,7 @@ impl ChatView {
     /// rows whose panel changed height with a new screen.
     pub(in crate::chat) fn apply_command_panel_changes(
         &mut self,
-        changes: components::command_panel::PanelChanges,
+        changes: tools::shell::PanelChanges,
         cx: &mut Context<Self>,
     ) {
         if !changes.unmounted.is_empty() {
