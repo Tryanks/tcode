@@ -230,15 +230,18 @@ pub(in crate::chat) struct WindowSpec {
     pub(in crate::chat) path: Option<(String, std::path::PathBuf)>,
 }
 
+/// How long an item took, when its start and its end were both seen.
+pub(in crate::chat) fn elapsed_of(entry: &tcode_core::session::TimelineEntry) -> Option<u64> {
+    Some(entry.finished_ts?.saturating_sub(entry.ts?))
+}
+
 /// How long the call took: as its harness reports it, else when its start
 /// and its end were both seen.
 pub(in crate::chat) fn elapsed(
     header: &Header,
     entry: &tcode_core::session::TimelineEntry,
 ) -> Option<u64> {
-    header
-        .elapsed_ms
-        .or_else(|| Some(entry.finished_ts?.saturating_sub(entry.ts?)))
+    header.elapsed_ms.or_else(|| elapsed_of(entry))
 }
 
 /// A whole window: the header, a click on which toggles the body, then the
@@ -524,7 +527,7 @@ fn chip_element(key: &str, chip: Chip, cx: &App) -> AnyElement {
 
 /// Interrupted and declined calls say so in words: neither failed, and a
 /// declined one never ran.
-fn status_chip(key: &str, status: ItemStatus, cx: &App) -> Option<AnyElement> {
+pub(in crate::chat) fn status_chip(key: &str, status: ItemStatus, cx: &App) -> Option<AnyElement> {
     let theme = cx.theme();
     let (label, color) = match status {
         ItemStatus::Interrupted => (crate::tr!("tools.status.interrupted"), theme.warning),
@@ -551,7 +554,12 @@ enum Glyph {
 /// cross-fades into the other. Failure never recolours the glyph — it hangs
 /// a small red X off its corner, on a disc of the row background so the
 /// badge stays legible over whatever it overlaps.
-fn status_glyph(key: &str, icon: SharedString, status: ItemStatus, cx: &App) -> AnyElement {
+pub(in crate::chat) fn status_glyph(
+    key: &str,
+    icon: SharedString,
+    status: ItemStatus,
+    cx: &App,
+) -> AnyElement {
     let glyph = match status {
         ItemStatus::InProgress => Glyph::Running,
         status => Glyph::Settled {
