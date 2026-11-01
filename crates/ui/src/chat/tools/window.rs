@@ -225,6 +225,9 @@ pub(in crate::chat) struct WindowSpec {
     pub(in crate::chat) elapsed_ms: Option<u64>,
     pub(in crate::chat) compact: bool,
     pub(in crate::chat) copy: Vec<(String, String)>,
+    /// A file the call is about, which the menu offers to open, and the
+    /// directory a relative one is under.
+    pub(in crate::chat) path: Option<(String, std::path::PathBuf)>,
 }
 
 /// How long the call took: as its harness reports it, else when its start
@@ -254,6 +257,7 @@ pub(in crate::chat) fn tool_window(
         elapsed_ms,
         compact,
         copy,
+        path,
     } = spec;
     let expandable = detail.expandable();
     let open = match &detail {
@@ -320,6 +324,14 @@ pub(in crate::chat) fn tool_window(
         })
         .children(detail)
         .context_menu(move |menu, _, _| {
+            let menu = match &path {
+                Some((path, base)) => {
+                    let full = base.join(path);
+                    menu.path_items(&full.to_string_lossy(), Some(base))
+                        .separator()
+                }
+                None => menu,
+            };
             copy.iter().cloned().fold(menu, |menu, (label, text)| {
                 menu.menu(label, Box::new(CopyText(text)))
             })

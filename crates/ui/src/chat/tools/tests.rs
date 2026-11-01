@@ -360,3 +360,201 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
     assert!(shows(cx, &format!("tool-text-{child}-output")));
     thread.shutdown(cx);
 }
+
+impl StoredThread {
+    /// The windows of the edit `id` made, one per file, as their headers
+    /// read: verb, path, line counts, and whether the diff is numbered.
+    pub(in crate::chat) fn files(
+        &self,
+        id: &str,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(String, String, Option<(u32, u32)>, bool)> {
+        let entry = self.entry(id, cx);
+        let cwd = std::path::PathBuf::from("/Users/me/project");
+        let edit = super::diff::edit(&entry, &cwd).expect("an edit");
+        edit.files
+            .iter()
+            .map(|file| {
+                let header = super::diff::file_header(file);
+                (
+                    header.verb.expect("a verb").text(edit.status).to_string(),
+                    header.argument.expect("a path").text,
+                    file.row.counts,
+                    file.numbered,
+                )
+            })
+            .collect()
+    }
+}
+
+/// An edit reads as a window per file: what happened to it, its path and
+/// the lines it added and removed, opening on its diff. A harness's own diff
+/// keeps its line numbers; an edit made as a tool call — Codex's imported
+/// `apply_patch`, a subagent's `Edit` — is drawn from what it asked for and
+/// numbers no lines, since it never said which.
+#[gpui::test]
+fn an_edit_reads_as_its_files_and_opens_on_each_diff(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/diff.jsonl"), 1_024.);
+    let file = |verb: &str, path: &str, counts, numbered| {
+        (verb.to_owned(), path.to_owned(), counts, numbered)
+    };
+    let patch = "call_pRHtbnUjD1fys6vF0opYzxxb";
+    let codex = "exec-f7170e74-7da8-447e-8dd1-8f9e4171a278";
+    for (id, expected) in [
+        (
+            "toolu_011mXP4LmwByfxyE3aeyTZmG",
+            vec![file(
+                "Edited",
+                "crates/app/src/sessions.rs",
+                Some((4, 1)),
+                true,
+            )],
+        ),
+        (
+            "toolu_017j2Ae9pT4MwYY5MGTQGrtR",
+            vec![file(
+                "Edited",
+                "crates/ui/src/store/mod.rs",
+                Some((1, 1)),
+                false,
+            )],
+        ),
+        (
+            "toolu_01428REq3FY79RkJYwSanEU7",
+            vec![file(
+                "Created",
+                "/Users/me/Documents/Tcode/2026-10-29/tools/extract_subs.sh",
+                Some((17, 0)),
+                false,
+            )],
+        ),
+        (
+            codex,
+            vec![file("Edited", "docs/review.md", Some((5, 1)), true)],
+        ),
+        (
+            "exec-c85dea68-c4be-4c0f-a7f3-c0acb537833a",
+            vec![
+                file("Moved", "crates/services/src/version_check.rs", None, false),
+                file(
+                    "Moved",
+                    "crates/services/src/version_check/app_releases.rs",
+                    Some((1, 1)),
+                    true,
+                ),
+            ],
+        ),
+        (
+            patch,
+            vec![file(
+                "Edited",
+                "crates/sampleapp-core/src/helper_protocol/ops.rs",
+                Some((4, 0)),
+                false,
+            )],
+        ),
+        (
+            "toolu_01CbYY9A8YxGCykHFEFqtNq5:toolu_01XFRP8Dbt8t1tPr3LaArd15",
+            vec![file(
+                "Edited",
+                "/tmp/sampleapp-selectors/locales/pages/selectors.yml",
+                Some((0, 3)),
+                false,
+            )],
+        ),
+    ] {
+        assert_eq!(thread.files(id, cx), expected, "{id}");
+    }
+
+    thread.open_work_log("toolu_011mXP4LmwByfxyE3aeyTZmG", cx);
+    assert!(shows(cx, "tool-chip-toolu_011mXP4LmwByfxyE3aeyTZmG-file-0"));
+    // A rename that changed no lines has nothing to open.
+    click(
+        cx,
+        "activity-row-exec-c85dea68-c4be-4c0f-a7f3-c0acb537833a-file-0",
+    );
+    assert!(!shows(cx, "file-edit-diff"));
+
+    click(cx, &format!("activity-row-{codex}-file-0"));
+    assert!(shows(cx, "file-edit-diff-line-0"));
+    assert!(shows(cx, "file-edit-diff-gutter-0"));
+    click(cx, &format!("activity-row-{codex}-file-0"));
+    assert!(!shows(cx, "file-edit-diff"));
+
+    click(cx, &format!("activity-row-{patch}-file-0"));
+    assert!(shows(cx, "file-edit-diff-line-0"));
+    assert!(!shows(cx, "file-edit-diff-gutter-0"));
+    thread.shutdown(cx);
+}
+
+/// A long path and its line counts stay inside an edit's header however
+/// narrow the chat gets, and the path never wraps: the counts keep their
+/// width and the path gives way.
+#[gpui::test]
+fn a_long_edit_path_and_its_counts_stay_in_the_header_at_narrow_widths(cx: &mut TestAppContext) {
+    use agent::{FileChange, FileChangeKind, ItemContent, ItemStatus};
+    use tcode_core::session::{EntryContent, Timeline, TurnMeta};
+
+    let mut timeline = Timeline::default();
+    timeline.turns = vec![TurnMeta {
+        running: true,
+        ..TurnMeta::default()
+    }];
+    let path =
+        "crates/ui/src/deeply/nested/module/tree/with/an/absurdly/long/name/live_file_edit_row.rs";
+    timeline.entries = vec![
+        crate::chat::tests::entry("user", crate::chat::tests::user_item("go")),
+        crate::chat::tests::entry(
+            "edit",
+            EntryContent::Item(ItemContent::FileChange {
+                changes: vec![FileChange {
+                    path: path.into(),
+                    kind: FileChangeKind::Modify,
+                    diff: Some(format!(
+                        "@@ -1,96 +1,128 @@\n{}{}",
+                        "-old\n".repeat(96),
+                        "+new\n".repeat(128)
+                    )),
+                }],
+                status: ItemStatus::InProgress,
+            }),
+        ),
+    ];
+    let (store, window_state, _) = crate::chat::tests::seed_chat(cx, timeline);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (_, cx) = cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+    cx.simulate_resize(size(px(900.), px(700.)));
+    draw_settled(cx);
+    let (row, path, counts) = (
+        "activity-row-edit-file-0",
+        "tool-argument-edit-file-0",
+        "tool-chip-edit-file-0",
+    );
+    let baseline = cx.debug_bounds(row).expect("header");
+    let baseline_counts = cx.debug_bounds(counts).expect("counts");
+    for width in (280..=900).rev() {
+        cx.simulate_resize(size(px(width as f32), px(700.)));
+        crate::test_frames::draw(cx);
+        let row = cx.debug_bounds(row).expect("header");
+        let path = cx.debug_bounds(path).expect("path");
+        let counts = cx.debug_bounds(counts).expect("counts");
+        assert!(
+            path.left() >= row.left() && path.right() <= row.right(),
+            "the path escaped the header at {width}px: {row:?} {path:?}"
+        );
+        assert!(
+            counts.left() >= path.right() && counts.right() <= row.right(),
+            "the counts left the header or overlapped the path at {width}px: {path:?} {counts:?}"
+        );
+        assert_eq!(
+            counts.size.width, baseline_counts.size.width,
+            "the counts were squeezed at {width}px"
+        );
+        assert_eq!(
+            row.size.height, baseline.size.height,
+            "the header grew at {width}px, so the path wrapped"
+        );
+    }
+}

@@ -10,6 +10,7 @@
 //! generic window. A provider that names a capability differently simply
 //! gets the generic window until a matcher accepts its name and shape.
 
+pub(in crate::chat) mod diff;
 pub(in crate::chat) mod generic;
 pub(in crate::chat) mod shell;
 pub(in crate::chat) mod window;
@@ -234,6 +235,7 @@ pub(crate) fn preview_window(entry: &TimelineEntry, open: bool, cx: &App) -> Any
             elapsed_ms,
             compact: false,
             copy,
+            path: None,
         },
         detail,
         |_, _, _| {},

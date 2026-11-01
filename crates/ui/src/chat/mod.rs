@@ -89,17 +89,17 @@ pub(crate) struct OpenFileDiff {
     pub(crate) path: String,
 }
 
-use self::components::changed_files::InlineDiffCache;
 use self::model::{
     LimitResumeAction, RowRenderArgs, Segment, activity_run_duration_ms, displayed_error_text,
     divergent_served_model, format_elapsed_deciseconds, latest_message_ids, limit_resume_action,
-    live_edit_counts, live_edit_rows, notice_keys, partition_activity_run, plain_text_as_markdown,
-    segment_entries, start_hub_projects, timeline_overdraw, user_content, user_notice,
-    user_visible_text, work_log_capsule_label, work_log_counts, work_log_key, work_log_outcome,
+    live_edit_counts, notice_keys, partition_activity_run, plain_text_as_markdown, segment_entries,
+    start_hub_projects, timeline_overdraw, user_content, user_notice, user_visible_text,
+    work_log_capsule_label, work_log_counts, work_log_key, work_log_outcome,
 };
 use self::timeline::rows::{
     ListSync, RowPart, TimelineContinuity, TimelineRow, TurnIndexCache, row_of_entry, rows_of_turn,
 };
+use self::tools::diff::InlineDiffCache;
 use self::tools::shell::CommandPanelCache;
 pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,

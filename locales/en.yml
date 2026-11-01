@@ -2692,3 +2692,4 @@ tools:
   keys: "{%{count} keys}"
   copy_arguments: "Copy arguments"
   session: "session %{id}"
+  copy_diff: "Copy diff"
