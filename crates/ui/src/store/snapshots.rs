@@ -70,8 +70,11 @@ pub struct ComposerState {
     pub conversation_read_only: bool,
     pub terminal_limit_reached: bool,
     pub terminal_split_available: bool,
+    /// The first approval the composer asks; a plan's is asked on its block.
     pub pending_approval: Option<agent::ApprovalRequest>,
     pub pending_approval_count: usize,
+    /// The plan decision the agent waits on, which a send answers in words.
+    pub pending_plan: Option<agent::ApprovalRequest>,
 }
 
 pub(crate) fn composer_state(
@@ -81,6 +84,13 @@ pub(crate) fn composer_state(
     providers: &ProvidersStatus,
 ) -> ComposerState {
     let provider = status.map(|status| status.provider);
+    let approvals = || {
+        status
+            .into_iter()
+            .flat_map(|status| &status.pending_approvals)
+    };
+    let is_plan =
+        |request: &agent::ApprovalRequest| matches!(request.kind, agent::ApprovalKind::Plan { .. });
     let active_model_spec = status.and_then(|status| {
         let model = status.requested_model.as_deref()?;
         providers
@@ -179,8 +189,9 @@ pub(crate) fn composer_state(
         conversation_read_only: status.is_some_and(|status| status.conversation_read_only),
         terminal_limit_reached: status.is_some_and(|status| status.terminal_limit_reached),
         terminal_split_available: status.is_some_and(|status| status.terminal_split_available),
-        pending_approval: status.and_then(|status| status.pending_approvals.first().cloned()),
-        pending_approval_count: status.map_or(0, |status| status.pending_approvals.len()),
+        pending_approval: approvals().find(|request| !is_plan(request)).cloned(),
+        pending_approval_count: approvals().filter(|request| !is_plan(request)).count(),
+        pending_plan: approvals().find(|request| is_plan(request)).cloned(),
     }
 }
 

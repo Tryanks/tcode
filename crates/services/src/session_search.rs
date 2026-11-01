@@ -348,6 +348,7 @@ fn searchable_text(content: &EntryContent) -> Option<(SearchKind, String)> {
                 ),
             ));
         }
+        EntryContent::Feedback { text } => return Some((SearchKind::UserMessage, text.clone())),
         _ => return None,
     };
     Some(match item {
@@ -359,7 +360,9 @@ fn searchable_text(content: &EntryContent) -> Option<(SearchKind, String)> {
                 std::iter::once(text.as_str()).chain(attachments.iter().map(String::as_str)),
             ),
         ),
-        ItemContent::AssistantMessage { text, .. } => (SearchKind::AssistantMessage, text.clone()),
+        ItemContent::AssistantMessage { text, .. } | ItemContent::Plan { markdown: text } => {
+            (SearchKind::AssistantMessage, text.clone())
+        }
         ItemContent::CommandExecution { command, .. } => {
             (SearchKind::CommandExecution, command.clone())
         }

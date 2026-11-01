@@ -772,6 +772,24 @@ impl Composer {
             cx.notify();
             return;
         }
+        // While the agent waits on its plan, words sent from here answer it:
+        // the agent keeps planning from them.
+        if let Some(plan) = composer_state.pending_plan
+            && !text.is_empty()
+        {
+            if self
+                .workspace_store
+                .read(cx)
+                .approval_delivery_pending(&plan.id)
+            {
+                return;
+            }
+            input.update(cx, |state, cx| state.replace_all("", window, cx));
+            self.respond(plan.id, ApprovalDecision::Feedback(text), cx);
+            cx.emit(ComposerEvent::Submitted);
+            cx.notify();
+            return;
+        }
         let orchestrate_text = strip_orchestrate_prefix(&text).map(str::to_string);
         let prompt_text = orchestrate_text.as_deref().unwrap_or(&text);
         let sent_text = prompt_text.to_string();
@@ -1231,6 +1249,8 @@ impl Render for Composer {
             crate::tr!("chat.subagent_readonly")
         } else if self.compact && !self.interactive(cx) {
             crate::tr!("mobile.offline_message")
+        } else if composer_state.pending_plan.is_some() {
+            crate::tr!("composer.plan_feedback_placeholder")
         } else {
             draft_placeholder(self.compact)
         };

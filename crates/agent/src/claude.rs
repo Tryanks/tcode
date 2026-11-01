@@ -1217,6 +1217,9 @@ enum ToolItem {
         name: String,
         input: Value,
     },
+    Plan {
+        markdown: String,
+    },
     Subagent {
         agent_type: String,
         description: String,
@@ -1559,6 +1562,9 @@ impl Mapper {
                 let suggestions = pending.suggestions.get(&id)?;
                 json!({ "behavior": "allow", "updatedInput": pending.input, "updatedPermissions": suggestions })
             }
+            ApprovalDecision::Feedback(text) => json!({
+                "behavior": "deny", "message": text,
+            }),
             ApprovalDecision::Cancel => json!({
                 "behavior": "deny", "message": "User cancelled tool execution.",
             }),
@@ -2579,6 +2585,14 @@ impl Mapper {
                     status: ItemStatus::InProgress,
                 },
             )
+        } else if name == EXIT_PLAN_MODE {
+            let markdown = plan_markdown(&input);
+            (
+                ToolItem::Plan {
+                    markdown: markdown.clone(),
+                },
+                ItemContent::Plan { markdown },
+            )
         } else if is_file_tool(&name) {
             let changes = file_changes(&name, &input);
             (
@@ -2723,6 +2737,7 @@ impl Mapper {
                     }
                     ItemContent::FileChange { changes, status }
                 }
+                ToolItem::Plan { markdown } => ItemContent::Plan { markdown },
                 ToolItem::Tool { name, input } => ItemContent::ToolCall {
                     image_reads: if !is_error && crate::image_reads::is_read_tool(&name) {
                         crate::image_reads::content_images(
@@ -2924,6 +2939,10 @@ impl Mapper {
             }];
         }
 
+        if tool_name == EXIT_PLAN_MODE {
+            return self.plan_approval(request_id, request, input);
+        }
+
         let request_type = classify_claude_tool(&tool_name);
 
         let detail = approval_detail(&tool_name, &input);
@@ -3010,6 +3029,79 @@ impl Mapper {
             kind,
             options,
         })]
+    }
+
+    /// `ExitPlanMode`'s permission prompt: the plan item it decides on (from
+    /// the tool's own item, emitted here when the prompt arrives first), then
+    /// the decision with Claude Code's allow and deny under plan names.
+    fn plan_approval(
+        &mut self,
+        request_id: String,
+        request: &Value,
+        input: Value,
+    ) -> Vec<AgentEvent> {
+        let markdown = plan_markdown(&input);
+        let item_id = request
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("plan-{request_id}"));
+        let mut events = Vec::new();
+        let known = match self.tool_items.get(&item_id) {
+            Some(ToolItem::Plan { markdown: shown }) => Some(*shown == markdown),
+            _ => None,
+        };
+        if known != Some(true) {
+            self.tool_items.insert(
+                item_id.clone(),
+                ToolItem::Plan {
+                    markdown: markdown.clone(),
+                },
+            );
+            let item = ThreadItem {
+                id: item_id.clone(),
+                parent_item_id: None,
+                content: ItemContent::Plan {
+                    markdown: markdown.clone(),
+                },
+            };
+            events.push(if known.is_some() {
+                AgentEvent::ItemUpdated(item)
+            } else {
+                AgentEvent::ItemStarted(item)
+            });
+        }
+        self.pending_approvals.insert(
+            request_id.clone(),
+            PendingApproval {
+                input,
+                suggestions: HashMap::new(),
+            },
+        );
+        let parent_item_id = request
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .and_then(|agent_id| self.task_tools.get(agent_id))
+            .cloned();
+        events.push(AgentEvent::ApprovalRequested(ApprovalRequest {
+            id: request_id,
+            turn_id: self.current_turn_id.clone(),
+            parent_item_id,
+            kind: ApprovalKind::Plan { item_id, markdown },
+            options: vec![
+                ApprovalOption {
+                    id: "allow".into(),
+                    label: "Approve".into(),
+                    kind: ApprovalOptionKind::AllowOnce,
+                },
+                ApprovalOption {
+                    id: "deny".into(),
+                    label: "Keep planning".into(),
+                    kind: ApprovalOptionKind::RejectOnce,
+                },
+            ],
+        }));
+        events
     }
 
     fn on_result(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -3234,6 +3326,19 @@ fn subagent_description(input: &Value) -> String {
 /// Classify approvals with an ordered substring matcher. Read-only matches
 /// take precedence (`WebSearch` → `FileRead`); agent tools use `ToolUse` even
 /// when their names also match command or file-change substrings.
+/// The tool Claude Code calls to present its plan and leave plan mode.
+const EXIT_PLAN_MODE: &str = "ExitPlanMode";
+
+/// The plan `ExitPlanMode` presents, which Claude Code fills in from the plan
+/// file it wrote.
+fn plan_markdown(input: &Value) -> String {
+    input
+        .get("plan")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 fn classify_claude_tool(name: &str) -> ClaudeRequestType {
     let n = name.to_lowercase();
     if n == "read"
@@ -3769,12 +3874,7 @@ mod tests {
         let session =
             json!({"type":"addRules", "rules":[{"toolName":"Write"}], "destination":"session"});
         let user = json!({"type":"setMode", "mode":"acceptEdits", "destination":"userSettings"});
-        for name in [
-            "Write",
-            "EnterPlanMode",
-            "ExitPlanMode",
-            "mcp__tcode_report__report_result",
-        ] {
+        for name in ["Write", "EnterPlanMode", "mcp__tcode_report__report_result"] {
             for choice in [
                 "allow",
                 "deny",
@@ -5499,6 +5599,80 @@ mod tests {
                 assert!(detail.len() < input["blob"].as_str().unwrap().len());
             }
         }
+    }
+
+    #[test]
+    fn exit_plan_mode_shows_its_plan_and_takes_the_decision_natively() {
+        let plan = "# Plan\n\n1. Write hello.txt";
+        let input = json!({"plan": plan, "planFilePath": "/plans/p.md"});
+        for (choice, expected) in [
+            (
+                ApprovalDecision::Option("allow".into()),
+                json!({"behavior": "allow", "updatedInput": input}),
+            ),
+            (
+                ApprovalDecision::Option("deny".into()),
+                json!({"behavior": "deny", "message": "User declined tool execution."}),
+            ),
+            (
+                ApprovalDecision::Feedback("Use Python instead".into()),
+                json!({"behavior": "deny", "message": "Use Python instead"}),
+            ),
+        ] {
+            let mut mapper = Mapper::new();
+            let started = mapper.on_message(json!({"type":"assistant", "message": {"id":"msg_plan",
+                "content":[{"type":"tool_use", "id":"toolu_plan", "name":"ExitPlanMode", "input":input}]}}));
+            assert!(
+                started.iter().any(|event| matches!(event, AgentEvent::ItemStarted(ThreadItem { id, content: ItemContent::Plan { markdown }, .. })
+                    if id == "toolu_plan" && markdown == plan)),
+                "{started:?}"
+            );
+            let events = mapper.on_message(json!({"type":"control_request", "request_id":"plan-request",
+                "request": {"subtype":"can_use_tool", "tool_name":"ExitPlanMode", "input":input, "tool_use_id":"toolu_plan"}}));
+            let [AgentEvent::ApprovalRequested(request)] = events.as_slice() else {
+                panic!("the plan item is already shown: {events:?}")
+            };
+            assert_eq!(
+                request.kind,
+                ApprovalKind::Plan {
+                    item_id: "toolu_plan".into(),
+                    markdown: plan.into()
+                }
+            );
+            assert_eq!(
+                request
+                    .options
+                    .iter()
+                    .map(|option| (option.id.as_str(), option.label.as_str(), option.kind))
+                    .collect::<Vec<_>>(),
+                [
+                    ("allow", "Approve", ApprovalOptionKind::AllowOnce),
+                    ("deny", "Keep planning", ApprovalOptionKind::RejectOnce)
+                ]
+            );
+            let response = mapper
+                .build_approval_response("plan-request", choice)
+                .unwrap();
+            assert_eq!(response["response"]["response"], expected);
+            let completed = mapper.on_message(json!({"type":"user", "message": {"content":[
+                {"type":"tool_result", "tool_use_id":"toolu_plan", "content":"User has approved your plan."}]}}));
+            assert!(
+                completed.iter().any(|event| matches!(event, AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Plan { markdown }, .. })
+                    if id == "toolu_plan" && markdown == plan)),
+                "{completed:?}"
+            );
+        }
+
+        let mut mapper = Mapper::new();
+        let events = mapper.on_message(json!({"type":"control_request", "request_id":"early",
+            "request": {"subtype":"can_use_tool", "tool_name":"ExitPlanMode", "input":{"plan": plan}, "tool_use_id":"toolu_early"}}));
+        assert!(
+            matches!(events.as_slice(), [
+                AgentEvent::ItemStarted(ThreadItem { id, content: ItemContent::Plan { markdown }, .. }),
+                AgentEvent::ApprovalRequested(ApprovalRequest { kind: ApprovalKind::Plan { item_id, .. }, .. }),
+            ] if id == "toolu_early" && item_id == id && markdown == plan),
+            "a prompt that arrives before its tool block still shows the plan it decides: {events:?}"
+        );
     }
 
     #[test]

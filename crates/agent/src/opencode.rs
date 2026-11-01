@@ -286,7 +286,7 @@ impl SessionActor for OpenCodeActor {
                     {
                         id.as_str()
                     }
-                    ApprovalDecision::Cancel => "reject",
+                    ApprovalDecision::Cancel | ApprovalDecision::Feedback(_) => "reject",
                     ApprovalDecision::Option(_) => return Ok(()),
                 };
                 if !self.pending_permissions.remove(&request_id) {

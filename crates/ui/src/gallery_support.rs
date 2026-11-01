@@ -8,7 +8,7 @@ use tcode_core::notice::OrchestrateCallback;
 use tcode_core::session::{SteeringStatus, TimelineEntry};
 
 use crate::chat::components::{
-    activity, assistant, bubble, changed_files, disclosure, dividers, error_card, indicator,
+    activity, assistant, bubble, changed_files, disclosure, dividers, error_card, indicator, plan,
     subagent, work_log,
 };
 use crate::markdown::MarkdownState;
@@ -123,6 +123,46 @@ pub fn assistant(
             pinned: true,
             show_actions: true,
             copied: false,
+        },
+        |_, _, _| {},
+        cx,
+    )
+}
+
+/// A proposed plan, with Claude Code's choices when `deciding`.
+pub fn plan(
+    id: &str,
+    markdown: Entity<MarkdownState>,
+    deciding: bool,
+    cwd: &Path,
+    cx: &App,
+) -> AnyElement {
+    let options = [
+        ("allow", "Approve", agent::ApprovalOptionKind::AllowOnce),
+        (
+            "deny",
+            "Keep planning",
+            agent::ApprovalOptionKind::RejectOnce,
+        ),
+    ]
+    .map(|(id, label, kind)| agent::ApprovalOption {
+        id: id.into(),
+        label: label.into(),
+        kind,
+    });
+    plan::plan_block(
+        plan::PlanData {
+            id,
+            text: "",
+            cwd,
+            markdown: Some(markdown),
+            compact: false,
+            copied: false,
+            decision: deciding.then(|| plan::PlanDecision {
+                options: &options,
+                enabled: true,
+                on_choose: std::rc::Rc::new(|_, _, _| {}),
+            }),
         },
         |_, _, _| {},
         cx,

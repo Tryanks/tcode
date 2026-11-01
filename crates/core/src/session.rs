@@ -442,6 +442,7 @@ fn tool_item_state(content: &ItemContent) -> Option<ToolState> {
         }
         ItemContent::UserMessage { .. }
         | ItemContent::AssistantMessage { .. }
+        | ItemContent::Plan { .. }
         | ItemContent::Reasoning { .. } => return None,
     };
     Some(match status {
@@ -491,6 +492,12 @@ pub enum EntryContent {
         /// Local paths of the image attachments sent with this message (empty
         /// for text-only messages and for logs predating the field).
         attachments: Vec<String>,
+    },
+    /// The user's own words declining a request the agent waits on
+    /// ([`ApprovalDecision::Feedback`](agent::ApprovalDecision::Feedback)), which
+    /// the agent continues from inside its open turn.
+    Feedback {
+        text: String,
     },
     Error {
         message: String,
@@ -989,8 +996,21 @@ impl Timeline {
                     self.pending_approvals.push(request.clone());
                 }
             }
-            AgentEvent::ApprovalResolved { request_id, .. } => {
+            AgentEvent::ApprovalResolved {
+                request_id,
+                decision,
+            } => {
                 self.pending_approvals.retain(|r| r.id != *request_id);
+                if let agent::ApprovalDecision::Feedback(text) = decision {
+                    let turn = self.ensure_turn();
+                    let id = self.synthetic_id("feedback", ts);
+                    self.entries.push(Arc::new(TimelineEntry {
+                        id,
+                        content: EntryContent::Feedback { text: text.clone() },
+                        ts,
+                        turn,
+                    }));
+                }
             }
             AgentEvent::UserInputRequested {
                 request_id,
@@ -1118,9 +1138,8 @@ impl Timeline {
                     &ThreadItem {
                         id: item_id.clone(),
                         parent_item_id: None,
-                        content: ItemContent::AssistantMessage {
-                            text: markdown.clone(),
-                            summarized: false,
+                        content: ItemContent::Plan {
+                            markdown: markdown.clone(),
                         },
                     },
                 );
@@ -1440,6 +1459,10 @@ impl Timeline {
                     DeltaKind::AssistantText,
                 )
                 | (
+                    EntryContent::Item(ItemContent::Plan { markdown: existing }),
+                    DeltaKind::AssistantText,
+                )
+                | (
                     EntryContent::Item(ItemContent::Reasoning { text: existing }),
                     DeltaKind::ReasoningText,
                 ) => {
@@ -1519,6 +1542,15 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             EntryContent::Item(ItemContent::Reasoning { text: new }),
         ) => EntryContent::Item(ItemContent::Reasoning {
             text: merge_text(old, new),
+        }),
+        (
+            EntryContent::Item(
+                ItemContent::Plan { markdown: old }
+                | ItemContent::AssistantMessage { text: old, .. },
+            ),
+            EntryContent::Item(ItemContent::Plan { markdown: new }),
+        ) => EntryContent::Item(ItemContent::Plan {
+            markdown: merge_text(old, new),
         }),
         (
             EntryContent::Item(ItemContent::CommandExecution {
@@ -1612,6 +1644,63 @@ mod tests {
     use super::*;
     use agent::{ApprovalDecision, ApprovalKind, FileChangeKind, RewindMode};
     use serde_json::json;
+
+    #[test]
+    fn a_plan_streams_into_one_entry_and_feedback_on_it_reads_as_the_users_words() {
+        let mut timeline = Timeline::default();
+        let plan = |markdown: &str| ThreadItem {
+            id: "plan-1".into(),
+            parent_item_id: None,
+            content: ItemContent::Plan {
+                markdown: markdown.into(),
+            },
+        };
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            AgentEvent::ItemStarted(plan("")),
+            AgentEvent::Delta {
+                item_id: "plan-1".into(),
+                kind: DeltaKind::AssistantText,
+                text: "# Plan".into(),
+            },
+            AgentEvent::ItemCompleted(plan("# Plan\n\n1. Step")),
+            AgentEvent::ApprovalRequested(ApprovalRequest {
+                id: "decide".into(),
+                parent_item_id: None,
+                turn_id: Some("turn-1".into()),
+                kind: ApprovalKind::Plan {
+                    item_id: "plan-1".into(),
+                    markdown: "# Plan\n\n1. Step".into(),
+                },
+                options: Vec::new(),
+            }),
+        ] {
+            timeline.apply_at(None, &event);
+        }
+        assert_eq!(timeline.pending_approvals.len(), 1);
+        timeline.apply_at(
+            Some(5),
+            &AgentEvent::ApprovalResolved {
+                request_id: "decide".into(),
+                decision: ApprovalDecision::Feedback("Split step one".into()),
+            },
+        );
+        assert!(timeline.pending_approvals.is_empty());
+        let contents = timeline
+            .entries
+            .iter()
+            .map(|entry| (&entry.content, entry.turn))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(contents.as_slice(), [
+                (EntryContent::Item(ItemContent::Plan { markdown }), 0),
+                (EntryContent::Feedback { text }, 0),
+            ] if markdown == "# Plan\n\n1. Step" && text == "Split step one"),
+            "{contents:?}"
+        );
+    }
 
     fn user_msg(id: &str, text: &str) -> AgentEvent {
         AgentEvent::ItemCompleted(ThreadItem {

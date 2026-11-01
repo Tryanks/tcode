@@ -8,5 +8,6 @@ pub(crate) mod dividers;
 pub(crate) mod error_card;
 pub(crate) mod images;
 pub(crate) mod indicator;
+pub(crate) mod plan;
 pub(crate) mod subagent;
 pub(crate) mod work_log;

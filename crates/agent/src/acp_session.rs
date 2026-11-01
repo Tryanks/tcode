@@ -330,6 +330,74 @@ impl Session {
         f(&mut self.state.lock_recover())
     }
 
+    /// Ask for a decision and wait for [`SessionCommand::RespondApproval`]; an
+    /// interrupt or shutdown decides [`ApprovalDecision::Cancel`].
+    pub(crate) async fn ask_approval(
+        &self,
+        kind: ApprovalKind,
+        options: Vec<ApprovalOption>,
+    ) -> ApprovalDecision {
+        let (responder, decided) = smol::channel::bounded(1);
+        let (id, turn_id) = self.with_state(|state| {
+            state.approval_seq += 1;
+            let id = format!("acp-approval-{}", state.approval_seq);
+            state.approvals.insert(id.clone(), responder);
+            (id, state.turn().map(str::to_owned))
+        });
+        self.emit(AgentEvent::ApprovalRequested(ApprovalRequest {
+            id: id.clone(),
+            turn_id,
+            parent_item_id: None,
+            kind,
+            options,
+        }))
+        .await;
+        let decision = decided.recv().await.unwrap_or(ApprovalDecision::Cancel);
+        self.with_state(|state| state.approvals.remove(&id));
+        decision
+    }
+
+    /// Show the plan a dialect's plan request carries in the timeline, then
+    /// ask for its decision among the dialect's own `options`. `params` holds
+    /// the plan under `field` and the agent's `toolCallId`.
+    pub(crate) async fn ask_plan<const N: usize>(
+        &self,
+        params: &Value,
+        field: &str,
+        options: [(&str, &str, ApprovalOptionKind); N],
+    ) -> ApprovalDecision {
+        let markdown = params
+            .get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let item_id = match params.get("toolCallId").and_then(Value::as_str) {
+            Some(id) => format!("plan:{id}"),
+            None => self.with_state(|state| {
+                state.approval_seq += 1;
+                format!("plan:{}", state.approval_seq)
+            }),
+        };
+        self.emit(AgentEvent::ItemCompleted(ThreadItem {
+            id: item_id.clone(),
+            parent_item_id: None,
+            content: ItemContent::Plan {
+                markdown: markdown.clone(),
+            },
+        }))
+        .await;
+        let options = options
+            .into_iter()
+            .map(|(id, label, kind)| ApprovalOption {
+                id: id.into(),
+                label: label.into(),
+                kind,
+            })
+            .collect();
+        self.ask_approval(ApprovalKind::Plan { item_id, markdown }, options)
+            .await
+    }
+
     /// Ask the user and wait for [`SessionCommand::RespondUserInput`]. `None`
     /// when the request was cancelled by an interrupt or shutdown.
     pub(crate) async fn ask_user(
@@ -1089,24 +1157,11 @@ async fn handle_command<D: Dialect>(
             decision,
         } => {
             let approval = state.lock_recover().approvals.remove(&request_id);
-            let Some((responder, options)) = approval else {
+            let Some(responder) = approval else {
                 log::warn!("acp: no pending approval {request_id}");
                 return;
             };
-            let outcome = match approval_outcome(&decision, &options) {
-                Some(outcome) => outcome,
-                None => {
-                    let _ = events
-                        .send(AgentEvent::Warning {
-                            message:
-                            "the agent offered no matching permission option; cancelling instead"
-                                .into(),
-                         })
-                        .await;
-                    acp::RequestPermissionOutcome::Cancelled
-                }
-            };
-            let _ = responder.send(outcome).await;
+            let _ = responder.send(decision.clone()).await;
             let _ = events
                 .send(AgentEvent::ApprovalResolved {
                     request_id,
@@ -1200,7 +1255,7 @@ async fn cancel_pending(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) 
             state
                 .approvals
                 .drain()
-                .map(|(_, (responder, _))| responder)
+                .map(|(_, responder)| responder)
                 .collect(),
             state
                 .inputs
@@ -1210,9 +1265,7 @@ async fn cancel_pending(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) 
         )
     };
     for responder in approvals {
-        let _ = responder
-            .send(acp::RequestPermissionOutcome::Cancelled)
-            .await;
+        let _ = responder.send(ApprovalDecision::Cancel).await;
     }
     for request_id in inputs {
         let _ = events
@@ -1451,6 +1504,10 @@ fn approval_outcome(
             .iter()
             .any(|option| &option.id == id)
             .then(|| id.clone()),
+        ApprovalDecision::Feedback(_) => options
+            .iter()
+            .find(|option| option.kind == ApprovalOptionKind::RejectOnce)
+            .map(|option| option.id.clone()),
     }?;
     Some(acp::RequestPermissionOutcome::Selected(
         acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(selected)),
@@ -1727,7 +1784,7 @@ pub(crate) struct State {
     loading: bool,
     tools: HashMap<String, ToolState>,
     text: Option<TextStream>,
-    approvals: HashMap<String, (Sender<acp::RequestPermissionOutcome>, Vec<ApprovalOption>)>,
+    approvals: HashMap<String, Sender<ApprovalDecision>>,
     approval_seq: u64,
     inputs: HashMap<String, Sender<Map<String, Value>>>,
     input_seq: u64,
@@ -2473,12 +2530,11 @@ impl Client {
             )
         };
         let request = approval_request(request_id.clone(), turn, &args.tool_call, &args.options);
+        let options = request.options.clone();
         let (responder, decided) = smol::channel::bounded(1);
         {
             let mut state = self.state.lock_recover();
-            state
-                .approvals
-                .insert(request_id.clone(), (responder, request.options.clone()));
+            state.approvals.insert(request_id.clone(), responder);
             // Keep the tool card in step with what we are asking about.
             let id = args.tool_call.tool_call_id.0.to_string();
             let entry = state.tools.entry(id).or_default();
@@ -2497,11 +2553,22 @@ impl Client {
             .send(AgentEvent::ApprovalRequested(request))
             .await;
 
-        let outcome = decided
-            .recv()
-            .await
-            .unwrap_or(acp::RequestPermissionOutcome::Cancelled);
+        let decision = decided.recv().await.unwrap_or(ApprovalDecision::Cancel);
         self.state.lock_recover().approvals.remove(&request_id);
+        let outcome = match approval_outcome(&decision, &options) {
+            Some(outcome) => outcome,
+            None => {
+                let _ = self
+                    .events
+                    .send(AgentEvent::Warning {
+                        message:
+                            "the agent offered no matching permission option; cancelling instead"
+                                .into(),
+                    })
+                    .await;
+                acp::RequestPermissionOutcome::Cancelled
+            }
+        };
         Ok(acp::RequestPermissionResponse::new(outcome))
     }
 

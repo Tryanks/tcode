@@ -949,6 +949,11 @@ impl SessionActor for Actor {
                 };
                 let result = match &decision {
                     ApprovalDecision::Cancel => pending.cancel_reply.clone(),
+                    ApprovalDecision::Feedback(_) => pending
+                        .replies
+                        .get("decline")
+                        .cloned()
+                        .unwrap_or_else(|| pending.cancel_reply.clone()),
                     ApprovalDecision::Option(id) => pending
                         .replies
                         .get(id)
@@ -3571,7 +3576,10 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             output: None,
             status: ItemStatus::Completed,
         },
-        "agentMessage" | "plan" | "proposed_plan" => ItemContent::AssistantMessage {
+        "plan" | "proposed_plan" => ItemContent::Plan {
+            markdown: string_field(item, "text"),
+        },
+        "agentMessage" => ItemContent::AssistantMessage {
             text: string_field(item, "text"),
             summarized: false,
         },
@@ -5668,7 +5676,7 @@ mod tests {
     }
 
     #[test]
-    fn native_plan_items_stream_as_assistant_text() {
+    fn native_plan_items_stream_as_plans() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             actor
@@ -5680,7 +5688,7 @@ mod tests {
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::ItemStarted(ThreadItem {
-                    content: ItemContent::AssistantMessage { .. },
+                    content: ItemContent::Plan { .. },
                     ..
                 })
             ));
@@ -5695,7 +5703,7 @@ mod tests {
             );
             actor.handle_notification("item/completed", &json!({"item": {"type": "plan", "id": "native-plan", "text": "# Final native plan"}})).await;
             assert!(
-                matches!(events.recv().await.unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::AssistantMessage { text, .. }, .. }) if text == "# Final native plan")
+                matches!(events.recv().await.unwrap(), AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Plan { markdown }, .. }) if markdown == "# Final native plan")
             );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
