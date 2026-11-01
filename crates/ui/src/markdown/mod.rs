@@ -18,6 +18,7 @@ pub(crate) mod parse;
 mod render;
 mod selection;
 mod state;
+mod stream_fade;
 mod utils;
 mod view;
 
@@ -29,6 +30,8 @@ pub use link_target::OpenThreadAnchor;
 pub(crate) use parse::parse;
 pub use selection::{SelectionArea, SelectionDocument};
 pub use state::{ImageResolver, MarkdownState};
+#[cfg(test)]
+pub(crate) use stream_fade::FADE;
 pub use view::{MarkdownView, MenuExtension};
 
 pub(super) const CONTEXT: &str = "MarkdownView";

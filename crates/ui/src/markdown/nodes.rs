@@ -139,6 +139,11 @@ impl BlockNode {
         self.walk_segments(&mut Vec::new(), f);
     }
 
+    /// [`Self::for_each_segment`] of this block where it is root block `ix`.
+    pub(super) fn for_each_segment_at(&self, ix: usize, f: &mut SegmentVisitor<'_>) {
+        self.walk_segments(&mut vec![ix as u32], f);
+    }
+
     fn walk_segments(&self, path: &mut Vec<u32>, f: &mut SegmentVisitor<'_>) {
         match self {
             Self::Root { children }

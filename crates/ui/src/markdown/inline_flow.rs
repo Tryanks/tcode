@@ -367,6 +367,9 @@ impl Element for InlineFlow {
                         }
                         _ => (Arc::new(Mutex::new(InlineState::default())), 0),
                     };
+                    let run_origin =
+                        RunOrigin::new(self.path.clone()).offset(base + source_range.start);
+                    let len = text.len();
                     if let Ok(mut state) = state.lock() {
                         state.set_text(text);
                     }
@@ -378,18 +381,19 @@ impl Element for InlineFlow {
                         highlights,
                         font_overrides,
                     )
-                    .origin(Some(
-                        RunOrigin::new(self.path.clone()).offset(base + source_range.start),
-                    ));
+                    .origin(Some(run_origin.clone()));
                     let mut element = match code_style {
                         Some(code) => {
                             let line_height = code.line_height();
+                            let fades = self.view.read(cx).fades(&run_origin, len);
                             div()
                                 .flex_none()
                                 .px(INLINE_CODE_PADDING_X)
                                 .py(INLINE_CODE_PADDING_Y)
                                 .rounded(code.radius)
-                                .bg(code.background)
+                                .bg(code
+                                    .background
+                                    .opacity(super::stream_fade::surround_opacity(&fades, len)))
                                 .font_family(code.font_family)
                                 .text_size(code.font_size)
                                 .line_height(line_height)

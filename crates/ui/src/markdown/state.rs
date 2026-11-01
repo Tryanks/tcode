@@ -22,6 +22,7 @@ use super::{
     nodes::{BlockNode, TextPosition},
     render::{self, RootItem},
     selection::{Membership, RunOrigin, SelectionDocument},
+    stream_fade::{FadeFrame, Fades, StreamFade},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +96,12 @@ pub struct MarkdownState {
     own_selection_focus_out: Option<gpui::Subscription>,
     /// The runs of text painted last frame, which selection ends hit-test.
     pub(super) runs: Rc<RefCell<Vec<PaintedRun>>>,
+    /// Whether the document has been drawn: text appended before then was
+    /// never seen arriving, so it does not fade in.
+    drawn: bool,
+    stream_fade: StreamFade,
+    /// The fades this frame paints, sampled when the document renders.
+    fade_frame: Option<Rc<FadeFrame>>,
     #[cfg(test)]
     last_reparse_bytes: usize,
 }
@@ -145,12 +152,17 @@ impl MarkdownState {
             owns_selection: false,
             own_selection_focus_out: None,
             runs: Rc::default(),
+            drawn: false,
+            stream_fade: StreamFade::default(),
+            fade_frame: None,
             #[cfg(test)]
             last_reparse_bytes: text.len(),
         }
     }
 
-    /// Append text, synchronously reparse the one canonical source, and repaint.
+    /// Append text, synchronously reparse the one canonical source, and
+    /// repaint. Once the document has been drawn, the text this adds to it
+    /// fades in.
     pub fn push_str(&mut self, text: &str, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
@@ -486,6 +498,14 @@ impl MarkdownState {
         for (old, new) in old_suffix.iter().zip(&blocks[unchanged..]) {
             new.reuse_highlights(old);
         }
+        if self.drawn {
+            self.stream_fade.record(
+                &old_suffix,
+                &blocks[unchanged..],
+                unchanged,
+                cx.background_executor().now(),
+            );
+        }
 
         // An append can only affect the old trailing block and blocks added
         // after it. Keep the measured items before it, and those of its items
@@ -541,6 +561,7 @@ impl MarkdownState {
     }
 
     fn reparse_reset(&mut self, cx: &mut Context<Self>) {
+        self.stream_fade.clear();
         self.image_sizes.clear();
         render::clear_code_measurements(cx.entity_id(), cx);
         self.prepare_reparse();
@@ -577,6 +598,13 @@ impl MarkdownState {
             .document
             .read(cx)
             .run_range(membership.entry, origin, len)
+    }
+
+    /// The fades the run of `len` bytes at `origin` paints this frame.
+    pub(super) fn fades(&self, origin: &RunOrigin, len: usize) -> Fades {
+        self.fade_frame.as_ref().map_or_else(Vec::new, |frame| {
+            frame.run(&origin.path, origin.line, origin.base, len)
+        })
     }
 
     pub(super) fn begin_frame(&self) {
@@ -669,6 +697,13 @@ fn contains_potential_link_reference_definition(source: &str) -> bool {
 
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drawn = true;
+        self.fade_frame = self
+            .stream_fade
+            .frame(cx.background_executor().now(), cx.reduce_motion());
+        if self.fade_frame.is_some() {
+            window.request_animation_frame();
+        }
         let state = cx.entity();
         v_flex()
             .w_full()
