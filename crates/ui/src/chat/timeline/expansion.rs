@@ -265,6 +265,7 @@ impl ChatView {
         if !self.expanded.remove(key) {
             self.expanded.insert(key.to_string());
         }
+        self.rows_regrouped = true;
         self.remeasure_expanded(turn, cx);
     }
 

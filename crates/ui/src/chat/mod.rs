@@ -66,8 +66,8 @@ use self::components::assistant::MdState;
 pub use self::timeline::CaptureScroll;
 use self::timeline::{
     AutoActivityExpansions, CaptureSession, FullOutput, PendingMarkdownBuild,
-    ReservationScrollBack, history_screens_covered, jump_to_latest_visible, settle_carried_anchor,
-    timeline_inset, transcript_selection,
+    ReservationScrollBack, RowArrival, history_screens_covered, jump_to_latest_visible,
+    settle_carried_anchor, timeline_inset, transcript_selection,
 };
 
 /// A message's context-menu rewind, which the chat applies as the bubble's
@@ -158,6 +158,17 @@ pub struct ChatView {
     carried_anchor: bool,
     rows: Vec<TimelineRow>,
     turn_index_cache: TurnIndexCache,
+    /// Rows that arrived live, by identity, until they have risen in.
+    arrivals: HashMap<u64, RowArrival>,
+    /// The store's fold count for the thread at the last sync: a different
+    /// one means the rows came from a fold, not from a live record.
+    timeline_folds: u64,
+    /// A Work Log was expanded or collapsed since the last sync, so the rows
+    /// it gains or loses are the reader's own doing, not arrivals.
+    rows_regrouped: bool,
+    /// The delivery bubbles drawn last frame: the timeline row that replaces
+    /// one is the same message, already on screen.
+    shown_deliveries: Vec<String>,
     /// The plan item whose block carries the decision its agent waits on.
     /// The row signature does not see approvals, so a change remeasures the
     /// rows of the plans gaining and losing it.
@@ -322,6 +333,10 @@ impl ChatView {
             reservation_scroll_back: None,
             carried_anchor: false,
             rows: Vec::new(),
+            arrivals: HashMap::new(),
+            timeline_folds: 0,
+            rows_regrouped: false,
+            shown_deliveries: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
             deciding_plan: None,
             md_states: HashMap::new(),
@@ -412,6 +427,8 @@ impl Render for ChatView {
             self.sync_markdown_states(cx);
         }
         self.inline_diffs.sweep();
+        let now = cx.background_executor().now();
+        self.arrivals.retain(|_, arrival| !arrival.settled(now));
         self.painted_rows.set(None);
         if self.carried_anchor {
             self.carried_anchor = !settle_carried_anchor(&self.list_state);
@@ -605,6 +622,7 @@ impl Render for ChatView {
 
         let composer = self.composer.clone().into_any_element();
         let deliveries = self.workspace_store.read(cx).delivery_messages();
+        self.shown_deliveries = deliveries.iter().map(|(key, ..)| key.clone()).collect();
         let waiting = !self
             .workspace_store
             .read(cx)
