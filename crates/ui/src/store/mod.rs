@@ -3373,6 +3373,13 @@ impl WorkspaceStore {
         self.thread_timeline(session_id).map(read)
     }
 
+    /// Changes each time `session_id`'s timeline is folded whole from the
+    /// records held for it (opening it, catching up, a history page, pages
+    /// dropped above the tail) instead of extended by a live record.
+    pub(crate) fn timeline_folds_for(&self, session_id: Option<&str>) -> u64 {
+        self.thread(session_id).map_or(0, |thread| thread.folds)
+    }
+
     pub(crate) fn pending_chat_turn(&self, session_id: &str) -> Option<usize> {
         let turn_offset = self.threads.get(session_id)?.turn_offset;
         self.pending_chat_turn

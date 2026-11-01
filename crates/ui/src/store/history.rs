@@ -299,7 +299,7 @@ impl WorkspaceStore {
         let mut timeline = thread.fold_held_records();
         thread.turn_offset += previous_turns.saturating_sub(timeline.turns.len());
         thread.settle_running_turn(&mut timeline);
-        thread.timeline = Some(timeline);
+        thread.adopt_fold(timeline);
     }
 
     #[cfg(test)]
@@ -368,7 +368,7 @@ impl WorkspaceStore {
                             .turn_offset
                             .saturating_sub(timeline.turns.len().saturating_sub(previous_turns));
                         thread.settle_running_turn(&mut timeline);
-                        thread.timeline = Some(timeline);
+                        thread.adopt_fold(timeline);
                     }
                     Err(error) => {
                         log::warn!("Earlier history page failed for {session_id} before {before}: {error:?}");

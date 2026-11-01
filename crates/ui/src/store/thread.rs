@@ -31,6 +31,9 @@ pub(super) struct ThreadReplica {
     pub(super) git: Option<GitStatusStatus>,
     /// The held records folded, settled against `status`.
     pub(super) timeline: Option<Timeline>,
+    /// Counts the times `timeline` was folded whole from the held records,
+    /// rather than extended by a record streamed in live.
+    pub(super) folds: u64,
     /// Turns of the log before the first held one.
     pub(super) turn_offset: usize,
     /// The window's records are still arriving.
@@ -94,7 +97,13 @@ impl ThreadReplica {
         let mut timeline = self.fold_held_records();
         self.turn_offset = total_turns.saturating_sub(timeline.turns.len());
         self.settle_running_turn(&mut timeline);
+        self.adopt_fold(timeline);
+    }
+
+    /// Show `timeline`, folded from the held records.
+    pub(super) fn adopt_fold(&mut self, timeline: Timeline) {
         self.timeline = Some(timeline);
+        self.folds = self.folds.wrapping_add(1);
     }
 
     /// Settle the timeline against a status that just changed.
