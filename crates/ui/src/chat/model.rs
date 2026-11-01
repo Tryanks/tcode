@@ -35,6 +35,7 @@ pub(crate) enum Segment<'a> {
     ControlAction(&'a TimelineEntry),
     User(&'a TimelineEntry),
     Assistant(&'a TimelineEntry),
+    Plan(&'a TimelineEntry),
     Error(&'a TimelineEntry),
 }
 
@@ -110,6 +111,7 @@ pub(crate) fn user_content(content: &EntryContent) -> Option<UserContent<'_>> {
             context_len,
             attachments,
         } => Some((text, Some(*status), *context_len, attachments)),
+        EntryContent::Feedback { text } => Some((text, None, None, &[])),
         _ => None,
     }
 }
@@ -231,8 +233,13 @@ pub(crate) fn segment_entries<'a>(
                 run_start.get_or_insert(index);
                 activities.push(entry);
             }
-            EntryContent::Item(ItemContent::UserMessage { .. }) | EntryContent::Steer { .. } => {
+            EntryContent::Item(ItemContent::UserMessage { .. })
+            | EntryContent::Steer { .. }
+            | EntryContent::Feedback { .. } => {
                 single(&mut segments, &mut ranges, Segment::User(entry));
+            }
+            EntryContent::Item(ItemContent::Plan { .. }) => {
+                single(&mut segments, &mut ranges, Segment::Plan(entry));
             }
             EntryContent::ProviderRelay { .. } => {
                 single(&mut segments, &mut ranges, Segment::Relay(entry));
@@ -315,8 +322,10 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             | EntryContent::ContextWindowChanged { .. }
             | EntryContent::ControlAction(_)
             | EntryContent::Steer { .. }
+            | EntryContent::Feedback { .. }
             | EntryContent::Item(ItemContent::UserMessage { .. })
             | EntryContent::Item(ItemContent::AssistantMessage { .. })
+            | EntryContent::Item(ItemContent::Plan { .. })
             | EntryContent::Item(ItemContent::Reasoning { .. })
             | EntryContent::Error { .. }
             | EntryContent::ProviderStartError { .. }
@@ -1327,7 +1336,9 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             context_len.hash(hash);
         }
         EntryContent::Item(ItemContent::AssistantMessage { text, .. })
-        | EntryContent::Item(ItemContent::Reasoning { text }) => {
+        | EntryContent::Item(ItemContent::Plan { markdown: text })
+        | EntryContent::Item(ItemContent::Reasoning { text })
+        | EntryContent::Feedback { text } => {
             text.len().hash(hash);
         }
         EntryContent::Item(ItemContent::CommandExecution {

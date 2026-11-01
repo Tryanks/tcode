@@ -448,6 +448,7 @@ fn approval_kind(kind: &agent::ApprovalKind) -> &'static str {
         agent::ApprovalKind::FileRead { .. } => "file_read",
         agent::ApprovalKind::FileChange { .. } => "file_change",
         agent::ApprovalKind::ToolUse { .. } => "tool_use",
+        agent::ApprovalKind::Plan { .. } => "plan",
     }
 }
 

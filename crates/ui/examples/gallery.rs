@@ -47,11 +47,14 @@ flowchart LR
 ```
 "#;
 
+const PLAN_MARKDOWN: &str = "# Plan: create hello.txt\n\n## Context\nA smoke test of the plan flow; nothing else in the directory changes.\n\n## Steps\n1. **Create the file**: write `hello.txt` with the content `hi`.\n2. **Verify**: run `cat hello.txt` and check that it prints `hi`.\n\n## Verification\n```sh\ncat hello.txt\n```";
 const NARRATION_MARKDOWN: &str = "f.txt contains two lines, \"a\" and \"b\". Now I'll run wc to get exact line, word, and byte counts.";
 
 struct Gallery {
     markdown: Entity<MarkdownState>,
     narration: Entity<MarkdownState>,
+    /// One per plan card: a Markdown state measures for the one width it draws at.
+    plans: [Entity<MarkdownState>; 2],
     started_at: u64,
     tabs: TabsState,
     options: Options,
@@ -96,6 +99,7 @@ impl Gallery {
     fn new(options: Options, cx: &mut Context<Self>) -> Self {
         let markdown = cx.new(|cx| MarkdownState::new(ASSISTANT_MARKDOWN, cx));
         let narration = cx.new(|cx| MarkdownState::new(NARRATION_MARKDOWN, cx));
+        let plans = [(); 2].map(|_| cx.new(|cx| MarkdownState::new(PLAN_MARKDOWN, cx)));
         let started_at = now_millis().saturating_sub(7_300);
         let tick = cx.spawn(async move |this, cx| {
             loop {
@@ -108,6 +112,7 @@ impl Gallery {
         Self {
             markdown,
             narration,
+            plans,
             started_at,
             tabs: TabsState {
                 selected: [0, 0, 0, 1, 1, 0, 0, 0, 2],
@@ -342,6 +347,28 @@ impl Render for Gallery {
                             "gallery-s07-assistant-summarized",
                             self.narration.clone(),
                             true,
+                            cwd,
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    state_card(
+                        "PLAN · AWAITING DECISION",
+                        gallery_support::plan(
+                            "gallery-s07-plan-deciding",
+                            self.plans[0].clone(),
+                            true,
+                            cwd,
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    state_card(
+                        "PLAN · DECIDED",
+                        gallery_support::plan(
+                            "gallery-s07-plan-decided",
+                            self.plans[1].clone(),
+                            false,
                             cwd,
                             cx,
                         ),

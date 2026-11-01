@@ -611,6 +611,10 @@ pub struct ChatView {
     carried_anchor: bool,
     rows: Vec<TimelineRow>,
     turn_index_cache: TurnIndexCache,
+    /// The plan item whose block carries the decision its agent waits on.
+    /// The row signature does not see approvals, so a change remeasures the
+    /// rows of the plans gaining and losing it.
+    deciding_plan: Option<String>,
     md_states: HashMap<String, MdState>,
     /// The transcript's one text selection, across its messages; each
     /// message is the entry at its index in the timeline. It goes when the
@@ -946,6 +950,7 @@ impl ChatView {
             carried_anchor: false,
             rows: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
+            deciding_plan: None,
             md_states: HashMap::new(),
             selection,
             focus_handle,
@@ -1206,6 +1211,7 @@ impl ChatView {
         }
 
         self.sync_markdown_residency(requested_row, cx);
+        self.sync_deciding_plan(cx);
 
         let scheduled_limit_resume = {
             let store = self.workspace_store.read(cx);
@@ -1797,6 +1803,9 @@ impl ChatView {
                         cx,
                     ));
                 }
+                Segment::Plan(entry) => {
+                    column = column.child(self.compose_plan(entry, cwd, cx));
+                }
                 Segment::Error(entry) => {
                     let message = displayed_error_text(&entry.content);
                     let resume = match &entry.content {
@@ -2231,6 +2240,109 @@ impl ChatView {
 
     /// A user-role entry, sent or still steering: the notice the host wrote,
     /// or else the user's bubble.
+    /// A proposed plan's block, carrying the decision its agent waits on.
+    fn compose_plan(
+        &self,
+        entry: &TimelineEntry,
+        cwd: &Path,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let EntryContent::Item(ItemContent::Plan { markdown: text }) = &entry.content else {
+            unreachable!();
+        };
+        let (markdown, copy_text) = self.md_states.get(&entry.id).map_or_else(
+            || (None, Arc::from(text.as_str())),
+            |md| (Some(md.state.clone()), md.synced.clone()),
+        );
+        let store = self.workspace_store.read(cx);
+        let request = self.pending_plan_request(&entry.id, cx);
+        let enabled = request.as_ref().is_some_and(|request| {
+            !store.approval_delivery_pending(&request.id)
+                && !store.native_subagent_readonly_for(self.session_id.as_deref())
+                && store.connection_state().is_connected()
+        });
+        let session_id = self.session_id.clone().unwrap_or_default();
+        let store_entity = self.workspace_store.clone();
+        let request_id = request.as_ref().map(|request| request.id.clone());
+        let on_choose: components::plan::ChooseOption = Rc::new(move |option, _, cx| {
+            let Some(request_id) = request_id.clone() else {
+                return;
+            };
+            store_entity.update(cx, |store, _| {
+                store.respond_approval_for(
+                    session_id.clone(),
+                    request_id,
+                    agent::ApprovalDecision::Option(option.to_owned()),
+                )
+            });
+        });
+        let copy_key = format!("plan:{}", entry.id);
+        let copied = self.copied.is(&copy_key);
+        components::plan::plan_block(
+            components::plan::PlanData {
+                id: &entry.id,
+                text,
+                cwd,
+                markdown,
+                compact: self.window_state.read(cx).compact,
+                copied,
+                decision: request
+                    .as_ref()
+                    .map(|request| components::plan::PlanDecision {
+                        options: &request.options,
+                        enabled,
+                        on_choose,
+                    }),
+            },
+            cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
+                this.mark_copied(copy_key.clone(), cx);
+            }),
+            cx,
+        )
+    }
+
+    fn sync_deciding_plan(&mut self, cx: &mut Context<Self>) {
+        let deciding = self
+            .workspace_store
+            .read(cx)
+            .session_status_for(self.session_id.as_deref())
+            .and_then(|status| {
+                status
+                    .pending_approvals
+                    .iter()
+                    .find_map(|request| match &request.kind {
+                        agent::ApprovalKind::Plan { item_id, .. } => Some(item_id.clone()),
+                        _ => None,
+                    })
+            });
+        if deciding == self.deciding_plan {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.deciding_plan, deciding);
+        for id in previous.iter().chain(&self.deciding_plan) {
+            if let Some(row) = self
+                .markdown_row(id, cx)
+                .filter(|row| *row < self.rows.len())
+            {
+                self.list_state.remeasure_items(row..row + 1);
+            }
+        }
+    }
+
+    /// The plan decision this thread's agent waits on for plan item `item_id`.
+    fn pending_plan_request(&self, item_id: &str, cx: &App) -> Option<agent::ApprovalRequest> {
+        self.workspace_store
+            .read(cx)
+            .session_status_for(self.session_id.as_deref())?
+            .pending_approvals
+            .iter()
+            .find(|request| {
+                matches!(&request.kind, agent::ApprovalKind::Plan { item_id: id, .. } if id == item_id)
+            })
+            .cloned()
+    }
+
     fn compose_user_entry(
         &self,
         (turn, entry, cwd, pinned): (usize, &TimelineEntry, &Path, bool),
@@ -4045,7 +4157,9 @@ fn floating_backing(radius: gpui::Pixels, cx: &App) -> gpui::Div {
 /// message's visible text.
 fn entry_markdown(entry: &TimelineEntry) -> Option<String> {
     match &entry.content {
-        EntryContent::Item(ItemContent::AssistantMessage { text, .. }) => Some(text.clone()),
+        EntryContent::Item(
+            ItemContent::AssistantMessage { text, .. } | ItemContent::Plan { markdown: text },
+        ) => Some(text.clone()),
         content => {
             let (text, _, context_len, _) = user_content(content)?;
             Some(plain_text_as_markdown(user_visible_text(text, context_len)))
@@ -4108,7 +4222,7 @@ fn markdown_entries_for_residency(
         }
         let markdown_bearing = matches!(
             entry.content,
-            EntryContent::Item(ItemContent::AssistantMessage { .. })
+            EntryContent::Item(ItemContent::AssistantMessage { .. } | ItemContent::Plan { .. })
         ) || user_content(&entry.content).is_some();
         if markdown_bearing {
             entries.push(MarkdownEntry {
@@ -6086,6 +6200,171 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
+        driver.shutdown(cx, &store, &host);
+    }
+
+    #[gpui::test]
+    fn a_plan_is_decided_on_its_block_and_answered_in_words_from_the_composer(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{Modifiers, VisualTestContext, px, size};
+        use tcode_core::project::SessionMeta;
+
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let root = crate::store::tests::scratch_root("chat-plan-decision-test");
+        let session_store =
+            tcode_services::store::SessionStore::open_at(root.clone()).expect("test session store");
+        let meta = SessionMeta::new(agent::ProviderKind::ClaudeCode, root.clone(), None);
+        let session_id = meta.id.clone();
+        session_store.upsert_meta(&meta).expect("persist session");
+        let host = tcode_runtime::pipe::spawn_host(
+            session_store,
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .expect("spawn test host");
+        let scripted = tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode);
+        let (provider_events, provider_commands) =
+            (scripted.events.clone(), scripted.commands.clone());
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.set_provider_launcher_for_test(scripted.launcher)
+        }))
+        .expect("script the provider");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, _| {
+            store.send_turn_for(session_id.clone(), "Plan it first".into(), Vec::new())
+        });
+        driver.wait_until(cx, &store, "the turn reaches the provider", |_| {
+            matches!(
+                provider_commands.try_recv(),
+                Ok(agent::SessionCommand::SendTurn { .. })
+            )
+        });
+
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (chat, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(800.)));
+        chat.update(cx, |chat, cx| {
+            chat.set_session(Some(session_id.clone()), cx)
+        });
+        let propose = |id: &str, request: &str| {
+            let markdown = format!("# Plan {id}\n\n1. Write hello.txt");
+            for event in [
+                agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                    id: id.into(),
+                    parent_item_id: None,
+                    content: ItemContent::Plan {
+                        markdown: markdown.clone(),
+                    },
+                }),
+                agent::AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                    id: request.into(),
+                    turn_id: None,
+                    parent_item_id: None,
+                    kind: agent::ApprovalKind::Plan {
+                        item_id: id.into(),
+                        markdown,
+                    },
+                    options: vec![
+                        agent::ApprovalOption {
+                            id: "allow".into(),
+                            label: "Approve".into(),
+                            kind: agent::ApprovalOptionKind::AllowOnce,
+                        },
+                        agent::ApprovalOption {
+                            id: "deny".into(),
+                            label: "Keep planning".into(),
+                            kind: agent::ApprovalOptionKind::RejectOnce,
+                        },
+                    ],
+                }),
+            ] {
+                provider_events.try_send(event).expect("provider event");
+            }
+        };
+        let decided = |driver: &mut crate::store::tests::LocalHostDriver,
+                       cx: &mut VisualTestContext,
+                       what: &str| {
+            let mut decision = None;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while decision.is_none() {
+                assert!(Instant::now() < deadline, "waiting for {what}");
+                driver.step(cx, &store);
+                draw(cx);
+                if let Ok(agent::SessionCommand::RespondApproval {
+                    request_id,
+                    decision: answer,
+                }) = provider_commands.try_recv()
+                {
+                    decision = Some((request_id, answer));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            decision.unwrap()
+        };
+        let shown = |driver: &mut crate::store::tests::LocalHostDriver,
+                     cx: &mut VisualTestContext| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while cx.debug_bounds("plan-decision").is_none() {
+                assert!(Instant::now() < deadline, "waiting for the plan's decision");
+                driver.step(cx, &store);
+                draw(cx);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+
+        propose("plan-1", "decide-1");
+        shown(&mut driver, cx);
+        assert!(
+            cx.debug_bounds("approval-header").is_none(),
+            "a plan is decided on its block, not in the composer"
+        );
+        let approve = cx
+            .debug_bounds("plan-option-allow")
+            .expect("approve button");
+        cx.simulate_click(approve.center(), Modifiers::default());
+        assert_eq!(
+            decided(&mut driver, cx, "the approval"),
+            (
+                "decide-1".to_string(),
+                agent::ApprovalDecision::Option("allow".into())
+            )
+        );
+        provider_events
+            .try_send(agent::AgentEvent::ApprovalResolved {
+                request_id: "decide-1".into(),
+                decision: agent::ApprovalDecision::Option("allow".into()),
+            })
+            .expect("provider event");
+
+        propose("plan-2", "decide-2");
+        shown(&mut driver, cx);
+        chat.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
+        cx.simulate_input("Split step one");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            decided(&mut driver, cx, "the feedback"),
+            (
+                "decide-2".to_string(),
+                agent::ApprovalDecision::Feedback("Split step one".into())
+            )
+        );
         driver.shutdown(cx, &store, &host);
     }
 

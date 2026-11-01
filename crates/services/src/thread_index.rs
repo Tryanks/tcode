@@ -440,12 +440,15 @@ impl Activity {
                 ItemContent::WebSearch { .. } => self.count_tool("web_search"),
                 ItemContent::ImageRead { path, .. } => push_unique(&mut self.files, path.clone()),
                 ItemContent::AssistantMessage { text, .. }
+                | ItemContent::Plan { markdown: text }
                 | ItemContent::UserMessage { text, .. } => {
                     collect_references(text, &mut self.references);
                 }
                 ItemContent::Reasoning { .. } | ItemContent::Other { .. } => {}
             },
-            EntryContent::Steer { text, .. } => collect_references(text, &mut self.references),
+            EntryContent::Steer { text, .. } | EntryContent::Feedback { text } => {
+                collect_references(text, &mut self.references)
+            }
             EntryContent::Error { message, .. } => self.errors.push(head(message, HEAD_CHARS)),
             EntryContent::ProviderStartError { error } => {
                 self.errors.push(head(error, HEAD_CHARS));
@@ -1193,6 +1196,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                 with_attachments(visible(text, *context_len), attachments),
             ),
             ItemContent::AssistantMessage { text, .. } => ("assistant_message", text.clone()),
+            ItemContent::Plan { markdown } => ("plan", markdown.clone()),
             ItemContent::Reasoning { text } => ("reasoning", text.clone()),
             ItemContent::CommandExecution {
                 command,
@@ -1270,6 +1274,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
             "steer",
             with_attachments(visible(text, *context_len), attachments),
         ),
+        EntryContent::Feedback { text } => ("feedback", text.clone()),
         EntryContent::Error { message, .. } => ("error", message.clone()),
         EntryContent::ProviderStartError { error } => ("provider_start_error", error.clone()),
         EntryContent::ProviderRelay {

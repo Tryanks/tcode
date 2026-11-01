@@ -22,9 +22,9 @@ use crate::acp_session::{
     prompt_status,
 };
 use crate::{
-    AgentError, AgentEvent, Attachment, LaunchEnv, ModelSpec, PlanStep, PlanStepStatus,
-    ProviderKind, ResumeCursor, SessionHandle, SessionOptions, TurnStatus, UserInputOption,
-    UserInputQuestion,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalOptionKind, Attachment, LaunchEnv, ModelSpec,
+    PlanStep, PlanStepStatus, ProviderKind, ResumeCursor, SessionHandle, SessionOptions,
+    TurnStatus, UserInputOption, UserInputQuestion,
 };
 
 use updates::Updates;
@@ -375,38 +375,29 @@ impl Dialect for Cursor {
                 if replaying {
                     return Ok(json!({"outcome": {"outcome": "cancelled"}}));
                 }
-                let content = params.get("plan").and_then(Value::as_str).unwrap_or("");
-                let answers = session
-                    .ask_user(vec![UserInputQuestion {
-                        id: "decision".into(),
-                        header: method,
-                        question: content.to_owned(),
-                        options: [
-                            ("Accept", "Let Cursor save the plan"),
-                            (
-                                "Reject",
-                                "Decline the plan; type a reason to provide feedback",
-                            ),
-                        ]
-                        .into_iter()
-                        .map(|(label, description)| UserInputOption {
-                            label: label.into(),
-                            description: description.into(),
-                        })
-                        .collect(),
-                        multi_select: false,
-                        prefill: None,
-                    }])
+                let decision = session
+                    .ask_plan(
+                        &params,
+                        "plan",
+                        [
+                            ("accept", "Accept", ApprovalOptionKind::AllowOnce),
+                            ("reject", "Reject", ApprovalOptionKind::RejectOnce),
+                        ],
+                    )
                     .await;
-                let answer = answers
-                    .as_ref()
-                    .and_then(|answers| answers.get("decision"))
-                    .and_then(Value::as_str);
-                Ok(match answer {
-                    Some("Accept") => json!({"outcome": {"outcome": "accepted"}}),
-                    Some("Reject") => json!({"outcome": {"outcome": "rejected"}}),
-                    Some(reason) => json!({"outcome": {"outcome": "rejected", "reason": reason}}),
-                    None => json!({"outcome": {"outcome": "cancelled"}}),
+                Ok(match decision {
+                    ApprovalDecision::Option(id) if id == "accept" => {
+                        json!({"outcome": {"outcome": "accepted"}})
+                    }
+                    ApprovalDecision::Option(id) if id == "reject" => {
+                        json!({"outcome": {"outcome": "rejected"}})
+                    }
+                    ApprovalDecision::Feedback(reason) => {
+                        json!({"outcome": {"outcome": "rejected", "reason": reason}})
+                    }
+                    ApprovalDecision::Option(_) | ApprovalDecision::Cancel => {
+                        json!({"outcome": {"outcome": "cancelled"}})
+                    }
                 })
             }
             UPDATE_TODOS => {

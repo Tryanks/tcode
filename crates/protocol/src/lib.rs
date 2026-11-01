@@ -245,7 +245,9 @@ pub use wire::{
 // response, CreateThirdPartyProfile carries `inherit_config`, the
 // ProfileConfig runtime error reports a profile's config directory that could
 // not be prepared or removed, and ProviderProbeDiagnostic adds
-// SharedCredentials.
+// SharedCredentials. Items gain the plan kind, approval requests the plan
+// kind naming its item, approval decisions feedback (the user's words), and
+// timeline entries feedback.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]

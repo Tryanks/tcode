@@ -2330,6 +2330,7 @@ pub(super) fn approval_request_summary(request: &agent::ApprovalRequest) -> Stri
             changes => format!("{} file changes", changes.len()),
         },
         agent::ApprovalKind::ToolUse { name, .. } => format!("tool `{name}`"),
+        agent::ApprovalKind::Plan { markdown, .. } => format!("plan: {markdown}"),
     };
     let one_line = detail.split_whitespace().collect::<Vec<_>>().join(" ");
     let truncated: String = one_line.chars().take(180).collect();

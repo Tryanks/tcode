@@ -2150,6 +2150,13 @@ pub enum ItemContent {
     Reasoning {
         text: String,
     },
+    /// A plan the harness proposed on its way out of its own plan mode
+    /// (Claude Code's `ExitPlanMode`, Grok's `exit_plan_mode`, Cursor's
+    /// `create_plan`, Codex's plan item). When the harness waits on a decision
+    /// it also asks an [`ApprovalKind::Plan`] naming this item.
+    Plan {
+        markdown: String,
+    },
     CommandExecution {
         command: String,
         output: String,
@@ -2355,6 +2362,10 @@ pub enum ApprovalKind {
         input: serde_json::Value,
         detail: String,
     },
+    /// Leave the harness's plan mode on the plan in [`ItemContent::Plan`]
+    /// item `item_id`. A reply in the user's own words is
+    /// [`ApprovalDecision::Feedback`]: the harness keeps planning from it.
+    Plan { item_id: String, markdown: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2365,6 +2376,10 @@ pub enum ApprovalDecision {
     Cancel,
     /// Pick one of the provider's own [`ApprovalOption`]s.
     Option(String),
+    /// Decline in the user's own words, which the agent continues from:
+    /// Claude denies with them as the message, Grok and Cursor return them as
+    /// plan feedback. A provider with no channel for words declines once.
+    Feedback(String),
 }
 
 impl<'de> Deserialize<'de> for ApprovalDecision {
@@ -2374,6 +2389,7 @@ impl<'de> Deserialize<'de> for ApprovalDecision {
         enum StoredDecision {
             Cancel,
             Option(String),
+            Feedback(String),
             Approve,
             ApproveForSession,
             Deny,
@@ -2381,6 +2397,7 @@ impl<'de> Deserialize<'de> for ApprovalDecision {
         Ok(match StoredDecision::deserialize(deserializer)? {
             StoredDecision::Cancel => Self::Cancel,
             StoredDecision::Option(id) => Self::Option(id),
+            StoredDecision::Feedback(text) => Self::Feedback(text),
             // These ids are history-only and never occur in live request options.
             StoredDecision::Approve => Self::Option("legacy:approve".into()),
             StoredDecision::ApproveForSession => Self::Option("legacy:approve_for_session".into()),

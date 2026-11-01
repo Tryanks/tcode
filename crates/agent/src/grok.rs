@@ -16,9 +16,9 @@ use crate::acp_session::{
     prompt_status, stop_reason_status,
 };
 use crate::{
-    AgentError, AgentEvent, Attachment, Compaction, ItemContent, LaunchEnv, ModelSpec,
-    ProviderKind, ResumeCursor, SessionHandle, SessionOptions, TokenUsage, TurnStatus,
-    UserInputOption, UserInputQuestion,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalOptionKind, Attachment, Compaction,
+    ItemContent, LaunchEnv, ModelSpec, ProviderKind, ResumeCursor, SessionHandle, SessionOptions,
+    TokenUsage, TurnStatus, UserInputOption, UserInputQuestion,
 };
 
 /// The non-interactive auth method: it validates `XAI_API_KEY` (or the key in
@@ -654,42 +654,32 @@ impl Dialect for Grok {
         params: Value,
     ) -> Result<Value, acp::Error> {
         if method == EXIT_PLAN_MODE {
-            let content = params
-                .get("planContent")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let answers = session
-                .ask_user(vec![UserInputQuestion {
-                    id: "decision".into(),
-                    header: method,
-                    question: content.to_owned(),
-                    options: [
-                        ("Approve", "Exit planning and begin implementation"),
+            let decision = session
+                .ask_plan(
+                    &params,
+                    "planContent",
+                    [
+                        ("approve", "Approve", ApprovalOptionKind::AllowOnce),
                         (
-                            "Request changes",
-                            "Keep planning; type feedback to request specific changes",
+                            "keep_planning",
+                            "Keep planning",
+                            ApprovalOptionKind::RejectOnce,
                         ),
-                        ("Abandon", "Exit planning without implementation"),
-                    ]
-                    .into_iter()
-                    .map(|(label, description)| UserInputOption {
-                        label: label.into(),
-                        description: description.into(),
-                    })
-                    .collect(),
-                    multi_select: false,
-                    prefill: None,
-                }])
+                        ("abandon", "Abandon", ApprovalOptionKind::RejectAlways),
+                    ],
+                )
                 .await;
-            let answer = answers
-                .as_ref()
-                .and_then(|answers| answers.get("decision"))
-                .and_then(Value::as_str);
-            return Ok(match answer {
-                Some("Approve") => json!({"outcome": "approved"}),
-                Some("Abandon") | None => json!({"outcome": "abandoned"}),
-                Some("Request changes") => json!({"outcome": "cancelled"}),
-                Some(feedback) => json!({"outcome": "cancelled", "feedback": feedback}),
+            return Ok(match decision {
+                ApprovalDecision::Option(id) if id == "approve" => json!({"outcome": "approved"}),
+                ApprovalDecision::Option(id) if id == "keep_planning" => {
+                    json!({"outcome": "cancelled"})
+                }
+                ApprovalDecision::Feedback(feedback) => {
+                    json!({"outcome": "cancelled", "feedback": feedback})
+                }
+                ApprovalDecision::Option(_) | ApprovalDecision::Cancel => {
+                    json!({"outcome": "abandoned"})
+                }
             });
         }
         let questions = questions(&params)?;

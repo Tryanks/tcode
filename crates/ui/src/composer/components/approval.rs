@@ -41,6 +41,7 @@ impl Composer {
                     crate::tr!("approval.tool_requested")
                 }
             }
+            ApprovalKind::Plan { .. } => crate::tr!("approval.plan_requested"),
         };
         let muted = cx.theme().muted_foreground;
 
@@ -105,6 +106,12 @@ impl Composer {
             ApprovalKind::FileRead { detail } => {
                 detail_area(div().text_code(cx).child(detail.clone()).into_any_element())
             }
+            ApprovalKind::Plan { markdown, .. } => detail_area(
+                div()
+                    .text_body(self.compact, cx)
+                    .child(markdown.clone())
+                    .into_any_element(),
+            ),
             ApprovalKind::ToolUse {
                 name,
                 input,
