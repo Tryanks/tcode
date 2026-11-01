@@ -3,6 +3,7 @@ use super::*;
 mod expansion;
 mod render;
 pub(super) mod residency;
+pub(super) mod rows;
 
 pub(super) use expansion::{
     AutoActivityExpansions, AutoActivityRecency, auto_activity_snapshot_keys,
