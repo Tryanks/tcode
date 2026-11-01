@@ -6956,6 +6956,171 @@ mod tests {
         }
     }
 
+    /// A reader following the tail stays pinned to the bottom while the last
+    /// message grows in place: each delta the host streams into it lands
+    /// with the message's end on the timeline's bottom edge.
+    #[gpui::test]
+    fn a_following_reader_stays_pinned_while_the_last_message_grows(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
+        // The streaming turn's working indicator rests.
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let ts = std::cell::Cell::new(0);
+        let record = |events: Vec<agent::AgentEvent>| {
+            let session_id = session_id.clone();
+            let from = ts.replace(ts.get() + events.len() as u64);
+            smol::block_on(host.update_state_for_test(move |state, cx| {
+                for (offset, event) in events.iter().enumerate() {
+                    state.record_event_for_replica_test(
+                        &session_id,
+                        from + offset as u64,
+                        event,
+                        cx,
+                    );
+                }
+            }))
+            .expect("record on the host");
+        };
+        let user = |turn: usize| {
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: format!("user-{turn}"),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: format!("Question {turn}"),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            })
+        };
+        let seeded_id = session_id.clone();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
+        }))
+        .expect("clear the seeded timeline");
+        // Earlier turns fill more than a screen above the streaming one.
+        let mut events = Vec::new();
+        for turn in 0..4 {
+            events.extend([
+                agent::AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                },
+                user(turn),
+                agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: format!("answer-{turn}"),
+                    parent_item_id: None,
+                    content: ItemContent::AssistantMessage {
+                        text: "An earlier answer.\n\n".repeat(8),
+                        summarized: false,
+                    },
+                }),
+                agent::AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                },
+            ]);
+        }
+        events.extend([
+            agent::AgentEvent::TurnStarted {
+                turn_id: "4".into(),
+            },
+            user(4),
+            agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                id: "streaming".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: String::new(),
+                    summarized: false,
+                },
+            }),
+        ]);
+        record(events);
+
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        driver.wait_until(cx, &store, "chat baseline", |cx| {
+            store.read_with(cx, |store, _| !store.chat_loading())
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw_settled(cx);
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        assert!(list.is_following_tail());
+        assert!(
+            list.max_offset_for_scrollbar().y > list.viewport_bounds().size.height,
+            "the thread scrolls"
+        );
+
+        let streamed = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .with_active_timeline(|timeline| {
+                        timeline
+                            .entries
+                            .last()
+                            .and_then(|entry| match &entry.content {
+                                EntryContent::Item(ItemContent::AssistantMessage {
+                                    text, ..
+                                }) => Some(text.len()),
+                                _ => None,
+                            })
+                    })
+                    .flatten()
+                    .unwrap_or(0)
+            })
+        };
+        let mut heights = Vec::new();
+        for delta in 0..12 {
+            let before = streamed(cx);
+            record(vec![agent::AgentEvent::Delta {
+                item_id: "streaming".into(),
+                kind: agent::DeltaKind::AssistantText,
+                text: format!("Paragraph {delta} of the streamed answer.\n\n"),
+            }]);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while streamed(cx) == before {
+                assert!(Instant::now() < deadline, "waiting for delta {delta}");
+                driver.step(cx, &store);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            draw_settled(cx);
+
+            assert!(list.is_following_tail(), "delta {delta} paused following");
+            let last = cx
+                .debug_bounds(format!("timeline-row-{}", list.item_count() - 1).leak())
+                .expect("the streaming message is on screen");
+            let bottom = list.viewport_bounds().bottom();
+            assert!(
+                (last.bottom() - bottom).abs() <= px(1.),
+                "delta {delta}: the message ends at {:?}, the timeline at {bottom:?}",
+                last.bottom()
+            );
+            heights.push(last.size.height);
+        }
+        assert!(
+            heights.windows(2).all(|pair| pair[1] > pair[0]),
+            "the message grew with every delta: {heights:?}"
+        );
+        driver.shutdown(cx, &store, &host);
+    }
+
     #[gpui::test]
     fn scroll_pill_over_inline_image_does_not_open_lightbox(cx: &mut TestAppContext) {
         use gpui::{Modifiers, MouseButton, ScrollDelta, ScrollEvent, TouchPhase, point, px};
