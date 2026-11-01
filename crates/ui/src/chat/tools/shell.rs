@@ -224,7 +224,7 @@ fn report(output: &str) -> Report<'_> {
 }
 
 impl ToolView for ToolShell<'_> {
-    fn header(&self, call: &Call<'_>) -> Header {
+    fn header(&self, call: &Call<'_>, _cwd: &std::path::Path) -> Header {
         let report = report(call.output.unwrap_or_default());
         let mut header =
             command_header(&self.command, report.output, report.exit_code, call.status);

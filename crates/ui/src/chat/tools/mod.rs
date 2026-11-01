@@ -12,6 +12,7 @@
 
 pub(in crate::chat) mod diff;
 pub(in crate::chat) mod generic;
+pub(in crate::chat) mod read;
 pub(in crate::chat) mod shell;
 pub(in crate::chat) mod window;
 
@@ -86,12 +87,17 @@ impl<'a> Call<'a> {
 
 /// One family's window for a call it accepts.
 pub(in crate::chat) trait ToolView {
-    fn header(&self, call: &Call<'_>) -> Header;
+    /// `cwd` is the thread's, which paths show relative to.
+    fn header(&self, call: &Call<'_>, cwd: &Path) -> Header;
     /// The window's body, built only while it is open.
     fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement;
     /// What the window's context menu copies: whole values a text selection
     /// cannot reach in a preview.
     fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)>;
+    /// A file the call is about, which the menu offers to open.
+    fn path(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A family's matcher: its view when it accepts the call's name and input.
@@ -99,7 +105,7 @@ type Matcher = for<'a> fn(&Call<'a>) -> Option<Box<dyn ToolView + 'a>>;
 
 /// Every family that claims calls by name and shape, in the order they are
 /// asked. The generic window takes whatever none accepts.
-const FAMILIES: &[Matcher] = &[shell::tool_call];
+const FAMILIES: &[Matcher] = &[shell::tool_call, read::tool_call];
 
 pub(in crate::chat) fn view<'a>(call: &Call<'a>) -> Box<dyn ToolView + 'a> {
     FAMILIES
@@ -116,6 +122,8 @@ pub(in crate::chat) struct Activity {
     pub(in crate::chat) output: Option<String>,
     pub(in crate::chat) copy: Vec<(String, String)>,
     pub(in crate::chat) expandable: bool,
+    /// A file the activity is about.
+    pub(in crate::chat) path: Option<String>,
 }
 
 impl Activity {
@@ -128,13 +136,18 @@ impl Activity {
 /// The window of one Work Log activity other than a file change or a
 /// subagent: dispatched on its item kind, then for a tool call on the
 /// family that claims it.
-pub(in crate::chat) fn activity(entry: &TimelineEntry, live_reasoning: bool) -> Activity {
+pub(in crate::chat) fn activity(
+    entry: &TimelineEntry,
+    live_reasoning: bool,
+    cwd: &Path,
+) -> Activity {
     let settled = |header, copy| Activity {
         header,
         status: ItemStatus::Completed,
         output: None,
         copy,
         expandable: false,
+        path: None,
     };
     let EntryContent::Item(item) = &entry.content else {
         return settled(Header::bare(crate::icon::IconName::Info), Vec::new());
@@ -151,16 +164,18 @@ pub(in crate::chat) fn activity(entry: &TimelineEntry, live_reasoning: bool) -> 
             output: Some(output.clone()),
             copy: shell::command_copy_items(command, output),
             expandable: true,
+            path: None,
         },
         ItemContent::ToolCall { .. } => {
             let call = Call::of(entry).expect("a tool call");
             let view = view(&call);
             Activity {
-                header: view.header(&call),
+                header: view.header(&call, cwd),
                 status: call.status,
                 output: call.output.map(str::to_owned),
                 copy: view.copy_items(&call),
                 expandable: true,
+                path: view.path().map(str::to_owned),
             }
         }
         ItemContent::Reasoning { text } => {
@@ -176,6 +191,7 @@ pub(in crate::chat) fn activity(entry: &TimelineEntry, live_reasoning: bool) -> 
                 output: None,
                 copy: items,
                 expandable: !live_reasoning,
+                path: None,
             }
         }
         ItemContent::WebSearch { query } => {
@@ -202,7 +218,7 @@ pub(in crate::chat) fn activity(entry: &TimelineEntry, live_reasoning: bool) -> 
 /// An activity's window drawn outside a chat, for the component gallery:
 /// its header, and a command's terminal when open.
 pub(crate) fn preview_window(entry: &TimelineEntry, open: bool, cx: &App) -> AnyElement {
-    let activity = activity(entry, false);
+    let activity = activity(entry, false, Path::new(""));
     let error = activity.failure();
     let elapsed_ms = window::elapsed(&activity.header, entry);
     let Activity {

@@ -1094,7 +1094,7 @@ impl ChatView {
             row.auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
         let expanded =
             self.auto_activity_expanded((turn, &entry.id), &key, auto_enabled, row.recency, cx);
-        let activity = tools::activity(entry, row.live_reasoning);
+        let activity = tools::activity(entry, row.live_reasoning, cwd);
         let error = activity.failure();
         let elapsed_ms = tools::window::elapsed(&activity.header, entry);
         let tools::Activity {
@@ -1102,6 +1102,7 @@ impl ChatView {
             status,
             copy,
             expandable,
+            path,
             ..
         } = activity;
         let detail = if !expandable {
@@ -1126,7 +1127,7 @@ impl ChatView {
                 elapsed_ms,
                 compact: row.compact,
                 copy,
-                path: None,
+                path: path.map(|path| (path, cwd.to_path_buf())),
             },
             detail,
             cx.listener(move |this, _, _, cx| {

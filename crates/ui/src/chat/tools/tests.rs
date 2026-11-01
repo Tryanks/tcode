@@ -109,7 +109,11 @@ impl StoredThread {
     /// The window of `id`, as its header reads.
     pub(in crate::chat) fn header(&self, id: &str, cx: &mut VisualTestContext) -> Read {
         let entry = self.entry(id, cx);
-        Read::of(&activity(&entry, false))
+        Read::of(&activity(
+            &entry,
+            false,
+            std::path::Path::new("/Users/me/project"),
+        ))
     }
 
     /// Opens the turn's folded Work Log, as a reader does.
@@ -142,6 +146,7 @@ pub(in crate::chat) struct Read {
     pub(in crate::chat) verb: Option<String>,
     pub(in crate::chat) subject: Option<String>,
     pub(in crate::chat) argument: Option<String>,
+    pub(in crate::chat) detail: Option<String>,
     pub(in crate::chat) chips: Vec<Chip>,
     pub(in crate::chat) error: Option<String>,
 }
@@ -158,6 +163,10 @@ impl Read {
                 .argument
                 .as_ref()
                 .map(|argument| argument.text.clone()),
+            detail: header
+                .argument
+                .as_ref()
+                .and_then(|argument| argument.detail.clone()),
             chips: header.chips.clone(),
             error: activity.failure(),
         }
@@ -174,6 +183,7 @@ pub(in crate::chat) fn read(
         verb: Some(verb.to_owned()),
         subject: subject.map(str::to_owned),
         argument: argument.map(str::to_owned),
+        detail: None,
         chips: Vec::new(),
         error: error.map(str::to_owned),
     }
@@ -557,4 +567,93 @@ fn a_long_edit_path_and_its_counts_stay_in_the_header_at_narrow_widths(cx: &mut 
             "the header grew at {width}px, so the path wrapped"
         );
     }
+}
+
+/// A read reads as the file and the lines read: numbered as its harness
+/// numbered them, or counted from the offset it asked for when the harness
+/// returned bare lines; a failure by the harness's own words; an image read
+/// as viewed, its image a tile above the row, whether it came live or from a
+/// Codex rollout stored before images had their own field.
+#[gpui::test]
+fn a_read_reads_as_its_file_and_lines(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/read.jsonl"), 1_024.);
+    let claude = "toolu_016biQ3Y87fKqgUWVGucqtNE";
+    let pi = "tool_WZrAwFwAbvGI2G5cZra64pTS";
+    let image = "toolu_01LaP7uGd5FPjA4TZEacYFKe";
+    let rollout = "call_COcZJppSUODpGmo9sQXLhw6m";
+    let with_detail = |read: Read, detail: Option<&str>| Read {
+        detail: detail.map(str::to_owned),
+        ..read
+    };
+    for (id, expected) in [
+        (
+            claude,
+            with_detail(
+                super::tests::read(
+                    "Read",
+                    None,
+                    Some("/tmp/sepia-ref/sepia/skills/sepia/references/model-fingerprints.md"),
+                    None,
+                ),
+                Some("L1–12"),
+            ),
+        ),
+        (
+            "toolu_01CHit7GAx8MHvPX8YPiiQne",
+            super::tests::read(
+                "Read",
+                None,
+                Some("/tmp/vm-3.png"),
+                Some(
+                    "File does not exist. Note: your current working directory is /Users/me/project",
+                ),
+            ),
+        ),
+        (
+            image,
+            super::tests::read("Viewed", None, Some("/tmp/tcode-xtrace/ui1.png"), None),
+        ),
+        (
+            pi,
+            with_detail(
+                super::tests::read(
+                    "Read",
+                    None,
+                    Some(
+                        "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/\
+                         node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js",
+                    ),
+                    None,
+                ),
+                Some("L346–380"),
+            ),
+        ),
+        (
+            rollout,
+            super::tests::read(
+                "Viewed",
+                None,
+                Some("/tmp/smart-cabinet-recognition-debug/diff_otsu_binary.png"),
+                None,
+            ),
+        ),
+    ] {
+        assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+
+    for id in [image, rollout] {
+        assert!(shows(cx, &format!("image-read-{id}-0")), "{id}");
+    }
+    thread.open_work_log(claude, cx);
+    click(cx, &format!("activity-row-{claude}"));
+    assert!(shows(cx, &format!("tool-text-{claude}-content")));
+    thread.open_work_log(pi, cx);
+    click(cx, &format!("activity-row-{pi}"));
+    let more = format!("tool-text-{pi}-content-more");
+    assert!(shows(cx, &more), "a long read shows its first lines");
+    click(cx, &more);
+    assert!(shows(cx, &format!("tool-text-{pi}-content")));
+    thread.shutdown(cx);
 }

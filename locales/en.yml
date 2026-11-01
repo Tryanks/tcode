@@ -2693,3 +2693,6 @@ tools:
   copy_arguments: "Copy arguments"
   session: "session %{id}"
   copy_diff: "Copy diff"
+  line_range: "L%{first}–%{last}"
+  copy_content: "Copy content"
+  lines_not_shown: "+%{count} lines not shown; copy the content to read them"
