@@ -2689,3 +2689,7 @@ tools:
   line_range: "第 %{first}–%{last} 行"
   copy_content: "复制内容"
   lines_not_shown: "另有 %{count} 行未显示；复制内容即可阅读"
+  results: "%{count} 个结果"
+  more_results: "另 %{count} 个"
+  copy_pattern: "复制模式"
+  copy_results: "复制结果"
