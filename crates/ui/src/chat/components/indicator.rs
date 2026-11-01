@@ -93,7 +93,10 @@ pub(crate) fn shimmer_label(id: SharedString, label: Cow<'static, str>, cx: &App
 
             div().child(StyledText::new(glyph)).with_animation(
                 animation_id,
-                Animation::new(Duration::from_millis(1400)).repeat(),
+                // On the app's clock, not the element's: a running turn's
+                // label moves to each new last row of the turn, whose fresh
+                // element state would restart the sweep.
+                Animation::new(Duration::from_millis(1400)).repeat_synced(),
                 move |element, delta| {
                     // Enter and leave outside the text so every glyph returns to muted.
                     let center = -0.15 + delta * 1.3;
@@ -125,7 +128,9 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
                 .bg(foreground)
                 .with_animation(
                     animation_id,
-                    Animation::new(Duration::from_millis(CYCLE_MS)).repeat(),
+                    // On the app's clock, as the shimmer is: the indicator
+                    // moves to each new last row of its turn.
+                    Animation::new(Duration::from_millis(CYCLE_MS)).repeat_synced(),
                     move |element, delta| {
                         let phase = (delta + 1. - delay_ms as f32 / CYCLE_MS as f32) % 1.;
                         let triangle = 1. - (phase * 2. - 1.).abs();
