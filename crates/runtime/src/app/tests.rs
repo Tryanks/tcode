@@ -9932,7 +9932,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
         ..
     }) = &mut image_record.event
     {
-        *image_reads = agent::tool_result_images("Read", &image_content);
+        *image_reads = agent::ToolOutput::from_content(&image_content).images;
     }
     let records = vec![
         tool_call("tool", tool_output.clone()),
