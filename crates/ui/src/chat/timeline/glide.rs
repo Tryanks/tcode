@@ -19,7 +19,7 @@ use gpui::{
     InspectorElementId, IntoElement, LayoutId, ParentElement as _, Pixels, Style, Styled as _,
     Window, div, point, prelude::FluentBuilder as _, px, relative, size,
 };
-use gpui_base::motion::{Easing, Timing};
+use gpui_base::motion::{Easing, MotionStatus, Timing};
 use tcode_core::session::EntryContent;
 
 use super::super::{ChatView, Instant};
@@ -71,9 +71,9 @@ pub(in crate::chat) enum Glide {
     /// it fades and rises in.
     Enter(f32),
     /// The live end of a running turn the reader follows: each time its
-    /// `content` changes, its height glides to the new measurement. Height
-    /// that changes on its own (a fold inside it, an image that loaded)
-    /// passes through, so one change never moves twice.
+    /// `content` changes, its height glides to the new measurement. At rest
+    /// it is laid out as a plain child, so height that changes on its own (a
+    /// fold inside it, an image that loaded) moves once, by its own motion.
     Tail { content: u64 },
 }
 
@@ -125,6 +125,8 @@ struct Measured {
     target: Option<Pixels>,
     /// The content changed; the next measurement is the new target.
     retarget: bool,
+    /// The height is on its way to `target`.
+    gliding: bool,
 }
 
 pub(in crate::chat) enum GlideLayout {
@@ -178,25 +180,34 @@ impl Element for RowGlide {
             Glide::Tail { content } => {
                 let state = window.with_element_state(global_id, |state, _| {
                     let mut state: Measured = state.unwrap_or_default();
-                    if state.content != Some(content) {
-                        state.content = Some(content);
+                    if state.content.is_some_and(|seen| seen != content) {
                         state.retarget = true;
                     }
+                    state.content = Some(content);
                     (state, state)
                 });
                 match (state.height, state.target) {
-                    (Some(measured), Some(target)) => {
-                        let glided = gpui_base::motion::transition(
+                    // The frame the content changes still shows the height it
+                    // had; its measurement becomes the target the next frame
+                    // glides to. Height that changes during a glide rides on
+                    // it, a frame late.
+                    (Some(measured), Some(target)) if state.retarget || state.gliding => {
+                        let glided = gpui_base::motion::transition_with_status(
                             "tail",
                             target,
                             crate::motion::settle(),
                             window,
                             cx,
                         );
-                        Some(((glided + measured - target).max(px(0.)), px(0.)))
+                        let gliding =
+                            matches!(glided.status, MotionStatus::Delayed | MotionStatus::Running);
+                        window.with_element_state(global_id, |state, _| {
+                            let mut state: Measured = state.unwrap_or_default();
+                            state.gliding = gliding;
+                            ((), state)
+                        });
+                        Some(((glided.value + measured - target).max(px(0.)), px(0.)))
                     }
-                    // Nothing measured yet: the first frame lays the child
-                    // out as it is and takes its measurement as the target.
                     _ => None,
                 }
             }
@@ -235,7 +246,6 @@ impl Element for RowGlide {
                             let mut state: Measured = state.unwrap_or_default();
                             state.height = Some(height);
                             state.target = Some(height);
-                            state.retarget = false;
                             ((), state)
                         },
                     );
@@ -264,6 +274,7 @@ impl Element for RowGlide {
                     moved |= state.target != Some(measured);
                     state.target = Some(measured);
                     state.retarget = false;
+                    state.gliding = true;
                 }
                 (moved, state)
             });
@@ -1042,5 +1053,83 @@ mod tests {
             captured.height,
             "the row the capture showed is the row at rest"
         );
+    }
+
+    fn command(id: &str) -> agent::AgentEvent {
+        agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: agent::ItemContent::CommandExecution {
+                command: format!("run {id}"),
+                output: format!("output of {id}\n").repeat(4),
+                exit_code: Some(0),
+                status: agent::ItemStatus::Completed,
+            },
+        })
+    }
+
+    /// A fold inside the followed tail is the only thing that moves it: the
+    /// tail is laid out as it is between its glides, so the turn's working
+    /// status stays on the bottom edge and the content above follows the
+    /// fold down, frame by frame, without the glide chasing it. Here the
+    /// reader shuts the newest command's output, which had opened on its own.
+    #[gpui::test]
+    fn a_fold_inside_the_followed_tail_moves_it_once(cx: &mut TestAppContext) {
+        let mut events = earlier_turns_and_a_running_one(4);
+        events.push(command("first"));
+        let mut thread = ScriptedThread::new(cx, events, 0, true);
+        let (chat, cx) = thread.open(cx);
+        thread.deliver(cx);
+        for _ in 0..20 {
+            frame(cx);
+        }
+        thread.live(command("second"));
+        thread.deliver(cx);
+        // The second command's window rises in, and the first's output
+        // folds shut once it has been open its while.
+        for _ in 0..60 {
+            frame(cx);
+        }
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        assert!(crate::chat::tests::command_open(cx, "first").is_none());
+        assert!(crate::chat::tests::command_open(cx, "second").is_some());
+        let place = |cx: &mut VisualTestContext| {
+            let header = cx
+                .debug_bounds("activity-row-second")
+                .expect("the newest command's window");
+            let status = cx
+                .debug_bounds("working-status-4")
+                .expect("the turn's working status");
+            (
+                header.top(),
+                list.viewport_bounds().bottom() - status.bottom(),
+            )
+        };
+        let (open_top, edge) = place(cx);
+        let header = cx.debug_bounds("activity-row-second").unwrap();
+        cx.simulate_click(header.center(), gpui::Modifiers::none());
+        let mut tops = Vec::new();
+        for _ in 0..20 {
+            frame(cx);
+            let (top, gap) = place(cx);
+            assert_eq!(gap, edge, "the fold moved the tail off the bottom edge");
+            tops.push(top);
+        }
+        assert!(crate::chat::tests::command_open(cx, "second").is_none());
+        let shut_top = *tops.last().unwrap();
+        assert!(shut_top > open_top + px(40.), "the output folded: {tops:?}");
+        assert!(
+            tops.windows(2).all(|pair| pair[1] >= pair[0]),
+            "the content above went back up: {tops:?}"
+        );
+        assert!(
+            tops.windows(2).filter(|pair| pair[1] > pair[0]).count() >= 6,
+            "the fold moved the content above in one step: {tops:?}"
+        );
+        assert_eq!(
+            tops[15], shut_top,
+            "the tail kept moving after its fold: {tops:?}"
+        );
+        assert!(list.is_following_tail());
     }
 }
