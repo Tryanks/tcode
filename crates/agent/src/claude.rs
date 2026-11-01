@@ -66,6 +66,90 @@ fn effective_permission_mode(internal: &str, extra_args: &[String]) -> String {
     effective
 }
 
+/// The directory the CLI launched with `launch_env` keeps its settings,
+/// sign-in and transcripts in.
+pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
+    let pairs = launch_env.pairs(ProviderKind::ClaudeCode);
+    let child_env = |key: &str| {
+        pairs
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| std::env::var_os(key).map(PathBuf::from))
+    };
+    child_env("CLAUDE_CONFIG_DIR").or_else(|| child_env("HOME").map(|home| home.join(".claude")))
+}
+
+// Credentials and per-account state (`.claude.json`, `projects/`) must not
+// cross accounts, and `plugins/` records absolute paths into its own config
+// directory.
+const INHERITED_CONFIG: [&str; 4] = ["CLAUDE.md", "agents", "commands", "skills"];
+
+/// Copy the user's configuration from one config directory into another.
+/// Blocking.
+pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut ancestors = HashSet::new();
+    INHERITED_CONFIG
+        .iter()
+        .try_for_each(|name| copy_resolved(&from.join(name), &to.join(name), &mut ancestors))?;
+    inherit_settings(&from.join("settings.json"), &to.join("settings.json"))
+}
+
+/// Copy what `from` names, following symbolic links: a link copied as a link
+/// would resolve its relative target under the new directory. A directory
+/// that is its own ancestor is skipped.
+fn copy_resolved(from: &Path, to: &Path, ancestors: &mut HashSet<PathBuf>) -> std::io::Result<()> {
+    const MAX_DEPTH: usize = 32;
+    let metadata = match std::fs::metadata(from) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        metadata => metadata?,
+    };
+    if metadata.is_dir() {
+        let canonical = std::fs::canonicalize(from)?;
+        if ancestors.len() == MAX_DEPTH || !ancestors.insert(canonical.clone()) {
+            return Ok(());
+        }
+        std::fs::create_dir_all(to)?;
+        let copied = std::fs::read_dir(from)?.try_for_each(|entry| {
+            let entry = entry?;
+            copy_resolved(&entry.path(), &to.join(entry.file_name()), ancestors)
+        });
+        ancestors.remove(&canonical);
+        copied?;
+    } else if metadata.is_file() {
+        std::fs::copy(from, to)?;
+    }
+    Ok(())
+}
+
+/// Copy `settings.json` without what would carry the source account's
+/// credentials or endpoint into the new one.
+fn inherit_settings(from: &Path, to: &Path) -> std::io::Result<()> {
+    let text = match std::fs::read(from) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        text => text?,
+    };
+    let mut settings: serde_json::Value = serde_json::from_slice(&text)
+        .map_err(|error| std::io::Error::other(format!("{}: {error}", from.display())))?;
+    if let Some(settings) = settings.as_object_mut() {
+        settings.remove("apiKeyHelper");
+        if let Some(env) = settings
+            .get_mut("env")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for key in [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL",
+            ] {
+                env.remove(key);
+            }
+        }
+    }
+    std::fs::write(to, serde_json::to_vec_pretty(&settings)?)
+}
+
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let native_rewind = claude_version(opts.binary_path.as_deref(), &opts.launch_env)
@@ -158,8 +242,6 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         // top-level invocation.
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT");
-    // Per-provider environment (Settings → Providers): custom variables and the
-    // `HOME` override that relocates `.claude.json` / `.claude`.
     for (key, value) in opts.launch_env.pairs(ProviderKind::ClaudeCode) {
         cmd.env(key, value);
     }
@@ -227,20 +309,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     });
 
     let session_config = SessionConfig {
-        claude_dir: opts
-            .launch_env
-            .home
-            .clone()
-            .or_else(|| {
-                opts.launch_env
-                    .env
-                    .iter()
-                    .rev()
-                    .find(|(key, _)| key == "HOME")
-                    .map(|(_, value)| PathBuf::from(value))
-            })
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .map(|home| home.join(".claude")),
+        claude_dir: config_dir(&opts.launch_env),
         resumed: opts.resume.is_some(),
     };
     smol::spawn(actor_loop(
@@ -3569,6 +3638,20 @@ pub async fn list_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `CLAUDE_CONFIG_DIR` the user set in the profile's environment is
+    /// where the CLI keeps its transcripts, whatever `HOME` says.
+    #[test]
+    fn config_dir_follows_a_configured_claude_config_dir_over_home() {
+        let launch_env = LaunchEnv {
+            env: [("CLAUDE_CONFIG_DIR", "/configured"), ("HOME", "/home")]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            home: None,
+        };
+        assert_eq!(config_dir(&launch_env), Some(PathBuf::from("/configured")));
+    }
 
     #[test]
     fn native_permission_switches_publish_only_confirmed_values() {

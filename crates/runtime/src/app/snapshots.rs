@@ -854,13 +854,15 @@ impl AppState {
     }
 
     pub fn providers_status_snapshot(&self) -> ProvidersStatus {
-        self.providers.status_snapshot(
+        let mut status = self.providers.status_snapshot(
             self.acp_marketplace_items(),
             self.acp_registry_loading,
             self.acp_registry_error.clone(),
             self.acp_installing.clone(),
             self.provider_plugin_catalogs(),
-        )
+        );
+        self.flag_shared_credentials(&mut status.provider_snapshots);
+        status
     }
 
     pub fn git_status_snapshot(&self, session_id: &str) -> GitStatusStatus {

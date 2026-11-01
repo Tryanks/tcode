@@ -8,11 +8,10 @@ use agent::ProviderKind;
 
 use crate::settings::provider_label;
 
-use tcode_core::provider_status::{AuthStatus, ProviderProbeDiagnostic, ProviderStatusKind};
+use tcode_core::provider_status::{
+    AuthStatus, ProviderAuth, ProviderProbeDiagnostic, ProviderStatusKind,
+};
 pub use tcode_core::provider_status::{ProviderSnapshot, StatusDot};
-
-#[cfg(test)]
-use tcode_core::provider_status::ProviderAuth;
 
 /// The derived card summary: dot + headline + detail (+ the email that the
 /// headline embeds, so the card can render it with the reveal control).
@@ -30,10 +29,12 @@ pub struct StatusSummary {
 pub const EMAIL_SLOT: &str = "{email}";
 
 /// Localized status copy for the semantic state supplied by the core summary.
+/// `same_account_as` names another profile signed in to the same account.
 pub fn summarize(
     provider: ProviderKind,
     snapshot: Option<&ProviderSnapshot>,
     enabled: bool,
+    same_account_as: Option<&str>,
 ) -> StatusSummary {
     let t = |key: &str| crate::tr!(key).into_owned();
     let checking = || StatusSummary {
@@ -114,10 +115,19 @@ pub fn summarize(
                 }
                 (None, None) => t("providers.status.authenticated"),
             };
+            let mut detail = detail_or("");
+            if let Some(name) = same_account_as {
+                let same = crate::tr!("providers.status.same_account_as", name = name);
+                detail = if detail.is_empty() {
+                    same.into_owned()
+                } else {
+                    format!("{detail} · {same}")
+                };
+            }
             StatusSummary {
                 dot,
                 headline,
-                detail: detail_or(""),
+                detail,
                 email,
             }
         }
@@ -150,6 +160,17 @@ pub fn summarize(
             }
         }
     }
+}
+
+/// The account a profile is signed in to, when its snapshot names one by email.
+pub fn signed_in_account(snapshot: &ProviderSnapshot) -> Option<&ProviderAuth> {
+    snapshot.auth.as_ref().filter(|auth| {
+        auth.status == AuthStatus::Authenticated
+            && auth
+                .email
+                .as_deref()
+                .is_some_and(|email| !email.trim().is_empty())
+    })
 }
 
 /// Redact an email for the collapsed presentation: keep the first character of
@@ -205,6 +226,9 @@ pub fn probe_diagnostic_message(
             provider = provider_label(provider)
         )
         .into_owned(),
+        ProviderProbeDiagnostic::SharedCredentials => {
+            crate::tr!("providers.status.shared_credentials").into_owned()
+        }
     }
 }
 
@@ -213,7 +237,7 @@ mod tests {
     use super::*;
 
     fn summarize(snapshot: Option<&ProviderSnapshot>, enabled: bool) -> StatusSummary {
-        super::summarize(ProviderKind::Codex, snapshot, enabled)
+        super::summarize(ProviderKind::Codex, snapshot, enabled, None)
     }
 
     fn snapshot() -> ProviderSnapshot {
@@ -270,6 +294,8 @@ mod tests {
             "Authenticated as {email} · Claude Max Subscription"
         );
         assert_eq!(s.email.as_deref(), Some("dev@example.com"));
+        let s = super::summarize(ProviderKind::Codex, Some(&authed), true, Some("Work"));
+        assert_eq!(s.detail, "Same account as «Work»");
 
         // Blank auth metadata behaves like absent metadata.
         let blank_auth = ProviderSnapshot {

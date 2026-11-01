@@ -6,7 +6,7 @@
 //! `install|update <id> <scope> [--accept <sha256>]`, `uninstall|enable|disable <id> <scope>`,
 //! `add-marketplace <source>` or `remove-marketplace <name>`. `--home` isolates
 //! the provider's native state (`CODEX_HOME` for Codex, `GROK_HOME` for Grok;
-//! for Claude Code `HOME` and `CLAUDE_CONFIG_DIR`).
+//! for Claude Code `CLAUDE_CONFIG_DIR`).
 //! Turn mode: `probe <provider> <prompt> [cwd] [acp-command args…] [flags]`.
 //! Flags are `--binary <path>`, `--model <id>`, `--option <id>=<value>`, `--effort <value>`,
 //! `--resume <cursor-json>`, `--fork`, `--leave-questions` (user-input requests
@@ -78,17 +78,10 @@ fn plugins(mut args: impl Iterator<Item = String>) -> i32 {
             _ => positional.push(arg),
         }
     }
-    let mut env = Vec::new();
-    if let (ProviderKind::ClaudeCode, Some(home)) = (provider, &home) {
-        env.push((
-            "CLAUDE_CONFIG_DIR".to_string(),
-            home.join(".claude").display().to_string(),
-        ));
-    }
     let context = PluginContext {
         binary_path: None,
         launch_env: LaunchEnv {
-            env,
+            env: Vec::new(),
             home: home.clone(),
         },
         cwd: project

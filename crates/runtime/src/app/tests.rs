@@ -993,6 +993,321 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     )));
 }
 
+/// A Claude Code stand-in that keeps its sign-in in `CLAUDE_CONFIG_DIR` and
+/// answers `auth status` and, without a terminal, `auth login` the way
+/// claude 2.1.314 does.
+#[cfg(unix)]
+#[test]
+fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use tcode_core::provider_status::{AuthStatus, ProviderLogin};
+
+    let test_store = TestStore::new("tcode-provider-login-test");
+    let binary = test_store.root().join("claude");
+    let home = test_store.root().join("claude-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\n\
+         case \"$*\" in\n\
+         --version) echo '2.1.314 (Claude Code)' ;;\n\
+         'auth status --json')\n\
+           if [ -f \"$CLAUDE_CONFIG_DIR/signed-in\" ]; then\n\
+             echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"dev@example.com\"}'\n\
+           else echo '{\"loggedIn\":false}'; exit 1; fi ;;\n\
+         'auth login')\n\
+           printf 'Opening browser to sign in\\nIf the browser did not open, visit: https://claude.com/cai/oauth/authorize?code=true&state=S\\nPaste code here if prompted > '\n\
+           read code\n\
+           if [ \"$code\" = good ]; then touch \"$CLAUDE_CONFIG_DIR/signed-in\"; echo 'Login successful.'; exit 0; fi\n\
+           echo 'Invalid code' >&2; exit 1 ;;\n\
+         'auth logout') rm -f \"$CLAUDE_CONFIG_DIR/signed-in\" ;;\n\
+         *) exit 2 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = TestClientState::new((*test_store).clone());
+    let claude = host.settings.provider_mut(ProviderKind::ClaudeCode);
+    claude.binary_path = Some(binary);
+    claude.home_path = Some(home);
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(host);
+    let snapshot = |state: &TestClientState, id: &str| {
+        state
+            .providers_status_snapshot()
+            .provider_snapshots
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let login = |state: &TestClientState| snapshot(state, "claude").login;
+    let awaiting = |state: &TestClientState| {
+        login(state)
+            == Some(ProviderLogin::AwaitingCode {
+                url: Some("https://claude.com/cai/oauth/authorize?code=true&state=S".into()),
+            })
+    };
+    let auth = |state: &TestClientState| snapshot(state, "claude").auth.map(|auth| auth.status);
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::StartProviderLogin {
+            profile_id: "codex".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert_eq!(state.read(|state| snapshot(state, "codex").login), None);
+
+    let start = || Command::StartProviderLogin {
+        profile_id: "claude".into(),
+    };
+    let submit = |code: &str| Command::SubmitProviderLoginCode {
+        profile_id: "claude".into(),
+        code: code.into(),
+    };
+    state.dispatch_command(cx, 2, start());
+    cx.run_until(awaiting);
+    state.dispatch_command(
+        cx,
+        3,
+        Command::CancelProviderLogin {
+            profile_id: "claude".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert_eq!(state.read(login), None);
+
+    state.dispatch_command(cx, 4, start());
+    cx.run_until(awaiting);
+    state.dispatch_command(cx, 5, submit("bad"));
+    cx.run_until(|state| {
+        login(state)
+            == Some(ProviderLogin::Failed {
+                message: "Invalid code".into(),
+            })
+    });
+
+    state.dispatch_command(cx, 6, start());
+    cx.run_until(awaiting);
+    state.dispatch_command(cx, 7, submit("good"));
+    cx.run_until(|state| login(state).is_none() && auth(state) == Some(AuthStatus::Authenticated));
+    assert_eq!(
+        state.read(|state| snapshot(state, "claude").auth.unwrap().email),
+        Some("dev@example.com".into())
+    );
+
+    state.dispatch_command(
+        cx,
+        8,
+        Command::LogoutProvider {
+            profile_id: "claude".into(),
+        },
+    );
+    cx.run_until(|state| auth(state) == Some(AuthStatus::Unauthenticated));
+}
+
+/// Another Claude account starts from a copy of the user's own configuration,
+/// never the default account's sign-in, endpoint or history, and its sign-in
+/// runs in its own config directory. A provider without account sign-in is
+/// refused.
+#[cfg(unix)]
+#[test]
+fn another_claude_account_inherits_configuration_but_not_the_account() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use tcode_core::provider_status::ProviderLogin;
+
+    let test_store = TestStore::new("tcode-account-profile-test");
+    let binary = test_store.root().join("claude");
+    let default = test_store.root().join("claude-default");
+    let shared = test_store.root().join("shared");
+    for (path, contents) in [
+        (
+            default.join("settings.json"),
+            r#"{"model":"opus","apiKeyHelper":"/bin/key","permissions":{"allow":["Bash(ls)"]},"env":{"ANTHROPIC_API_KEY":"sk","ANTHROPIC_AUTH_TOKEN":"t","ANTHROPIC_BASE_URL":"https://proxy.test","FOO":"bar"}}"#,
+        ),
+        (default.join("commands/ship.md"), "Ship it."),
+        (default.join("skills/review/SKILL.md"), "Review the diff."),
+        (
+            default.join("plugins/known_marketplaces.json"),
+            r#"{"official":{}}"#,
+        ),
+        (default.join(".credentials.json"), r#"{"claudeAiOauth":{}}"#),
+        (
+            default.join(".claude.json"),
+            r#"{"oauthAccount":{"emailAddress":"work@example.com"}}"#,
+        ),
+        (default.join("projects/-repo/x.jsonl"), "{}"),
+        (default.join("history.jsonl"), "{}"),
+        (shared.join("CLAUDE.md"), "Answer briefly."),
+        (shared.join("agents/reviewer.md"), "Review."),
+        (shared.join("skills/linked/SKILL.md"), "Linked."),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    // Dotfile managers link files and directories in, relative links
+    // included, and a link may point back up its own tree.
+    std::os::unix::fs::symlink("../shared/CLAUDE.md", default.join("CLAUDE.md")).unwrap();
+    std::os::unix::fs::symlink(shared.join("agents"), default.join("agents")).unwrap();
+    std::os::unix::fs::symlink("../../shared/skills/linked", default.join("skills/linked"))
+        .unwrap();
+    std::os::unix::fs::symlink("..", default.join("skills/review/up")).unwrap();
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\n\
+         case \"$*\" in\n\
+         --version) echo '2.1.314 (Claude Code)' ;;\n\
+         'auth status --json') echo '{\"loggedIn\":false}'; exit 1 ;;\n\
+         'auth login')\n\
+           printf 'If the browser did not open, visit: https://claude.com/cai/oauth/authorize?dir=%s\\nPaste code here if prompted > ' \"$CLAUDE_CONFIG_DIR\"\n\
+           read code ;;\n\
+         *) exit 2 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = TestClientState::new((*test_store).clone());
+    let claude = host.settings.provider_mut(ProviderKind::ClaudeCode);
+    claude.binary_path = Some(binary);
+    claude.home_path = Some(default.clone());
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(host);
+    let create = |provider| Command::CreateAccountProfile {
+        provider,
+        name: "Claude Personal".into(),
+        inherit_config: true,
+    };
+
+    state.dispatch_command(cx, 1, create(ProviderKind::Codex));
+    let (code, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Ack {
+            id: 1,
+            result: Err(error),
+        } => Some(error.code.clone()),
+        _ => None,
+    });
+    assert_eq!(code, "no_account_login");
+
+    state.dispatch_command(cx, 2, create(ProviderKind::ClaudeCode));
+    let (id, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Ack {
+            id: 2,
+            result: Ok(CommandResponse::ProfileId(id)),
+        } => Some(id.clone()),
+        _ => None,
+    });
+    let home = test_store.root().join("profile-homes").join(&id);
+    let profile = state.read(|state| state.settings.resolved_profile(&id).unwrap());
+    assert_eq!(profile.kind, ProviderKind::ClaudeCode);
+    assert_eq!(
+        profile.settings.display_name.as_deref(),
+        Some("Claude Personal")
+    );
+    assert_eq!(profile.settings.home_path.as_ref(), Some(&home));
+    assert_eq!(
+        std::fs::read_to_string(home.join(".claude.json")).unwrap(),
+        r#"{"hasCompletedOnboarding":true}"#
+    );
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({
+            "model": "opus",
+            "permissions": {"allow": ["Bash(ls)"]},
+            "env": {"FOO": "bar"},
+        })
+    );
+    for (copied, contents) in [
+        ("CLAUDE.md", "Answer briefly."),
+        ("agents/reviewer.md", "Review."),
+        ("commands/ship.md", "Ship it."),
+        ("skills/review/SKILL.md", "Review the diff."),
+        ("skills/linked/SKILL.md", "Linked."),
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(home.join(copied)).unwrap(),
+            contents,
+            "{copied}"
+        );
+    }
+    for copy in ["CLAUDE.md", "agents", "skills/linked"] {
+        assert!(
+            !std::fs::symlink_metadata(home.join(copy))
+                .unwrap()
+                .is_symlink(),
+            "{copy} must be a copy, not a link"
+        );
+    }
+    for kept in [
+        ".credentials.json",
+        "projects",
+        "history.jsonl",
+        "plugins",
+        "skills/review/up",
+    ] {
+        assert!(!home.join(kept).exists(), "{kept} must not be copied");
+    }
+
+    cx.run_until(|state| {
+        state
+            .providers_status_snapshot()
+            .provider_snapshots
+            .get(&id)
+            .and_then(|snapshot| snapshot.login.clone())
+            == Some(ProviderLogin::AwaitingCode {
+                url: Some(format!(
+                    "https://claude.com/cai/oauth/authorize?dir={}",
+                    home.display()
+                )),
+            })
+    });
+}
+
+#[test]
+fn deleting_a_profile_removes_only_the_config_directory_tcode_made() {
+    let test_store = TestStore::new("tcode-delete-profile-home-test");
+    let made = test_store.root().join("profile-homes").join("work");
+    let chosen = test_store.root().join("my-claude");
+    for home in [&made, &chosen] {
+        std::fs::create_dir_all(home.join("projects")).unwrap();
+        std::fs::write(home.join(".claude.json"), "{}").unwrap();
+    }
+    let mut host = TestClientState::new((*test_store).clone());
+    for (id, home) in [("work", &made), ("mine", &chosen)] {
+        host.settings.profiles.insert(
+            id.into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    home_path: Some(home.clone()),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+    }
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(host);
+
+    for (request, id) in [(1, "work"), (2, "mine")] {
+        state.dispatch_command(
+            cx,
+            request,
+            Command::DeleteProfile {
+                profile_id: id.into(),
+            },
+        );
+    }
+    cx.run_until_parked();
+
+    assert!(state.read(|state| state.settings.profiles.is_empty()));
+    assert!(!made.exists());
+    assert!(chosen.join(".claude.json").exists());
+    assert!(chosen.join("projects").is_dir());
+}
+
 #[test]
 fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     let cx = &mut TestAppContext::default();
@@ -3085,7 +3400,10 @@ fn provider_binary_home_and_launch_arguments_follow_the_selected_profile() {
                 "ANTHROPIC_BASE_URL".to_string(),
                 "https://proxy.test".to_string()
             ),
-            ("HOME".to_string(), "/tmp/claude-home".to_string()),
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/tmp/claude-home".to_string()
+            ),
         ]
     );
 

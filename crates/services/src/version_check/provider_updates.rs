@@ -73,7 +73,7 @@ pub fn npm_package(provider: ProviderKind) -> &'static str {
 ///
 /// Accepts `MAJOR.MINOR` provider output with an implicit zero patch, unlike
 /// the stricter parser for app release tags.
-pub(crate) fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
+pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     text.split_whitespace().find_map(parse_version_token)
 }
 

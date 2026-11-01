@@ -21,6 +21,9 @@ pub enum ProviderProbeDiagnostic {
     FailedCli,
     Unauthenticated,
     IndeterminateAuth,
+    /// The CLI keeps one sign-in for every config directory, so this
+    /// profile's account login is shared with the other account profiles.
+    SharedCredentials,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -40,6 +43,24 @@ pub struct ProviderSnapshot {
     pub diagnostic: Option<ProviderProbeDiagnostic>,
     pub message: Option<String>,
     pub checking: bool,
+    #[serde(default)]
+    pub login: Option<ProviderLogin>,
+}
+
+/// Where a sign-in the host runs through the provider CLI stands.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ProviderLogin {
+    Starting,
+    /// The CLI waits for the code its sign-in page shows; `url` is that page
+    /// when the CLI printed one.
+    AwaitingCode {
+        url: Option<String>,
+    },
+    Finishing,
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

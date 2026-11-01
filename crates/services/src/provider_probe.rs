@@ -34,14 +34,11 @@ pub async fn run_capture_env(
     args: &[&str],
     env: &[(String, String)],
 ) -> Option<String> {
-    let mut cmd = crate::process::async_command(program);
-    cmd.args(args)
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT");
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
-    let output = cmd.output().await.ok()?;
+    let output = provider_command(program, env)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -53,6 +50,30 @@ pub async fn run_capture_env(
     // exit with empty stdout is still a successful run.
     let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+/// Trimmed stdout whatever the exit status, for a CLI whose exit status only
+/// restates the answer it prints.
+async fn run_stdout_env(program: &str, args: &[&str], env: &[(String, String)]) -> Option<String> {
+    let output = provider_command(program, env)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// A provider CLI child with the profile's environment applied, never told
+/// it runs inside another Claude Code session.
+pub(crate) fn provider_command(program: &str, env: &[(String, String)]) -> smol::process::Command {
+    let mut cmd = crate::process::async_command(program);
+    cmd.env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT");
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    cmd
 }
 
 /// Probe one provider's installation, version, and authentication state.
@@ -92,7 +113,8 @@ pub async fn probe_provider(
         .or(Some(raw_version));
 
     let auth = match provider {
-        ProviderKind::ClaudeCode => run_capture_env(&program, &["auth", "status", "--json"], &env)
+        // `claude auth status` exits 1 when signed out.
+        ProviderKind::ClaudeCode => run_stdout_env(&program, &["auth", "status", "--json"], &env)
             .await
             .as_deref()
             .and_then(parse_claude_auth),
@@ -219,6 +241,7 @@ fn finalize_probe(
         diagnostic,
         message: None,
         checking: false,
+        login: None,
     }
 }
 
@@ -280,6 +303,57 @@ mod tests {
         let auth = signed_in.auth.unwrap();
         assert_eq!(auth.status, AuthStatus::Authenticated);
         assert_eq!(auth.email.as_deref(), Some("dev@example.com"));
+    }
+
+    /// `claude auth status --json` as claude 2.1.314 answers it for a fresh
+    /// `CLAUDE_CONFIG_DIR`, exit status included.
+    #[cfg(unix)]
+    #[test]
+    fn a_signed_out_claude_profile_is_unauthenticated() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("tcode-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("claude");
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+case "$*" in
+--version) echo '2.1.314 (Claude Code)' ;;
+'auth status --json')
+  cat <<'JSON'
+{
+  "loggedIn": false,
+  "authMethod": "none",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/tmp/claude/projects",
+  "configDirectory": "/tmp/claude"
+}
+JSON
+  exit 1 ;;
+*) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let snapshot = smol::block_on(probe_provider(
+            ProviderKind::ClaudeCode,
+            Some(binary),
+            LaunchEnv::default(),
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(snapshot.version.as_deref(), Some("2.1.314"));
+        assert_eq!(
+            snapshot.auth.map(|auth| auth.status),
+            Some(AuthStatus::Unauthenticated)
+        );
+        assert_eq!(
+            snapshot.diagnostic,
+            Some(ProviderProbeDiagnostic::Unauthenticated)
+        );
     }
 
     #[test]

@@ -54,7 +54,12 @@ impl WorkspaceStore {
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
                 | Command::CreateThirdPartyProfile { .. }
+                | Command::CreateAccountProfile { .. }
                 | Command::DeleteProfile { .. }
+                | Command::StartProviderLogin { .. }
+                | Command::SubmitProviderLoginCode { .. }
+                | Command::CancelProviderLogin { .. }
+                | Command::LogoutProvider { .. }
                 | Command::RefreshProviderStatus
                 | Command::RefreshProviderUsage
                 | Command::CheckProviderVersions
@@ -1038,16 +1043,46 @@ impl WorkspaceStore {
         base_url: String,
         model: Option<String>,
         api_key: String,
+        inherit_config: bool,
     ) {
         self.dispatch(Command::CreateThirdPartyProfile {
             name,
             base_url,
             model,
             api_key,
+            inherit_config,
         });
+    }
+    pub fn create_account_profile(
+        &self,
+        provider: ProviderKind,
+        name: String,
+        inherit_config: bool,
+        cx: &mut App,
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(
+            Command::CreateAccountProfile {
+                provider,
+                name,
+                inherit_config,
+            },
+            cx,
+        )
     }
     pub fn delete_profile(&mut self, profile_id: String) {
         self.dispatch(Command::DeleteProfile { profile_id });
+    }
+    pub fn start_provider_login(&mut self, profile_id: String) {
+        self.dispatch(Command::StartProviderLogin { profile_id });
+    }
+    pub fn submit_provider_login_code(&mut self, profile_id: String, code: String) {
+        self.dispatch(Command::SubmitProviderLoginCode { profile_id, code });
+    }
+    pub fn cancel_provider_login(&mut self, profile_id: String) {
+        self.dispatch(Command::CancelProviderLogin { profile_id });
+    }
+    pub fn logout_provider(&mut self, profile_id: String) {
+        self.dispatch(Command::LogoutProvider { profile_id });
     }
     pub fn update_providers(&mut self, providers: Vec<ProviderKind>) {
         self.dispatch(Command::UpdateProviders { providers });

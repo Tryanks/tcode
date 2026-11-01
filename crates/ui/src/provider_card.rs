@@ -9,15 +9,15 @@ use crate::icon::Icon;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
     icon::IconName,
-    overlay::OverlayExt as _,
+    overlay::{DialogButtons, OverlayExt as _},
     provider_dialog::ProviderDialog,
-    provider_status::{EMAIL_SLOT, StatusDot, redact_email},
+    provider_status::{EMAIL_SLOT, ProviderSnapshot, StatusDot, redact_email, signed_in_account},
     sizing::Sizable as _,
     store::{TopicKind, WorkspaceStore, observe_store_topics},
     theme::ActiveTheme as _,
     typography::TextRole as _,
     widgets::{
-        button::{Button, ButtonVariants as _},
+        button::{Button, ButtonVariant, ButtonVariants as _},
         switch::Switch,
     },
 };
@@ -30,6 +30,7 @@ use gpui::{Styled as _, rgb};
 use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
+use tcode_core::provider_status::AuthStatus;
 use tcode_core::settings::builtin_provider_color;
 
 /// The card's dialog asked to manage this profile's plugins.
@@ -109,7 +110,15 @@ impl ProviderCard {
         let name = store.provider_profile_display_name(&self.profile_id);
         let enabled = store.provider_profile_settings(&self.profile_id).enabled;
         let snapshot = store.provider_profile_snapshot(&self.profile_id);
-        let summary = crate::provider_status::summarize(provider, snapshot.as_ref(), enabled);
+        let same_account_as = snapshot
+            .as_ref()
+            .and_then(|snapshot| same_account_profile(store, &self.profile_id, provider, snapshot));
+        let summary = crate::provider_status::summarize(
+            provider,
+            snapshot.as_ref(),
+            enabled,
+            same_account_as.as_deref(),
+        );
         let provider_version = (self.profile_id
             == tcode_core::settings::Settings::builtin_profile_id(provider))
         .then(|| store.provider_version_status(provider))
@@ -272,6 +281,9 @@ impl ProviderCard {
                                 crate::tr!("providers.reveal_email")
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
+                                // The card body around this line opens the
+                                // editor on click; this press is not for it.
+                                cx.stop_propagation();
                                 this.email_revealed = !this.email_revealed;
                                 cx.notify();
                             })),
@@ -284,7 +296,77 @@ impl ProviderCard {
         }
         // Row wrapper so the chip left-aligns and hugs its content instead of
         // being stretched to the column width by the surrounding v_flex.
-        h_flex().w_full().min_w_0().child(line).into_any_element()
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .items_center()
+            .child(line)
+            .children(self.render_account_action(cx))
+            .into_any_element()
+    }
+
+    /// Sign in or out, where Tcode runs the profile's own account sign-in.
+    /// Its press stops propagating so the card body does not also open the
+    /// editor.
+    fn render_account_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let store = self.store.read(cx);
+        if !store.provider_profile_supports_account_login(&self.profile_id) {
+            return None;
+        }
+        let snapshot = store.provider_profile_snapshot(&self.profile_id)?;
+        let button = match snapshot.auth.map(|auth| auth.status) {
+            Some(AuthStatus::Authenticated) => Button::new("provider-sign-out")
+                .ghost()
+                .label(crate::tr!("providers.login.sign_out"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.confirm_sign_out(window, cx);
+                })),
+            Some(AuthStatus::Unauthenticated) | None if snapshot.installed => {
+                Button::new("provider-sign-in")
+                    .label(crate::tr!("providers.login.sign_in"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        crate::provider_login_dialog::open(
+                            this.store.clone(),
+                            this.provider,
+                            this.profile_id.clone(),
+                            window,
+                            cx,
+                        );
+                    }))
+            }
+            _ => return None,
+        };
+        Some(button.xsmall().into_any_element())
+    }
+
+    fn confirm_sign_out(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let profile_id = self.profile_id.clone();
+        let name = store.read(cx).provider_profile_display_name(&profile_id);
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let store = store.clone();
+            let profile_id = profile_id.clone();
+            alert
+                .title(
+                    crate::tr!("providers.login.sign_out_confirm_title", name = name).into_owned(),
+                )
+                .description(crate::tr!("providers.login.sign_out_confirm_body"))
+                .button_props(
+                    DialogButtons::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(crate::tr!("providers.login.sign_out"))
+                        .cancel_text(crate::tr!("settings.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    let profile_id = profile_id.clone();
+                    store.update(cx, |store, _| store.logout_provider(profile_id));
+                    true
+                })
+        });
     }
 
     /// The update-available icon + its popover.
@@ -411,6 +493,32 @@ impl Render for ProviderCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex().w_full().child(self.render_header(cx))
     }
+}
+
+/// The name of another profile of `provider` signed in to the account this
+/// profile's snapshot is.
+fn same_account_profile(
+    store: &WorkspaceStore,
+    profile_id: &str,
+    provider: ProviderKind,
+    snapshot: &ProviderSnapshot,
+) -> Option<String> {
+    let email = |snapshot: &ProviderSnapshot| {
+        signed_in_account(snapshot)
+            .and_then(|auth| auth.email.as_deref())
+            .map(|email| email.trim().to_lowercase())
+    };
+    let account = email(snapshot)?;
+    store
+        .all_provider_profiles()
+        .into_iter()
+        .filter(|profile| profile.kind == provider && profile.id != profile_id)
+        .find(|profile| {
+            store
+                .provider_profile_snapshot(&profile.id)
+                .is_some_and(|other| email(&other).as_ref() == Some(&account))
+        })
+        .map(|profile| store.provider_profile_display_name(&profile.id))
 }
 
 /// The provider's glyph (the same asset the composer's picker rail uses).

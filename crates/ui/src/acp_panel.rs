@@ -1,6 +1,7 @@
 //! First-class ACP provider cards and the modal agent marketplace.
 
 use crate::overlay::{DialogActions, OverlayExt as _};
+use crate::settings_rows::ToggleRow;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -20,7 +21,7 @@ use gpui_base::{Scrollbar, h_flex, v_flex};
 use std::rc::Rc;
 
 use tcode_core::acp::InstalledAcpAgent;
-use tcode_protocol::AcpMarketplaceItem;
+use tcode_protocol::{AcpMarketplaceItem, CommandResponse};
 
 use crate::material;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
@@ -253,6 +254,8 @@ enum PanelView {
     Home,
     /// The third-party Claude Code endpoint form (Kimi preset or custom).
     ThirdParty,
+    /// The form that adds and signs in to another Claude account.
+    Account,
     /// The custom ACP agent form.
     CustomAcp,
 }
@@ -281,6 +284,12 @@ pub struct AcpPanel {
     tp_base_url: Entity<InputState>,
     tp_model: Entity<InputState>,
     tp_key: Entity<InputState>,
+    tp_inherit_config: bool,
+    /// Another-account form.
+    account_name: Entity<InputState>,
+    account_inherit_config: bool,
+    account_pending: bool,
+    account_error: Option<String>,
     /// Measured rows stay valid while the filtered agents keep their ids. The
     /// registry is small enough to measure whole, so the scrollbar and the
     /// touch edge bounce see its full extent.
@@ -312,6 +321,11 @@ impl AcpPanel {
             tp_base_url: input(KIMI_BASE_URL, window, cx),
             tp_model: input(KIMI_MODEL, window, cx),
             tp_key: cx.new(|cx| InputState::new(window, cx)),
+            tp_inherit_config: false,
+            account_name: cx.new(|cx| InputState::new(window, cx)),
+            account_inherit_config: true,
+            account_pending: false,
+            account_error: None,
             market_list: ListState::new(0, ListAlignment::Top, px(120.)).measure_all(),
             market_ids: Vec::new(),
             _subscriptions: subscriptions,
@@ -341,8 +355,73 @@ impl AcpPanel {
         self.tp_model
             .update(cx, |i, cx| i.set_value(model, window, cx));
         self.tp_key.update(cx, |i, cx| i.set_value("", window, cx));
+        self.tp_inherit_config = false;
         self.view = PanelView::ThirdParty;
         cx.notify();
+    }
+
+    fn open_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.account_name
+            .update(cx, |i, cx| i.set_value("", window, cx));
+        self.account_inherit_config = true;
+        self.account_error = None;
+        self.view = PanelView::Account;
+        cx.notify();
+    }
+
+    /// Add the account on the host, which starts its sign-in, then show that
+    /// sign-in in place of this dialog.
+    fn sign_in_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.account_name.read(cx).value().to_string();
+        if self.account_pending || name.trim().is_empty() {
+            return;
+        }
+        let provider = agent::ProviderKind::ClaudeCode;
+        let inherit_config = self.account_inherit_config;
+        let create = self.store.update(cx, |store, cx| {
+            store.create_account_profile(provider, name, inherit_config, cx)
+        });
+        self.account_pending = true;
+        self.account_error = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let response = create.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.account_pending = false;
+                match response {
+                    Ok(CommandResponse::ProfileId(profile_id)) => {
+                        this.view = PanelView::Home;
+                        window.close_dialog(cx);
+                        crate::provider_login_dialog::show(
+                            this.store.clone(),
+                            provider,
+                            profile_id,
+                            window,
+                            cx,
+                        );
+                    }
+                    Ok(other) => {
+                        log::error!("unexpected create-account response: {other:?}");
+                        this.account_error =
+                            Some(crate::tr!("providers.account.create_failed").into_owned());
+                    }
+                    Err(error) => {
+                        this.account_error = Some(match error.code.as_str() {
+                            "profile_exists" => {
+                                crate::tr!("providers.account.profile_exists").into_owned()
+                            }
+                            _ => crate::tr!(
+                                "providers.account.create_failed_reason",
+                                reason = error.message
+                            )
+                            .into_owned(),
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn render_market_row(&self, agent: &AcpMarketplaceItem, cx: &mut Context<Self>) -> AnyElement {
@@ -502,15 +581,18 @@ impl AcpPanel {
     }
 
     /// The provider entries shown above the ACP marketplace: Claude Code (opens
-    /// the third-party endpoint form) and Codex (present but disabled for now).
+    /// the third-party endpoint form), another Claude account, and Codex
+    /// (present but disabled for now).
     fn render_provider_entries(&self, cx: &mut Context<Self>) -> AnyElement {
+        type Open = fn(&mut AcpPanel, &mut Window, &mut Context<AcpPanel>);
         let entry = |id: &'static str,
                      glyph: Icon,
                      title: String,
                      subtitle: String,
-                     enabled: bool,
+                     open: Option<Open>,
                      cx: &mut Context<Self>|
          -> AnyElement {
+            let enabled = open.is_some();
             let muted = cx.theme().muted_foreground;
             let row = material::card(cx)
                 .flex_row()
@@ -536,16 +618,14 @@ impl AcpPanel {
                                 })
                                 .child(title.clone()),
                         )
-                        .child(div().text_secondary(false, cx).child(subtitle)),
+                        .child(div().text_secondary(false, cx).truncate().child(subtitle)),
                 );
-            if enabled {
+            if let Some(open) = open {
                 material::accessible_clickable(row, id, gpui::Role::Button, title, cx)
                     .cursor_pointer()
                     .hover(|s| s.bg(cx.theme().list_hover))
                     .child(Icon::new(IconName::ChevronRight).text_color(muted))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_third_party(TpPreset::Kimi, window, cx);
-                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
                     .into_any_element()
             } else {
                 row.id(id)
@@ -570,15 +650,28 @@ impl AcpPanel {
                 crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode),
                 crate::tr!("providers.third_party.claude_title").into_owned(),
                 crate::tr!("providers.third_party.claude_subtitle").into_owned(),
-                true,
+                Some(|this, window, cx| this.open_third_party(TpPreset::Kimi, window, cx)),
                 cx,
             ))
+            .when(
+                agent::ProviderKind::ClaudeCode.caps().account_login,
+                |entries| {
+                    entries.child(entry(
+                        "provider-entry-claude-account",
+                        crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode),
+                        crate::tr!("providers.account.title").into_owned(),
+                        crate::tr!("providers.account.subtitle").into_owned(),
+                        Some(Self::open_account),
+                        cx,
+                    ))
+                },
+            )
             .child(entry(
                 "provider-entry-codex",
                 crate::provider_card::provider_glyph(agent::ProviderKind::Codex),
                 crate::tr!("providers.third_party.codex_title").into_owned(),
                 crate::tr!("providers.third_party.codex_subtitle").into_owned(),
-                false,
+                None,
                 cx,
             ))
             .into_any_element()
@@ -656,6 +749,16 @@ impl AcpPanel {
                     .placeholder(crate::tr!("providers.third_party.key_hint"))
                     .into_any_element(),
             ))
+            .child(material::group(cx).child(ToggleRow::new(
+                "tp-inherit-config",
+                crate::tr!("providers.inherit_config"),
+                self.tp_inherit_config,
+                false,
+                cx.listener(|this, checked: &bool, _, cx| {
+                    this.tp_inherit_config = *checked;
+                    cx.notify();
+                }),
+            )))
             .child(
                 DialogActions::new()
                     .w_full()
@@ -680,18 +783,96 @@ impl AcpPanel {
                                 if base_url.trim().is_empty() || key.trim().is_empty() {
                                     return;
                                 }
+                                let inherit_config = this.tp_inherit_config;
                                 this.store.update(cx, |store, _cx| {
                                     store.create_third_party_profile(
                                         name,
                                         base_url,
                                         Some(model),
                                         key,
+                                        inherit_config,
                                     );
                                 });
                                 this.view = PanelView::Home;
                                 window.close_dialog(cx);
                                 cx.notify();
                             })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_account(&self, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(
+                Button::new("account-back")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::ArrowLeft)
+                    .label(crate::tr!("settings.back").into_owned())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.view = PanelView::Home;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .text_secondary(false, cx)
+                    .child(crate::tr!("providers.account.subtitle").into_owned()),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_caption(cx)
+                            .child(crate::tr!("providers.third_party.name").into_owned()),
+                    )
+                    .child(
+                        Input::new(&self.account_name)
+                            .placeholder(crate::tr!("providers.account.name_hint")),
+                    ),
+            )
+            .child(material::group(cx).child(ToggleRow::new(
+                "account-inherit-config",
+                crate::tr!("providers.inherit_config"),
+                self.account_inherit_config,
+                false,
+                cx.listener(|this, checked: &bool, _, cx| {
+                    this.account_inherit_config = *checked;
+                    cx.notify();
+                }),
+            )))
+            .when_some(self.account_error.clone(), |form, error| {
+                form.child(
+                    div()
+                        .text_secondary(false, cx)
+                        .text_color(cx.theme().danger_foreground)
+                        .child(error),
+                )
+            })
+            .child(
+                DialogActions::new()
+                    .w_full()
+                    .child(
+                        Button::new("account-cancel")
+                            .ghost()
+                            .xsmall()
+                            .label(crate::tr!("settings.cancel").into_owned())
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("account-sign-in")
+                            .with_variant(ButtonVariant::Primary)
+                            .xsmall()
+                            .loading(self.account_pending)
+                            .label(crate::tr!("providers.login.sign_in").into_owned())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.sign_in_account(window, cx)),
+                            ),
                     ),
             )
             .into_any_element()
@@ -784,6 +965,7 @@ impl Render for AcpPanel {
                 .child(self.render_marketplace(window, cx))
                 .into_any_element(),
             PanelView::ThirdParty => self.render_third_party(cx),
+            PanelView::Account => self.render_account(cx),
             PanelView::CustomAcp => self.render_custom(cx),
         })
     }

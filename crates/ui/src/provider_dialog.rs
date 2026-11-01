@@ -934,7 +934,7 @@ type ProviderCopy = [&'static str; 6];
 fn provider_copy(provider: ProviderKind) -> ProviderCopy {
     match provider {
         ProviderKind::Codex =>      ["codex",        "~/.codex",    "providers.codex_home",  "providers.codex_home_help",  "",                             "gpt-6.7-codex-ultra-preview"],
-        ProviderKind::ClaudeCode => ["claude",       "~",           "providers.claude_home", "providers.claude_home_help", "e.g. --chrome",                "claude-sonnet-5"],
+        ProviderKind::ClaudeCode => ["claude",       "~/.claude",   "providers.claude_home", "providers.claude_home_help", "e.g. --chrome",                "claude-sonnet-5"],
         ProviderKind::Pi =>         ["pi",           "~/.pi/agent", "providers.pi_home",     "providers.pi_home_help",     "e.g. --provider openai-codex", "openai-codex/gpt-5.5"],
         ProviderKind::OpenCode =>   ["opencode",     "",            "providers.home",        "providers.home_help",        "e.g. --print-logs",            "openai/gpt-5.1-codex"],
         ProviderKind::Cursor =>     ["cursor-agent", "~/.cursor",   "providers.cursor_home", "providers.cursor_home_help", "e.g. --sandbox enabled",       ""],

@@ -89,6 +89,12 @@ impl AppState {
                     "Built-in provider profiles cannot be deleted.",
                 ));
             }
+            Command::CreateAccountProfile { provider, .. } if !provider.caps().account_login => {
+                return Err(error(
+                    "no_account_login",
+                    "This provider has no account to sign in to.",
+                ));
+            }
             Command::TerminalInput { terminal_id, .. }
             | Command::ClearTerminal { terminal_id }
             | Command::ResizeTerminal { terminal_id, .. }
@@ -128,6 +134,10 @@ impl AppState {
             Command::SetProfileSecret { profile_id, .. }
             | Command::UpdateProfileSettings { profile_id, .. }
             | Command::DeleteProfile { profile_id }
+            | Command::StartProviderLogin { profile_id }
+            | Command::SubmitProviderLoginCode { profile_id, .. }
+            | Command::CancelProviderLogin { profile_id }
+            | Command::LogoutProvider { profile_id }
                 if self.settings.resolved_profile(profile_id).is_none() =>
             {
                 return Err(error(

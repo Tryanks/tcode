@@ -135,9 +135,9 @@ running-session markers. `jobs/` and `daemon/` hold background-session state.
   `~/.cache/claude`).
   [Troubleshoot install](https://code.claude.com/docs/en/troubleshoot-install#check-directory-permissions)
 - Paths that ignore these variables: none found that matter. Tcode's own
-  per-provider home override sets `HOME` for Claude
-  (`crates/agent/src/lib.rs:806-813`), which moves both `~/.claude` and
-  `~/.claude.json`.
+  per-provider home override sets `CLAUDE_CONFIG_DIR` for Claude
+  (`LaunchEnv::pairs` in `crates/agent/src/lib.rs`), which moves both
+  `~/.claude` and `~/.claude.json` and leaves `HOME` unchanged.
 
 ### 6. Install and self-update
 
