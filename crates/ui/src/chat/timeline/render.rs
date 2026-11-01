@@ -1,4 +1,5 @@
 use super::*;
+use crate::chat::tools;
 
 /// A whole tool output fetched on request.
 pub(in crate::chat) enum FullOutput {
@@ -8,6 +9,16 @@ pub(in crate::chat) enum FullOutput {
     },
     Loaded(SharedString),
     Failed(String),
+}
+
+/// How one activity row is drawn where it stands.
+pub(in crate::chat) struct ActivityRow {
+    pub(in crate::chat) compact: bool,
+    pub(in crate::chat) live_reasoning: bool,
+    pub(in crate::chat) auto_expand: bool,
+    pub(in crate::chat) recency: AutoActivityRecency,
+    /// A completed call's images show as tiles above its row instead.
+    pub(in crate::chat) images_inline: bool,
 }
 
 impl ChatView {
@@ -108,6 +119,7 @@ impl ChatView {
                 Segment::ActivityRun(activities) => {
                     column = column.child(self.compose_work_log(
                         (index, &row.part, turn, cwd, activities, row.live_activity),
+                        window,
                         cx,
                     ));
                 }
@@ -124,11 +136,15 @@ impl ChatView {
                             EntryContent::Item(ItemContent::ToolCall { .. })
                         ) {
                             column = column.child(self.compose_activity_row(
-                                entry,
-                                true,
-                                false,
-                                false,
-                                AutoActivityRecency::Older,
+                                (entry, cwd),
+                                ActivityRow {
+                                    compact: true,
+                                    live_reasoning: false,
+                                    auto_expand: false,
+                                    recency: AutoActivityRecency::Older,
+                                    images_inline: false,
+                                },
+                                window,
                                 cx,
                             ));
                         }
@@ -854,6 +870,7 @@ impl ChatView {
     fn compose_work_log(
         &mut self,
         args: components::work_log::WorkLogArgs<'_>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (index, part, turn, cwd, activities, is_last) = args;
@@ -872,7 +889,7 @@ impl ChatView {
             .map(|entry| entry.id.as_str());
         match part {
             RowPart::WorkLogActivity => {
-                let rows = self.compose_work_log_rows(activities, cwd, None, false, cx);
+                let rows = self.compose_work_log_rows(activities, cwd, None, false, window, cx);
                 return components::work_log::work_log_body(rows).into_any_element();
             }
             RowPart::WorkLogLive => {
@@ -884,6 +901,7 @@ impl ChatView {
                         cwd,
                         live_reasoning_id,
                         running,
+                        window,
                         cx,
                     ))
                     .into_any_element();
@@ -905,7 +923,7 @@ impl ChatView {
                 format_elapsed_deciseconds(activity_run_duration_ms(folded, turn, is_last));
             let outcome = work_log_outcome(turn, folded, is_last);
             let rows = if expanded && !header_only {
-                self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, cx)
+                self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, window, cx)
             } else {
                 Vec::new()
             };
@@ -940,6 +958,7 @@ impl ChatView {
                         cwd,
                         live_reasoning_id,
                         running,
+                        window,
                         cx,
                     )),
             );
@@ -954,6 +973,7 @@ impl ChatView {
         cwd: &Path,
         live_reasoning_id: Option<&str>,
         auto_expand: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
@@ -991,11 +1011,15 @@ impl ChatView {
                 }
             } else {
                 rows.push(self.compose_activity_row(
-                    entry,
-                    false,
-                    live_reasoning_id == Some(entry.id.as_str()),
-                    auto_expand,
-                    recency,
+                    (entry, cwd),
+                    ActivityRow {
+                        compact: false,
+                        live_reasoning: live_reasoning_id == Some(entry.id.as_str()),
+                        auto_expand,
+                        recency,
+                        images_inline: true,
+                    },
+                    window,
                     cx,
                 ));
             }
@@ -1003,14 +1027,13 @@ impl ChatView {
         rows
     }
 
-    /// Prepare one stateless Work Log activity component.
-    fn compose_activity_row(
+    /// One Work Log activity as its window: a header in the shared grammar,
+    /// and its body while it is open or folding shut.
+    pub(in crate::chat) fn compose_activity_row(
         &mut self,
-        entry: &TimelineEntry,
-        compact: bool,
-        live_reasoning: bool,
-        auto_expand: bool,
-        recency: AutoActivityRecency,
+        (entry, cwd): (&TimelineEntry, &Path),
+        row: ActivityRow,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if matches!(
@@ -1026,70 +1049,42 @@ impl ChatView {
             EntryContent::Item(ItemContent::CommandExecution { .. })
         );
         let auto_enabled =
-            auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
+            row.auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
         let expanded =
-            self.auto_activity_expanded((turn, &entry.id), &key, auto_enabled, recency, cx);
-        let command_detail = if expanded {
-            match &entry.content {
-                EntryContent::Item(ItemContent::CommandExecution {
-                    command, output, ..
-                }) => {
-                    let panel_id = entry.id.clone();
-                    let session_id = self.session_id.clone();
-                    let on_cols_change = cx.listener(move |_this, cols: &u16, window, cx| {
-                        // Fires from `on_prepaint`, in the middle of laying the
-                        // list out. Subscribe once the frame is done.
-                        let cols = *cols;
-                        let panel_id = panel_id.clone();
-                        let session_id = session_id.clone();
-                        cx.defer_in(window, move |this, _window, cx| {
-                            this.workspace_store.update(cx, |store, _| {
-                                store.watch_command_output_for(
-                                    session_id.as_deref(),
-                                    &panel_id,
-                                    cols,
-                                );
-                            });
-                        });
-                    });
-                    let store = self.workspace_store.read(cx);
-                    let replica = store.command_output_for(self.session_id.as_deref(), &entry.id);
-                    let screen = components::command_panel::OutputScreen {
-                        watched: replica.and_then(|replica| replica.watched()),
-                        frame: replica.and_then(|replica| replica.frame()),
-                    };
-                    Some(self.command_panels.borrow_mut().render(
-                        entry,
-                        command,
-                        output,
-                        screen,
-                        Some(Box::new(on_cols_change)),
-                        cx,
-                    ))
+            self.auto_activity_expanded((turn, &entry.id), &key, auto_enabled, row.recency, cx);
+        let activity = tools::activity(entry, row.live_reasoning, cx);
+        let error = activity.failure();
+        let tools::Activity {
+            header,
+            status,
+            copy,
+            expandable,
+            ..
+        } = activity;
+        let detail = if !expandable {
+            tools::window::Detail::None
+        } else {
+            match tools::window::fold(&entry.id, expanded, window, cx) {
+                Some(shown) => {
+                    let body = self.activity_body(entry, cwd, row.images_inline, cx);
+                    tools::window::Detail::Fold(shown, body)
                 }
-                _ => None,
+                None => tools::window::Detail::Shut,
             }
-        } else {
-            None
-        };
-        let elided_output = if expanded
-            && matches!(
-                &entry.content,
-                EntryContent::Item(ItemContent::ToolCall { .. })
-            ) {
-            self.elided_output(&entry.id, turn, cx)
-        } else {
-            None
         };
         let click_key = key;
         let entry_id = entry.id.clone();
-        components::activity::activity_row(
-            entry,
-            compact,
-            live_reasoning,
-            expanded,
-            command_detail,
-            elided_output,
+        tools::window::tool_window(
+            tools::window::WindowSpec {
+                key: entry.id.clone(),
+                header,
+                status,
+                error,
+                elapsed_ms: tools::window::elapsed(entry),
+                compact: row.compact,
+                copy,
+            },
+            detail,
             cx.listener(move |this, _, _, cx| {
                 this.toggle_activity_expanded((turn, &entry_id), &click_key, expanded, cx);
             }),
@@ -1097,22 +1092,87 @@ impl ChatView {
         )
     }
 
+    /// The body of an open activity window.
+    fn activity_body(
+        &mut self,
+        entry: &TimelineEntry,
+        cwd: &Path,
+        images_inline: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let EntryContent::Item(item) = &entry.content else {
+            return div().into_any_element();
+        };
+        match item {
+            ItemContent::CommandExecution {
+                command, output, ..
+            } => {
+                let panel_id = entry.id.clone();
+                let session_id = self.session_id.clone();
+                let on_cols_change = cx.listener(move |_this, cols: &u16, window, cx| {
+                    // Fires from `on_prepaint`, in the middle of laying the
+                    // list out. Subscribe once the frame is done.
+                    let cols = *cols;
+                    let panel_id = panel_id.clone();
+                    let session_id = session_id.clone();
+                    cx.defer_in(window, move |this, _window, cx| {
+                        this.workspace_store.update(cx, |store, _| {
+                            store.watch_command_output_for(session_id.as_deref(), &panel_id, cols);
+                        });
+                    });
+                });
+                let store = self.workspace_store.read(cx);
+                let replica = store.command_output_for(self.session_id.as_deref(), &entry.id);
+                let screen = components::command_panel::OutputScreen {
+                    watched: replica.and_then(|replica| replica.watched()),
+                    frame: replica.and_then(|replica| replica.frame()),
+                };
+                self.command_panels.borrow_mut().render(
+                    entry,
+                    command,
+                    output,
+                    screen,
+                    Some(Box::new(on_cols_change)),
+                    cx,
+                )
+            }
+            ItemContent::ToolCall { .. } => {
+                let call = tools::Call::of(entry).expect("a tool call");
+                let view = tools::view(&call);
+                let mut ctx = tools::ToolCtx {
+                    chat: self,
+                    cx,
+                    cwd,
+                    images_inline,
+                };
+                view.body(&call, &mut ctx)
+            }
+            ItemContent::Reasoning { text } => div()
+                .w_full()
+                .text_secondary(false, cx)
+                .whitespace_normal()
+                .child(text.clone())
+                .into_any_element(),
+            _ => div().into_any_element(),
+        }
+    }
+
     /// How much of a shortened tool output the reader has, or `None` when the
     /// record carried it whole.
-    fn elided_output(
+    pub(in crate::chat) fn elided_output(
         &mut self,
         item_id: &str,
         turn: usize,
         cx: &mut Context<Self>,
-    ) -> Option<components::activity::ElidedOutput> {
-        use components::activity::ElidedOutput;
+    ) -> Option<tools::ElidedOutput> {
+        use tools::ElidedOutput;
         let full_bytes = self
             .workspace_store
             .read(cx)
             .with_timeline_for(self.session_id.as_deref(), |timeline| {
                 timeline.elided_outputs.get(item_id).copied()
             })??;
-        let load = || -> components::subagent::ClickHandler {
+        let load = || -> tools::ClickHandler {
             let item_id = item_id.to_owned();
             Box::new(cx.listener(move |this, _, _, cx| {
                 this.load_full_output(item_id.clone(), turn, cx);

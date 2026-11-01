@@ -446,28 +446,6 @@ pub(crate) fn one_line_with_break_markers(text: &str) -> (String, Vec<Range<usiz
     (out, markers)
 }
 
-/// A short one-line summary of a tool call's input for the Work Log.
-pub(crate) fn tool_brief(input: &serde_json::Value) -> String {
-    match input {
-        serde_json::Value::Object(map) => map
-            .get("query")
-            .or_else(|| map.get("path"))
-            .or_else(|| map.get("command"))
-            .or_else(|| map.get("summary"))
-            // Question tools: Claude `AskUserQuestion` items carry `question`,
-            // Codex `request_user_input_async` items carry `title`.
-            .or_else(|| {
-                let first = map.get("questions")?.get(0)?;
-                first.get("question").or_else(|| first.get("title"))
-            })
-            .and_then(|v| v.as_str())
-            .map(one_line)
-            .unwrap_or_default(),
-        serde_json::Value::String(s) => one_line(s),
-        _ => String::new(),
-    }
-}
-
 /// Wall-clock duration formatted as "XmYYs" / "YYs".
 pub(crate) fn format_duration(secs: u64) -> String {
     if secs >= 60 {

@@ -435,7 +435,7 @@ impl ChatView {
 
     /// Invalidate the measured height of the row that renders the activity
     /// `entry_id`; an expanded Work Log gives each activity a row of its own.
-    fn remeasure_activity(&self, turn: usize, entry_id: &str, cx: &App) {
+    pub(in crate::chat) fn remeasure_activity(&self, turn: usize, entry_id: &str, cx: &App) {
         let row = self
             .workspace_store
             .read(cx)
