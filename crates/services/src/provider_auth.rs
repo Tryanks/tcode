@@ -168,25 +168,53 @@ fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Parse the shared `auth.json` shape used by pi and OpenCode. Each top-level
-/// key names an upstream provider whose object carries a non-empty `type`.
+/// Parse pi's `auth.json`. Each top-level key names an upstream provider whose
+/// object carries a non-empty `type`.
 ///
-/// An empty or unreadable credential set remains indeterminate because either
+/// An empty or unreadable credential set remains indeterminate because the
 /// CLI may also authenticate through environment variables.
 pub fn parse_aggregator_auth(json: &str) -> Option<ProviderAuth> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     let object = value.as_object()?;
-    let mut providers: Vec<_> = object
-        .iter()
-        .filter_map(|(provider, credential)| {
-            credential
-                .as_object()?
-                .get("type")
-                .and_then(|value| value.as_str())
-                .filter(|kind| !kind.trim().is_empty())
-                .map(|_| provider.as_str())
-        })
-        .collect();
+    upstream_providers_auth(
+        object
+            .iter()
+            .filter_map(|(provider, credential)| {
+                credential
+                    .as_object()?
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .filter(|kind| !kind.trim().is_empty())
+                    .map(|_| provider.as_str())
+            })
+            .collect(),
+    )
+}
+
+/// Parse `opencode auth list --format json`: the integrations OpenCode knows,
+/// each with the connections (stored credentials or environment) it uses.
+///
+/// None connected remains indeterminate: OpenCode's own free models need no
+/// sign-in.
+pub fn parse_opencode_auth(json: &str) -> Option<ProviderAuth> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    upstream_providers_auth(
+        value
+            .as_array()?
+            .iter()
+            .filter(|integration| {
+                integration
+                    .get("connections")
+                    .and_then(|connections| connections.as_array())
+                    .is_some_and(|connections| !connections.is_empty())
+            })
+            .filter_map(|integration| integration.get("id")?.as_str())
+            .collect(),
+    )
+}
+
+/// Signed in to the listed upstream providers, labelled by the first three.
+fn upstream_providers_auth(mut providers: Vec<&str>) -> Option<ProviderAuth> {
     if providers.is_empty() {
         return None;
     }
@@ -309,5 +337,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(auth.label.as_deref(), Some("alpha, beta, delta +2"));
+    }
+
+    #[test]
+    fn parses_opencode_auth_list_json() {
+        // Recorded from `opencode auth list --standalone --format json` (2.2.5).
+        let auth = parse_opencode_auth(
+            r#"[{"id":"openai","name":"OpenAI","connections":[{"type":"credential","id":"cred_1742dd55a001aae39XldzS80se","label":"OAuth","method":"oauth"}]}]"#,
+        )
+        .unwrap();
+        assert_eq!(auth.status, AuthStatus::Authenticated);
+        assert_eq!(auth.label.as_deref(), Some("openai"));
+
+        assert!(
+            parse_opencode_auth(r#"[{"id":"anthropic","name":"Anthropic","connections":[]}]"#)
+                .is_none()
+        );
     }
 }
