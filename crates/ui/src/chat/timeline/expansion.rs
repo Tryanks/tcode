@@ -470,7 +470,7 @@ mod tests {
         };
         for (item, selector, detail_selector) in [
             (command, "activity-row-first", "activity-detail"),
-            (file_edit, "file-edit-row", "file-edit-diff"),
+            (file_edit, "activity-row-first-file-0", "file-edit-diff"),
         ] {
             let mut timeline = Timeline::default();
             // Render a live turn without starting the perpetual timeline ticker.

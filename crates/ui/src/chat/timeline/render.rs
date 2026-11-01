@@ -981,34 +981,16 @@ impl ChatView {
             let recency = AutoActivityRecency::from_newer_activity_count(
                 activities.len() - activity_index - 1,
             );
-            if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content {
-                let turn = entry.turn;
-                for (file_index, row) in live_edit_rows(changes, cwd).iter().enumerate() {
-                    let key = format!("activity-{}-file-{file_index}", entry.id);
-                    let enabled = auto_expand && row.counts.is_some();
-                    let expanded =
-                        self.auto_activity_expanded((turn, &entry.id), &key, enabled, recency, cx);
-                    let inline_diff = (expanded && row.counts.is_some())
-                        .then(|| self.inline_diffs.render(&key, row, cx));
-                    let toggle_key = key.clone();
-                    let entry_id = entry.id.clone();
-                    rows.push(components::changed_files::file_edit_row(
-                        &key,
-                        row,
-                        cwd,
-                        expanded,
-                        inline_diff,
-                        cx.listener(move |this, _, _, cx| {
-                            this.toggle_activity_expanded(
-                                (turn, &entry_id),
-                                &toggle_key,
-                                expanded,
-                                cx,
-                            );
-                        }),
-                        cx,
-                    ));
-                }
+            if let Some(edit) = tools::diff::edit(entry, cwd) {
+                rows.extend(self.compose_edit_rows(
+                    entry,
+                    cwd,
+                    &edit,
+                    auto_expand,
+                    recency,
+                    window,
+                    cx,
+                ));
             } else {
                 rows.push(self.compose_activity_row(
                     (entry, cwd),
@@ -1023,6 +1005,66 @@ impl ChatView {
                     cx,
                 ));
             }
+        }
+        rows
+    }
+
+    /// An edit's windows, one per file it touched. A harness's own diff
+    /// opens by itself while it is the latest.
+    #[allow(clippy::too_many_arguments)]
+    fn compose_edit_rows(
+        &mut self,
+        entry: &TimelineEntry,
+        cwd: &Path,
+        edit: &tools::diff::Edit,
+        auto_expand: bool,
+        recency: AutoActivityRecency,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let turn = entry.turn;
+        let mut rows = Vec::new();
+        for (file_index, file) in edit.files.iter().enumerate() {
+            let key = format!("activity-{}-file-{file_index}", entry.id);
+            let enabled = auto_expand && edit.live && file.row.counts.is_some();
+            let expanded =
+                self.auto_activity_expanded((turn, &entry.id), &key, enabled, recency, cx);
+            let window_key = format!("{}-file-{file_index}", entry.id);
+            let detail = if file.row.counts.is_none() {
+                tools::window::Detail::None
+            } else {
+                match tools::window::fold(&window_key, expanded, window, cx) {
+                    Some(shown) => {
+                        tools::window::Detail::Fold(shown, self.inline_diffs.render(&key, file, cx))
+                    }
+                    None => tools::window::Detail::Shut,
+                }
+            };
+            let header = tools::diff::file_header(file);
+            // The call's failure and its time belong to it, told once.
+            let first = file_index == 0;
+            let elapsed_ms = first
+                .then(|| tools::window::elapsed(&header, entry))
+                .flatten();
+            let toggle_key = key.clone();
+            let entry_id = entry.id.clone();
+            rows.push(tools::window::tool_window(
+                tools::window::WindowSpec {
+                    key: window_key,
+                    header,
+                    status: edit.status,
+                    error: first.then(|| edit.failure.clone()).flatten(),
+                    elapsed_ms,
+                    compact: false,
+                    copy: tools::diff::file_copy_items(file),
+                    path: Some((file.row.path.clone(), cwd.to_path_buf())),
+                },
+                detail,
+                cx.listener(move |this, _, _, cx| {
+                    this.toggle_activity_expanded((turn, &entry_id), &toggle_key, expanded, cx);
+                }),
+                cx,
+            ));
         }
         rows
     }
@@ -1084,6 +1126,7 @@ impl ChatView {
                 elapsed_ms,
                 compact: row.compact,
                 copy,
+                path: None,
             },
             detail,
             cx.listener(move |this, _, _, cx| {
