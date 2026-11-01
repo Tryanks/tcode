@@ -1253,10 +1253,13 @@ mod tests {
             Some(&("", Some(0)))
         );
 
+        // The diff is the hunk Grok sent, placed at its `_meta` line.
         assert!(matches!(completed(&events, "call_35_0"),
             ItemContent::FileChange { changes, status: ItemStatus::Completed }
                 if changes.len() == 1 && changes[0].kind == FileChangeKind::Modify
-                    && changes[0].path.ends_with("/in.txt")));
+                    && changes[0].path.ends_with("/in.txt")
+                    && changes[0].diff.as_deref() == Some(
+                        "--- a//private/tmp/grok-fixture/cwork/in.txt\n+++ b//private/tmp/grok-fixture/cwork/in.txt\n@@ -1,1 +1,1 @@\n-hello\n+bye\n")));
         assert!(events.iter().any(|event| matches!(event,
             AgentEvent::UserInputRequested { questions, .. }
                 if questions[0].id == "Which greeting should I use?")));
