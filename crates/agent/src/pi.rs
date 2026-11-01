@@ -19,7 +19,7 @@ use crate::{
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
     LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderCommandKind,
     ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, UserInputDelivery, UserInputOption, UserInputQuestion,
+    ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
 };
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
@@ -799,7 +799,9 @@ struct PiMapper {
 struct PiTool {
     name: String,
     input: Value,
-    output: String,
+    output: ToolOutput,
+    /// The latest `AgentToolResult`.
+    result: Option<Value>,
 }
 
 impl PiMapper {
@@ -964,18 +966,14 @@ impl PiMapper {
                     .or_else(|| tool.get("input"))
                     .cloned()
                     .unwrap_or(Value::Null);
-                let existed = self
-                    .tool_items
-                    .insert(
-                        id.clone(),
-                        PiTool {
-                            name: name.clone(),
-                            input: input.clone(),
-                            output: String::new(),
-                        },
-                    )
-                    .is_some();
-                let item = tool_item(&id, &name, input, String::new(), ItemStatus::InProgress);
+                let tool = PiTool {
+                    name,
+                    input,
+                    output: ToolOutput::default(),
+                    result: None,
+                };
+                let item = tool_item(&id, &tool, ItemStatus::InProgress);
+                let existed = self.tool_items.insert(id, tool).is_some();
                 return vec![if existed {
                     AgentEvent::ItemUpdated(item)
                 } else {
@@ -1151,12 +1149,15 @@ impl PiMapper {
         } else {
             event.get("result")
         };
-        let output = result.map(result_text).unwrap_or_default();
+        let output = result
+            .map(|result| ToolOutput::from_content(result.get("content").unwrap_or(&Value::Null)))
+            .unwrap_or_default();
         let was_known = self.tool_items.contains_key(&id);
         let tool = self.tool_items.entry(id.clone()).or_insert_with(|| PiTool {
             name: event_name.unwrap_or("tool").to_owned(),
             input: event_input.clone().unwrap_or(Value::Null),
-            output: String::new(),
+            output: ToolOutput::default(),
+            result: None,
         });
         if let Some(name) = event_name {
             tool.name = name.to_owned();
@@ -1166,27 +1167,12 @@ impl PiMapper {
         }
         if has_result {
             tool.output = output;
+            tool.result = result.cloned();
         }
         if status == ItemStatus::Failed {
             self.failed = true;
         }
-        let mut item = tool_item(
-            &id,
-            &tool.name,
-            tool.input.clone(),
-            tool.output.clone(),
-            status,
-        );
-        if status == ItemStatus::Completed
-            && crate::image_reads::is_read_tool(&tool.name)
-            && let ItemContent::ToolCall { image_reads, .. } = &mut item.content
-        {
-            *image_reads = crate::image_reads::content_images(
-                result
-                    .and_then(|r| r.get("content"))
-                    .unwrap_or(&Value::Null),
-            );
-        }
+        let item = tool_item(&id, tool, status);
         vec![match status {
             ItemStatus::InProgress if has_result => AgentEvent::ItemUpdated(item),
             ItemStatus::InProgress if was_known => AgentEvent::ItemUpdated(item),
@@ -1196,16 +1182,29 @@ impl PiMapper {
     }
 }
 
-fn tool_item(id: &str, name: &str, input: Value, output: String, status: ItemStatus) -> ThreadItem {
-    let content = match name {
+/// The canonical item for a pi tool call. Its `result` carries what the
+/// content text leaves out: bash's `structuredContent.exit_code` and edit's
+/// `details.patch`, a unified diff.
+fn tool_item(id: &str, tool: &PiTool, status: ItemStatus) -> ThreadItem {
+    let PiTool {
+        name,
+        input,
+        output,
+        result,
+    } = tool;
+    let result = result.as_ref();
+    let content = match name.as_str() {
         "bash" => ItemContent::CommandExecution {
             command: input
                 .get("command")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned(),
-            output,
-            exit_code: None,
+            output: output.text.clone(),
+            exit_code: result
+                .and_then(|result| result.pointer("/structuredContent/exit_code"))
+                .and_then(Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok()),
             status,
         },
         "edit" | "write" => ItemContent::FileChange {
@@ -1220,17 +1219,34 @@ fn tool_item(id: &str, name: &str, input: Value, output: String, status: ItemSta
                         } else {
                             FileChangeKind::Modify
                         },
-                        diff: None,
+                        diff: if name == "write" {
+                            input
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .filter(|content| !content.is_empty())
+                                .map(|content| {
+                                    content
+                                        .lines()
+                                        .map(|line| format!("+{line}"))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                })
+                        } else {
+                            result
+                                .and_then(|result| result.pointer("/details/patch"))
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        },
                     }]
                 })
                 .unwrap_or_default(),
             status,
         },
         _ => ItemContent::ToolCall {
-            image_reads: Vec::new(),
-            name: name.to_owned(),
-            input,
-            output: (!output.is_empty()).then_some(output),
+            image_reads: output.images.clone(),
+            name: name.clone(),
+            input: input.clone(),
+            output: (!output.text.is_empty()).then(|| output.text.clone()),
             status,
         },
     };
@@ -1420,17 +1436,6 @@ fn cancel_pending_dialogs(
         )?;
     }
     Ok(())
-}
-
-fn result_text(result: &Value) -> String {
-    result
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn custom_message_id(message: &Value) -> String {
@@ -1830,28 +1835,62 @@ mod tests {
             .collect()
     }
 
+    /// Each `result` is what pi 1.4.0's own `bash`, `edit`, `write` and
+    /// `read` tools returned in a scratch directory (`createToolDefinition(..)
+    /// .execute`), in the `tool_execution_*` events `pi --mode rpc` forwards
+    /// verbatim. The items keep bash's exit code, edit's unified patch, the
+    /// written text and the read image.
     #[test]
-    fn image_read_results_exclude_failed_reads_and_image_generation() {
-        for (name, failed, expected) in [
-            ("read", false, 2),
-            ("read", true, 0),
-            ("generate_image", false, 0),
-        ] {
-            let mut mapper = PiMapper::new();
-            mapper.on_message(&json!({"type":"tool_execution_start","toolCallId":"read","toolName":name,"args":{"path":"image.png"}}));
-            let events = mapper.on_message(&json!({"type":"tool_execution_end","toolCallId":"read","isError":failed,"result":{"content":[{"type":"image","mimeType":"image/png","data":"AQID"},{"type":"image","mimeType":"image/jpeg","data":"BAUG"}]}}));
-            let AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::ToolCall { image_reads, .. },
-                ..
-            }) = &events[0]
-            else {
-                panic!("tool completion: {events:?}")
-            };
-            assert_eq!(image_reads.len(), expected, "{name}, failed={failed}");
-            if expected != 0 {
-                assert_eq!(image_reads[1].data_base64, "BAUG");
+    fn tool_results_keep_exit_code_patch_and_images() {
+        let mut mapper = PiMapper::new();
+        let mut completed = Vec::new();
+        for line in include_str!("../tests/fixtures/pi/tool_results.jsonl").lines() {
+            for event in mapper.on_message(&serde_json::from_str(line).unwrap()) {
+                if let AgentEvent::ItemCompleted(item) = event {
+                    completed.push(item.content);
+                }
             }
         }
+        assert_eq!(
+            completed,
+            [
+                ItemContent::CommandExecution {
+                    command: "echo hi; exit 3".into(),
+                    output: "hi\n\n\nCommand exited with code 3".into(),
+                    exit_code: Some(3),
+                    status: ItemStatus::Failed,
+                },
+                ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: "a.txt".into(),
+                        kind: FileChangeKind::Modify,
+                        diff: Some(
+                            "--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n-hello\n+bye\n world\n".into()
+                        ),
+                    }],
+                    status: ItemStatus::Completed,
+                },
+                ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: "new.txt".into(),
+                        kind: FileChangeKind::Create,
+                        diff: Some("+fresh".into()),
+                    }],
+                    status: ItemStatus::Completed,
+                },
+                ItemContent::ToolCall {
+                    image_reads: vec![Attachment {
+                        media_type: "image/png".into(),
+                        data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==".into(),
+                        source_path: None,
+                    }],
+                    name: "read".into(),
+                    input: json!({"path": "blue.png"}),
+                    output: Some("Read image file [image/png]".into()),
+                    status: ItemStatus::Completed,
+                },
+            ]
+        );
     }
 
     #[test]
