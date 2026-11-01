@@ -339,3 +339,210 @@ impl ChatView {
         auto.expanded
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::tests::*;
+    use crate::test_frames::draw_settled;
+    use agent::ItemStatus;
+    use gpui::TestAppContext;
+    use tcode_core::session::TurnMeta;
+
+    /// Opening a running thread opens the detail of its latest command only;
+    /// the commands before it were already superseded.
+    #[gpui::test]
+    fn running_session_snapshot_renders_only_latest_command_expanded(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries.push(entry("user", user_item("go")));
+        for index in 1..=5 {
+            timeline
+                .entries
+                .push(command_with_output(&format!("command-{index}")));
+        }
+
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (_view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw_settled(cx);
+
+        for index in 1..=4 {
+            assert!(
+                command_open(cx, &format!("command-{index}")).is_none(),
+                "historical command {index} reopened"
+            );
+        }
+        assert!(command_open(cx, "command-5").is_some());
+    }
+
+    /// The latest command's detail opens by itself. Once a newer command
+    /// starts it stays open until it has shown for half a second, unless a
+    /// second newer one has started, and a newer one that goes away leaves it
+    /// the latest again.
+    #[gpui::test]
+    fn the_latest_command_stays_open_for_half_a_second_after_the_next_starts(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![entry("user", user_item("go")), command_with_output("first")];
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (_view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(900.)));
+        let mut show = |commands: &[&str], cx: &mut VisualTestContext| {
+            timeline.entries.truncate(1);
+            timeline
+                .entries
+                .extend(commands.iter().map(|id| command_with_output(id)));
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+                cx.notify();
+            });
+            draw_settled(cx);
+        };
+        let open = |cx: &mut VisualTestContext, ids: &[&str]| {
+            ["first", "second", "third", "fourth"]
+                .into_iter()
+                .filter(|id| command_open(cx, id).is_some())
+                .collect::<Vec<_>>()
+                == ids
+        };
+        let wait = |duration: u64, cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(duration));
+            draw_settled(cx);
+        };
+
+        show(&["first"], cx);
+        assert!(open(cx, &["first"]));
+        show(&["first", "second"], cx);
+        assert!(open(cx, &["first", "second"]), "first folded on its own");
+        wait(400, cx);
+        assert!(open(cx, &["first", "second"]), "first folded early");
+        wait(100, cx);
+        assert!(open(cx, &["second"]), "first stayed past its minimum");
+
+        show(&["first", "second", "third", "fourth"], cx);
+        assert!(
+            open(cx, &["third", "fourth"]),
+            "second kept its minimum behind two newer commands"
+        );
+
+        // The newest goes again: the one before it is the latest once more.
+        show(&["first", "second", "third"], cx);
+        wait(1_000, cx);
+        assert!(open(cx, &["third"]), "the latest folded");
+    }
+
+    #[gpui::test]
+    fn manually_collapsed_activity_stays_closed_while_new_activity_opens(cx: &mut TestAppContext) {
+        use gpui::{px, size};
+
+        let command = ItemContent::CommandExecution {
+            command: "echo hello".into(),
+            output: "hello\n".into(),
+            exit_code: Some(0),
+            status: ItemStatus::Completed,
+        };
+        let file_edit = ItemContent::FileChange {
+            changes: vec![agent::FileChange {
+                path: "src/lib.rs".into(),
+                kind: agent::FileChangeKind::Modify,
+                diff: Some("@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n".into()),
+            }],
+            status: ItemStatus::Completed,
+        };
+        for (item, selector, detail_selector) in [
+            (command, "activity-row-first", "activity-detail"),
+            (file_edit, "file-edit-row", "file-edit-diff"),
+        ] {
+            let mut timeline = Timeline::default();
+            // Render a live turn without starting the perpetual timeline ticker.
+            timeline.turns = vec![TurnMeta {
+                running: true,
+                ..TurnMeta::default()
+            }];
+            timeline.entries = vec![
+                entry("user", user_item("go")),
+                entry("first", EntryContent::Item(item.clone())),
+            ];
+            let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+            cx.update(|cx| cx.set_reduce_motion(true));
+            let (_, cx) = cx.add_window_view(|window, cx| {
+                ChatView::new(store.clone(), window_state, window, cx)
+            });
+            cx.simulate_resize(size(px(1_024.), px(900.)));
+            draw_settled(cx);
+
+            assert!(cx.debug_bounds(detail_selector).is_some());
+            let header = cx.debug_bounds(selector).expect("activity toggle");
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            draw_settled(cx);
+            assert!(
+                cx.debug_bounds(detail_selector).is_none(),
+                "{selector} did not close"
+            );
+
+            let mut updated = item.clone();
+            match &mut updated {
+                ItemContent::CommandExecution { output, .. } => output.push_str("more output\n"),
+                ItemContent::FileChange { changes, .. } => {
+                    changes[0]
+                        .diff
+                        .as_mut()
+                        .unwrap()
+                        .push_str("+fn another() {}\n");
+                }
+                _ => unreachable!(),
+            }
+            timeline.entries[1] = entry("first", EntryContent::Item(updated));
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+                cx.notify();
+            });
+            draw_settled(cx);
+            assert!(
+                cx.debug_bounds(detail_selector).is_none(),
+                "{selector} reopened on an activity update"
+            );
+
+            let header = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            draw_settled(cx);
+            assert!(cx.debug_bounds(detail_selector).is_some());
+            let header = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            draw_settled(cx);
+            assert!(cx.debug_bounds(detail_selector).is_none());
+
+            timeline
+                .entries
+                .push(entry("next", EntryContent::Item(item)));
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+                cx.notify();
+            });
+            draw_settled(cx);
+            assert!(
+                cx.debug_bounds(detail_selector).is_some(),
+                "the next {selector} did not open automatically"
+            );
+        }
+    }
+}

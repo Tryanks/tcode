@@ -490,3 +490,283 @@ pub(in crate::chat) struct PaintedRowsChange {
     tail_start: Option<usize>,
     visible: Option<Range<usize>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::tests::*;
+    use crate::test_frames::draw_settled;
+    use gpui::TestAppContext;
+    use tcode_core::session::TurnMeta;
+
+    /// A message on screen dozens of short rows above the end shows as
+    /// Markdown, not as its source, when the reader comes back to the
+    /// latest from the start of the thread.
+    #[gpui::test]
+    fn markdown_on_screen_above_an_expanded_work_log_is_built(cx: &mut TestAppContext) {
+        use gpui::{FollowMode, ListOffset, Modifiers, VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta::default()];
+        timeline.entries = vec![entry("user", user_item("go"))];
+        for index in 0..100 {
+            timeline.entries.push(entry(
+                &format!("note-{index}"),
+                assistant(&format!("Note {index}.")),
+            ));
+        }
+        // The only code block in the thread: its lines exist only once the
+        // message is rendered as Markdown.
+        timeline
+            .entries
+            .push(entry("early", assistant("```\nLooking around first.\n```")));
+        for index in 0..40 {
+            timeline.entries.push(command(&format!("command-{index}")));
+        }
+        timeline.entries.push(entry("late", assistant("Done.")));
+        let (store, window_state, _) = seed_chat(cx, timeline);
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(1_900.)));
+        draw_settled(cx);
+        let header = cx
+            .debug_bounds("worklog-header-0-command-0")
+            .expect("collapsed work log");
+        cx.simulate_click(header.center(), Modifiers::default());
+        draw_settled(cx);
+
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        list.scroll_to(ListOffset::default());
+        draw_settled(cx);
+        list.set_follow_mode(FollowMode::Tail);
+        draw_settled(cx);
+
+        let line = cx
+            .debug_bounds("markdown-code-line-0")
+            .expect("the message on screen is rendered as Markdown");
+        assert!(
+            line.intersects(&list.viewport_bounds()),
+            "{line:?} is not on screen"
+        );
+    }
+
+    /// Scrolling to a turn far above the tail renders its messages there
+    /// without moving the reader.
+    #[gpui::test]
+    fn a_distant_turn_renders_its_messages_under_the_reader_without_moving_them(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{FollowMode, ListOffset, VisualTestContext, px, size};
+
+        // The user bubble of turn 40: three rows per synthetic turn.
+        const TARGET: usize = 120;
+        let mut timeline = synthetic_markdown_timeline(240);
+        // The thread's only code block, in the answer below the reader: its
+        // lines exist only once the message is rendered as Markdown.
+        Arc::make_mut(&mut timeline.entries[TARGET + 2]).content =
+            assistant("```\nAssistant 40\n```");
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw_settled(cx);
+        let list_state = view.read_with(cx, |chat, _| chat.list_state.clone());
+
+        list_state.set_follow_mode(FollowMode::Normal);
+        list_state.scroll_to(ListOffset {
+            item_ix: TARGET,
+            offset_in_item: px(7.),
+        });
+        draw_settled(cx);
+
+        assert!(
+            cx.debug_bounds("markdown-code-line-0")
+                .is_some_and(|line| line.intersects(&list_state.viewport_bounds())),
+            "the turn under the reader is not rendered as Markdown"
+        );
+        let scroll_top = list_state.logical_scroll_top();
+        assert_eq!(scroll_top.item_ix, TARGET);
+        assert_eq!(
+            scroll_top.offset_in_item,
+            px(7.),
+            "rendering the scroll-top turn changed the list anchor"
+        );
+    }
+
+    /// A message over the background-parse threshold shows its text at once
+    /// and its Markdown from the frame after the parse lands, inside its row;
+    /// a smaller one is Markdown from its first frame.
+    #[gpui::test]
+    fn large_markdown_renders_once_its_background_parse_lands(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+        for (id, text, asynchronous) in [
+            ("small", "small **streaming** reply".to_string(), false),
+            ("large", large_markdown("async content"), true),
+        ] {
+            assert_eq!(text.len() >= ASYNC_MARKDOWN_THRESHOLD_BYTES, asynchronous);
+            let timeline = single_assistant_timeline(id, &text);
+            let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+            // Opening the window draws a frame before any background work runs.
+            let window = cx
+                .add_window(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+            let cx = &mut VisualTestContext::from_window(window.into(), cx);
+            cx.simulate_resize(size(px(1_024.), px(700.)));
+            assert_eq!(
+                painted_markdown_block(cx).is_some(),
+                !asynchronous,
+                "{id}: the first frame"
+            );
+            draw_settled(cx);
+            let block = painted_markdown_block(cx).expect("the parsed message");
+            let row = cx.debug_bounds("timeline-row-0").expect("the message row");
+            assert!(
+                block.top() >= row.top() && block.bottom() <= row.bottom(),
+                "{id}: {block:?} spills out of its row {row:?}"
+            );
+        }
+    }
+
+    /// A rewrite of a message whose parse is still in flight shows the
+    /// rewritten text once the parse lands, not the text it started from.
+    #[gpui::test]
+    fn in_flight_markdown_update_finishes_with_latest_text(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+        let original = large_markdown("original");
+        // The thread's only code block: its lines show only the rewrite.
+        let latest = format!("{}\n```\nedited\n```\n", large_markdown("edited"));
+        let timeline = single_assistant_timeline("large", &original);
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        let window = cx.add_window(|window, cx| {
+            ChatView::new(workspace_store.clone(), window_state, window, cx)
+        });
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        assert!(
+            painted_markdown_block(cx).is_none(),
+            "the original's parse is in flight"
+        );
+
+        // The rewrite lands and is drawn before the parse finishes.
+        workspace_store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(
+                session_id,
+                single_assistant_timeline("large", &latest),
+                cx,
+            );
+            cx.notify();
+        });
+        assert!(painted_markdown_block(cx).is_none());
+        draw_settled(cx);
+        assert!(
+            cx.debug_bounds("markdown-code-line-0").is_some(),
+            "the message settled on the text its parse started from"
+        );
+    }
+
+    /// A thread switched away from while a message's parse is in flight
+    /// does not get that message back in the thread it switched to, even
+    /// under the same item id.
+    #[gpui::test]
+    fn session_switch_does_not_resurrect_in_flight_markdown(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+        // The thread's only code block: its lines show only the stale text.
+        let text = format!("{}\n```\nstale\n```\n", large_markdown("stale session"));
+        let (host, session_id, timeline) =
+            seeded_chat_host(cx, single_assistant_timeline("large", &text), false);
+        let replacement = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("replacement".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&id).expect("second draft");
+            active.draft = false;
+            let meta = active.meta.clone();
+            state.sessions.push(meta);
+            id
+        }))
+        .expect("seed the replacement thread");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        driver.wait_until(cx, &store, "chat baseline", |cx| {
+            store.read_with(cx, |store, _| !store.chat_loading())
+        });
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let window =
+            cx.add_window(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let view = window.root(cx).expect("the chat is the window's root");
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        assert!(
+            painted_markdown_block(cx).is_none(),
+            "the stale message's parse is in flight"
+        );
+
+        // The shell binds the pane to the thread it opens.
+        store.update(cx, |store, cx| {
+            store.select_session(replacement.clone(), cx)
+        });
+        view.update(cx, |chat, cx| {
+            chat.set_session(Some(replacement.clone()), cx)
+        });
+        driver.wait_until(cx, &store, "the replacement thread's history", |cx| {
+            store.read_with(cx, |store, _| store.with_active_timeline(|_| ()).is_some())
+        });
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(
+                replacement,
+                single_assistant_timeline("large", "The replacement."),
+                cx,
+            );
+            cx.notify();
+        });
+        draw_settled(cx);
+
+        assert!(
+            painted_markdown_block(cx).is_some(),
+            "the replacement message"
+        );
+        assert!(
+            cx.debug_bounds("markdown-code-line-0").is_none(),
+            "the switched-away message came back"
+        );
+        driver.shutdown(cx, &store, &host);
+    }
+
+    /// A Markdown block of any message painted in the last frame.
+    fn painted_markdown_block(
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<gpui::Bounds<gpui::Pixels>> {
+        static SELECTORS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+        SELECTORS
+            .get_or_init(|| {
+                (0..256)
+                    .map(|ix| &*format!("markdown-block-{ix}").leak())
+                    .collect()
+            })
+            .iter()
+            .find_map(|selector| cx.debug_bounds(selector))
+    }
+
+    fn large_markdown(marker: &str) -> String {
+        let mut text = format!("# {marker}\n\n");
+        while text.len() <= ASYNC_MARKDOWN_THRESHOLD_BYTES {
+            text.push_str("- a sufficiently substantial Markdown list item\n");
+        }
+        text
+    }
+}
