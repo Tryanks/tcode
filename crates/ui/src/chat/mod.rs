@@ -16,7 +16,6 @@ mod empty;
 mod header;
 pub(crate) mod model;
 pub(crate) use model::format_duration;
-mod residency;
 mod timeline;
 
 pub(crate) use header::{
@@ -63,7 +62,10 @@ use crate::window_drag_area;
 use crate::window_state::{NavigationPanel, OpenPanel, WindowState};
 
 use self::components::assistant::MdState;
-use self::timeline::{AutoActivityExpansions, AutoActivityRecency, auto_activity_snapshot_keys};
+use self::timeline::{
+    AutoActivityExpansions, AutoActivityRecency, PendingMarkdownBuild, auto_activity_snapshot_keys,
+    tail_row_window, transcript_selection, viewport_row_window,
+};
 
 /// A message's context-menu rewind, which the chat applies as the bubble's
 /// rewind popover does.
@@ -95,9 +97,6 @@ use self::model::{
     user_notice, user_visible_text, work_log_capsule_label, work_log_counts, work_log_key,
     work_log_outcome,
 };
-use self::residency::{
-    MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_row_window, viewport_row_window,
-};
 pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
 };
@@ -107,14 +106,6 @@ pub(crate) use crate::material::{
 const TURN_GAP: f32 = 32.;
 /// Vertical rhythm between the segments of one turn.
 const SEGMENT_GAP: f32 = 10.;
-/// Large documents are parsed away from the UI executor before becoming resident.
-const ASYNC_MARKDOWN_THRESHOLD_BYTES: usize = 4 * 1024;
-
-struct PendingMarkdownBuild {
-    generation: u64,
-    session_key: Option<String>,
-    desired_text: String,
-}
 
 /// A whole tool output fetched on request.
 enum FullOutput {
@@ -818,198 +809,6 @@ impl ChatView {
         }
     }
 
-    fn sync_markdown_residency(
-        &mut self,
-        one_shot_row_target: Option<usize>,
-        cx: &mut Context<Self>,
-    ) {
-        let running = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .turn_running;
-        let row_count = self.rows.len();
-        let resident_ids = self.md_states.keys().cloned().collect();
-        let (texts, decisions) = self
-            .workspace_store
-            .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                let scope = ResidencyScope::new(
-                    row_count,
-                    self.markdown_visible_rows.clone(),
-                    one_shot_row_target,
-                    running,
-                );
-                let entries = markdown_entries_for_residency(timeline, &self.rows, &scope);
-                let decisions = decide(ResidencyInput {
-                    row_count,
-                    visible_rows: self.markdown_visible_rows.clone(),
-                    one_shot_row_target,
-                    entries: &entries,
-                    stream_running: running,
-                    resident_ids: &resident_ids,
-                });
-                let mut texts = Vec::new();
-                for (index, entry) in timeline.entries.iter().enumerate() {
-                    if !decisions.build.contains(&entry.id) {
-                        continue;
-                    }
-                    let row = row_of_entry(&self.rows, index, entry.turn);
-                    if let Some(text) = entry_markdown(entry) {
-                        texts.push((row, entry.id.clone(), text));
-                    }
-                }
-                (texts, decisions)
-            })
-            .unwrap_or_default();
-        self.md_states.retain(|id, _| !decisions.evict.contains(id));
-        self.pending_md_builds
-            .retain(|id, _| decisions.build.contains(id) && !decisions.evict.contains(id));
-
-        let mut rebuilt_rows = HashSet::new();
-        for (row, id, text) in texts {
-            match self.md_states.get_mut(&id) {
-                Some(md) => md.sync(text, cx),
-                None if self.pending_md_builds.contains_key(&id) => {
-                    let pending = self
-                        .pending_md_builds
-                        .get_mut(&id)
-                        .expect("pending Markdown build disappeared");
-                    pending.desired_text = text;
-                }
-                None if text.len() > ASYNC_MARKDOWN_THRESHOLD_BYTES => {
-                    self.spawn_markdown_build(id, text, cx);
-                }
-                None => {
-                    self.md_states.insert(id, MdState::new(&text, cx));
-                    rebuilt_rows.extend(row);
-                }
-            }
-        }
-        self.place_messages_in_selection(cx);
-        let mut rebuilt_rows = rebuilt_rows
-            .into_iter()
-            .filter(|row| *row < self.rows.len())
-            .collect::<Vec<_>>();
-        rebuilt_rows.sort_unstable();
-        let Some((&first, rest)) = rebuilt_rows.split_first() else {
-            return;
-        };
-        let mut range = first..first + 1;
-        for &row in rest {
-            if row == range.end {
-                range.end += 1;
-            } else {
-                // Eviction leaves this cache untouched. A lazy rebuild only
-                // invalidates rebuilt rows; ListState preserves the absolute
-                // scroll-top offset while it measures the parsed Markdown.
-                self.list_state.remeasure_items(range);
-                range = row..row + 1;
-            }
-        }
-        self.list_state.remeasure_items(range);
-    }
-
-    /// Make each resident message the selection entry at its index in the
-    /// timeline.
-    fn place_messages_in_selection(&self, cx: &mut Context<Self>) {
-        let places = self
-            .workspace_store
-            .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                timeline
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, entry)| {
-                        let md = self.md_states.get(&entry.id)?;
-                        Some((md.state.clone(), index as u64))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for (state, entry) in places {
-            state.update(cx, |state, cx| {
-                state.set_selection_entry(&self.selection, entry, cx)
-            });
-        }
-    }
-
-    fn markdown_row(&self, id: &str, cx: &App) -> Option<usize> {
-        self.workspace_store
-            .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                timeline
-                    .entries
-                    .iter()
-                    .position(|entry| entry.id == id)
-                    .and_then(|index| row_of_entry(&self.rows, index, timeline.entries[index].turn))
-            })
-            .flatten()
-    }
-
-    fn spawn_markdown_build(&mut self, id: String, text: String, cx: &mut Context<Self>) {
-        self.next_md_build_generation = self.next_md_build_generation.wrapping_add(1);
-        let generation = self.next_md_build_generation;
-        self.pending_md_builds.insert(
-            id.clone(),
-            PendingMarkdownBuild {
-                generation,
-                session_key: self.session_key.clone(),
-                desired_text: text.clone(),
-            },
-        );
-        let parse_text = text;
-        cx.spawn(async move |this, cx| {
-            let parsed_text = parse_text.clone();
-            let parsed = cx
-                .background_executor()
-                .spawn(async move { crate::markdown::parse::parse_document(&parse_text) })
-                .await;
-            let _ = this.update(cx, |chat, cx| {
-                chat.finish_markdown_build(id, generation, parsed_text, parsed, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn finish_markdown_build(
-        &mut self,
-        id: String,
-        generation: u64,
-        parsed_text: String,
-        parsed: crate::markdown::parse::ParsedDocument,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(pending) = self.pending_md_builds.get(&id) else {
-            return;
-        };
-        if pending.generation != generation || pending.session_key != self.session_key {
-            return;
-        }
-        let desired_text = pending.desired_text.clone();
-        self.pending_md_builds.remove(&id);
-
-        if desired_text != parsed_text && !desired_text.starts_with(&parsed_text) {
-            // An edit invalidated the parse. Re-evaluate residency and kick a
-            // replacement job for the latest text if it is still wanted.
-            self.sync_markdown_residency(None, cx);
-            return;
-        }
-
-        let mut state = MdState::from_parsed(&parsed_text, parsed, cx);
-        if desired_text != parsed_text {
-            state.sync(desired_text, cx);
-        }
-        let row = self.markdown_row(&id, cx);
-        self.md_states.insert(id, state);
-        self.place_messages_in_selection(cx);
-        if let Some(row) = row.filter(|row| *row < self.rows.len()) {
-            self.list_state.remeasure_items(row..row + 1);
-        }
-        cx.notify();
-    }
-
     /// Invalidate the measured heights of every row of `turn`.
     fn remeasure_turn(&self, turn: usize) {
         let rows = rows_of_turn(&self.rows, turn);
@@ -1038,71 +837,6 @@ impl ChatView {
         match row {
             Some(row) => self.list_state.remeasure_items(row..row + 1),
             None => self.remeasure_turn(turn),
-        }
-    }
-
-    fn set_markdown_visible_rows(&mut self, visible_rows: Range<usize>, cx: &mut Context<Self>) {
-        self.painted_tail_start = None;
-        let row_count = self.rows.len();
-        let visible_rows = visible_rows.start.min(row_count)..visible_rows.end.min(row_count);
-        self.markdown_scroll_top = Some(visible_rows.start);
-        if visible_rows == self.markdown_visible_rows {
-            return;
-        }
-        self.markdown_visible_rows = visible_rows;
-        self.sync_markdown_residency(None, cx);
-        cx.notify();
-    }
-
-    fn sync_markdown_scroll_position(&mut self, cx: &mut Context<Self>) {
-        let row_count = self.rows.len();
-        let scroll_top = self.list_state.logical_scroll_top().item_ix.min(row_count);
-        if self.markdown_scroll_top == Some(scroll_top) {
-            return;
-        }
-        self.markdown_scroll_top = Some(scroll_top);
-        self.markdown_visible_rows = if scroll_top == row_count {
-            self.markdown_tail_window()
-        } else {
-            self.painted_tail_start = None;
-            viewport_row_window(scroll_top, row_count)
-        };
-        self.sync_markdown_residency(None, cx);
-    }
-
-    /// The tail's rows: the row hint, widened to the rows last painted there.
-    /// Rows only join the tail while it is followed, so those stay in place.
-    fn markdown_tail_window(&self) -> Range<usize> {
-        let tail = tail_row_window(self.rows.len());
-        let start = self
-            .painted_tail_start
-            .map_or(tail.start, |start| start.min(tail.start));
-        start..tail.end
-    }
-
-    /// Row hints only approximate the rows on screen, which can be far
-    /// shorter than a hint assumes (an expanded Work Log's activities). Take
-    /// the rows the list painted when the hint missed some of them. `None`
-    /// when they change nothing.
-    fn painted_rows_change(&self, painted: Range<usize>) -> Option<PaintedRowsChange> {
-        let row_count = self.rows.len();
-        let painted = painted.start.min(row_count)..painted.end.min(row_count);
-        let tail_start = (self.list_state.is_following_tail() && painted.end == row_count)
-            .then_some(painted.start);
-        let window = &self.markdown_visible_rows;
-        let missed = painted.start < window.start || window.end < painted.end;
-        (missed || tail_start != self.painted_tail_start).then(|| PaintedRowsChange {
-            tail_start,
-            visible: missed.then_some(painted),
-        })
-    }
-
-    fn adopt_painted_rows(&mut self, change: PaintedRowsChange, cx: &mut Context<Self>) {
-        self.painted_tail_start = change.tail_start;
-        if let Some(visible) = change.visible {
-            self.markdown_visible_rows = visible;
-            self.sync_markdown_residency(None, cx);
-            cx.notify();
         }
     }
 
@@ -2368,87 +2102,6 @@ fn floating_backing(radius: gpui::Pixels, cx: &App) -> gpui::Div {
         .shadow_md()
 }
 
-/// The Markdown a message renders: an assistant message's text, or a user
-/// message's visible text.
-fn entry_markdown(entry: &TimelineEntry) -> Option<String> {
-    match &entry.content {
-        EntryContent::Item(
-            ItemContent::AssistantMessage { text, .. } | ItemContent::Plan { markdown: text },
-        ) => Some(text.clone()),
-        content => {
-            let (text, _, context_len, _) = user_content(content)?;
-            Some(plain_text_as_markdown(user_visible_text(text, context_len)))
-        }
-    }
-}
-
-/// The transcript's selection document: its entries are the messages at
-/// their timeline indices, read from their resident Markdown when they have
-/// one and parsed from the timeline when they are not resident.
-fn transcript_selection(
-    chat: gpui::WeakEntity<ChatView>,
-    cx: &mut App,
-) -> Entity<SelectionDocument> {
-    cx.new(|_| {
-        SelectionDocument::new(Rc::new(move |range, cx| {
-            let Some(chat) = chat.upgrade() else {
-                return Vec::new();
-            };
-            let chat = chat.read(cx);
-            chat.workspace_store
-                .read(cx)
-                .with_timeline_for(chat.session_id.as_deref(), |timeline| {
-                    let (start, end) = (*range.start() as usize, *range.end() as usize);
-                    timeline
-                        .entries
-                        .iter()
-                        .enumerate()
-                        .skip(start)
-                        .take(end.saturating_sub(start) + 1)
-                        .filter_map(|(index, entry)| {
-                            let root = match chat.md_states.get(&entry.id) {
-                                Some(md) => md.state.read(cx).parsed_root(),
-                                None => Rc::new(
-                                    crate::markdown::parse::parse_document(&entry_markdown(entry)?)
-                                        .root,
-                                ),
-                            };
-                            Some((index as u64, root))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        }))
-    })
-}
-
-fn markdown_entries_for_residency(
-    timeline: &Timeline,
-    rows: &[TimelineRow],
-    scope: &ResidencyScope,
-) -> Vec<MarkdownEntry> {
-    let mut entries = Vec::new();
-    for (index, entry) in timeline.entries.iter().enumerate() {
-        let Some(row) = row_of_entry(rows, index, entry.turn) else {
-            continue;
-        };
-        if !scope.includes(row) {
-            continue;
-        }
-        let markdown_bearing = matches!(
-            entry.content,
-            EntryContent::Item(ItemContent::AssistantMessage { .. } | ItemContent::Plan { .. })
-        ) || user_content(&entry.content).is_some();
-        if markdown_bearing {
-            entries.push(MarkdownEntry {
-                id: entry.id.clone(),
-                row,
-            });
-        }
-    }
-    entries
-}
-
 /// The walk back into a page that replaced the reservation the reader had
 /// scrolled into. See [`ChatView::apply_reservation_scroll_back`].
 #[derive(Debug, Clone, Copy)]
@@ -2457,12 +2110,6 @@ struct ReservationScrollBack {
     /// A frame has laid the page out since the walk back was requested, so
     /// `scroll_by` can count its rows.
     measured: bool,
-}
-
-/// What the rows a frame painted change; see [`ChatView::painted_rows_change`].
-struct PaintedRowsChange {
-    tail_start: Option<usize>,
-    visible: Option<Range<usize>>,
 }
 
 impl ChatView {
@@ -3100,7 +2747,8 @@ const TIMELINE_EDGE_PADDING: f32 = 8.;
 
 #[cfg(test)]
 mod tests {
-    use super::{ASYNC_MARKDOWN_THRESHOLD_BYTES, ChatView, RowPart};
+    use super::timeline::residency::ASYNC_MARKDOWN_THRESHOLD_BYTES;
+    use super::{ChatView, RowPart};
     use crate::store::WorkspaceStore;
     use crate::test_frames::{draw, draw_settled};
     use crate::window_state::WindowState;
