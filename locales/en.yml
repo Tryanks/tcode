@@ -2704,3 +2704,5 @@ tools:
   links: "%{count} links"
   copy_url: "Copy URL"
   copy_query: "Copy query"
+  steps_done: "%{done}/%{total} done"
+  copy_plan: "Copy plan"

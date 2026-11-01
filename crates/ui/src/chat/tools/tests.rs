@@ -18,7 +18,6 @@ use crate::window_state::WindowState;
 /// A chat open on a thread whose stored log is `log`.
 pub(in crate::chat) struct StoredThread {
     pub(in crate::chat) store: Entity<WorkspaceStore>,
-    pub(in crate::chat) view: Entity<ChatView>,
     driver: crate::store::tests::LocalHostDriver,
     host: tcode_runtime::pipe::SpawnedHost,
 }
@@ -71,14 +70,13 @@ impl StoredThread {
             })
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        let (view, cx) =
+        let (_, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         cx.simulate_resize(size(px(width), px(1_400.)));
         draw_settled(cx);
         (
             Self {
                 store,
-                view,
                 driver,
                 host,
             },
@@ -793,5 +791,33 @@ fn a_web_call_reads_as_its_url_or_query(cx: &mut TestAppContext) {
         assert!(shows(cx, &format!("tool-link-{search}-{index}")), "{index}");
     }
     assert!(shows(cx, &format!("tool-text-{search}-output")));
+    thread.shutdown(cx);
+}
+
+/// A plan written as a tool call reads as the step under way and how many
+/// are done, and opens on the checklist, every step in its order.
+#[gpui::test]
+fn a_plan_written_as_a_call_reads_as_a_checklist(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/todo.jsonl"), 1_024.);
+    let plan = "call_ZBnIlWgl8BTGGZ6KIUCb3Pmo";
+    assert_eq!(
+        thread.header(plan, cx),
+        Read {
+            chips: vec![Chip::Count("0/4 done".to_owned())],
+            ..read(
+                "Updated the plan",
+                None,
+                Some("审视旧环境变量兼容残留与配置命名"),
+                None
+            )
+        }
+    );
+    thread.open_work_log(plan, cx);
+    click(cx, &format!("activity-row-{plan}"));
+    for index in 0..4 {
+        assert!(shows(cx, &format!("tool-todo-{plan}-{index}")), "{index}");
+    }
     thread.shutdown(cx);
 }

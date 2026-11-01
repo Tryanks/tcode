@@ -1,0 +1,4 @@
+{"ts":1780627159937,"event":{"type":"turn_started","turn_id":"turn-1"}}
+{"ts":1780627159938,"event":{"type":"item_completed","id":"user-1","content":{"kind":"user_message","text":"Plan it."}}}
+{"ts":1780627160939,"event":{"type":"item_completed","id":"call_ZBnIlWgl8BTGGZ6KIUCb3Pmo","content":{"kind":"tool_call","name":"update_plan","input":{"plan":[{"step":"审视旧环境变量兼容残留与配置命名","status":"in_progress"},{"step":"删除兼容开关并统一为显式后端配置","status":"pending"},{"step":"更新测试和示例环境变量","status":"pending"},{"step":"运行回归测试与构建检查","status":"pending"}]},"output":"Plan updated","status":"completed"}}}
+{"ts":1780627161939,"event":{"type":"turn_completed","turn_id":"turn-1","status":"completed","usage":null}}
