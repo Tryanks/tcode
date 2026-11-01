@@ -70,7 +70,7 @@ fn oversized_output(event: &AgentEvent) -> bool {
     }
 }
 
-const HISTORY_PREVIEW_POLICY: u32 = 1;
+const HISTORY_PREVIEW_POLICY: u32 = 2;
 static HISTORY_PREVIEW_VERSION: LazyLock<String> =
     LazyLock::new(|| format!("history-preview-{HISTORY_PREVIEW_POLICY}-{OUTPUT_PREVIEW_BYTES}"));
 const HISTORY_PREVIEW_CACHE_BYTES: usize = 16 * 1024;

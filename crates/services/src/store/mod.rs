@@ -1478,8 +1478,30 @@ impl ParsedRecord {
     }
 }
 
+/// A tool call recorded before every adapter kept results canonical holds
+/// its provider's result shape in `output`; it reads back as the text and
+/// images a new row holds.
+fn canonical_tool_output(event: &mut AgentEvent) {
+    if let AgentEvent::ItemStarted(item)
+    | AgentEvent::ItemUpdated(item)
+    | AgentEvent::ItemCompleted(item) = event
+        && let agent::ItemContent::ToolCall {
+            output: Some(output),
+            image_reads,
+            ..
+        } = &mut item.content
+        && let Some(split) = agent::ToolOutput::split(output)
+    {
+        *output = split.text;
+        // Claude rows already carry their images here, and in the text too.
+        if image_reads.is_empty() {
+            *image_reads = split.images;
+        }
+    }
+}
+
 pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::Error> {
-    let (stored, version) = match serde_json::from_str::<EventEnvelope>(line) {
+    let (mut stored, version) = match serde_json::from_str::<EventEnvelope>(line) {
         Ok(envelope) => (
             StoredEvent {
                 origin: envelope.origin,
@@ -1501,6 +1523,7 @@ pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::
             None,
         ),
     };
+    canonical_tool_output(&mut stored.event);
     let legacy_file_diff = version.is_none()
         && match &stored.event {
             AgentEvent::ItemStarted(item)
