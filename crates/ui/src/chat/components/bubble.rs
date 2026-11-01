@@ -45,17 +45,25 @@ pub(crate) struct BubbleData<'a> {
     pub(crate) copied: bool,
     pub(crate) markdown: Option<Entity<MarkdownState>>,
     pub(crate) rewind: Option<AnyElement>,
-    /// The rewind the context menu offers, when the harness has one: the
-    /// turn, whether it is blocked right now, and whether a conversation
-    /// rewind is possible (there is none for the first turn).
+    /// The rewind the context menu offers, when the harness has one.
     pub(crate) rewind_menu: Option<RewindMenu>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct RewindMenu {
     pub(crate) turn: usize,
     pub(crate) disabled: bool,
-    pub(crate) conversation_available: bool,
+    /// The modes the harness restores this turn in, in its order.
+    pub(crate) modes: Vec<RewindMode>,
+}
+
+fn rewind_label(mode: RewindMode) -> String {
+    match mode {
+        RewindMode::FilesAndConversation => crate::tr!("chat.rewind_all"),
+        RewindMode::Conversation => crate::tr!("chat.rewind_conversation"),
+        RewindMode::Files => crate::tr!("chat.rewind_files"),
+    }
+    .into_owned()
 }
 
 /// The bubble's context-menu items: copy the message, then the rewind modes
@@ -71,31 +79,18 @@ fn bubble_menu_items(copy_text: Arc<str>, rewind: Option<RewindMenu>) -> MenuExt
         let Some(RewindMenu {
             turn,
             disabled,
-            conversation_available,
-        }) = rewind
+            modes,
+        }) = &rewind
         else {
             return menu;
         };
-        let mut modes = Vec::new();
-        if conversation_available {
-            modes.push((
-                crate::tr!("chat.rewind_all").into_owned(),
-                RewindMode::FilesAndConversation,
-            ));
-            modes.push((
-                crate::tr!("chat.rewind_conversation").into_owned(),
-                RewindMode::Conversation,
-            ));
-        }
-        modes.push((
-            crate::tr!("chat.rewind_files").into_owned(),
-            RewindMode::Files,
-        ));
-        modes
-            .into_iter()
-            .fold(menu.separator(), |menu, (label, mode)| {
-                menu.menu_with_enable(label, Box::new(RewindTurn { turn, mode }), !disabled)
-            })
+        modes.iter().fold(menu.separator(), |menu, &mode| {
+            menu.menu_with_enable(
+                rewind_label(mode),
+                Box::new(RewindTurn { turn: *turn, mode }),
+                !disabled,
+            )
+        })
     })
 }
 
@@ -104,23 +99,19 @@ pub(crate) struct BubbleHandlers {
     pub(crate) images: Vec<ClickHandler>,
 }
 
-pub(crate) struct RewindHandlers {
-    pub(crate) files_and_conversation: SharedClickHandler,
-    pub(crate) conversation: SharedClickHandler,
-    pub(crate) files: SharedClickHandler,
-}
-
+/// The rewind popover for a turn: one item per mode in `menu`, each running
+/// its handler.
 pub(crate) fn native_rewind_button(
-    turn: usize,
-    conversation_available: bool,
-    (state, compact): (Option<(bool, bool)>, bool),
-    handlers: RewindHandlers,
+    menu: RewindMenu,
+    compact: bool,
+    handlers: Vec<SharedClickHandler>,
     cx: &App,
-) -> Option<AnyElement> {
-    let (available, disabled) = state?;
-    if !available {
-        return None;
-    }
+) -> AnyElement {
+    let RewindMenu {
+        turn,
+        disabled,
+        modes,
+    } = menu;
 
     let trigger = action_button(
         SharedString::from(format!("rewind-{turn}")),
@@ -133,69 +124,54 @@ pub(crate) fn native_rewind_button(
         cx,
     )
     .disabled(disabled)
-    .touch(compact);
-    Some(
-        crate::material::overlay_popover(("rewind-menu", turn), cx)
-            .anchor(Anchor::TopRight)
-            .when(compact, |popover| {
-                popover.bottom_sheet(crate::tr!("chat.rewind"))
-            })
-            .trigger(trigger)
-            .content(move |_state, _window, cx| {
-                let muted = cx.theme().muted_foreground;
-                let hover = cx.theme().muted;
-                let popover = cx.entity();
-                let RewindHandlers {
-                    files_and_conversation,
-                    conversation,
-                    files,
-                } = &handlers;
-                let mut modes = Vec::new();
-                if conversation_available {
-                    modes.push((
-                        crate::tr!("chat.rewind_all").into_owned(),
-                        files_and_conversation.clone(),
-                    ));
-                    modes.push((
-                        crate::tr!("chat.rewind_conversation").into_owned(),
-                        conversation.clone(),
-                    ));
-                }
-                modes.push((crate::tr!("chat.rewind_files").into_owned(), files.clone()));
-                let mut menu = v_flex()
-                    .w(px(240.))
-                    .p_1()
-                    .gap_0p5()
-                    .id(("rewind-options", turn))
-                    .role(Role::Menu)
-                    .aria_label(crate::tr!("chat.rewind"));
-                for (index, (label, on_select)) in modes.into_iter().enumerate() {
-                    let popover = popover.clone();
-                    menu = menu.child(
-                        crate::material::accessible_clickable(
-                            crate::material::menu_item_frame(compact, cx),
-                            ("rewind-option", index),
-                            Role::MenuItem,
-                            label.clone(),
-                            cx,
-                        )
-                        .w_full()
-                        .items_center()
-                        .cursor_pointer()
-                        .text_body(compact, cx)
-                        .hover(move |style| style.bg(hover))
-                        .child(Icon::new(IconName::Undo).text_color(muted))
-                        .child(label)
-                        .on_click(move |event, window, cx| {
-                            popover.update(cx, |state, cx| state.dismiss(window, cx));
-                            on_select(event, window, cx);
-                        }),
-                    );
-                }
-                menu.into_any_element()
-            })
-            .into_any_element(),
-    )
+    .touch(compact)
+    .debug_selector(move || format!("rewind-{turn}"));
+    crate::material::overlay_popover(("rewind-menu", turn), cx)
+        .anchor(Anchor::TopRight)
+        .when(compact, |popover| {
+            popover.bottom_sheet(crate::tr!("chat.rewind"))
+        })
+        .trigger(trigger)
+        .content(move |_state, _window, cx| {
+            let muted = cx.theme().muted_foreground;
+            let hover = cx.theme().muted;
+            let popover = cx.entity();
+            let mut menu = v_flex()
+                .w(px(240.))
+                .p_1()
+                .gap_0p5()
+                .id(("rewind-options", turn))
+                .role(Role::Menu)
+                .aria_label(crate::tr!("chat.rewind"));
+            for (index, (&mode, on_select)) in modes.iter().zip(&handlers).enumerate() {
+                let label = rewind_label(mode);
+                let on_select = on_select.clone();
+                let popover = popover.clone();
+                menu = menu.child(
+                    crate::material::accessible_clickable(
+                        crate::material::menu_item_frame(compact, cx),
+                        ("rewind-option", index),
+                        Role::MenuItem,
+                        label.clone(),
+                        cx,
+                    )
+                    .debug_selector(move || format!("rewind-option-{mode:?}"))
+                    .w_full()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_body(compact, cx)
+                    .hover(move |style| style.bg(hover))
+                    .child(Icon::new(IconName::Undo).text_color(muted))
+                    .child(label)
+                    .on_click(move |event, window, cx| {
+                        popover.update(cx, |state, cx| state.dismiss(window, cx));
+                        on_select(event, window, cx);
+                    }),
+                );
+            }
+            menu.into_any_element()
+        })
+        .into_any_element()
 }
 
 /// A user message: right-aligned bubble, attachment thumbnails, and actions.
@@ -298,8 +274,10 @@ pub(crate) fn user_bubble(
                 .into_any_element()
         },
     );
+    let bubble_selector = format!("user-bubble-{entry_id}");
     v_flex()
         .group(group_key.clone())
+        .debug_selector(move || bubble_selector)
         .w_full()
         .items_end()
         .gap(px(2.))

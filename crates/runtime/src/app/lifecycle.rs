@@ -8,7 +8,7 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return;
         };
-        if self.native_rewind_blocked(active) {
+        if self.native_rewind_blocked(active) || !Self::native_rewind_offered(active, turn, mode) {
             self.report_error(RuntimeError::NativeRewindBlocked, cx);
             return;
         }
@@ -18,15 +18,8 @@ impl AppState {
             .get(turn)
             .and_then(|turn| turn.provider_checkpoint_id.clone())
         else {
-            self.report_error(RuntimeError::NativeRewindBlocked, cx);
             return;
         };
-        // Claude Code 2.1.214 cannot persist a conversation rewind before the
-        // first assistant anchor. File-only rewind remains valid there.
-        if turn == 0 && mode.includes_conversation() {
-            self.report_error(RuntimeError::NativeRewindBlocked, cx);
-            return;
-        }
         let session_id = active.meta.id.clone();
         let live_commands = match &active.runtime {
             Runtime::Live(commands) => Some(commands.clone()),

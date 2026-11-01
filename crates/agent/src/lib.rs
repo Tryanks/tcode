@@ -72,7 +72,9 @@ pub enum ProviderKind {
 pub struct Caps {
     pub supports_steering: bool,
     pub supports_fork: bool,
-    pub native_rewind: bool,
+    /// What the harness restores of a checkpointed turn
+    /// ([`SessionCommand::Rewind`]), when it can.
+    pub native_rewind: Option<RewindControl>,
     /// The harness compacts its context on request ([`SessionCommand::Compact`]).
     pub manual_compaction: bool,
     /// How the harness's standing goal is driven ([`SessionCommand::SetGoal`]),
@@ -96,6 +98,23 @@ pub struct Caps {
     pub instruction_channel: InstructionChannel,
     /// The CLI signs a profile in and out of its native account itself.
     pub account_login: bool,
+}
+
+/// What a harness restores of a turn it checkpointed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RewindControl {
+    /// The scopes it restores, in the order a menu offers them.
+    pub modes: &'static [RewindMode],
+    /// The conversation can be restored to before the thread's first turn.
+    pub first_turn_conversation: bool,
+}
+
+impl RewindControl {
+    /// Whether `mode` can restore turn `turn`, counted from the thread's first.
+    pub fn offers(self, mode: RewindMode, turn: usize) -> bool {
+        self.modes.contains(&mode)
+            && (turn > 0 || self.first_turn_conversation || !mode.includes_conversation())
+    }
 }
 
 /// What a harness lets a client do with its standing goal.
@@ -167,7 +186,16 @@ impl ProviderKind {
             ProviderKind::ClaudeCode => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: true,
+                native_rewind: Some(RewindControl {
+                    modes: &[
+                        RewindMode::FilesAndConversation,
+                        RewindMode::Conversation,
+                        RewindMode::Files,
+                    ],
+                    // Claude Code 2.1.214 cannot persist a conversation rewind
+                    // before the first assistant anchor.
+                    first_turn_conversation: false,
+                }),
                 manual_compaction: true,
                 goals: Some(GoalControl {
                     pause: false,
@@ -198,7 +226,7 @@ impl ProviderKind {
             ProviderKind::Codex => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: false,
+                native_rewind: None,
                 manual_compaction: true,
                 goals: Some(GoalControl {
                     pause: true,
@@ -229,7 +257,7 @@ impl ProviderKind {
             ProviderKind::Acp => Caps {
                 supports_steering: false,
                 supports_fork: false,
-                native_rewind: false,
+                native_rewind: None,
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
@@ -250,7 +278,7 @@ impl ProviderKind {
             ProviderKind::Pi => Caps {
                 supports_steering: true,
                 supports_fork: false,
-                native_rewind: false,
+                native_rewind: None,
                 manual_compaction: true,
                 goals: None,
                 per_turn_effort: false,
@@ -269,7 +297,12 @@ impl ProviderKind {
             ProviderKind::OpenCode => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: true,
+                // A revert restores the conversation, with or without the
+                // files its steps changed; there is no files-only revert.
+                native_rewind: Some(RewindControl {
+                    modes: &[RewindMode::FilesAndConversation, RewindMode::Conversation],
+                    first_turn_conversation: true,
+                }),
                 manual_compaction: true,
                 goals: None,
                 per_turn_effort: true,
@@ -288,7 +321,7 @@ impl ProviderKind {
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
                 supports_fork: false,
-                native_rewind: false,
+                native_rewind: None,
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
@@ -307,7 +340,7 @@ impl ProviderKind {
             ProviderKind::Grok => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: false,
+                native_rewind: None,
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,

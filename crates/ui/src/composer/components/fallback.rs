@@ -58,13 +58,10 @@ impl Composer {
         let can_rewind = refused.as_ref().is_some_and(|(turn, _)| {
             self.workspace_store
                 .read(cx)
-                .absolute_turn_for(self.session_id.as_deref(), *turn)
-                > 0
-                && self
-                    .workspace_store
-                    .read(cx)
-                    .chat_native_rewind_state_for(self.session_id.as_deref(), *turn)
-                    .is_some_and(|(available, disabled)| available && !disabled)
+                .chat_native_rewind_state_for(self.session_id.as_deref(), *turn)
+                .is_some_and(|state| {
+                    !state.blocked && state.modes.contains(&RewindMode::Conversation)
+                })
         });
 
         let header = h_flex()

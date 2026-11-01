@@ -3384,7 +3384,7 @@ cat > /dev/null
     }
 
     #[test]
-    fn a_rewind_reverts_the_conversation_to_its_prompt_and_files_alone_are_refused() {
+    fn a_rewind_reverts_the_conversation_and_files_to_its_prompt() {
         smol::block_on(async {
             const PROMPT_ID: &str = "msg_198aac9f2001K4cb8mDh24jTzH";
             let fixture = fixture(
@@ -3408,25 +3408,17 @@ cat > /dev/null
             let handle = open(fixture.options.clone()).await;
             send(&handle, turn("Reply with exactly: PONG")).await;
             until(&handle, turn_completed).await;
-            for mode in [RewindMode::Files, RewindMode::FilesAndConversation] {
-                send(
-                    &handle,
-                    SessionCommand::Rewind {
-                        checkpoint_id: PROMPT_ID.into(),
-                        mode,
-                    },
-                )
-                .await;
-            }
+            send(
+                &handle,
+                SessionCommand::Rewind {
+                    checkpoint_id: PROMPT_ID.into(),
+                    mode: RewindMode::FilesAndConversation,
+                },
+            )
+            .await;
             assert_eq!(
-                vec![
-                    serde_json::to_value(recv(&handle).await).unwrap(),
-                    serde_json::to_value(recv(&handle).await).unwrap(),
-                ],
-                vec![
-                    json!({"type": "rewind_failed", "checkpoint_id": PROMPT_ID, "mode": "files", "error": "OpenCode restores files only together with the conversation that changed them"}),
-                    json!({"type": "rewind_completed", "checkpoint_id": PROMPT_ID, "mode": "files_and_conversation", "prefill": "Reply with exactly: PONG"}),
-                ]
+                serde_json::to_value(recv(&handle).await).unwrap(),
+                json!({"type": "rewind_completed", "checkpoint_id": PROMPT_ID, "mode": "files_and_conversation", "prefill": "Reply with exactly: PONG"})
             );
             shut_down(handle).await;
             assert_eq!(

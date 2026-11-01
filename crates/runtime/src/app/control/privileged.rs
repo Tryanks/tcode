@@ -312,7 +312,7 @@ impl AppState {
         let target = params.thread_id;
         if self
             .find_meta(&target)
-            .is_some_and(|meta| !meta.provider.caps().native_rewind)
+            .is_some_and(|meta| meta.provider.caps().native_rewind.is_none())
         {
             return Err(format!(
                 "refused: thread {target}'s provider has no native rewind"
