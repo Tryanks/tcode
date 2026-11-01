@@ -1825,7 +1825,6 @@ pull_requests:
   agent_instructions: "Instructions"
   agent_not_attached: "Offered, not attached: this agent does not take HTTP MCP servers, so it has neither these tools nor their instructions."
   channel_system: "System instruction"
-  channel_system_per_prompt: "System instruction, every prompt"
   channel_developer_context: "Developer context"
   channel_per_turn_block: "Per-turn block, after your message"
   channel_mcp_server: "MCP server instructions · %{name}"

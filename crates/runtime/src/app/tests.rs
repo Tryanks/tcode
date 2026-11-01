@@ -6303,12 +6303,12 @@ fn send_routing_matrix() {
     pi.turn_in_flight = true;
     assert_eq!(pi.route(true), SendRouting::Steer);
 
-    // OpenCode and ACP have no steering method, so a steer must fall back
-    // to the queue rather than silently vanish.
     let mut opencode = live_session(ProviderKind::OpenCode, commands.clone());
     opencode.turn_in_flight = true;
-    assert_eq!(opencode.route(true), SendRouting::QueueUnsupported);
+    assert_eq!(opencode.route(true), SendRouting::Steer);
 
+    // ACP has no steering method, so a steer must fall back to the queue
+    // rather than silently vanish.
     let mut acp = live_session(ProviderKind::Acp, commands);
     acp.turn_in_flight = true;
     assert_eq!(acp.route(false), SendRouting::Queue);
