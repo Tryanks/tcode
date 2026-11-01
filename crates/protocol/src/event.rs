@@ -857,6 +857,11 @@ pub enum RuntimeError {
         error: String,
     },
     ProviderMessage(String),
+    /// A profile's config directory could not be prepared or removed; the
+    /// profile is added or deleted regardless.
+    ProfileConfig {
+        error: String,
+    },
 }
 
 #[non_exhaustive]

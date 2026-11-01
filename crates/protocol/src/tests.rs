@@ -1404,6 +1404,121 @@ fn path_info_kinds_read_older_peers_and_spell_the_flags() {
     assert!(!relayed.probing_direct);
 }
 
+/// Clients render a sign-in from the profile snapshot's `login` and drive it
+/// with these commands; a snapshot from a host without sign-in has none.
+#[test]
+fn provider_login_commands_and_state_use_their_documented_wire_shapes() {
+    for (command, wire) in [
+        (
+            Command::StartProviderLogin {
+                profile_id: "claude".into(),
+            },
+            json!({"type": "start_provider_login", "content": {"profile_id": "claude"}}),
+        ),
+        (
+            Command::SubmitProviderLoginCode {
+                profile_id: "claude".into(),
+                code: "abc#def".into(),
+            },
+            json!({"type": "submit_provider_login_code", "content": {"profile_id": "claude", "code": "abc#def"}}),
+        ),
+        (
+            Command::CancelProviderLogin {
+                profile_id: "claude".into(),
+            },
+            json!({"type": "cancel_provider_login", "content": {"profile_id": "claude"}}),
+        ),
+        (
+            Command::LogoutProvider {
+                profile_id: "claude".into(),
+            },
+            json!({"type": "logout_provider", "content": {"profile_id": "claude"}}),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(&command).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<Command>(wire).unwrap(), command);
+    }
+
+    let older: tcode_core::provider_status::ProviderSnapshot = serde_json::from_value(json!({
+        "checked_at": 1, "installed": true, "version": "2.1.314", "status": "Error",
+        "auth": {"status": "Unauthenticated", "label": null, "email": null},
+        "diagnostic": "Unauthenticated", "message": null, "checking": false
+    }))
+    .unwrap();
+    assert_eq!(older.login, None);
+    for (login, wire) in [
+        (
+            tcode_core::provider_status::ProviderLogin::Starting,
+            json!({"type": "starting"}),
+        ),
+        (
+            tcode_core::provider_status::ProviderLogin::AwaitingCode {
+                url: Some("https://claude.com/cai/oauth/authorize".into()),
+            },
+            json!({"type": "awaiting_code", "content": {"url": "https://claude.com/cai/oauth/authorize"}}),
+        ),
+        (
+            tcode_core::provider_status::ProviderLogin::AwaitingCode { url: None },
+            json!({"type": "awaiting_code", "content": {"url": null}}),
+        ),
+        (
+            tcode_core::provider_status::ProviderLogin::Finishing,
+            json!({"type": "finishing"}),
+        ),
+        (
+            tcode_core::provider_status::ProviderLogin::Failed {
+                message: "Invalid code".into(),
+            },
+            json!({"type": "failed", "content": {"message": "Invalid code"}}),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(&login).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<tcode_core::provider_status::ProviderLogin>(wire).unwrap(),
+            login
+        );
+    }
+}
+
+/// A client adds another account and opens its sign-in from the profile id
+/// the host answers with; a third-party profile from a client without
+/// `inherit_config` copies nothing.
+#[test]
+fn profile_creation_commands_use_their_documented_wire_shapes() {
+    let command = Command::CreateAccountProfile {
+        provider: agent::ProviderKind::ClaudeCode,
+        name: "Claude Personal".into(),
+        inherit_config: true,
+    };
+    let wire = json!({"type": "create_account_profile", "content": {
+        "provider": "claude_code", "name": "Claude Personal", "inherit_config": true
+    }});
+    assert_eq!(serde_json::to_value(&command).unwrap(), wire);
+    assert_eq!(serde_json::from_value::<Command>(wire).unwrap(), command);
+
+    let response = CommandResponse::ProfileId("claude-personal".into());
+    let wire = json!({"type": "profile_id", "content": "claude-personal"});
+    assert_eq!(serde_json::to_value(&response).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<CommandResponse>(wire).unwrap(),
+        response
+    );
+
+    assert_eq!(
+        serde_json::from_value::<Command>(json!({"type": "create_third_party_profile", "content": {
+            "name": "Kimi", "base_url": "https://api.kimi.com/coding/", "model": null, "api_key": "sk"
+        }}))
+        .unwrap(),
+        Command::CreateThirdPartyProfile {
+            name: "Kimi".into(),
+            base_url: "https://api.kimi.com/coding/".into(),
+            model: None,
+            api_key: "sk".into(),
+            inherit_config: false,
+        }
+    );
+}
+
 /// A provider-plugin catalog and a plugin command are read by clients that
 /// render the actions the host computed, so their literal shapes are the
 /// contract; an older providers snapshot still decodes with no catalogs.

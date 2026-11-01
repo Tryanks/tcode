@@ -92,6 +92,8 @@ pub struct Caps {
     pub plugin_management: PluginManagement,
     /// Where [`SessionOptions::instructions`] reach the model.
     pub instruction_channel: InstructionChannel,
+    /// The CLI signs a profile in and out of its native account itself.
+    pub account_login: bool,
 }
 
 /// What a harness lets a client do with its standing goal.
@@ -190,6 +192,7 @@ impl ProviderKind {
                     marketplaces: true,
                 },
                 instruction_channel: InstructionChannel::SessionAppend,
+                account_login: true,
             },
             ProviderKind::Codex => Caps {
                 supports_steering: true,
@@ -220,6 +223,7 @@ impl ProviderKind {
                     marketplaces: true,
                 },
                 instruction_channel: InstructionChannel::DeveloperContext,
+                account_login: false,
             },
             ProviderKind::Acp => Caps {
                 supports_steering: false,
@@ -240,6 +244,7 @@ impl ProviderKind {
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
+                account_login: false,
             },
             ProviderKind::Pi => Caps {
                 supports_steering: true,
@@ -258,6 +263,7 @@ impl ProviderKind {
                 trust_project_extensions: true,
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::None,
+                account_login: false,
             },
             ProviderKind::OpenCode => Caps {
                 supports_steering: false,
@@ -276,6 +282,7 @@ impl ProviderKind {
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::PerPromptSystem,
+                account_login: false,
             },
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
@@ -294,6 +301,7 @@ impl ProviderKind {
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
+                account_login: false,
             },
             ProviderKind::Grok => Caps {
                 supports_steering: true,
@@ -319,6 +327,7 @@ impl ProviderKind {
                     marketplaces: true,
                 },
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
+                account_login: false,
             },
         }
     }
@@ -798,7 +807,7 @@ pub struct SessionOptions {
     /// Enabled tcode HTTP MCP servers to register with this session.
     pub mcp_servers: Vec<McpRegistration>,
     /// Per-provider environment (Settings → Providers): extra variables merged
-    /// into the child's environment, plus the home-directory override. See
+    /// into the child's environment, plus the config-directory override. See
     /// [`LaunchEnv`].
     pub launch_env: LaunchEnv,
     /// Extra CLI arguments appended at spawn for providers whose settings card
@@ -820,9 +829,10 @@ pub struct LaunchEnv {
     /// Extra `KEY=VALUE` pairs merged into the child's environment. Later
     /// entries win, and these override anything inherited from the parent.
     pub env: Vec<(String, String)>,
-    /// Home-directory override. Provider-specific: Claude gets `HOME`, Codex
-    /// gets `CODEX_HOME`, pi gets `PI_CODING_AGENT_DIR`, Cursor gets
-    /// `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` and Grok gets `GROK_HOME`.
+    /// Config-directory override. Provider-specific: Claude gets
+    /// `CLAUDE_CONFIG_DIR`, Codex gets `CODEX_HOME`, pi gets
+    /// `PI_CODING_AGENT_DIR`, Cursor gets `CURSOR_CONFIG_DIR` and
+    /// `CURSOR_DATA_DIR` and Grok gets `GROK_HOME`.
     /// OpenCode has no supported single-directory override, so its value is
     /// ignored. Cursor reads its login from `$XDG_CONFIG_HOME/cursor` or
     /// `~/.config/cursor` whatever these say; moving either would also move
@@ -839,7 +849,7 @@ impl LaunchEnv {
         let mut pairs = self.env.clone();
         if let Some(home) = &self.home {
             let keys: &[&str] = match provider {
-                ProviderKind::ClaudeCode => &["HOME"],
+                ProviderKind::ClaudeCode => &["CLAUDE_CONFIG_DIR"],
                 ProviderKind::Codex => &["CODEX_HOME"],
                 ProviderKind::Pi => &["PI_CODING_AGENT_DIR"],
                 ProviderKind::Cursor => &["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"],
@@ -2486,7 +2496,7 @@ mod launch_env_tests {
     #[test]
     fn home_override_is_provider_specific_and_wins_over_configured_pairs() {
         for (provider, variable) in [
-            (ProviderKind::ClaudeCode, Some("HOME")),
+            (ProviderKind::ClaudeCode, Some("CLAUDE_CONFIG_DIR")),
             (ProviderKind::Codex, Some("CODEX_HOME")),
             (ProviderKind::Pi, Some("PI_CODING_AGENT_DIR")),
             (ProviderKind::OpenCode, None),

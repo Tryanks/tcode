@@ -1,5 +1,7 @@
 use super::*;
+use tcode_core::provider_status::{ProviderLogin, ProviderProbeDiagnostic, ProviderStatusKind};
 use tcode_protocol::{ProviderUpdateAvailable, ProviderUpdateRun};
+use tcode_services::provider_login::{self, LoginEvent, LoginHandle};
 
 #[derive(Default)]
 struct VersionCheckRound {
@@ -27,6 +29,13 @@ struct SecretWrite {
     result: Option<Result<(), String>>,
 }
 
+/// A sign-in the host is running; the handle arrives once the CLI spawned.
+struct RunningLogin {
+    generation: u64,
+    handle: Option<LoginHandle>,
+    url: Option<String>,
+}
+
 type SecretWrites = HashMap<String, HashMap<String, Arc<smol::lock::Mutex<SecretWrite>>>>;
 
 pub struct ProviderCatalog {
@@ -45,6 +54,8 @@ pub struct ProviderCatalog {
     profile_revisions: HashMap<String, u64>,
     secret_writes: SecretWrites,
     pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
+    logins: HashMap<String, RunningLogin>,
+    next_login: u64,
 }
 
 impl ProviderCatalog {
@@ -66,6 +77,8 @@ impl ProviderCatalog {
             profile_revisions: HashMap::new(),
             secret_writes: HashMap::new(),
             provider_secret_names,
+            logins: HashMap::new(),
+            next_login: 0,
         }
     }
 
@@ -105,8 +118,10 @@ impl ProviderCatalog {
         true
     }
 
+    /// A sign-in begun under the old configuration ends with it.
     pub(super) fn invalidate_profile_reads(&mut self, id: &str) {
         self.provider_snapshots.remove(id);
+        self.logins.remove(id);
         self.provider_usage.remove(id);
         self.usage_checking.remove(id);
         *self.profile_revisions.entry(id.to_owned()).or_default() += 1;
@@ -480,24 +495,21 @@ impl AppState {
     /// Create a first-class *third-party* Claude Code profile from the Add-agent
     /// dialog: a named endpoint (Kimi preset or a custom Anthropic-compatible
     /// URL). Wires the three env vars, registers the model as a custom slug so it
-    /// shows in the picker, gives the profile its own isolated `HOME` (seeded so
-    /// `claude` runs non-interactively and never touches the official
-    /// `~/.claude`), and stores the API key in `secrets.json`. Returns the id.
+    /// shows in the picker, gives the profile its own `CLAUDE_CONFIG_DIR`
+    /// (seeded so `claude` runs non-interactively and never touches the
+    /// official `~/.claude`), and stores the API key in `secrets.json`.
     pub fn create_third_party_profile(
         &mut self,
         name: &str,
         base_url: &str,
         model: Option<&str>,
         api_key: &str,
+        inherit_config: bool,
         cx: &mut HostCx,
-    ) -> String {
+    ) {
         let name = name.trim();
         let name = if name.is_empty() { "Third-party" } else { name };
         let id = self.settings.allocate_profile_id(name);
-
-        // Each third-party Claude profile gets an isolated HOME so its auth /
-        // config never collides with the official Claude login. Seed onboarding
-        // so the CLI starts straight into API-key mode.
         let home = self.store.root().join("profile-homes").join(&id);
 
         let mut env = vec![EnvVar {
@@ -533,22 +545,23 @@ impl AppState {
                 ..ProviderSettings::default()
             },
         };
-        let result_id = id.clone();
         let api_key = api_key.trim().to_string();
+        // Seeding onboarding starts the CLI straight into API-key mode.
+        let prepared = self.prepare_claude_home(
+            home,
+            r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
+            inherit_config,
+            cx,
+        );
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            host_cx
-                .unblock(move || {
-                    let _ = std::fs::create_dir_all(&home);
-                    let _ = std::fs::write(
-                        home.join(".claude.json"),
-                        r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
-                    );
-                })
-                .await;
+            let prepared = prepared.await;
             host_cx.enqueue(move |state, cx| {
                 if state.settings.profiles.contains_key(&id) {
                     return;
+                }
+                if let Err(error) = prepared {
+                    state.report_error(RuntimeError::ProfileConfig { error }, cx);
                 }
                 let mut settings = state.settings.clone();
                 settings.profiles.insert(id.clone(), profile);
@@ -556,7 +569,99 @@ impl AppState {
                 state.set_profile_secret(&id, "ANTHROPIC_API_KEY", Some(&api_key), cx);
             });
         });
-        result_id
+    }
+
+    /// Add a profile for another account of `provider` in its own config
+    /// directory and start its sign-in. Resolves to the new profile's id.
+    pub fn create_account_profile(
+        &mut self,
+        provider: ProviderKind,
+        name: &str,
+        inherit_config: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<String, ProtocolError>> {
+        let name = name.trim();
+        let name = if name.is_empty() {
+            provider.display_name()
+        } else {
+            name
+        };
+        let id = self.settings.allocate_profile_id(name);
+        let home = self.store.root().join("profile-homes").join(&id);
+        let profile = ProviderProfile {
+            kind: provider,
+            settings: ProviderSettings {
+                display_name: Some(name.to_string()),
+                home_path: Some(home.clone()),
+                // Another account runs the same CLI the default one does.
+                binary_path: self.settings.provider(provider).binary_path,
+                ..ProviderSettings::default()
+            },
+        };
+        let prepared = self.prepare_claude_home(
+            home,
+            r#"{"hasCompletedOnboarding":true}"#,
+            inherit_config,
+            cx,
+        );
+        let host_cx = cx.clone();
+        cx.spawn_background(async move {
+            let prepared = prepared.await;
+            host_cx
+                .enqueue_and_wait(move |state, cx| {
+                    if state.settings.profiles.contains_key(&id) {
+                        return Err(ProtocolError {
+                            code: "profile_exists".into(),
+                            message: "A profile with this name was just added.".into(),
+                        });
+                    }
+                    if let Err(error) = prepared {
+                        state.report_error(RuntimeError::ProfileConfig { error }, cx);
+                    }
+                    let mut settings = state.settings.clone();
+                    settings.profiles.insert(id.clone(), profile);
+                    state.update_settings(settings, cx);
+                    state.start_provider_login(&id, cx);
+                    Ok(id)
+                })
+                .await
+                .map_err(|_| ProtocolError {
+                    code: "transport_closed".into(),
+                    message: "Host stopped before creating the profile.".into(),
+                })?
+        })
+    }
+
+    /// Create a new Claude profile's config directory with `seed` as its
+    /// `.claude.json`, and with `inherit` the user's configuration from the
+    /// built-in profile's config directory.
+    fn prepare_claude_home(
+        &self,
+        home: PathBuf,
+        seed: &'static str,
+        inherit: bool,
+        cx: &HostCx,
+    ) -> impl std::future::Future<Output = Result<(), String>> + use<> {
+        let builtin = inherit.then(|| {
+            self.prepare_profile_env(Settings::builtin_profile_id(ProviderKind::ClaudeCode), cx)
+        });
+        let host_cx = cx.clone();
+        async move {
+            let source = match builtin {
+                Some(launch_env) => agent::claude::config_dir(&launch_env.await?),
+                None => None,
+            };
+            host_cx
+                .unblock(move || {
+                    std::fs::create_dir_all(&home)?;
+                    std::fs::write(home.join(".claude.json"), seed)?;
+                    source.map_or(Ok(()), |source| {
+                        agent::claude::inherit_config(&source, &home)
+                    })
+                })
+                .await
+                .map_err(|error: std::io::Error| error.to_string())
+        }
     }
 
     /// Delete a user profile: remove its card, its secrets, and detach any
@@ -567,13 +672,62 @@ impl AppState {
             return;
         }
         let mut settings = self.settings.clone();
-        if settings.profiles.remove(id).is_none() {
+        let Some(profile) = settings.profiles.remove(id) else {
             return;
-        }
+        };
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
         self.providers.provider_secret_names.remove(id);
         self.providers.secret_writes.remove(id);
         self.update_settings(settings, cx);
+
+        // Only the directory Tcode made; a home the user chose is theirs.
+        let home = self.store.root().join("profile-homes").join(id);
+        if profile.settings.home_path.as_ref() != Some(&home) {
+            return;
+        }
+        let removed = cx.unblock(move || match std::fs::remove_dir_all(&home) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+            _ => Ok(()),
+        });
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            if let Err(error) = removed.await {
+                host_cx.enqueue(move |state, cx| {
+                    state.report_error(RuntimeError::ProfileConfig { error }, cx);
+                });
+            }
+        });
+    }
+
+    /// The snapshots as clients see them: a Claude account profile whose CLI
+    /// cannot keep its sign-in apart from the other account profiles' says so.
+    pub(super) fn flag_shared_credentials(
+        &self,
+        snapshots: &mut HashMap<String, ProviderSnapshot>,
+    ) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let accounts: Vec<ResolvedProfile> = self
+            .settings
+            .profiles_for_kind(ProviderKind::ClaudeCode)
+            .into_iter()
+            .filter(ResolvedProfile::supports_account_login)
+            .collect();
+        for profile in &accounts {
+            let Some(snapshot) = snapshots.get_mut(&profile.id) else {
+                continue;
+            };
+            if !claude_shares_credentials(snapshot.version.as_deref(), accounts.len()) {
+                continue;
+            }
+            if snapshot.status != Some(ProviderStatusKind::Error) {
+                snapshot.status = Some(ProviderStatusKind::Warning);
+            }
+            snapshot
+                .diagnostic
+                .get_or_insert(ProviderProbeDiagnostic::SharedCredentials);
+        }
     }
 
     /// Probe every provider profile: is the CLI there, what version, and who is signed
@@ -583,62 +737,237 @@ impl AppState {
     /// indeterminate auth state until their model/session requests run.
     pub fn refresh_provider_status(&mut self, cx: &mut HostCx) {
         for profile in self.all_profiles() {
-            let profile_id = profile.id.clone();
-            let provider = profile.kind;
-            let revision = self
-                .providers
-                .profile_revisions
-                .get(&profile_id)
-                .copied()
-                .unwrap_or(0);
-            let snapshot = self
-                .providers
-                .provider_snapshots
-                .entry(profile_id.clone())
-                .or_default();
-            if snapshot.checking {
-                continue;
-            }
-            snapshot.checking = true;
-            let binary = self.resolve_profile_binary(&profile_id);
-            let launch_env = self.prepare_profile_env(&profile_id, cx);
-            let host_cx = cx.clone();
-            HostCx::spawn_detached(cx, async move {
-                let snapshot = match launch_env.await {
-                    Ok(launch_env) => Ok(probe_provider(provider, binary, launch_env).await),
-                    Err(error) => Err(error),
-                };
-                log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
-                host_cx.enqueue(move |state, cx| {
-                    if state
-                        .providers
-                        .profile_revisions
-                        .get(&profile_id)
-                        .copied()
-                        .unwrap_or(0)
-                        != revision
-                        || state.settings.resolved_profile(&profile_id).as_ref() != Some(&profile)
-                    {
-                        return;
+            self.refresh_profile_status(profile, cx);
+        }
+    }
+
+    fn refresh_profile_status(&mut self, profile: ResolvedProfile, cx: &mut HostCx) {
+        let profile_id = profile.id.clone();
+        let provider = profile.kind;
+        let revision = self
+            .providers
+            .profile_revisions
+            .get(&profile_id)
+            .copied()
+            .unwrap_or(0);
+        let snapshot = self
+            .providers
+            .provider_snapshots
+            .entry(profile_id.clone())
+            .or_default();
+        if snapshot.checking {
+            return;
+        }
+        snapshot.checking = true;
+        let binary = self.resolve_profile_binary(&profile_id);
+        let launch_env = self.prepare_profile_env(&profile_id, cx);
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let snapshot = match launch_env.await {
+                Ok(launch_env) => Ok(probe_provider(provider, binary, launch_env).await),
+                Err(error) => Err(error),
+            };
+            log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
+            host_cx.enqueue(move |state, cx| {
+                if state
+                    .providers
+                    .profile_revisions
+                    .get(&profile_id)
+                    .copied()
+                    .unwrap_or(0)
+                    != revision
+                    || state.settings.resolved_profile(&profile_id).as_ref() != Some(&profile)
+                {
+                    return;
+                }
+                let snapshots = &mut state.providers.provider_snapshots;
+                match snapshot {
+                    Ok(snapshot) => {
+                        let login = snapshots
+                            .remove(&profile_id)
+                            .and_then(|previous| previous.login);
+                        snapshots.insert(profile_id, ProviderSnapshot { login, ..snapshot });
                     }
-                    match snapshot {
-                        Ok(snapshot) => {
-                            state
-                                .providers
-                                .provider_snapshots
-                                .insert(profile_id, snapshot);
+                    Err(error) => {
+                        if let Some(snapshot) = snapshots.get_mut(&profile_id) {
+                            snapshot.checking = false;
                         }
-                        Err(error) => {
-                            if let Some(snapshot) =
-                                state.providers.provider_snapshots.get_mut(&profile_id)
-                            {
-                                snapshot.checking = false;
-                            }
-                            state.report_error(RuntimeError::PersistSettings { error }, cx);
-                        }
+                        state.report_error(RuntimeError::PersistSettings { error }, cx);
                     }
-                });
+                }
             });
+        });
+    }
+
+    fn set_provider_login(&mut self, profile_id: &str, login: Option<ProviderLogin>) {
+        self.providers
+            .provider_snapshots
+            .entry(profile_id.to_owned())
+            .or_default()
+            .login = login;
+    }
+
+    /// Run the CLI's own sign-in for a profile. Its progress is the profile
+    /// snapshot's `login`; a sign-in already running is left alone.
+    pub fn start_provider_login(&mut self, profile_id: &str, cx: &mut HostCx) {
+        let Some(profile) = self
+            .settings
+            .resolved_profile(profile_id)
+            .filter(|profile| profile.supports_account_login())
+        else {
+            return;
+        };
+        if self.providers.logins.contains_key(profile_id) {
+            return;
+        }
+        let generation = self.providers.next_login;
+        self.providers.next_login += 1;
+        self.providers.logins.insert(
+            profile_id.to_owned(),
+            RunningLogin {
+                generation,
+                handle: None,
+                url: None,
+            },
+        );
+        self.set_provider_login(profile_id, Some(ProviderLogin::Starting));
+        let binary = self
+            .resolve_profile_binary(profile_id)
+            .unwrap_or_else(|| default_program(profile.kind).into());
+        let launch_env = self.prepare_profile_env(profile_id, cx);
+        let profile_id = profile_id.to_owned();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let started = match launch_env.await {
+                Ok(launch_env) => provider_login::start_login(&binary, &launch_env)
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            };
+            let mut run = match started {
+                Ok((handle, run)) => {
+                    let profile_id = profile_id.clone();
+                    host_cx.enqueue(move |state, _cx| {
+                        if let Some(login) = state
+                            .providers
+                            .logins
+                            .get_mut(&profile_id)
+                            .filter(|login| login.generation == generation)
+                        {
+                            login.handle = Some(handle);
+                        }
+                    });
+                    run
+                }
+                Err(error) => {
+                    let event = LoginEvent::Finished(Err(error));
+                    host_cx.enqueue(move |state, cx| {
+                        state.apply_provider_login_event(&profile_id, generation, event, cx)
+                    });
+                    return;
+                }
+            };
+            while let Some(event) = run.next().await {
+                let profile_id = profile_id.clone();
+                host_cx.enqueue(move |state, cx| {
+                    state.apply_provider_login_event(&profile_id, generation, event, cx)
+                });
+            }
+        });
+    }
+
+    fn apply_provider_login_event(
+        &mut self,
+        profile_id: &str,
+        generation: u64,
+        event: LoginEvent,
+        cx: &mut HostCx,
+    ) {
+        let Some(login) = self
+            .providers
+            .logins
+            .get_mut(profile_id)
+            .filter(|login| login.generation == generation)
+        else {
+            return;
+        };
+        match event {
+            LoginEvent::Url(url) => login.url = Some(url),
+            LoginEvent::AwaitingCode => {
+                let url = login.url.clone();
+                self.set_provider_login(profile_id, Some(ProviderLogin::AwaitingCode { url }));
+            }
+            LoginEvent::Finished(Ok(())) => self.provider_account_changed(profile_id, cx),
+            LoginEvent::Finished(Err(message)) => {
+                self.providers.logins.remove(profile_id);
+                self.set_provider_login(profile_id, Some(ProviderLogin::Failed { message }));
+            }
+        }
+    }
+
+    pub fn submit_provider_login_code(&mut self, profile_id: &str, code: &str) {
+        let code = code.trim();
+        let Some(handle) = self
+            .providers
+            .logins
+            .get(profile_id)
+            .and_then(|login| login.handle.as_ref())
+        else {
+            return;
+        };
+        if code.is_empty() {
+            return;
+        }
+        handle.submit_code(code.to_owned());
+        self.set_provider_login(profile_id, Some(ProviderLogin::Finishing));
+    }
+
+    /// Stop a running sign-in, or dismiss a failed one.
+    pub fn cancel_provider_login(&mut self, profile_id: &str) {
+        if let Some(login) = self.providers.logins.remove(profile_id)
+            && let Some(handle) = login.handle
+        {
+            handle.cancel();
+        }
+        if let Some(snapshot) = self.providers.provider_snapshots.get_mut(profile_id) {
+            snapshot.login = None;
+        }
+    }
+
+    /// Sign a profile out of its native account through its CLI.
+    pub fn logout_provider(&mut self, profile_id: &str, cx: &mut HostCx) {
+        let Some(profile) = self
+            .settings
+            .resolved_profile(profile_id)
+            .filter(|profile| profile.supports_account_login())
+        else {
+            return;
+        };
+        self.cancel_provider_login(profile_id);
+        let binary = self
+            .resolve_profile_binary(profile_id)
+            .unwrap_or_else(|| default_program(profile.kind).into());
+        let launch_env = self.prepare_profile_env(profile_id, cx);
+        let profile_id = profile_id.to_owned();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = match launch_env.await {
+                Ok(launch_env) => provider_login::logout(&binary, &launch_env).await,
+                Err(error) => Err(error),
+            };
+            host_cx.enqueue(move |state, cx| match result {
+                Ok(()) => state.provider_account_changed(&profile_id, cx),
+                Err(message) => state.report_error(RuntimeError::ProviderMessage(message), cx),
+            });
+        });
+    }
+
+    /// The profile signed in or out: what was read under the old account is
+    /// dropped and read again.
+    fn provider_account_changed(&mut self, profile_id: &str, cx: &mut HostCx) {
+        self.providers.invalidate_profile_reads(profile_id);
+        if let Some(profile) = self.settings.resolved_profile(profile_id) {
+            self.refresh_profile_status(profile, cx);
+            self.refresh_provider_usage_if_stale(cx);
         }
     }
 
@@ -1316,6 +1645,16 @@ pub(super) fn session_options(
     }
 }
 
+/// Claude Code before 2.1.144 keeps the OAuth sign-in in one macOS Keychain
+/// item shared by every config directory, so signing in one account profile
+/// replaces the others' sign-in.
+fn claude_shares_credentials(version: Option<&str>, account_profiles: usize) -> bool {
+    account_profiles >= 2
+        && version
+            .and_then(provider_updates::parse_version)
+            .is_some_and(|version| version < (2, 1, 144))
+}
+
 #[cfg(test)]
 mod provider_lifecycle_tests {
     use super::*;
@@ -1574,5 +1913,22 @@ mod provider_lifecycle_tests {
         );
         assert_eq!(catalog.provider_usage["claude"].error, None);
         assert_eq!(catalog.provider_usage["claude"].fetched_at, 1_700_001_000);
+    }
+
+    #[test]
+    fn claude_account_profiles_share_one_sign_in_before_2_1_144() {
+        for (version, profiles, shared) in [
+            (Some("2.1.143"), 2, true),
+            (Some("2.0.76"), 3, true),
+            (Some("2.1.144"), 2, false),
+            (Some("2.1.143"), 1, false),
+            (None, 2, false),
+        ] {
+            assert_eq!(
+                claude_shares_credentials(version, profiles),
+                shared,
+                "{version:?} {profiles}"
+            );
+        }
     }
 }

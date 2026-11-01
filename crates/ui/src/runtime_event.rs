@@ -98,6 +98,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::PersistSessionIndex { error } => {
                     crate::tr!("errors.persist_session_index", error = error).into_owned()
                 }
+                RuntimeError::ProfileConfig { error } => {
+                    crate::tr!("errors.profile_config", error = error).into_owned()
+                }
                 _ => format!("Unknown runtime error: {error:?}"),
             };
             (RuntimeEventSeverity::Error, message)

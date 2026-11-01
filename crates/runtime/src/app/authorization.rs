@@ -358,7 +358,12 @@ impl AppState {
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
                 | Command::CreateThirdPartyProfile { .. }
+                | Command::CreateAccountProfile { .. }
                 | Command::DeleteProfile { .. }
+                | Command::StartProviderLogin { .. }
+                | Command::SubmitProviderLoginCode { .. }
+                | Command::CancelProviderLogin { .. }
+                | Command::LogoutProvider { .. }
                 | Command::RefreshProviderStatus
                 | Command::RefreshProviderUsage
                 | Command::CheckProviderVersions
