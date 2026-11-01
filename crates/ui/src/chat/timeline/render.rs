@@ -1286,3 +1286,926 @@ fn injected_context_label(context: &str) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::tests::*;
+    use crate::test_frames::draw_settled;
+    use agent::ItemStatus;
+    use gpui::TestAppContext;
+    use tcode_core::session::TurnMeta;
+
+    #[gpui::test]
+    fn pending_steer_after_the_last_segment_renders_in_the_trailer(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+        use tcode_core::session::SteeringStatus;
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries.extend([
+            entry("user", user_item("go")),
+            entry("assistant", assistant("On it.")),
+            entry(
+                "steer",
+                EntryContent::Steer {
+                    text: "also do this".into(),
+                    status: SteeringStatus::Pending,
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            ),
+        ]);
+
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (_view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw_settled(cx);
+
+        assert!(cx.debug_bounds("steering-steer").is_some());
+    }
+
+    /// The host steers its notices into a running turn: steered or still
+    /// pending, a notice is a disclosure row per notice, never the user's bubble.
+    #[gpui::test]
+    fn steered_notices_render_as_disclosures_not_bubbles(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+        use tcode_core::session::SteeringStatus;
+
+        let steer = |text: String, status| EntryContent::Steer {
+            text,
+            status,
+            context_len: None,
+            attachments: Vec::new(),
+        };
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries.extend([
+            entry("user", user_item("go")),
+            entry(
+                "wake",
+                steer(
+                    tcode_core::pull_request_watch::merged_message(5, "https://x/pull/5"),
+                    SteeringStatus::Accepted,
+                ),
+            ),
+            entry("assistant", assistant("On it.")),
+            entry(
+                "results",
+                steer(
+                    "[orchestrate] thread a (\"First\") reported.\nResult (reported via report_result):\none\n\n[orchestrate] thread b (\"Second\") failed.\nthe provider closed".into(),
+                    SteeringStatus::Pending,
+                ),
+            ),
+        ]);
+
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (_view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw_settled(cx);
+
+        for row in [
+            "disclosure-pull-request-update-wake",
+            "disclosure-orchestrate-callback-results-0",
+            "disclosure-orchestrate-callback-results-1",
+        ] {
+            assert!(cx.debug_bounds(row).is_some(), "{row} is not a disclosure");
+        }
+        for bubble in ["steering-wake", "steering-results"] {
+            assert!(cx.debug_bounds(bubble).is_none(), "{bubble} is a bubble");
+        }
+    }
+
+    #[gpui::test]
+    fn an_expanded_work_log_lays_out_only_the_activities_on_screen(cx: &mut TestAppContext) {
+        use gpui::{FollowMode, ListOffset, Modifiers, VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta::default()];
+        timeline.entries.push(entry("user", user_item("go")));
+        for index in 0..400 {
+            timeline.entries.push(command(&format!("command-{index}")));
+        }
+        timeline
+            .entries
+            .push(entry("assistant", assistant("Done.")));
+
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw_settled(cx);
+
+        let header = cx
+            .debug_bounds("worklog-header-0-command-0")
+            .expect("collapsed work log");
+        cx.simulate_click(header.center(), Modifiers::default());
+        draw_settled(cx);
+        view.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        draw_settled(cx);
+        assert!(cx.debug_bounds("activity-row-command-0").is_some());
+        assert!(
+            cx.debug_bounds("activity-row-command-399").is_none(),
+            "an expanded work log must not lay out all 400 activities"
+        );
+
+        view.update(cx, |chat, cx| {
+            chat.list_state.set_follow_mode(FollowMode::Tail);
+            cx.notify();
+        });
+        draw_settled(cx);
+        assert!(cx.debug_bounds("activity-row-command-399").is_some());
+        assert!(cx.debug_bounds("activity-row-command-0").is_none());
+
+        // Opening one activity keeps the measured heights of the turn's
+        // other rows, however far away.
+        view.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        draw_settled(cx);
+        let last = view.read_with(cx, |chat, _| chat.rows.len() - 1);
+        let measured = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |chat, _| {
+                chat.list_state.bounds_for_item(last).is_some()
+            })
+        };
+        assert!(measured(cx));
+        let row = cx
+            .debug_bounds("activity-row-command-0")
+            .expect("the first activity");
+        cx.simulate_click(row.center(), Modifiers::default());
+        draw_settled(cx);
+        assert!(cx.debug_bounds("activity-detail").is_some());
+        assert!(
+            measured(cx),
+            "opening one activity remeasured the whole turn"
+        );
+    }
+
+    #[gpui::test]
+    fn a_live_file_edit_lays_out_only_the_diff_lines_on_screen(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, ScrollDelta, ScrollEvent, TouchPhase, VisualTestContext};
+        use gpui::{point, px, size};
+
+        let mut diff = format!("@@ -1,400 +1,401 @@\n+// {}\n", "wide ".repeat(80));
+        for line in 0..400 {
+            diff.push_str(&format!("-fn old_{line}() {{}}\n+fn new_{line}() {{}}\n"));
+        }
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![entry("user", user_item("go"))];
+        for note in 0..20 {
+            timeline.entries.push(entry(
+                &format!("note-{note}"),
+                assistant("A note above the edit."),
+            ));
+        }
+        timeline.entries.push(entry(
+            "edit",
+            EntryContent::Item(ItemContent::FileChange {
+                changes: vec![agent::FileChange {
+                    path: "src/lib.rs".into(),
+                    kind: agent::FileChangeKind::Modify,
+                    diff: Some(diff),
+                }],
+                status: ItemStatus::InProgress,
+            }),
+        ));
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(600.), px(900.)));
+        draw_settled(cx);
+
+        assert!(cx.debug_bounds("file-edit-diff-line-0").is_some());
+        assert!(
+            cx.debug_bounds("file-edit-diff-line-300").is_none(),
+            "an inline diff must not lay out all 801 lines"
+        );
+
+        // Both axes scroll inside the diff; the timeline stays put.
+        let timeline_top = |cx: &mut VisualTestContext| {
+            let top = view.read_with(cx, |chat, _| chat.list_state.logical_scroll_top());
+            (top.item_ix, top.offset_in_item)
+        };
+        let before = timeline_top(cx);
+        assert!(
+            view.read_with(cx, |chat, _| chat.list_state.max_offset_for_scrollbar().y) > px(0.)
+        );
+        let diff_bounds = cx.debug_bounds("file-edit-diff").expect("inline diff");
+        let wheel = |delta, cx: &mut VisualTestContext| {
+            for (touch_phase, delta) in [
+                (TouchPhase::Started, point(px(0.), px(0.))),
+                (TouchPhase::Moved, delta),
+                (TouchPhase::Ended, point(px(0.), px(0.))),
+            ] {
+                cx.simulate_event(ScrollEvent {
+                    position: diff_bounds.center(),
+                    delta: ScrollDelta::Pixels(delta),
+                    modifiers: Modifiers::default(),
+                    touch_phase,
+                    ..Default::default()
+                });
+            }
+            draw_settled(cx);
+        };
+        wheel(point(px(0.), px(-2_000.)), cx);
+        assert!(cx.debug_bounds("file-edit-diff-line-0").is_none());
+        // `debug_bounds` takes a `'static` selector.
+        let shown: &'static str = (1..801)
+            .map(|ix| &*format!("file-edit-diff-line-{ix}").leak())
+            .find(|selector| cx.debug_bounds(selector).is_some())
+            .expect("a line scrolled into the diff");
+        let line = cx.debug_bounds(shown).unwrap();
+        wheel(point(px(-200.), px(0.)), cx);
+        let scrolled = cx.debug_bounds(shown).unwrap();
+        assert!(
+            scrolled.left() < line.left(),
+            "{scrolled:?} did not scroll left of {line:?}"
+        );
+        assert_eq!(scrolled.top(), line.top());
+        assert_eq!(timeline_top(cx), before);
+
+        // The provider reports a different patch for the same edit.
+        timeline.entries[21] = entry(
+            "edit",
+            EntryContent::Item(ItemContent::FileChange {
+                changes: vec![agent::FileChange {
+                    path: "src/lib.rs".into(),
+                    kind: agent::FileChangeKind::Modify,
+                    diff: Some("@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n".into()),
+                }],
+                status: ItemStatus::InProgress,
+            }),
+        );
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        draw_settled(cx);
+        assert!(cx.debug_bounds("file-edit-diff-line-1").is_some());
+        assert!(cx.debug_bounds("file-edit-diff-line-2").is_none());
+    }
+
+    /// A running command's panel shows the screens the host renders at the
+    /// panel's width, pushed as the output grows, over one subscription per
+    /// width that collapsing the panel or leaving the thread releases.
+    #[gpui::test]
+    fn a_running_command_shows_the_screens_the_host_pushes_for_its_width(cx: &mut TestAppContext) {
+        use crate::terminal_drawer::TERMINAL_CELL_HEIGHT;
+        use gpui::{VisualTestContext, px, size};
+        use tcode_protocol::{Topic, terminal::TerminalColor};
+
+        let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let seeded_id = session_id.clone();
+        let other_id = smol::block_on(host.update_state_for_test(move |state, cx| {
+            state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
+            for (ts, event) in [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: "turn".into(),
+                },
+                agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: "user".into(),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "build it".into(),
+                        context_len: None,
+                        attachments: Vec::new(),
+                    },
+                }),
+                agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                    id: "run".into(),
+                    parent_item_id: None,
+                    content: ItemContent::CommandExecution {
+                        command: "make".into(),
+                        output: String::new(),
+                        exit_code: None,
+                        status: ItemStatus::InProgress,
+                    },
+                }),
+            ]
+            .iter()
+            .enumerate()
+            {
+                state.record_event_for_replica_test(&seeded_id, ts as u64, event, cx);
+            }
+            let other = state.start_draft("other-thread".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&other).expect("second draft");
+            active.draft = false;
+            let meta = active.meta.clone();
+            state.sessions.push(meta);
+            other
+        }))
+        .expect("record the running command");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        driver.wait_until(cx, &store, "chat baseline", |cx| {
+            store.read_with(cx, |store, _| !store.chat_loading())
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (_, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(900.)));
+
+        let link = driver.link.clone();
+        let output_topics = || {
+            link.subscribed_topics()
+                .into_iter()
+                .filter_map(|topic| match topic {
+                    Topic::CommandOutput {
+                        session_id,
+                        item_id,
+                        cols,
+                    } => Some((session_id, item_id, cols)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let watched = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .command_output_for(store.active_session_id().as_deref(), "run")
+                    .and_then(|output| output.watched())
+            })
+        };
+        let frame = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .command_output_for(store.active_session_id().as_deref(), "run")
+                    .and_then(|output| output.frame().cloned())
+            })
+        };
+        let mut settle = |cx: &mut VisualTestContext,
+                          description: &str,
+                          ready: &dyn Fn(&mut VisualTestContext) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                driver.step(cx, &store);
+                draw_settled(cx);
+                if ready(cx) {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "waiting for {description}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        // Nothing drives this turn on the host, so its Work Log reads as
+        // finished and folded: open it and the command, as a reader would.
+        settle(cx, "the Work Log", &|cx| {
+            cx.debug_bounds("worklog-header-0-run").is_some()
+        });
+        let header = cx.debug_bounds("worklog-header-0-run").unwrap();
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        settle(cx, "the command row", &|cx| {
+            cx.debug_bounds("activity-row-run").is_some()
+        });
+        if cx.debug_bounds("activity-detail").is_none() {
+            let row = cx.debug_bounds("activity-row-run").unwrap();
+            cx.simulate_click(row.center(), gpui::Modifiers::default());
+        }
+        settle(cx, "the panel to measure its width", &|cx| {
+            watched(cx).is_some()
+        });
+        let cols = watched(cx).unwrap();
+        let subscribed = vec![(session_id.clone(), "run".to_string(), cols)];
+        assert_eq!(output_topics(), subscribed);
+
+        let mut long_line = "x".repeat(usize::from(cols));
+        long_line.push_str("yz");
+        let growth = [
+            "10%\r".to_string(),
+            "50%\r".into(),
+            "100%\n".into(),
+            format!("{long_line}\n"),
+            "\u{1b}[32mok\u{1b}[0m\n".into(),
+        ];
+        for (index, text) in growth.into_iter().enumerate() {
+            let seeded_id = session_id.clone();
+            smol::block_on(host.update_state_for_test(move |state, cx| {
+                state.record_event_for_replica_test(
+                    &seeded_id,
+                    10 + index as u64,
+                    &agent::AgentEvent::Delta {
+                        item_id: "run".into(),
+                        kind: agent::DeltaKind::CommandOutput,
+                        text,
+                    },
+                    cx,
+                );
+            }))
+            .expect("grow the command output");
+            settle(cx, "one host turn", &|_| true);
+            assert_eq!(output_topics(), subscribed, "growth re-subscribed");
+        }
+        settle(cx, "the screen after the last growth", &|cx| {
+            frame(cx).is_some_and(|frame| frame.rows == 4)
+        });
+        let screen = frame(cx).unwrap();
+        let text = |row: usize| {
+            screen.visible[row]
+                .cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(screen.cols, cols);
+        assert_eq!(text(0), "100%", "the progress bar was not redrawn in place");
+        assert_eq!(text(1), "x".repeat(usize::from(cols)));
+        assert_eq!(text(2), "yz");
+        assert_eq!(text(3), "ok");
+        assert_eq!(
+            screen.style(&screen.visible[3].cells[0]).fg,
+            TerminalColor::Indexed(2)
+        );
+        assert_eq!(output_topics(), subscribed);
+        // The panel is as tall as the host's screen, not as the raw output's
+        // three lines.
+        let output = cx
+            .debug_bounds("command-output-run")
+            .expect("the output grid");
+        assert_eq!(output.size.height, px(4. * TERMINAL_CELL_HEIGHT));
+
+        cx.simulate_resize(size(px(600.), px(900.)));
+        settle(cx, "the narrower screen", &|cx| {
+            watched(cx).is_some_and(|watched| watched < cols)
+                && frame(cx).is_some_and(|frame| Some(frame.cols) == watched(cx))
+        });
+        let narrower = watched(cx).unwrap();
+        assert_eq!(
+            output_topics(),
+            vec![(session_id.clone(), "run".to_string(), narrower)]
+        );
+
+        let header = cx.debug_bounds("activity-row-run").expect("command row");
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        settle(cx, "the collapsed panel to release its screen", &|_| {
+            output_topics().is_empty()
+        });
+        let header = cx.debug_bounds("activity-row-run").expect("command row");
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        settle(cx, "the reopened panel", &|_| output_topics().len() == 1);
+
+        store.update(cx, |store, cx| store.select_session(other_id, cx));
+        settle(cx, "leaving the thread", &|_| output_topics().is_empty());
+        driver.shutdown(cx, &store, &host);
+    }
+
+    #[gpui::test]
+    fn a_plan_is_decided_on_its_block_and_answered_in_words_from_the_composer(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{Modifiers, VisualTestContext, px, size};
+        use tcode_core::project::SessionMeta;
+
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let root = crate::store::tests::scratch_root("chat-plan-decision-test");
+        let session_store =
+            tcode_services::store::SessionStore::open_at(root.clone()).expect("test session store");
+        let meta = SessionMeta::new(agent::ProviderKind::ClaudeCode, root.clone(), None);
+        let session_id = meta.id.clone();
+        session_store.upsert_meta(&meta).expect("persist session");
+        let host = tcode_runtime::pipe::spawn_host(
+            session_store,
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .expect("spawn test host");
+        let scripted = tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode);
+        let (provider_events, provider_commands) =
+            (scripted.events.clone(), scripted.commands.clone());
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.set_provider_launcher_for_test(scripted.launcher)
+        }))
+        .expect("script the provider");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, _| {
+            store.send_turn_for(session_id.clone(), "Plan it first".into(), Vec::new())
+        });
+        driver.wait_until(cx, &store, "the turn reaches the provider", |_| {
+            matches!(
+                provider_commands.try_recv(),
+                Ok(agent::SessionCommand::SendTurn { .. })
+            )
+        });
+
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (chat, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(800.)));
+        chat.update(cx, |chat, cx| {
+            chat.set_session(Some(session_id.clone()), cx)
+        });
+        let propose = |id: &str, request: &str| {
+            let markdown = format!("# Plan {id}\n\n1. Write hello.txt");
+            for event in [
+                agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                    id: id.into(),
+                    parent_item_id: None,
+                    content: ItemContent::Plan {
+                        markdown: markdown.clone(),
+                    },
+                }),
+                agent::AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                    id: request.into(),
+                    turn_id: None,
+                    parent_item_id: None,
+                    kind: agent::ApprovalKind::Plan {
+                        item_id: id.into(),
+                        markdown,
+                    },
+                    options: vec![
+                        agent::ApprovalOption {
+                            id: "allow".into(),
+                            label: "Approve".into(),
+                            kind: agent::ApprovalOptionKind::AllowOnce,
+                        },
+                        agent::ApprovalOption {
+                            id: "deny".into(),
+                            label: "Keep planning".into(),
+                            kind: agent::ApprovalOptionKind::RejectOnce,
+                        },
+                    ],
+                }),
+            ] {
+                provider_events.try_send(event).expect("provider event");
+            }
+        };
+        let decided = |driver: &mut crate::store::tests::LocalHostDriver,
+                       cx: &mut VisualTestContext,
+                       what: &str| {
+            let mut decision = None;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while decision.is_none() {
+                assert!(Instant::now() < deadline, "waiting for {what}");
+                driver.step(cx, &store);
+                draw_settled(cx);
+                if let Ok(agent::SessionCommand::RespondApproval {
+                    request_id,
+                    decision: answer,
+                }) = provider_commands.try_recv()
+                {
+                    decision = Some((request_id, answer));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            decision.unwrap()
+        };
+        let shown = |driver: &mut crate::store::tests::LocalHostDriver,
+                     cx: &mut VisualTestContext| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while cx.debug_bounds("plan-decision").is_none() {
+                assert!(Instant::now() < deadline, "waiting for the plan's decision");
+                driver.step(cx, &store);
+                draw_settled(cx);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+
+        propose("plan-1", "decide-1");
+        shown(&mut driver, cx);
+        assert!(
+            cx.debug_bounds("approval-header").is_none(),
+            "a plan is decided on its block, not in the composer"
+        );
+        let approve = cx
+            .debug_bounds("plan-option-allow")
+            .expect("approve button");
+        cx.simulate_click(approve.center(), Modifiers::default());
+        assert_eq!(
+            decided(&mut driver, cx, "the approval"),
+            (
+                "decide-1".to_string(),
+                agent::ApprovalDecision::Option("allow".into())
+            )
+        );
+        provider_events
+            .try_send(agent::AgentEvent::ApprovalResolved {
+                request_id: "decide-1".into(),
+                decision: agent::ApprovalDecision::Option("allow".into()),
+            })
+            .expect("provider event");
+
+        propose("plan-2", "decide-2");
+        shown(&mut driver, cx);
+        chat.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
+        cx.simulate_input("Split step one");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            decided(&mut driver, cx, "the feedback"),
+            (
+                "decide-2".to_string(),
+                agent::ApprovalDecision::Feedback("Split step one".into())
+            )
+        );
+        driver.shutdown(cx, &store, &host);
+    }
+
+    #[gpui::test]
+    fn long_markdown_paints_middle_blocks_when_scrolled_in_chat_outer_list(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{VisualTestContext, point, px, size};
+        use tcode_runtime::pipe::{HostServices, spawn_host};
+        use tcode_services::store::SessionStore;
+
+        const DEMO_MARKDOWN: &str = r#"# H1
+
+## H2
+
+This paragraph has **bold**, *italic*, ~~strikethrough~~, and `inline code`.
+
+```rust
+fn main() {
+    let language = "Rust";
+    let message = format!("Hello from {language}!");
+    println!("{message}");
+}
+```
+
+```typescript
+const count: number = 3;
+interface Demo {
+  title: string;
+  enabled: boolean;
+}
+const demo: Demo = { title: "TypeScript", enabled: true };
+```
+
+```python
+def greet(name: str) -> str:
+    message = f"Hello, {name}!"
+    return message
+
+print(greet("Python"))
+```
+
+```go
+package main
+func main() {
+    message := "Hello from Go"
+    println(message)
+}
+```
+
+```toml
+[demo]
+title = "TOML sample"
+enabled = true
+count = 3
+```
+
+```kotlin
+fun main() {
+    val language: String = "Kotlin"
+    println("Hello from $language")
+}
+```
+
+```text
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+| Left | Center | Right |
+| :--- | :----: | ----: |
+| alpha | beta | 100 |
+| gamma | delta | 200 |
+
+| Name | Status | Owner | Description | Count | Notes |
+| :--- | :----: | :--- | :---------- | ----: | :---- |
+| Short | Ready | UI | This deliberately long table cell contains about sixty characters total. | 12 | wraps |
+| Longer component name | Pending | Visual QA | Brief | 3 | compact |
+
+- [x] Render headings
+- [ ] Inspect every pixel
+
+1. Ordered parent
+   - Unordered child
+     1. Nested ordered child
+2. Second ordered item
+
+- Unordered parent
+  - Nested bullet
+    1. Ordered grandchild
+
+> First line of the blockquote.
+> Second line of the blockquote.
+
+Visit [Example](https://example.com) or the bare URL https://tcode.dev for more.
+
+---
+
+This paragraph has a soft
+line break, followed by a hard break.\
+This begins after the hard break."#;
+
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let data_root = crate::store::tests::scratch_root("markdown-outer-list-test");
+        let store = SessionStore::open_at(data_root).expect("test session store");
+        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
+        let (session_id, timeline) =
+            smol::block_on(host.update_state_for_test(move |state, cx| {
+                let id = state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
+                let active = state.residents.live.get_mut(&id).expect("selected draft");
+                active.timeline = Timeline::default();
+                active.timeline.turns = vec![TurnMeta::default()];
+                active.timeline.entries = vec![
+                    entry("user", user_item("render a long document")),
+                    entry("assistant", assistant(DEMO_MARKDOWN)),
+                ];
+                active.draft = false;
+                (active.meta.id.clone(), active.timeline.clone())
+            }))
+            .expect("seed markdown host");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let workspace_store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+            workspace_store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        workspace_store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
+            workspace_store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.chat_loading()
+            })
+        });
+        workspace_store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(workspace_store.clone(), window_state, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        cx.run_until_parked();
+        draw_settled(cx);
+        cx.run_until_parked();
+        draw_settled(cx);
+
+        let outer_list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        let max_scroll = outer_list.max_offset_for_scrollbar().y;
+        assert!(
+            max_scroll > px(800.),
+            "long markdown did not contribute its full height to the chat list: {max_scroll:?}"
+        );
+        let scroll_step = px(40.);
+        let steps = (f32::from(max_scroll / 2.) / f32::from(scroll_step)).ceil() as usize;
+        for step in 0..steps {
+            let distance = (scroll_step * (step + 1) as f32).min(max_scroll / 2.);
+            outer_list.set_offset_from_scrollbar(point(px(0.), -(max_scroll - distance)));
+            view.update(cx, |_, cx| cx.notify());
+            draw_settled(cx);
+        }
+
+        let viewport = outer_list.viewport_bounds();
+        let middle = cx.debug_bounds("markdown-block-6");
+        assert!(
+            middle.is_some_and(|bounds| bounds.intersects(&viewport)),
+            "middle markdown block did not paint at the chat list's middle offset; bounds={middle:?}, max_scroll={max_scroll:?}, viewport={viewport:?}"
+        );
+        assert!(
+            cx.debug_bounds("markdown-block-18").is_none(),
+            "offscreen tail block was painted; block virtualization did not cull it"
+        );
+        driver.shutdown(cx, &workspace_store, &host);
+    }
+
+    /// A user turn's rewind popover offers exactly the scopes its harness
+    /// restores that turn in: Claude Code restores only files of the first
+    /// turn and all three scopes of a later one; OpenCode restores the
+    /// conversation, with or without files, of any turn, and never files alone.
+    #[gpui::test]
+    fn the_rewind_popover_offers_exactly_the_harness_rewind_modes(cx: &mut TestAppContext) {
+        use agent::{ProviderKind, RewindMode};
+        use gpui::{Modifiers, VisualTestContext, px, size};
+
+        const ALL: [RewindMode; 3] = [
+            RewindMode::FilesAndConversation,
+            RewindMode::Conversation,
+            RewindMode::Files,
+        ];
+        for (provider, turn, offered) in [
+            (ProviderKind::ClaudeCode, 0, &[RewindMode::Files][..]),
+            (ProviderKind::ClaudeCode, 1, &ALL[..]),
+            (
+                ProviderKind::OpenCode,
+                0,
+                &[RewindMode::FilesAndConversation, RewindMode::Conversation][..],
+            ),
+            (
+                ProviderKind::OpenCode,
+                1,
+                &[RewindMode::FilesAndConversation, RewindMode::Conversation][..],
+            ),
+        ] {
+            let mut timeline = Timeline::default();
+            timeline.turns = (0..2)
+                .map(|index| TurnMeta {
+                    provider_checkpoint_id: Some(format!("msg_checkpoint_{index}")),
+                    ..TurnMeta::default()
+                })
+                .collect();
+            timeline.entries.extend([
+                at_turn(entry("user-0", user_item("first")), 0),
+                at_turn(entry("assistant-0", assistant("One.")), 0),
+                at_turn(entry("user-1", user_item("second")), 1),
+                at_turn(entry("assistant-1", assistant("Two.")), 1),
+            ]);
+            let (workspace_store, window_state, _, _driver) =
+                seed_chat_with_history_on(cx, timeline, false, Some(provider));
+            let (_view, window) = cx.add_window_view(|window, cx| {
+                ChatView::new(workspace_store, window_state, window, cx)
+            });
+            let window: &mut VisualTestContext = window;
+            window.simulate_resize(size(px(1_024.), px(700.)));
+            draw_settled(window);
+            // The bubble's actions show while the pointer is over it.
+            let bubble = window
+                .debug_bounds(["user-bubble-user-0", "user-bubble-user-1"][turn])
+                .expect("the user bubble is drawn");
+            window.simulate_mouse_move(bubble.center(), None, Modifiers::default());
+            draw_settled(window);
+            let trigger = window
+                .debug_bounds(["rewind-0", "rewind-1"][turn])
+                .unwrap_or_else(|| panic!("{provider:?} turn {turn} has a rewind button"));
+            window.simulate_click(trigger.center(), Modifiers::default());
+            draw_settled(window);
+            let shown: Vec<RewindMode> = ALL
+                .into_iter()
+                .filter(|mode| {
+                    window
+                        .debug_bounds(match mode {
+                            RewindMode::FilesAndConversation => {
+                                "rewind-option-FilesAndConversation"
+                            }
+                            RewindMode::Conversation => "rewind-option-Conversation",
+                            RewindMode::Files => "rewind-option-Files",
+                        })
+                        .is_some()
+                })
+                .collect();
+            assert_eq!(shown, offered, "{provider:?} turn {turn}");
+        }
+    }
+}
