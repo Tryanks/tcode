@@ -233,6 +233,14 @@ const KEPT_THREADS: usize = 4;
 
 /// A turn stopped by Claude Code's safety classifier, kept per session so the
 /// composer can offer recovery after the turn already ended.
+/// What a turn's rewind offers: the harness's modes for it, and whether a
+/// rewind is blocked right now (a turn running, a rewind pending).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRewindState {
+    pub modes: Vec<agent::RewindMode>,
+    pub blocked: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct FallbackBlock {
     pub category: Option<agent::ClassifierCategory>,
@@ -3683,12 +3691,15 @@ impl WorkspaceStore {
         .unwrap_or((Vec::new(), agent::ChangeCompleteness::Partial))
     }
 
+    /// The rewind modes the thread's harness restores `turn` in; `None` when
+    /// it has none for that turn (no checkpoint, or no native rewind).
     pub fn chat_native_rewind_state_for(
         &self,
         session_id: Option<&str>,
         turn: usize,
-    ) -> Option<(bool, bool)> {
+    ) -> Option<NativeRewindState> {
         let status = self.thread_status(session_id)?;
+        let rewind = status.provider.caps().native_rewind?;
         let has_checkpoint = self
             .with_timeline_for(session_id, |timeline| {
                 timeline
@@ -3698,7 +3709,17 @@ impl WorkspaceStore {
                     .is_some()
             })
             .unwrap_or(false);
-        Some((has_checkpoint, status.native_rewind_blocked))
+        let absolute = self.absolute_turn_for(session_id, turn);
+        let modes: Vec<agent::RewindMode> = rewind
+            .modes
+            .iter()
+            .copied()
+            .filter(|&mode| rewind.offers(mode, absolute))
+            .collect();
+        (has_checkpoint && !modes.is_empty()).then_some(NativeRewindState {
+            modes,
+            blocked: status.native_rewind_blocked,
+        })
     }
 
     pub fn chat_git_controls_for(

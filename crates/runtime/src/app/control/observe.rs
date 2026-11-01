@@ -229,10 +229,18 @@ struct GoalFacts {
 }
 
 #[derive(Debug, Serialize)]
+struct RewindFacts {
+    modes: &'static [agent::RewindMode],
+    /// The conversation can be restored to before the first turn.
+    first_turn_conversation: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct CapsFacts {
     steering: bool,
     fork: bool,
-    native_rewind: bool,
+    /// What a rewind can restore, when the provider has one.
+    native_rewind: Option<RewindFacts>,
     manual_compaction: bool,
     goals: Option<GoalFacts>,
     per_turn_effort: bool,
@@ -1139,7 +1147,10 @@ impl AppState {
                     caps: CapsFacts {
                         steering: caps.supports_steering,
                         fork: caps.supports_fork,
-                        native_rewind: caps.native_rewind,
+                        native_rewind: caps.native_rewind.map(|rewind| RewindFacts {
+                            modes: rewind.modes,
+                            first_turn_conversation: rewind.first_turn_conversation,
+                        }),
                         manual_compaction: caps.manual_compaction,
                         goals: caps.goals.map(|goals| GoalFacts {
                             pause: goals.pause,

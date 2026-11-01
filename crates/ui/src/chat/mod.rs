@@ -2103,48 +2103,31 @@ impl ChatView {
                     .chat_native_rewind_state_for(self.session_id.as_deref(), turn)
             })
             .flatten()
-            .filter(|(available, _)| *available)
-            .map(|(_, disabled)| components::bubble::RewindMenu {
+            .map(|state| components::bubble::RewindMenu {
                 turn,
-                disabled,
-                conversation_available: self
-                    .workspace_store
-                    .read(cx)
-                    .absolute_turn_for(self.session_id.as_deref(), turn)
-                    > 0,
+                disabled: state.blocked,
+                modes: state.modes,
             });
-        let rewind = steering
-            .is_none()
-            .then(|| {
-                let rewind_handler = |mode| {
+        let rewind = rewind_menu.clone().map(|menu| {
+            let handlers = menu
+                .modes
+                .iter()
+                .map(|&mode| {
                     Arc::new(cx.listener(move |this, _, _, cx| {
                         let session_id = this.session_id.clone().unwrap_or_default();
                         this.workspace_store.update(cx, |store, _cx| {
                             store.rewind_turn_for(session_id, turn, mode)
                         });
                     })) as components::bubble::SharedClickHandler
-                };
-                components::bubble::native_rewind_button(
-                    turn,
-                    self.workspace_store
-                        .read(cx)
-                        .absolute_turn_for(self.session_id.as_deref(), turn)
-                        > 0,
-                    (
-                        self.workspace_store
-                            .read(cx)
-                            .chat_native_rewind_state_for(self.session_id.as_deref(), turn),
-                        self.window_state.read(cx).compact,
-                    ),
-                    components::bubble::RewindHandlers {
-                        files_and_conversation: rewind_handler(RewindMode::FilesAndConversation),
-                        conversation: rewind_handler(RewindMode::Conversation),
-                        files: rewind_handler(RewindMode::Files),
-                    },
-                    cx,
-                )
-            })
-            .flatten();
+                })
+                .collect();
+            components::bubble::native_rewind_button(
+                menu,
+                self.window_state.read(cx).compact,
+                handlers,
+                cx,
+            )
+        });
         let markdown = self.md_states.get(entry_id).map(|md| md.state.clone());
         let copy_key = format!("user:{entry_id}");
         let copied = self.copied.is(&copy_key);
@@ -5220,6 +5203,90 @@ mod tests {
             states[4],
             Some(AutoActivityExpansion::Expanded { .. })
         ));
+    }
+
+    /// A user turn's rewind popover offers exactly the scopes its harness
+    /// restores that turn in: Claude Code restores only files of the first
+    /// turn and all three scopes of a later one; OpenCode restores the
+    /// conversation, with or without files, of any turn, and never files alone.
+    #[gpui::test]
+    fn the_rewind_popover_offers_exactly_the_harness_rewind_modes(cx: &mut TestAppContext) {
+        use agent::{ProviderKind, RewindMode};
+        use gpui::{Modifiers, VisualTestContext, px, size};
+
+        const ALL: [RewindMode; 3] = [
+            RewindMode::FilesAndConversation,
+            RewindMode::Conversation,
+            RewindMode::Files,
+        ];
+        for (provider, turn, offered) in [
+            (ProviderKind::ClaudeCode, 0, &[RewindMode::Files][..]),
+            (ProviderKind::ClaudeCode, 1, &ALL[..]),
+            (
+                ProviderKind::OpenCode,
+                0,
+                &[RewindMode::FilesAndConversation, RewindMode::Conversation][..],
+            ),
+            (
+                ProviderKind::OpenCode,
+                1,
+                &[RewindMode::FilesAndConversation, RewindMode::Conversation][..],
+            ),
+        ] {
+            let mut timeline = Timeline::default();
+            timeline.turns = (0..2)
+                .map(|index| TurnMeta {
+                    provider_checkpoint_id: Some(format!("msg_checkpoint_{index}")),
+                    ..TurnMeta::default()
+                })
+                .collect();
+            timeline.entries.extend([
+                at_turn(entry("user-0", user_item("first")), 0),
+                at_turn(entry("assistant-0", assistant("One.")), 0),
+                at_turn(entry("user-1", user_item("second")), 1),
+                at_turn(entry("assistant-1", assistant("Two.")), 1),
+            ]);
+            let (workspace_store, window_state, _, _driver) =
+                seed_chat_with_history_on(cx, timeline, false, Some(provider));
+            let (_view, window) = cx.add_window_view(|window, cx| {
+                ChatView::new(workspace_store, window_state, window, cx)
+            });
+            let window: &mut VisualTestContext = window;
+            window.simulate_resize(size(px(1_024.), px(700.)));
+            window.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            // The bubble's actions show while the pointer is over it.
+            let bubble = window
+                .debug_bounds(["user-bubble-user-0", "user-bubble-user-1"][turn])
+                .expect("the user bubble is drawn");
+            window.simulate_mouse_move(bubble.center(), None, Modifiers::default());
+            window.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let trigger = window
+                .debug_bounds(["rewind-0", "rewind-1"][turn])
+                .unwrap_or_else(|| panic!("{provider:?} turn {turn} has a rewind button"));
+            window.simulate_click(trigger.center(), Modifiers::default());
+            window.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let shown: Vec<RewindMode> = ALL
+                .into_iter()
+                .filter(|mode| {
+                    window
+                        .debug_bounds(match mode {
+                            RewindMode::FilesAndConversation => {
+                                "rewind-option-FilesAndConversation"
+                            }
+                            RewindMode::Conversation => "rewind-option-Conversation",
+                            RewindMode::Files => "rewind-option-Files",
+                        })
+                        .is_some()
+                })
+                .collect();
+            assert_eq!(shown, offered, "{provider:?} turn {turn}");
+        }
     }
 
     #[gpui::test]
@@ -8910,6 +8977,16 @@ This begins after the hard break."#;
         timeline: Timeline,
         paged: bool,
     ) -> (tcode_runtime::pipe::SpawnedHost, String, Timeline) {
+        seeded_chat_host_on(cx, timeline, paged, None)
+    }
+
+    /// A host holding one thread with `timeline`, on `provider` when given.
+    fn seeded_chat_host_on(
+        cx: &mut TestAppContext,
+        timeline: Timeline,
+        paged: bool,
+        provider: Option<agent::ProviderKind>,
+    ) -> (tcode_runtime::pipe::SpawnedHost, String, Timeline) {
         use tcode_runtime::pipe::{HostServices, spawn_host};
         use tcode_services::store::SessionStore;
 
@@ -8937,6 +9014,9 @@ This begins after the hard break."#;
                 let active = state.residents.live.get_mut(&id).expect("selected draft");
                 active.timeline = timeline;
                 active.draft = false;
+                if let Some(provider) = provider {
+                    active.meta.provider = provider;
+                }
                 let result = (active.meta.id.clone(), active.timeline.clone());
                 let meta = active.meta.clone();
                 state.sessions.push(meta);
@@ -8956,7 +9036,21 @@ This begins after the hard break."#;
         String,
         crate::store::tests::LocalHostDriver,
     ) {
-        let (host, session_id, timeline) = seeded_chat_host(cx, timeline, paged);
+        seed_chat_with_history_on(cx, timeline, paged, None)
+    }
+
+    fn seed_chat_with_history_on(
+        cx: &mut TestAppContext,
+        timeline: Timeline,
+        paged: bool,
+        provider: Option<agent::ProviderKind>,
+    ) -> (
+        Entity<WorkspaceStore>,
+        Entity<WindowState>,
+        String,
+        crate::store::tests::LocalHostDriver,
+    ) {
+        let (host, session_id, timeline) = seeded_chat_host_on(cx, timeline, paged, provider);
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let workspace_store = cx.new(|cx| {
             WorkspaceStore::new_attached(
