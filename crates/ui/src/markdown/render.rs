@@ -1247,6 +1247,12 @@ fn render_list_item(
         };
         match child {
             BlockNode::Paragraph(_) if ix == 0 => {
+                // The marker shows with the item's first character.
+                let marker_opacity = {
+                    let origin = RunOrigin::new(super::selection::render_path(&child_options.path));
+                    let fades = state.read(cx).fades(&origin, 1);
+                    super::stream_fade::surround_opacity(&fades, 1)
+                };
                 let content = div().flex_1().min_w_0().child(render_block(
                     child,
                     child_options,
@@ -1265,16 +1271,19 @@ fn render_list_item(
                         .min_w_0()
                         .items_start()
                         .when(checked.is_none(), |this| {
-                            this.child(list_item_prefix(
-                                item_ix,
-                                options.ordered,
-                                options.list_start,
-                                options.depth,
+                            this.child(div().flex_none().opacity(marker_opacity).child(
+                                list_item_prefix(
+                                    item_ix,
+                                    options.ordered,
+                                    options.list_start,
+                                    options.depth,
+                                ),
                             ))
                         })
                         .when_some(*checked, |this, checked| {
                             this.child(
                                 div()
+                                    .opacity(marker_opacity)
                                     .mt(rems(0.35))
                                     .mr_1p5()
                                     .size(rems(0.875))

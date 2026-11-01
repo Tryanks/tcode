@@ -211,9 +211,21 @@ impl Element for Inline {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let text_style = window.text_style();
+        let fades = self
+            .origin
+            .as_ref()
+            .map(|origin| self.view.read(cx).fades(origin, self.text.len()))
+            .unwrap_or_default();
+        let faded;
+        let highlights = if fades.is_empty() {
+            &self.highlights
+        } else {
+            faded = super::stream_fade::fade_highlights(&self.highlights, &fades);
+            &faded
+        };
         let mut runs = Vec::new();
         let mut ix = 0;
-        for (range, highlight) in &self.highlights {
+        for (range, highlight) in highlights {
             if ix < range.start {
                 runs.push(text_style.clone().to_run(range.start - ix));
             }

@@ -189,8 +189,13 @@ pub(crate) fn reserve_action_row(
 mod tests {
     use super::MdState;
     use crate::chat::model::plain_text_as_markdown;
-    use crate::markdown::MarkdownState;
-    use gpui::{AppContext as _, Entity, TestAppContext};
+    use crate::markdown::{FADE, MarkdownState, MarkdownView};
+    use crate::test_frames::{draw, draw_settled};
+    use crate::theme::ActiveTheme as _;
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, px,
+    };
 
     fn rendered(state: &Entity<MarkdownState>, cx: &mut TestAppContext) -> String {
         state.read_with(cx, |state, _| state.rendered_text())
@@ -254,6 +259,162 @@ mod tests {
             cx.update(|cx| md.sync(text.into(), cx));
             assert_eq!(md.synced.as_ref(), text);
             assert_eq!(rendered(&md.state, cx), expected);
+        }
+    }
+
+    /// A message as the timeline draws it: its state's view in a column.
+    struct Message(Entity<MarkdownState>);
+
+    impl Render for Message {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(640.))
+                .child(MarkdownView::new(&self.0).selectable(true))
+        }
+    }
+
+    fn open<'a>(md: &MdState, cx: &'a mut TestAppContext) -> &'a mut VisualTestContext {
+        let state = md.state.clone();
+        let (_, cx) = cx.add_window_view(|_, _| Message(state));
+        draw_settled(cx);
+        cx
+    }
+
+    fn init(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+    }
+
+    /// The alpha of each underline and strikethrough painted last frame on
+    /// a one-line message, left to right.
+    fn decoration_alphas(cx: &mut VisualTestContext) -> Vec<f32> {
+        let mut lines = cx.update(|window, _| window.painted_underlines());
+        lines.sort_by(|a, b| a.bounds.origin.x.0.total_cmp(&b.bounds.origin.x.0));
+        lines.iter().map(|line| line.color.a).collect()
+    }
+
+    /// The alpha of each inline code background painted last frame.
+    fn chip_alphas(cx: &mut VisualTestContext) -> Vec<f32> {
+        cx.update(|window, cx| {
+            let muted = cx.theme().tokens.colors.muted;
+            window
+                .painted_quads()
+                .iter()
+                .filter_map(|quad| quad.background.as_solid())
+                .filter(|color| color.h == muted.h && color.s == muted.s && color.l == muted.l)
+                .map(|color| color.a)
+                .collect()
+        })
+    }
+
+    fn frames_requested(cx: &mut VisualTestContext) -> usize {
+        cx.update(|window, cx| window.simulate_next_frame(cx))
+    }
+
+    /// While a message streams, the text a delta adds fades in -- and an
+    /// inline code chip with it -- while the text already shown stays as it
+    /// was; once the fade has played the window asks for no more frames.
+    #[gpui::test]
+    fn streamed_text_fades_in_where_it_is_new(cx: &mut TestAppContext) {
+        init(cx);
+        let mut md = cx.update(|cx| MdState::new("Read [the docs](https://a.example)", cx));
+        let cx = open(&md, cx);
+        let link = decoration_alphas(cx);
+        assert_eq!(link.len(), 1, "the link's underline");
+        let chip = cx.update(|_, cx| cx.theme().tokens.colors.muted.a);
+
+        cx.update(|_, cx| {
+            md.sync(
+                "Read [the docs](https://a.example), then run `cargo test`".into(),
+                cx,
+            )
+        });
+        draw(cx);
+        assert!(frames_requested(cx) > 0, "a fade asks for frames");
+        cx.executor().advance_clock(FADE / 2);
+        draw(cx);
+        assert_eq!(decoration_alphas(cx), link, "the shown link faded again");
+        let fading = chip_alphas(cx);
+        assert!(
+            !fading.is_empty() && fading.iter().all(|alpha| *alpha > 0. && *alpha < chip),
+            "the new chip fades in with its text: {fading:?} of {chip}"
+        );
+
+        cx.executor().advance_clock(FADE);
+        draw_settled(cx);
+        assert!(chip_alphas(cx).iter().all(|alpha| *alpha == chip));
+        draw(cx);
+        assert_eq!(frames_requested(cx), 0, "a played fade asks for frames");
+    }
+
+    /// Markup a delta completes is painted anew from where its rendered text
+    /// changed: `~~bo` becoming `~~bold~~` fades the struck word in, and
+    /// leaves the text before it as it was.
+    #[gpui::test]
+    fn completed_markup_fades_only_the_glyphs_it_changed(cx: &mut TestAppContext) {
+        init(cx);
+        let mut md = cx.update(|cx| MdState::new("[seen](https://a.example) ~~bo", cx));
+        let cx = open(&md, cx);
+        let link = decoration_alphas(cx);
+        assert_eq!(link.len(), 1, "the link's underline");
+
+        cx.update(|_, cx| md.sync("[seen](https://a.example) ~~bold~~".into(), cx));
+        draw(cx);
+        cx.executor().advance_clock(FADE / 2);
+        draw(cx);
+        let painted = decoration_alphas(cx);
+        assert_eq!(painted.len(), 2, "the underline and the strikethrough");
+        assert_eq!(painted[0], link[0], "the shown link faded again");
+        assert!(
+            painted[1] > 0. && painted[1] < link[0],
+            "the struck word fades in: {painted:?}"
+        );
+    }
+
+    /// Text the reader did not watch arrive is shown at once, even while
+    /// earlier text still fades: what a document holds when it is first
+    /// drawn, a rewrite, a burst larger than a stream delivers, and anything
+    /// under reduced motion.
+    #[gpui::test]
+    fn text_not_watched_arriving_appears_at_once(cx: &mut TestAppContext) {
+        init(cx);
+        let link = "[docs](https://a.example)";
+        let burst = "A paragraph that arrived whole. ".repeat(20);
+        let cases = [
+            ("synced before it was drawn", format!("Read on: {link}")),
+            ("rewritten", format!("Final {link}")),
+            ("a burst", format!("Read on: {burst}{link}")),
+            ("reduced motion", format!("Read on: {link}")),
+        ];
+        for (case, text) in cases {
+            let mut md = cx.update(|cx| MdState::new("Read", cx));
+            let drawn_first = case != "synced before it was drawn";
+            if !drawn_first {
+                cx.update(|cx| md.sync(text.clone(), cx));
+            }
+            let state = md.state.clone();
+            let (_, window) = cx.add_window_view(|_, _| Message(state));
+            draw(window);
+            if drawn_first {
+                draw_settled(window);
+                window.update(|_, cx| md.sync("Read on:".into(), cx));
+                draw(window);
+                assert!(frames_requested(window) > 0, "{case}: the delta fades");
+            }
+            let reduce = case == "reduced motion";
+            if reduce {
+                window.update(|_, cx| cx.set_reduce_motion(true));
+                draw(window);
+                frames_requested(window);
+            }
+            window.update(|_, cx| md.sync(text.clone(), cx));
+            draw(window);
+            let rest = window.update(|_, cx| cx.theme().link.a);
+            assert_eq!(decoration_alphas(window), [rest], "{case}");
+            if reduce {
+                assert_eq!(frames_requested(window), 0, "{case}");
+            }
+            window.update(|_, cx| cx.set_reduce_motion(false));
         }
     }
 }
