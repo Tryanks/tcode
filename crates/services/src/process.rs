@@ -72,3 +72,50 @@ pub fn hide_console(_cmd: &mut std::process::Command) {}
 pub fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::process::Command {
     smol::process::Command::from(command(program))
 }
+
+/// Raise this process's soft limit on open files to its hard limit; children
+/// inherit it.
+///
+/// A host holds several descriptors per provider session (stdio pipes and the
+/// loopback MCP connections), and a Finder/Dock launch inherits launchd's soft
+/// limit of 256, which a few dozen sessions exhaust; every later open in the
+/// process then fails with `EMFILE`.
+#[cfg(unix)]
+pub fn raise_open_file_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a valid, writable `rlimit`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        log::warn!(
+            "could not read the open-file limit: {}",
+            std::io::Error::last_os_error()
+        );
+        return;
+    }
+    // macOS rejects a soft limit above OPEN_MAX (<sys/syslimits.h>) even when
+    // the hard limit is unlimited; setrlimit(2) prescribes min(OPEN_MAX, max).
+    #[cfg(target_vendor = "apple")]
+    let target = limit.rlim_max.min(10240);
+    #[cfg(not(target_vendor = "apple"))]
+    let target = limit.rlim_max;
+    if target <= limit.rlim_cur {
+        return;
+    }
+    let raised = libc::rlimit {
+        rlim_cur: target,
+        rlim_max: limit.rlim_max,
+    };
+    // SAFETY: `raised` is a valid `rlimit` that does not exceed the hard limit.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } != 0 {
+        log::warn!(
+            "could not raise the open-file limit from {} to {target}: {}",
+            limit.rlim_cur,
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+pub fn raise_open_file_limit() {}
