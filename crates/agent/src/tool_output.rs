@@ -17,7 +17,7 @@ pub struct ToolOutput {
 impl ToolOutput {
     /// A result's content blocks — MCP `CallToolResult` (or its `content`),
     /// Claude `tool_result.content`, Codex `contentItems` and rollout output
-    /// arrays, pi and ACP content — as text and images. Text parts are joined
+    /// arrays, pi and ACP content, OpenCode tool content — as text and images. Text parts are joined
     /// by newlines; a block that is neither text nor an inline image (a
     /// resource, a tool reference) stays in the text as its JSON.
     pub fn from_content(content: &Value) -> Self {
@@ -111,6 +111,8 @@ fn block_part(block: &Value) -> Part {
         Some("inputImage") => text("imageUrl")
             .and_then(|url| data_url(&url))
             .map(Part::Image),
+        // OpenCode's file part; one that is not an image stays a block.
+        Some("file") => text("uri").and_then(|uri| data_url(&uri)).map(Part::Image),
         Some("image") => {
             let source = block.get("source").unwrap_or(block);
             let declared = source

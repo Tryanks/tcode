@@ -21,7 +21,6 @@ mod claude_manifest;
 #[cfg(feature = "process")]
 mod claude_plugins;
 pub mod context_window;
-mod image_reads;
 #[cfg(not(feature = "process"))]
 pub mod claude {
     pub use crate::claude_context::*;
