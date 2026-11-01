@@ -646,6 +646,7 @@ impl Render for ChatView {
                 });
                 let painted = this.painted_rows.clone();
                 v_flex()
+                    .id(("timeline-row", row.identity))
                     .debug_selector(move || format!("timeline-row-{index}"))
                     .on_prepaint(move |_, _, _| {
                         painted.set(Some(
