@@ -545,4 +545,71 @@ mod tests {
             );
         }
     }
+
+    /// A command's half-second is its own thread's: a collapse pending for a
+    /// command in the thread the pane leaves neither closes nor shortens a
+    /// command of the same id in the thread it binds to.
+    #[gpui::test]
+    fn a_pending_collapse_stays_with_its_thread(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let running = |commands: &[&str]| {
+            let mut timeline = Timeline::default();
+            timeline.turns = vec![TurnMeta {
+                running: true,
+                ..TurnMeta::default()
+            }];
+            timeline.entries = vec![entry("user", user_item("go"))];
+            timeline
+                .entries
+                .extend(commands.iter().map(|id| command_with_output(id)));
+            timeline
+        };
+        let mut threads = seed_two_threads(cx, running(&["shared"]));
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let store = threads.store.clone();
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(900.)));
+        let show = |thread: &str, commands: &[&str], cx: &mut VisualTestContext| {
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(thread.to_string(), running(commands), cx);
+                cx.notify();
+            });
+            draw_settled(cx);
+        };
+        let wait = |duration: u64, cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(duration));
+            draw_settled(cx);
+        };
+        let (first, second) = (threads.first.clone(), threads.second.clone());
+
+        // The first thread's command is superseded: it folds in half a second.
+        draw_settled(cx);
+        show(&first, &["shared", "newer"], cx);
+        assert!(command_open(cx, "shared").is_some());
+
+        // The pane moves to the second thread before it does, and a command
+        // of the same id starts there later.
+        threads.bind(&view, &second, running(&[]), cx);
+        draw_settled(cx);
+        wait(300, cx);
+        show(&second, &["shared"], cx);
+        assert!(command_open(cx, "shared").is_some());
+        wait(100, cx);
+        show(&second, &["shared", "next"], cx);
+        wait(200, cx);
+        assert!(
+            command_open(cx, "shared").is_some(),
+            "the first thread's collapse ran out the second thread's command"
+        );
+        wait(400, cx);
+        assert!(
+            command_open(cx, "shared").is_none(),
+            "the second thread's command stayed past its own minimum"
+        );
+        threads.shutdown(cx);
+    }
 }
