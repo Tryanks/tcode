@@ -821,3 +821,28 @@ fn a_plan_written_as_a_call_reads_as_a_checklist(cx: &mut TestAppContext) {
     }
     thread.shutdown(cx);
 }
+
+/// A subagent keeps its pill, in the shared grammar: interrupted says so
+/// in words, beside an agent that completed and one Codex left running no
+/// longer.
+#[gpui::test]
+fn a_subagent_keeps_its_pill_and_says_how_it_stands(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/subagent.jsonl"), 1_024.);
+    let claude = "toolu_01N5qbJptVEf5KH4yk3fYa9N";
+    let codex = "call_vmWu7cCLM2uUfy2hX4GQhU9Y";
+    let interrupted = "call_fCcc53Gl87IKZZRYJZKIisUT";
+    thread.open_work_log(claude, cx);
+    for id in [claude, codex, interrupted] {
+        assert!(shows(cx, &format!("subagent-{id}")), "{id}");
+    }
+    assert!(shows(cx, &format!("tool-status-chip-{interrupted}")));
+    for settled in [claude, codex] {
+        assert!(
+            !shows(cx, &format!("tool-status-chip-{settled}")),
+            "{settled}"
+        );
+    }
+    thread.shutdown(cx);
+}

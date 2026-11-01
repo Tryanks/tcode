@@ -2,7 +2,6 @@ use crate::icon::{Icon, IconName};
 use crate::material::semantic_chip;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
-use crate::widgets::spinner::Spinner;
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
@@ -58,31 +57,24 @@ pub(crate) fn subagent_row(
     )
     .into_owned();
     let theme = cx.theme();
-    let lifecycle: AnyElement = match status {
-        ItemStatus::InProgress => Spinner::new().color(theme.primary).into_any_element(),
-        ItemStatus::Completed => semantic_chip(
-            crate::tr!("chat.subagent_completed"),
-            theme.success.opacity(0.12),
-            theme.success,
-            cx,
-        )
-        .into_any_element(),
-        ItemStatus::Interrupted => semantic_chip(
-            crate::tr!("chat.subagent_interrupted"),
-            theme.warning.opacity(0.12),
-            theme.warning,
-            cx,
-        )
-        .into_any_element(),
-        ItemStatus::Failed | ItemStatus::Declined => semantic_chip(
-            crate::tr!("chat.subagent_failed"),
-            theme.danger.opacity(0.12),
-            theme.danger,
-            cx,
-        )
-        .into_any_element(),
-    };
+    // The shared header grammar inside the agent's own pill: what it does,
+    // the agent, how it stands, how long it took.
+    let glyph = crate::chat::tools::window::status_glyph(
+        &entry.id,
+        crate::icon::IconNamed::path(IconName::Bot),
+        *status,
+        cx,
+    );
+    let verb = crate::chat::tools::window::Verb("agent").text(*status);
+    let status_chip = crate::chat::tools::window::status_chip(&entry.id, *status, cx);
+    let elapsed = crate::chat::tools::window::elapsed_of(entry)
+        .filter(|elapsed| *elapsed >= 100)
+        .map(super::super::model::format_elapsed_deciseconds);
     let row = h_flex()
+        .debug_selector({
+            let id = entry.id.clone();
+            move || format!("subagent-{id}")
+        })
         .w_full()
         .h(px(crate::material::TOUCH_TARGET))
         .min_w_0()
@@ -94,7 +86,8 @@ pub(crate) fn subagent_row(
         .border_color(cx.theme().border)
         .bg(crate::material::content_surface(cx))
         .text_body(false, cx)
-        .child(lifecycle)
+        .child(glyph)
+        .child(div().flex_none().font_medium().child(verb))
         .child(div().flex_none().font_medium().child(agent_type.clone()))
         .when_some(model_chip(model, effort), |row, chip| {
             row.child(
@@ -119,10 +112,17 @@ pub(crate) fn subagent_row(
                         .min_w_0()
                         .overflow_hidden()
                         .text_meta_mono(false, cx)
+                        .when(*status == ItemStatus::Failed, |summary| {
+                            summary.text_color(theme.danger)
+                        })
                         .child(crate::widgets::fade_text(one_line(summary))),
                 )
             },
-        );
+        )
+        .children(status_chip)
+        .when_some(elapsed, |row, elapsed| {
+            row.child(div().flex_none().text_meta_mono(false, cx).child(elapsed))
+        });
 
     let Some(on_open) = on_open else {
         return row.into_any_element();
