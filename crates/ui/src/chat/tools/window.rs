@@ -456,8 +456,10 @@ fn header_row(
                     )
                     .when_some(detail, |row, detail| {
                         row.child(
+                            // Where it looked, or which lines: short, so the
+                            // argument gives way first.
                             div()
-                                .min_w_0()
+                                .flex_none()
                                 .max_w(px(320.))
                                 .text_secondary(false, cx)
                                 .text_color(muted.opacity(0.75))
