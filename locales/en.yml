@@ -2700,3 +2700,7 @@ tools:
   more_results: "+%{count} more"
   copy_pattern: "Copy pattern"
   copy_results: "Copy results"
+  prompt: "Prompt"
+  links: "%{count} links"
+  copy_url: "Copy URL"
+  copy_query: "Copy query"

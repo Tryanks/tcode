@@ -15,6 +15,7 @@ pub(in crate::chat) mod generic;
 pub(in crate::chat) mod read;
 pub(in crate::chat) mod search;
 pub(in crate::chat) mod shell;
+pub(in crate::chat) mod web;
 pub(in crate::chat) mod window;
 
 use std::path::Path;
@@ -109,7 +110,12 @@ type Matcher = for<'a> fn(&Call<'a>) -> Option<Box<dyn ToolView + 'a>>;
 
 /// Every family that claims calls by name and shape, in the order they are
 /// asked. The generic window takes whatever none accepts.
-const FAMILIES: &[Matcher] = &[shell::tool_call, read::tool_call, search::tool_call];
+const FAMILIES: &[Matcher] = &[
+    shell::tool_call,
+    read::tool_call,
+    search::tool_call,
+    web::tool_call,
+];
 
 pub(in crate::chat) fn view<'a>(call: &Call<'a>) -> Box<dyn ToolView + 'a> {
     FAMILIES
@@ -201,11 +207,7 @@ pub(in crate::chat) fn activity(
         ItemContent::WebSearch { query } => {
             let mut items = Vec::new();
             copy(&mut items, "chat.copy_text", query);
-            settled(
-                Header::new(crate::icon::IconName::Globe, window::Verb("search_web"))
-                    .argument(window::Argument::plain(super::model::one_line(query))),
-                items,
-            )
+            settled(web::search_item_header(query), items)
         }
         ItemContent::Other {
             provider_kind,
