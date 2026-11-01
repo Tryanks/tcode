@@ -739,6 +739,7 @@ fn entry(id: &str, content: ItemContent) -> TimelineEntry {
         id: id.into(),
         content: EntryContent::Item(content),
         ts: None,
+        finished_ts: None,
         turn: 0,
     }
 }

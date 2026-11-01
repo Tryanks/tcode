@@ -232,6 +232,10 @@ pub struct TimelineEntry {
     pub content: EntryContent,
     /// Wall-clock time (unix ms) this entry was first observed, if known.
     pub ts: Option<u64>,
+    /// Wall-clock time (unix ms) the item completed, when its entry was
+    /// observed before then: an item that arrives already complete took no
+    /// time anyone saw.
+    pub finished_ts: Option<u64>,
     /// Index into [`Timeline::turns`] of the turn this entry belongs to.
     pub turn: usize,
 }
@@ -794,6 +798,7 @@ impl Timeline {
                         moved_from: moved_from.clone(),
                     },
                     ts,
+                    finished_ts: None,
                     turn,
                 }));
             }
@@ -830,6 +835,7 @@ impl Timeline {
                             reason: reason.clone(),
                         },
                         ts,
+                        finished_ts: None,
                         turn,
                     }));
                 }
@@ -962,7 +968,14 @@ impl Timeline {
                 self.track_tool_item(ts, item, ToolLifecycle::Updated);
             }
             AgentEvent::ItemCompleted(item) => {
+                let observed = self.first_entry(&item.id).is_some();
                 self.upsert_item(ts, item);
+                if observed
+                    && item.parent_item_id.is_none()
+                    && let Some(position) = self.first_entry(&item.id)
+                {
+                    Arc::make_mut(&mut self.entries[position]).finished_ts = ts;
+                }
                 self.track_tool_item(ts, item, ToolLifecycle::Completed);
                 if matches!(
                     &item.content,
@@ -1008,6 +1021,7 @@ impl Timeline {
                         id,
                         content: EntryContent::Feedback { text: text.clone() },
                         ts,
+                        finished_ts: None,
                         turn,
                     }));
                 }
@@ -1057,6 +1071,7 @@ impl Timeline {
                         error: error.clone(),
                     },
                     ts,
+                    finished_ts: None,
                     turn,
                 }));
             }
@@ -1070,6 +1085,7 @@ impl Timeline {
                         limit_resets_at: None,
                     },
                     ts,
+                    finished_ts: None,
                     turn,
                 }));
             }
@@ -1093,6 +1109,7 @@ impl Timeline {
                         limit_resets_at: Some(*resets_at),
                     },
                     ts: entry.ts,
+                    finished_ts: None,
                     turn: entry.turn,
                 });
             }
@@ -1112,6 +1129,7 @@ impl Timeline {
                             limit_resets_at: None,
                         },
                         ts,
+                        finished_ts: None,
                         turn,
                     }));
                 }
@@ -1151,6 +1169,7 @@ impl Timeline {
                     id,
                     content: EntryContent::ControlAction(action.clone()),
                     ts,
+                    finished_ts: None,
                     turn,
                 }));
             }
@@ -1177,6 +1196,7 @@ impl Timeline {
                     id,
                     content: EntryContent::ContextCompacted(compaction.clone()),
                     ts,
+                    finished_ts: None,
                     turn,
                 }));
             }
@@ -1187,6 +1207,7 @@ impl Timeline {
                     id,
                     content: EntryContent::ContextWindowChanged { window: *window },
                     ts,
+                    finished_ts: None,
                     turn,
                 }));
             }
@@ -1366,6 +1387,7 @@ impl Timeline {
                 id: item.id.clone(),
                 content: incoming,
                 ts,
+                finished_ts: None,
                 turn,
             }));
         }
@@ -1391,6 +1413,7 @@ impl Timeline {
                 attachments: attachments.to_vec(),
             },
             ts,
+            finished_ts: None,
             turn,
         }));
     }
@@ -1499,6 +1522,7 @@ impl Timeline {
             id: item_id.to_string(),
             content,
             ts,
+            finished_ts: None,
             turn,
         }));
     }
@@ -1647,6 +1671,54 @@ mod tests {
     use super::*;
     use agent::{ApprovalDecision, ApprovalKind, FileChangeKind, RewindMode};
     use serde_json::json;
+
+    /// A tool window says how long its call took: the time between the
+    /// item's start and its completion, and nothing for an item that only
+    /// ever arrived complete (an import, a provider that reports results
+    /// alone).
+    #[test]
+    fn an_item_seen_starting_keeps_when_it_finished() {
+        let read = |id: &str, status| ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::ToolCall {
+                image_reads: Vec::new(),
+                name: "Read".into(),
+                input: json!({ "file_path": "src/lib.rs" }),
+                output: (status == ItemStatus::Completed).then(|| "1\tfn main() {}".into()),
+                status,
+            },
+        };
+        let timeline = Timeline::fold_events([
+            StoredEvent::from(AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            }),
+            StoredEvent {
+                ts: Some(1_000),
+                ..AgentEvent::ItemStarted(read("seen", ItemStatus::InProgress)).into()
+            },
+            StoredEvent {
+                ts: Some(3_400),
+                ..AgentEvent::ItemCompleted(read("seen", ItemStatus::Completed)).into()
+            },
+            StoredEvent {
+                ts: Some(5_000),
+                ..AgentEvent::ItemCompleted(read("whole", ItemStatus::Completed)).into()
+            },
+        ]);
+        let times = timeline
+            .entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.ts, entry.finished_ts))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            times,
+            [
+                ("seen", Some(1_000), Some(3_400)),
+                ("whole", Some(5_000), None)
+            ]
+        );
+    }
 
     #[test]
     fn a_plan_streams_into_one_entry_and_feedback_on_it_reads_as_the_users_words() {
