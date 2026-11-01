@@ -1462,3 +1462,65 @@ fn legacy_codex_file_contents_replay_as_patches_without_rewriting_history() {
         patch(&records[0].event)
     );
 }
+
+/// Tool calls recorded before every adapter kept results canonical, as
+/// tcode.db holds them (images swapped for 1x1 pictures): a Codex MCP result,
+/// a Claude image read whose image is also inlined in the text, a connector
+/// whose payload is only structured, and a Codex rollout import. They read
+/// back as text and images; text in no provider shape is left alone.
+#[test]
+fn tool_output_recorded_in_provider_shapes_reads_back_canonical() {
+    const LOG: &str = include_str!("fixtures/legacy-tool-output.jsonl");
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    meta.id = "legacy".into();
+    store.upsert_meta(&meta).unwrap();
+    store
+        .apply(&[Mutation::replace_event_log("legacy", LOG.into())])
+        .unwrap();
+    let calls: Vec<_> = store
+        .read_log("legacy")
+        .unwrap()
+        .records
+        .into_iter()
+        .map(|record| match record.event {
+            AgentEvent::ItemCompleted(agent::ThreadItem {
+                content:
+                    agent::ItemContent::ToolCall {
+                        output,
+                        image_reads,
+                        ..
+                    },
+                ..
+            }) => (
+                output.unwrap(),
+                image_reads
+                    .into_iter()
+                    .map(|image| image.media_type)
+                    .collect::<Vec<_>>(),
+            ),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let tree = "The following is a diff from the previous accessibility tree for Window: \"\" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.\nRemoved element IDs: 1-30\n+41 window Secondary Actions: Raise\nThe focused UI element is 41 window Secondary Actions: Raise";
+    assert_eq!(
+        calls,
+        [
+            (tree.to_owned(), vec!["image/jpeg".to_owned()]),
+            (String::new(), vec!["image/png".to_owned()]),
+            (
+                "Action completed.\n{\"repositories\":[]}".to_owned(),
+                vec![]
+            ),
+            (
+                format!("Wall time: 0.4182 seconds\nOutput:\n{tree}"),
+                vec!["image/jpeg".to_owned()]
+            ),
+            (
+                "{\"type\":\"tool_reference\",\"tool_name\":\"Monitor\"}".to_owned(),
+                vec![]
+            ),
+        ]
+    );
+}
