@@ -290,9 +290,7 @@ fn patch_files(text: &str) -> Option<Vec<(FileChange, bool)>> {
                 files[index].0.kind = FileChangeKind::Rename;
                 moves.push((index, path.trim().to_owned()));
             }
-        } else if line.starts_with("@@") {
-            flush(&mut files, &mut hunk);
-        } else if line.starts_with("***") {
+        } else if line.starts_with("@@") || line.starts_with("***") {
             flush(&mut files, &mut hunk);
         } else if !files.is_empty() {
             hunk.push(line);

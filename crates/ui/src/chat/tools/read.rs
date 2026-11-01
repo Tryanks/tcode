@@ -127,7 +127,7 @@ impl Read<'_> {
             if content.numbered
                 && let Some(first) = numbers.next()
             {
-                return Some(range(first, numbers.last().unwrap_or(first)));
+                return Some(range(first, numbers.next_back().unwrap_or(first)));
             }
         }
         let first = self.input.offset?.max(1);

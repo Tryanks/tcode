@@ -369,14 +369,14 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
+/// An edited file's window as its header reads: verb, path, line counts,
+/// and whether its diff is numbered.
+type FileRead = (String, String, Option<(u32, u32)>, bool);
+
 impl StoredThread {
     /// The windows of the edit `id` made, one per file, as their headers
-    /// read: verb, path, line counts, and whether the diff is numbered.
-    pub(in crate::chat) fn files(
-        &self,
-        id: &str,
-        cx: &mut VisualTestContext,
-    ) -> Vec<(String, String, Option<(u32, u32)>, bool)> {
+    /// read.
+    pub(in crate::chat) fn files(&self, id: &str, cx: &mut VisualTestContext) -> Vec<FileRead> {
         let entry = self.entry(id, cx);
         let cwd = std::path::PathBuf::from("/Users/me/project");
         let edit = super::diff::edit(&entry, &cwd).expect("an edit");
