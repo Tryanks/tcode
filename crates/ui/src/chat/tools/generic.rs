@@ -48,7 +48,7 @@ impl Generic {
 }
 
 impl ToolView for Generic {
-    fn header(&self, call: &Call<'_>) -> Header {
+    fn header(&self, call: &Call<'_>, _cwd: &std::path::Path) -> Header {
         let subject = match call.name.server {
             Some(server) => format!("{server} · {}", call.name.tool),
             None => call.name.tool.to_owned(),

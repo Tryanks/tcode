@@ -92,6 +92,10 @@ pub(crate) fn item_tile(
         title.clone(),
         cx,
     )
+    .debug_selector({
+        let selector = format!("image-read-{}-{index}", entry.id);
+        move || selector.clone()
+    })
     .on_click(move |_, window, cx| {
         crate::image_viewer::open(
             crate::image_viewer::ViewerSource::original(source.clone(), viewer_preview.clone()),
