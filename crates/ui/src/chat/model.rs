@@ -1021,6 +1021,7 @@ pub(in crate::chat) mod tests {
             id: id.to_string(),
             content,
             ts: None,
+            finished_ts: None,
             turn: 0,
         })
     }
