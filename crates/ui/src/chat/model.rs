@@ -300,38 +300,26 @@ pub(crate) fn live_activity_segment(segments: &[Segment<'_>], turn_running: bool
 pub(crate) struct WorkLogCounts {
     pub(crate) commands: usize,
     pub(crate) files: usize,
+    pub(crate) reads: usize,
+    pub(crate) searches: usize,
     pub(crate) tools: usize,
     pub(crate) subagents: usize,
 }
 
+/// What a run of activities did, each counted by the window it shows as.
 pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
+    use super::tools::Family;
     let mut counts = WorkLogCounts::default();
     let mut files = HashSet::new();
-
     for entry in entries {
-        match &entry.content {
-            EntryContent::Item(ItemContent::CommandExecution { .. }) => counts.commands += 1,
-            EntryContent::Item(ItemContent::FileChange { changes, .. }) => {
-                files.extend(changes.iter().map(|change| change.path.as_str()));
-            }
-            EntryContent::Item(ItemContent::ToolCall { .. })
-            | EntryContent::Item(ItemContent::WebSearch { .. })
-            | EntryContent::Item(ItemContent::ImageRead { .. })
-            | EntryContent::Item(ItemContent::Other { .. }) => counts.tools += 1,
-            EntryContent::Item(ItemContent::Subagent { .. }) => counts.subagents += 1,
-            EntryContent::ContextCompacted(_)
-            | EntryContent::ContextWindowChanged { .. }
-            | EntryContent::ControlAction(_)
-            | EntryContent::Steer { .. }
-            | EntryContent::Feedback { .. }
-            | EntryContent::Item(ItemContent::UserMessage { .. })
-            | EntryContent::Item(ItemContent::AssistantMessage { .. })
-            | EntryContent::Item(ItemContent::Plan { .. })
-            | EntryContent::Item(ItemContent::Reasoning { .. })
-            | EntryContent::Error { .. }
-            | EntryContent::ProviderStartError { .. }
-            | EntryContent::ProviderRelay { .. }
-            | EntryContent::ModelChanged { .. } => {}
+        match super::tools::family(entry) {
+            Some(Family::Command) => counts.commands += 1,
+            Some(Family::Edit(paths)) => files.extend(paths),
+            Some(Family::Read) => counts.reads += 1,
+            Some(Family::Search) => counts.searches += 1,
+            Some(Family::Tool) => counts.tools += 1,
+            Some(Family::Agent) => counts.subagents += 1,
+            None => {}
         }
     }
     counts.files = files.len();
@@ -359,6 +347,20 @@ pub(crate) fn work_log_capsule_label(counts: &WorkLogCounts, activity_count: usi
             crate::tr!("chat.work_log_command_one").into_owned()
         } else {
             crate::tr!("chat.work_log_commands", count = counts.commands).into_owned()
+        });
+    }
+    if counts.reads > 0 {
+        clauses.push(if counts.reads == 1 {
+            crate::tr!("chat.work_log_read_one").into_owned()
+        } else {
+            crate::tr!("chat.work_log_reads", count = counts.reads).into_owned()
+        });
+    }
+    if counts.searches > 0 {
+        clauses.push(if counts.searches == 1 {
+            crate::tr!("chat.work_log_search_one").into_owned()
+        } else {
+            crate::tr!("chat.work_log_searches", count = counts.searches).into_owned()
         });
     }
     if clauses.is_empty() && activity_count > 0 {
@@ -446,61 +448,45 @@ pub(crate) fn one_line_with_break_markers(text: &str) -> (String, Vec<Range<usiz
     (out, markers)
 }
 
-/// Wall-clock duration formatted as "XmYYs" / "YYs".
-pub(crate) fn format_duration(secs: u64) -> String {
-    if secs >= 60 {
+/// A span of time as every timing in the app reads: tenths of a second
+/// under a minute, then minutes and seconds, hours, minutes and seconds,
+/// and past a day, days, hours and minutes, so a long span never grows an
+/// unreadable count of a small unit.
+pub(crate) fn format_elapsed(elapsed_ms: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    let secs = elapsed_ms / 1000;
+    if secs < MINUTE {
+        let tenths = elapsed_ms / 100;
+        crate::tr!(
+            "time.duration_seconds",
+            seconds = format!("{}.{}", tenths / 10, tenths % 10)
+        )
+        .into_owned()
+    } else if secs < HOUR {
         crate::tr!(
             "time.duration_minutes",
-            minutes = secs / 60,
-            seconds = format!("{:02}", secs % 60)
+            minutes = secs / MINUTE,
+            seconds = format!("{:02}", secs % MINUTE)
         )
         .into_owned()
-    } else {
-        crate::tr!("time.duration_seconds", seconds = secs).into_owned()
-    }
-}
-
-pub(crate) fn format_elapsed_deciseconds(elapsed_ms: u64) -> String {
-    let deciseconds = elapsed_ms / 100;
-    let seconds = deciseconds / 10;
-    let tenth = deciseconds % 10;
-    if seconds < 60 {
-        format!("{seconds}.{tenth}s")
-    } else {
-        format!("{}m {}.{tenth}s", seconds / 60, seconds % 60)
-    }
-}
-
-pub(crate) fn format_compact_span(secs: u64) -> String {
-    if secs >= 3600 {
-        format!(
-            "{}h{:02}m{:02}s",
-            secs / 3600,
-            (secs % 3600) / 60,
-            secs % 60
-        )
-    } else if secs >= 60 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
-/// A finished turn's duration. Long turns roll up into hours rather than
-/// growing an unreadable minute count (a full day reads `24h 00m 59s`, not
-/// `1440m 59s`), keeping the seconds because this row reports actual elapsed
-/// time. The live "Working for" indicator keeps [`format_duration`].
-pub(crate) fn format_span(secs: u64) -> String {
-    if secs >= 3600 {
+    } else if secs < DAY {
         crate::tr!(
             "time.duration_hours",
-            hours = secs / 3600,
-            minutes = format!("{:02}", (secs % 3600) / 60),
-            seconds = format!("{:02}", secs % 60)
+            hours = secs / HOUR,
+            minutes = format!("{:02}", (secs % HOUR) / MINUTE),
+            seconds = format!("{:02}", secs % MINUTE)
         )
         .into_owned()
     } else {
-        format_duration(secs)
+        crate::tr!(
+            "time.duration_days",
+            days = secs / DAY,
+            hours = format!("{:02}", (secs % DAY) / HOUR),
+            minutes = format!("{:02}", (secs % HOUR) / MINUTE)
+        )
+        .into_owned()
     }
 }
 
@@ -535,19 +521,18 @@ pub(crate) fn format_cost_usd(cost: f64) -> String {
 pub(crate) fn turn_time_parts(clock: String, timing: Option<TurnTiming>) -> Vec<String> {
     let mut parts = vec![clock];
     if let Some(timing) = timing {
-        parts.push(format_compact_span(timing.total_ms / 1000));
+        parts.push(format_elapsed(timing.total_ms));
     }
     parts
 }
 
 pub(crate) fn turn_time_breakdown(timing: Option<TurnTiming>) -> Option<String> {
     timing.map(|timing| {
-        let total = timing.total_ms / 1000;
-        let tools = (timing.tool_ms / 1000).min(total);
-        let ai = total - tools;
+        let tools = timing.tool_ms.min(timing.total_ms);
+        let ai = timing.total_ms - tools;
         [
-            crate::tr!("chat.turn_ai", duration = format_span(ai)).into_owned(),
-            crate::tr!("chat.turn_tools", duration = format_span(tools)).into_owned(),
+            crate::tr!("chat.turn_ai", duration = format_elapsed(ai)).into_owned(),
+            crate::tr!("chat.turn_tools", duration = format_elapsed(tools)).into_owned(),
         ]
         .join(" · ")
     })
@@ -1376,6 +1361,8 @@ pub(in crate::chat) mod tests {
         let all = WorkLogCounts {
             commands: 2,
             files: 3,
+            reads: 1,
+            searches: 2,
             tools: 1,
             subagents: 2,
         };
@@ -1386,13 +1373,13 @@ pub(in crate::chat) mod tests {
         for (locale, full_label, tools_label, fallback) in [
             (
                 crate::LANGUAGE_ENGLISH,
-                "1 tool call · 3 edits · 2 commands",
+                "1 tool call · 3 edits · 2 commands · 1 read · 2 searches",
                 "2 tool calls",
                 "1 activity",
             ),
             (
                 crate::LANGUAGE_SIMPLIFIED_CHINESE,
-                "1 次工具调用 · 3 处编辑 · 2 条命令",
+                "1 次工具调用 · 3 处编辑 · 2 条命令 · 1 次读取 · 2 次搜索",
                 "2 次工具调用",
                 "1 项活动",
             ),
@@ -1535,7 +1522,7 @@ pub(in crate::chat) mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("turn-time-clock", "3:04 PM"),
-                ("turn-time-total", "1m20s"),
+                ("turn-time-total", "1m 20s"),
                 ("turn-time-cost", "$0.12"),
                 ("turn-time-model", "⚠ claude-opus-5"),
             ]
@@ -1562,31 +1549,32 @@ pub(in crate::chat) mod tests {
     }
 
     #[test]
-    fn finished_time_rows_keep_compact_totals_and_localized_breakdowns() {
+    fn finished_time_rows_keep_totals_and_localized_breakdowns() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        for (locale, normal_tooltip, ai_only_tooltip) in [
+        for (locale, totals, normal_tooltip, ai_only_tooltip) in [
             (
                 crate::LANGUAGE_ENGLISH,
-                "AI thinking & response 45s · Tool calls 35s",
-                "AI thinking & response 8s · Tool calls 0s",
+                ["1m 20s", "8.0s", "10.5s", "1d 00h 00m"],
+                "AI thinking & response 45.0s · Tool calls 35.0s",
+                "AI thinking & response 8.0s · Tool calls 0.0s",
             ),
             (
                 crate::LANGUAGE_SIMPLIFIED_CHINESE,
-                "AI 思考与回答 45 秒 · 工具调用 35 秒",
-                "AI 思考与回答 8 秒 · 工具调用 0 秒",
+                ["1 分 20 秒", "8.0 秒", "10.5 秒", "1 天 00 小时 00 分"],
+                "AI 思考与回答 45.0 秒 · 工具调用 35.0 秒",
+                "AI 思考与回答 8.0 秒 · 工具调用 0.0 秒",
             ),
         ] {
             crate::set_locale(locale);
-            for (timing, total, tooltip) in [
-                (
-                    TurnTiming::new(80_000, 35_000),
-                    "1m20s",
-                    Some(normal_tooltip),
-                ),
-                (TurnTiming::new(8_000, 0), "8s", Some(ai_only_tooltip)),
-                (TurnTiming::new(10_500, 3_600), "10s", None),
-                (TurnTiming::new(86_459_000, 84_600_000), "24h00m59s", None),
-            ] {
+            for ((timing, tooltip), total) in [
+                (TurnTiming::new(80_000, 35_000), Some(normal_tooltip)),
+                (TurnTiming::new(8_000, 0), Some(ai_only_tooltip)),
+                (TurnTiming::new(10_500, 3_600), None),
+                (TurnTiming::new(86_459_000, 84_600_000), None),
+            ]
+            .into_iter()
+            .zip(totals)
+            {
                 assert_eq!(
                     turn_time_parts("3:04 PM".into(), Some(timing)),
                     ["3:04 PM", total]
@@ -1600,18 +1588,22 @@ pub(in crate::chat) mod tests {
         }
     }
 
+    /// Every timing reads in one format, and a long span rolls up into a
+    /// larger unit instead of a five-digit count of minutes.
     #[test]
-    fn the_live_working_indicator_keeps_its_own_format() {
+    fn a_span_reads_in_one_format_from_tenths_to_days() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(format_duration(3_600), "60m 00s");
-        assert_eq!(format_duration(90_061), "1501m 01s");
-        assert_eq!(format_span(3_600), "1h 00m 00s");
-        assert_eq!(format_span(90_061), "25h 01m 01s");
-        assert_eq!(format_span(59), "59s");
-        assert_eq!(format_span(90), "1m 30s");
-        assert_eq!(format_elapsed_deciseconds(0), "0.0s");
-        assert_eq!(format_elapsed_deciseconds(12_399), "12.3s");
-        assert_eq!(format_elapsed_deciseconds(65_299), "1m 5.2s");
+        for (ms, text) in [
+            (0, "0.0s"),
+            (12_399, "12.3s"),
+            (65_299, "1m 05s"),
+            (3_600_000, "1h 00m 00s"),
+            (90_061_000, "1d 01h 01m"),
+            // A work log's span in a thread recorded months apart.
+            (7_323_276_000, "84d 18h 14m"),
+        ] {
+            assert_eq!(format_elapsed(ms), text, "{ms}");
+        }
     }
 }

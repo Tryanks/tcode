@@ -356,16 +356,34 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
             .is_some_and(|argument| argument.starts_with("cd /Users/me/project/SampleGame/")),
     );
 
+    // Every one of them is a command to the run that holds them.
+    let entries = thread.entries(cx);
+    let refs: Vec<&TimelineEntry> = entries.iter().map(Arc::as_ref).collect();
+    let counts = crate::chat::model::work_log_counts(&refs);
+    assert_eq!((counts.commands, counts.tools), (8, 0));
+
     thread.open_work_log("toolu_01RQ9kdsaRsD7Vh9QGznNJwT", cx);
     assert!(shows(cx, &format!("tool-status-chip-{declined}")));
-    assert!(shows(cx, "tool-error-toolu_01RNnVjDHfMoqLkL2otV6JiC"));
-    // A shell call opens on its command line and what it printed; one that
-    // printed nothing says so instead of showing its harness's report.
-    click(cx, &format!("activity-row-{exec}"));
-    assert!(shows(cx, &format!("tool-shell-{exec}")));
-    assert!(!shows(cx, &format!("tool-text-{exec}-output")));
-    click(cx, &format!("activity-row-{child}"));
-    assert!(shows(cx, &format!("tool-text-{child}-output")));
+    let failed = "toolu_01RNnVjDHfMoqLkL2otV6JiC";
+    assert!(shows(cx, &format!("tool-error-{failed}")));
+    // Open, the body tells the failure; the header's line would repeat it.
+    click(cx, &format!("activity-row-{failed}"));
+    assert!(!shows(cx, &format!("tool-error-{failed}")));
+    click(cx, &format!("activity-row-{failed}"));
+    // A shell run as a tool opens on the same terminal window as a command:
+    // its command line over what it printed, verbatim, its harness's report
+    // included, and the whole output a click away.
+    for shell in [exec, child] {
+        click(cx, &format!("activity-row-{shell}"));
+        assert!(shows(cx, &format!("tool-shell-{shell}")), "{shell}");
+        assert!(shows(cx, &format!("command-output-{shell}")), "{shell}");
+        click(cx, &format!("activity-row-{shell}"));
+    }
+    // A command's window offers its whole output the same way.
+    let pi = "tool_mJeTs4Cc0I6gPcCx5W0BlgpT";
+    click(cx, &format!("activity-row-{pi}"));
+    click(cx, &format!("tool-text-{pi}-output-more"));
+    assert!(shows(cx, &format!("tool-text-{pi}-output")));
     thread.shutdown(cx);
 }
 

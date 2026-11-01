@@ -13,8 +13,7 @@ use gpui::{
 use gpui_base::h_flex;
 
 use super::super::model::{
-    TurnTimeClause, format_elapsed_deciseconds, format_local_time, turn_time_breakdown,
-    turn_time_clauses,
+    TurnTimeClause, format_elapsed, format_local_time, turn_time_breakdown, turn_time_clauses,
 };
 use crate::time::now_millis;
 use tcode_core::session::TurnMeta;
@@ -161,7 +160,7 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
                 // 2x; both fonts ship with the app.
                 .relative()
                 .top(px(2.))
-                .child(format_elapsed_deciseconds(elapsed_ms)),
+                .child(format_elapsed(elapsed_ms)),
         )
         .into_any_element()
 }

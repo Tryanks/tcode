@@ -322,7 +322,8 @@ pub(in crate::chat) fn tool_window(
         .w_full()
         .gap_1()
         .child(row)
-        .when_some(error, |window, error| {
+        // An open body tells the failure in full; the line is for a shut one.
+        .when_some(error.filter(|_| !open), |window, error| {
             window.child(error_line(&key, error, cx))
         })
         .children(detail)
@@ -480,7 +481,7 @@ fn header_row(
                         .flex_none()
                         .text_meta_mono(false, cx)
                         .debug_selector(move || format!("tool-elapsed-{key}"))
-                        .child(super::super::model::format_elapsed_deciseconds(elapsed)),
+                        .child(super::super::model::format_elapsed(elapsed)),
                 )
             },
         )

@@ -69,7 +69,7 @@ pub(crate) fn subagent_row(
     let status_chip = crate::chat::tools::window::status_chip(&entry.id, *status, cx);
     let elapsed = crate::chat::tools::window::elapsed_of(entry)
         .filter(|elapsed| *elapsed >= 100)
-        .map(super::super::model::format_elapsed_deciseconds);
+        .map(super::super::model::format_elapsed);
     let row = h_flex()
         .debug_selector({
             let id = entry.id.clone();

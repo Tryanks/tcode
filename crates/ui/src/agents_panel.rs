@@ -86,9 +86,7 @@ impl AgentRow {
             (false, Some(ended)) => ended,
             _ => return None,
         };
-        Some(crate::chat::format_duration(
-            ended.saturating_sub(started) / 1000,
-        ))
+        Some(crate::chat::format_elapsed(ended.saturating_sub(started)))
     }
 }
 
