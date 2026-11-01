@@ -1397,6 +1397,89 @@ pub(in crate::chat) mod tests {
         (host, session_id, timeline)
     }
 
+    /// Two threads on one host, the first selected and holding `first`.
+    pub(in crate::chat) struct TwoThreads {
+        pub(in crate::chat) store: Entity<WorkspaceStore>,
+        pub(in crate::chat) driver: crate::store::tests::LocalHostDriver,
+        pub(in crate::chat) host: tcode_runtime::pipe::SpawnedHost,
+        pub(in crate::chat) first: String,
+        pub(in crate::chat) second: String,
+    }
+
+    pub(in crate::chat) fn seed_two_threads(
+        cx: &mut TestAppContext,
+        first: Timeline,
+    ) -> TwoThreads {
+        let (host, first_id, timeline) = seeded_chat_host(cx, first, false);
+        let second = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("second".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&id).expect("second draft");
+            active.draft = false;
+            let meta = active.meta.clone();
+            state.sessions.push(meta);
+            id
+        }))
+        .expect("seed the second thread");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, cx| store.select_session(first_id.clone(), cx));
+        driver.wait_until(cx, &store, "chat baseline", |cx| {
+            store.read_with(cx, |store, _| !store.chat_loading())
+        });
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(first_id.clone(), timeline, cx);
+        });
+        TwoThreads {
+            store,
+            driver,
+            host,
+            first: first_id,
+            second,
+        }
+    }
+
+    impl TwoThreads {
+        /// Binds `chat`'s pane to `thread`, as the shell does, and gives the
+        /// thread `timeline` once its history has arrived.
+        pub(in crate::chat) fn bind(
+            &mut self,
+            chat: &Entity<ChatView>,
+            thread: &str,
+            timeline: Timeline,
+            cx: &mut gpui::VisualTestContext,
+        ) {
+            let store = self.store.clone();
+            store.update(cx, |store, cx| store.select_session(thread.to_string(), cx));
+            chat.update(cx, |chat, cx| {
+                chat.set_session(Some(thread.to_string()), cx)
+            });
+            self.driver
+                .wait_until(cx, &store, "the bound thread's history", |cx| {
+                    store.read_with(cx, |store, _| store.with_active_timeline(|_| ()).is_some())
+                });
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(thread.to_string(), timeline, cx);
+                cx.notify();
+            });
+        }
+
+        pub(in crate::chat) fn shutdown(mut self, cx: &mut gpui::VisualTestContext) {
+            self.driver.shutdown(cx, &self.store, &self.host);
+        }
+    }
+
     pub(in crate::chat) fn seed_chat_with_history(
         cx: &mut TestAppContext,
         timeline: Timeline,

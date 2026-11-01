@@ -673,41 +673,10 @@ mod tests {
         use gpui::{VisualTestContext, px, size};
         // The thread's only code block: its lines show only the stale text.
         let text = format!("{}\n```\nstale\n```\n", large_markdown("stale session"));
-        let (host, session_id, timeline) =
-            seeded_chat_host(cx, single_assistant_timeline("large", &text), false);
-        let replacement = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("replacement".into(), std::env::temp_dir(), cx);
-            let active = state.residents.live.get_mut(&id).expect("second draft");
-            active.draft = false;
-            let meta = active.meta.clone();
-            state.sessions.push(meta);
-            id
-        }))
-        .expect("seed the replacement thread");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
-            store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
-        driver.wait_until(cx, &store, "chat baseline", |cx| {
-            store.read_with(cx, |store, _| !store.chat_loading())
-        });
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
-        });
+        let mut threads = seed_two_threads(cx, single_assistant_timeline("large", &text));
         let window_state = cx.new(|_| WindowState::new(false));
-        let window =
-            cx.add_window(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let store = threads.store.clone();
+        let window = cx.add_window(|window, cx| ChatView::new(store, window_state, window, cx));
         let view = window.root(cx).expect("the chat is the window's root");
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         cx.simulate_resize(size(px(1_024.), px(700.)));
@@ -716,24 +685,13 @@ mod tests {
             "the stale message's parse is in flight"
         );
 
-        // The shell binds the pane to the thread it opens.
-        store.update(cx, |store, cx| {
-            store.select_session(replacement.clone(), cx)
-        });
-        view.update(cx, |chat, cx| {
-            chat.set_session(Some(replacement.clone()), cx)
-        });
-        driver.wait_until(cx, &store, "the replacement thread's history", |cx| {
-            store.read_with(cx, |store, _| store.with_active_timeline(|_| ()).is_some())
-        });
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(
-                replacement,
-                single_assistant_timeline("large", "The replacement."),
-                cx,
-            );
-            cx.notify();
-        });
+        let second = threads.second.clone();
+        threads.bind(
+            &view,
+            &second,
+            single_assistant_timeline("large", "The replacement."),
+            cx,
+        );
         draw_settled(cx);
 
         assert!(
@@ -744,7 +702,7 @@ mod tests {
             cx.debug_bounds("markdown-code-line-0").is_none(),
             "the switched-away message came back"
         );
-        driver.shutdown(cx, &store, &host);
+        threads.shutdown(cx);
     }
 
     /// A Markdown block of any message painted in the last frame.
