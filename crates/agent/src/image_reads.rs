@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::Attachment;
+use crate::{Attachment, ToolName};
 
 pub fn tool_result_images(name: &str, content: &Value) -> Vec<Attachment> {
     if is_read_tool(name) {
@@ -12,11 +12,10 @@ pub fn tool_result_images(name: &str, content: &Value) -> Vec<Attachment> {
 // Tool results are model inputs, but generated images are not read operations.
 // Only recognize explicit read/capture tools; an image block alone is insufficient.
 pub(crate) fn is_read_tool(name: &str) -> bool {
-    let name = name.rsplit('/').next().unwrap_or(name);
-    let name = name.rsplit("__").next().unwrap_or(name);
-    let name = name.rsplit('.').next().unwrap_or(name);
+    let tool = ToolName::parse(name).tool;
+    let tool = tool.rsplit('.').next().unwrap_or(tool);
     matches!(
-        name.to_ascii_lowercase().as_str(),
+        tool.to_ascii_lowercase().as_str(),
         "read"
             | "read_file"
             | "read_image"

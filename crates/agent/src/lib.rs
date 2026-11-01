@@ -43,6 +43,8 @@ mod process;
 pub use process::keep_own_stdio_from_children;
 #[cfg(feature = "process")]
 mod subagent_tail;
+mod tool_name;
+pub use tool_name::ToolName;
 
 use std::path::PathBuf;
 

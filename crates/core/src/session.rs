@@ -1504,10 +1504,13 @@ impl Timeline {
     }
 }
 
-/// The tool a dispatched child reports through, as every provider names it:
-/// Claude Code `mcp__tcode_report__report_result`, Codex `tcode_report/report_result`.
+/// The tool a dispatched child reports through.
 pub fn is_report_result_tool(name: &str) -> bool {
-    name.ends_with("report_result") && name.contains("tcode_report")
+    agent::ToolName::parse(name)
+        == agent::ToolName {
+            server: Some(agent::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT),
+            tool: "report_result",
+        }
 }
 
 /// Merge an authoritative item snapshot over an existing entry, keeping
