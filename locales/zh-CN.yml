@@ -43,15 +43,10 @@ chat:
   command_run: "执行命令"
   file_edit: "编辑代码"
   thinking: "思考中"
-  thinking_live: "正在思考…"
-  thinking_done: "已思考"
   activity_details: "切换活动详情"
   command: "完整命令"
-  input: "输入"
-  output: "输出末尾"
   output_elided: "共 %{size}"
   load_full_output: "加载完整输出"
-  full_output: "完整输出"
   full_output_loading: "正在加载完整输出…"
   full_output_failed: "无法加载完整输出：%{error}"
   subagent_completed: "已完成"
@@ -88,7 +83,6 @@ chat:
   copy_title: "复制标题"
   copy_command: "复制命令"
   copy_output: "复制输出"
-  copy_input: "复制输入"
   copy_text: "复制文字"
   copy_error: "复制错误信息"
   capacity_retry:
@@ -2607,3 +2601,86 @@ panes:
   layout_one_beside_two: "一左二右"
   layout_single: "单个窗格"
   spread_agents: "在旁边显示此对话的子代理"
+tools:
+  verb:
+    call:
+      running: "调用中"
+      done: "已调用"
+      asked: "调用"
+    run:
+      running: "运行中"
+      done: "已运行"
+      asked: "运行"
+    send_input:
+      running: "发送输入中"
+      done: "已发送输入"
+      asked: "发送输入"
+    think:
+      running: "正在思考…"
+      done: "已思考"
+      asked: "思考"
+    read:
+      running: "读取中"
+      done: "已读取"
+      asked: "读取"
+    view:
+      running: "查看中"
+      done: "已查看"
+      asked: "查看"
+    edit:
+      running: "编辑中"
+      done: "已编辑"
+      asked: "编辑"
+    create:
+      running: "创建中"
+      done: "已创建"
+      asked: "创建"
+    delete:
+      running: "删除中"
+      done: "已删除"
+      asked: "删除"
+    rename:
+      running: "移动中"
+      done: "已移动"
+      asked: "移动"
+    search:
+      running: "搜索中"
+      done: "已搜索"
+      asked: "搜索"
+    find:
+      running: "查找中"
+      done: "已查找"
+      asked: "查找"
+    list:
+      running: "列出中"
+      done: "已列出"
+      asked: "列出"
+    fetch:
+      running: "获取中"
+      done: "已获取"
+      asked: "获取"
+    search_web:
+      running: "网络搜索中"
+      done: "已网络搜索"
+      asked: "网络搜索"
+    plan:
+      running: "更新计划中"
+      done: "已更新计划"
+      asked: "更新计划"
+    agent:
+      running: "代理运行中"
+      done: "代理已运行"
+      asked: "运行代理"
+  status:
+    interrupted: "已中断"
+    declined: "已拒绝"
+  exit_code: "退出码 %{code}"
+  input: "输入"
+  output: "输出"
+  error: "错误"
+  no_output: "无输出"
+  more_lines: "+%{count} 行"
+  show_less: "收起"
+  items: "[%{count} 项]"
+  keys: "{%{count} 个键}"
+  copy_arguments: "复制参数"

@@ -1,4 +1,3 @@
-pub(crate) mod activity;
 pub(crate) mod assistant;
 pub(crate) mod bubble;
 pub(crate) mod changed_files;

@@ -8,8 +8,8 @@ use tcode_core::notice::OrchestrateCallback;
 use tcode_core::session::{SteeringStatus, TimelineEntry};
 
 use crate::chat::components::{
-    activity, assistant, bubble, changed_files, disclosure, dividers, error_card, indicator, plan,
-    subagent, work_log,
+    assistant, bubble, changed_files, disclosure, dividers, error_card, indicator, plan, subagent,
+    work_log,
 };
 use crate::markdown::MarkdownState;
 
@@ -57,7 +57,7 @@ pub fn user_bubble(
 }
 
 pub fn activity(entry: &TimelineEntry, expanded: bool, cx: &App) -> AnyElement {
-    activity::activity_row(entry, false, false, expanded, None, None, |_, _, _| {}, cx)
+    crate::chat::tools::preview_window(entry, expanded, cx)
 }
 
 pub fn work_log(

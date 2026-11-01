@@ -1,0 +1,627 @@
+//! Tool windows: what each tool call did, drawn from its canonical item.
+//!
+//! A window is chosen from what the item carries, never from the provider
+//! that produced it (Principle 4): first its `ItemContent` kind — a command,
+//! a file change — and then, for a `ToolCall`, by its tool name
+//! ([`agent::ToolName::parse`], so `mcp__s__t`, `s/t` and `s.t` name one
+//! tool) and the shape of its input. Each family view tries its names and
+//! deserializes the input into its own typed fields; a call no family
+//! accepts, or whose input is not the shape a family expects, gets the
+//! generic window. A provider that names a capability differently simply
+//! gets the generic window until a matcher accepts its name and shape.
+
+pub(in crate::chat) mod generic;
+pub(in crate::chat) mod shell;
+pub(in crate::chat) mod window;
+
+use std::path::Path;
+
+use agent::{Attachment, ItemContent, ItemStatus, ToolName};
+use gpui::{
+    AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _,
+    px,
+};
+use gpui_base::{h_flex, v_flex};
+use serde::Deserialize;
+use serde_json::Value;
+use tcode_core::session::{EntryContent, TimelineEntry};
+
+use super::ChatView;
+use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
+pub(in crate::chat) use window::{ClickHandler, Header};
+
+/// A `ToolCall` item as a view reads it.
+pub(in crate::chat) struct Call<'a> {
+    pub(in crate::chat) entry: &'a TimelineEntry,
+    pub(in crate::chat) name: ToolName<'a>,
+    pub(in crate::chat) input: &'a Value,
+    pub(in crate::chat) output: Option<&'a str>,
+    pub(in crate::chat) images: &'a [Attachment],
+    pub(in crate::chat) status: ItemStatus,
+}
+
+impl<'a> Call<'a> {
+    pub(in crate::chat) fn of(entry: &'a TimelineEntry) -> Option<Self> {
+        let EntryContent::Item(ItemContent::ToolCall {
+            image_reads,
+            name,
+            input,
+            output,
+            status,
+        }) = &entry.content
+        else {
+            return None;
+        };
+        Some(Self {
+            entry,
+            name: ToolName::parse(name),
+            input,
+            output: output.as_deref(),
+            images: image_reads,
+            status: *status,
+        })
+    }
+
+    /// Whether the tool's own name is one of `names`, in any case: harnesses
+    /// spell the same tool `Read` and `read`.
+    pub(in crate::chat) fn named(&self, names: &[&str]) -> bool {
+        names
+            .iter()
+            .any(|name| self.name.tool.eq_ignore_ascii_case(name))
+    }
+
+    /// The input as a view's typed fields, borrowing its strings; `None`
+    /// when the input is not that shape.
+    pub(in crate::chat) fn input<T: Deserialize<'a>>(&self) -> Option<T> {
+        T::deserialize(self.input).ok()
+    }
+
+    pub(in crate::chat) fn id(&self) -> &'a str {
+        &self.entry.id
+    }
+}
+
+/// One family's window for a call it accepts.
+pub(in crate::chat) trait ToolView {
+    fn header(&self, call: &Call<'_>) -> Header;
+    /// The window's body, built only while it is open.
+    fn body(&self, call: &Call<'_>, ctx: &mut ToolCtx<'_, '_>) -> AnyElement;
+    /// What the window's context menu copies: whole values a text selection
+    /// cannot reach in a preview.
+    fn copy_items(&self, call: &Call<'_>) -> Vec<(String, String)>;
+}
+
+/// A family's matcher: its view when it accepts the call's name and input.
+type Matcher = for<'a> fn(&Call<'a>) -> Option<Box<dyn ToolView + 'a>>;
+
+/// Every family that claims calls by name and shape, in the order they are
+/// asked. The generic window takes whatever none accepts.
+const FAMILIES: &[Matcher] = &[shell::tool_call];
+
+pub(in crate::chat) fn view<'a>(call: &Call<'a>) -> Box<dyn ToolView + 'a> {
+    FAMILIES
+        .iter()
+        .find_map(|family| family(call))
+        .unwrap_or_else(|| Box::new(generic::Generic::of(call)))
+}
+
+/// An activity's window as its kind gives it, before its body.
+pub(in crate::chat) struct Activity {
+    pub(in crate::chat) header: Header,
+    pub(in crate::chat) status: ItemStatus,
+    /// The output a failure's line is taken from.
+    pub(in crate::chat) output: Option<String>,
+    pub(in crate::chat) copy: Vec<(String, String)>,
+    pub(in crate::chat) expandable: bool,
+}
+
+impl Activity {
+    /// The line its failure is told by, when it failed.
+    pub(in crate::chat) fn failure(&self) -> Option<String> {
+        window::failure_line(&self.header, self.status, self.output.as_deref())
+    }
+}
+
+/// The window of one Work Log activity other than a file change or a
+/// subagent: dispatched on its item kind, then for a tool call on the
+/// family that claims it.
+pub(in crate::chat) fn activity(entry: &TimelineEntry, live_reasoning: bool, cx: &App) -> Activity {
+    let muted = cx.theme().muted_foreground;
+    let settled = |header, copy| Activity {
+        header,
+        status: ItemStatus::Completed,
+        output: None,
+        copy,
+        expandable: false,
+    };
+    let EntryContent::Item(item) = &entry.content else {
+        return settled(Header::bare(crate::icon::IconName::Info), Vec::new());
+    };
+    match item {
+        ItemContent::CommandExecution {
+            command,
+            output,
+            exit_code,
+            status,
+        } => Activity {
+            header: shell::command_header(command, output, *exit_code, *status, muted),
+            status: *status,
+            output: Some(output.clone()),
+            copy: shell::command_copy_items(command, output),
+            expandable: true,
+        },
+        ItemContent::ToolCall { .. } => {
+            let call = Call::of(entry).expect("a tool call");
+            let view = view(&call);
+            Activity {
+                header: view.header(&call),
+                status: call.status,
+                output: call.output.map(str::to_owned),
+                copy: view.copy_items(&call),
+                expandable: true,
+            }
+        }
+        ItemContent::Reasoning { text } => {
+            let mut items = Vec::new();
+            copy(&mut items, "chat.copy_text", text);
+            Activity {
+                header: Header::with_icon("icons/sparkles.svg", window::Verb("think")).shimmer(),
+                status: if live_reasoning {
+                    ItemStatus::InProgress
+                } else {
+                    ItemStatus::Completed
+                },
+                output: None,
+                copy: items,
+                expandable: !live_reasoning,
+            }
+        }
+        ItemContent::WebSearch { query } => {
+            let mut items = Vec::new();
+            copy(&mut items, "chat.copy_text", query);
+            settled(
+                Header::new(crate::icon::IconName::Globe, window::Verb("search_web"))
+                    .argument(window::Argument::plain(super::model::one_line(query))),
+                items,
+            )
+        }
+        ItemContent::Other {
+            provider_kind,
+            summary,
+        } => {
+            let mut items = Vec::new();
+            copy(&mut items, "chat.copy_text", summary);
+            settled(generic::other_header(provider_kind, summary), items)
+        }
+        _ => settled(Header::bare(crate::icon::IconName::Info), Vec::new()),
+    }
+}
+
+/// An activity's window drawn outside a chat, for the component gallery:
+/// its header, and a command's terminal when open.
+pub(crate) fn preview_window(entry: &TimelineEntry, open: bool, cx: &App) -> AnyElement {
+    let activity = activity(entry, false, cx);
+    let error = activity.failure();
+    let Activity {
+        header,
+        status,
+        copy,
+        expandable,
+        ..
+    } = activity;
+    let detail = match &entry.content {
+        EntryContent::Item(ItemContent::CommandExecution {
+            command, output, ..
+        }) if open => window::Detail::Open(
+            super::components::command_panel::CommandPanelCache::new().render(
+                entry,
+                command,
+                output,
+                Default::default(),
+                None,
+                cx,
+            ),
+        ),
+        _ if expandable => window::Detail::Shut,
+        _ => window::Detail::None,
+    };
+    window::tool_window(
+        window::WindowSpec {
+            key: entry.id.clone(),
+            header,
+            status,
+            error,
+            elapsed_ms: window::elapsed(entry),
+            compact: false,
+            copy,
+        },
+        detail,
+        |_, _, _| {},
+        cx,
+    )
+}
+
+/// What a window copies, for a surface outside the window that offers the
+/// same (an image tile of the call).
+pub(in crate::chat) fn copy_items(entry: &TimelineEntry) -> Vec<(String, String)> {
+    match Call::of(entry) {
+        Some(call) => view(&call).copy_items(&call),
+        None => Vec::new(),
+    }
+}
+
+/// A copy-menu item, when there is something to copy.
+pub(in crate::chat) fn copy(items: &mut Vec<(String, String)>, key: &str, text: &str) {
+    if !text.trim().is_empty() {
+        items.push((crate::tr!(key).into_owned(), text.to_owned()));
+    }
+}
+
+/// A tool output that reached this client as a preview, and how far the
+/// reader has gone in fetching the rest.
+pub(in crate::chat) enum ElidedOutput {
+    Preview {
+        full_bytes: u64,
+        on_load: ClickHandler,
+    },
+    Loading,
+    Loaded(SharedString),
+    Failed {
+        error: String,
+        on_load: ClickHandler,
+    },
+}
+
+/// The chat services a window's body reaches, and only through here.
+pub(in crate::chat) struct ToolCtx<'a, 'b> {
+    pub(in crate::chat) chat: &'a mut ChatView,
+    pub(in crate::chat) cx: &'a mut Context<'b, ChatView>,
+    pub(in crate::chat) cwd: &'a Path,
+    /// A completed call's images show as tiles above its row, so its body
+    /// leaves them out.
+    pub(in crate::chat) images_inline: bool,
+}
+
+impl ToolCtx<'_, '_> {
+    pub(in crate::chat) fn app(&self) -> &App {
+        self.cx
+    }
+
+    pub(in crate::chat) fn session_id(&self) -> String {
+        self.chat.session_key.clone().unwrap_or_default()
+    }
+
+    /// Whether the part of a body `key` names is open: a long text shown
+    /// whole, a nested value unfolded.
+    pub(in crate::chat) fn is_open(&self, key: &str) -> bool {
+        self.chat.expanded.contains(key)
+    }
+
+    /// Opens or shuts the part of `entry`'s body that `key` names.
+    pub(in crate::chat) fn toggle(&mut self, entry: &TimelineEntry, key: String) -> ClickHandler {
+        let (turn, entry_id) = (entry.turn, entry.id.clone());
+        Box::new(self.cx.listener(move |this, _, _, cx| {
+            if !this.expanded.remove(&key) {
+                this.expanded.insert(key.clone());
+            }
+            this.remeasure_activity(turn, &entry_id, cx);
+            cx.notify();
+        }))
+    }
+
+    /// How much of `entry`'s output this client holds, when the record
+    /// carried only a preview of it.
+    pub(in crate::chat) fn elided(&mut self, entry: &TimelineEntry) -> Option<ElidedOutput> {
+        self.chat.elided_output(&entry.id, entry.turn, self.cx)
+    }
+}
+
+/// How much of a long text a body shows before the reader asks for more.
+#[derive(Clone, Copy)]
+pub(in crate::chat) struct Bound {
+    pub(in crate::chat) head: usize,
+    pub(in crate::chat) tail: usize,
+}
+
+impl Bound {
+    /// Output: where a run ended matters as much as how it began.
+    pub(in crate::chat) const OUTPUT: Self = Self { head: 8, tail: 6 };
+    /// A value read top down: an argument, a file, a list.
+    pub(in crate::chat) const HEAD: Self = Self { head: 12, tail: 0 };
+}
+
+/// Characters of a text a body lays out at most, opened in full.
+const MAX_SHOWN_CHARS: usize = 256 * 1024;
+/// The height an opened text scrolls within.
+const OPEN_MAX_HEIGHT: f32 = 360.;
+
+/// The lines a bounded text shows, and the lines it hides between them.
+pub(in crate::chat) struct Bounded<'t> {
+    pub(in crate::chat) head: Vec<&'t str>,
+    pub(in crate::chat) hidden: usize,
+    pub(in crate::chat) tail: Vec<&'t str>,
+}
+
+/// Splits `text` into what a shut body shows: all of it when it is short,
+/// else its first `head` and last `tail` lines around a count of the rest.
+pub(in crate::chat) fn bound(text: &str, bound: Bound) -> Bounded<'_> {
+    let lines: Vec<&str> = text.lines().collect();
+    // Hiding two lines behind a control saves nothing.
+    if lines.len() <= bound.head + bound.tail + 2 {
+        return Bounded {
+            head: lines,
+            hidden: 0,
+            tail: Vec::new(),
+        };
+    }
+    Bounded {
+        head: lines[..bound.head].to_vec(),
+        hidden: lines.len() - bound.head - bound.tail,
+        tail: lines[lines.len() - bound.tail..].to_vec(),
+    }
+}
+
+/// A long text, bounded with an honest count of what it leaves out: open,
+/// it shows whole in a capped scroll.
+pub(in crate::chat) fn bounded_text(
+    entry: &TimelineEntry,
+    key: &str,
+    text: &str,
+    mono: bool,
+    limit: Bound,
+    ctx: &mut ToolCtx<'_, '_>,
+) -> AnyElement {
+    let key = format!("tool-text-{}-{key}", entry.id);
+    let open = ctx.is_open(&key);
+    let lines = bound(text, limit);
+    let style = |el: gpui::Div, cx: &App| {
+        el.w_full()
+            .min_w_0()
+            .text_secondary(false, cx)
+            .text_color(cx.theme().foreground.opacity(0.85))
+            .when(mono, |el| {
+                el.font_family(cx.theme().mono_font_family.clone())
+            })
+            .whitespace_normal()
+    };
+    let selector = key.clone();
+    let tagged = move |el: AnyElement| {
+        let selector = selector.clone();
+        div()
+            .w_full()
+            .min_w_0()
+            .debug_selector(move || selector.clone())
+            .child(el)
+            .into_any_element()
+    };
+    if lines.hidden == 0 {
+        return tagged(
+            style(div(), ctx.app())
+                .child(SharedString::from(text.trim_end().to_owned()))
+                .into_any_element(),
+        );
+    }
+    let control = |label: String, ctx: &mut ToolCtx<'_, '_>| {
+        let on_click = ctx.toggle(entry, key.clone());
+        let selector = format!("{key}-more");
+        div()
+            .debug_selector(move || selector.clone())
+            .child(super::components::changed_files::quiet_control(
+                SharedString::from(format!("{key}-more")),
+                label.into(),
+                on_click,
+                ctx.app(),
+            ))
+            .into_any_element()
+    };
+    if open {
+        let shown: SharedString = if text.len() > MAX_SHOWN_CHARS {
+            let mut end = MAX_SHOWN_CHARS;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &text[..end]).into()
+        } else {
+            text.trim_end().to_owned().into()
+        };
+        let less = control(crate::tr!("tools.show_less").into_owned(), ctx);
+        return tagged(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    style(div(), ctx.app())
+                        .id(SharedString::from(key.clone()))
+                        .max_h(px(OPEN_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .child(shown),
+                )
+                .child(less)
+                .into_any_element(),
+        );
+    }
+    let more = control(
+        crate::tr!("tools.more_lines", count = lines.hidden).into_owned(),
+        ctx,
+    );
+    let cx = ctx.app();
+    tagged(
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .child(style(div(), cx).child(SharedString::from(lines.head.join("\n"))))
+            .child(more)
+            .when(!lines.tail.is_empty(), |text| {
+                text.child(style(div(), cx).child(SharedString::from(lines.tail.join("\n"))))
+            })
+            .into_any_element(),
+    )
+}
+
+/// The call's output as text: the whole fetched one when the reader loaded
+/// it, JSON pretty-printed once the call is done (a half result is not
+/// JSON), danger-tinted when the call failed.
+pub(in crate::chat) fn output_section(
+    call: &Call<'_>,
+    limit: Bound,
+    ctx: &mut ToolCtx<'_, '_>,
+) -> Option<AnyElement> {
+    let elided = ctx.elided(call.entry);
+    let loaded = match &elided {
+        Some(ElidedOutput::Loaded(full)) => Some(full.clone()),
+        _ => None,
+    };
+    let text: String = match (&loaded, call.output) {
+        (Some(full), _) => full.to_string(),
+        (None, Some(output)) => output.to_owned(),
+        (None, None) => return None,
+    };
+    let text = if call.status != ItemStatus::InProgress {
+        pretty_json(&text).unwrap_or(text)
+    } else {
+        text
+    };
+    let failed = call.status == ItemStatus::Failed;
+    let label = if failed {
+        crate::tr!("tools.error")
+    } else {
+        crate::tr!("tools.output")
+    };
+    let body = if text.trim().is_empty() {
+        div()
+            .text_secondary(false, ctx.app())
+            .child(crate::tr!("tools.no_output").into_owned())
+            .into_any_element()
+    } else {
+        bounded_text(call.entry, "output", &text, true, limit, ctx)
+    };
+    let cx = ctx.app();
+    let body = div()
+        .w_full()
+        .min_w_0()
+        .when(failed, |body| {
+            body.pl_2()
+                .border_l_2()
+                .border_color(cx.theme().danger.opacity(0.6))
+                .text_color(cx.theme().danger)
+        })
+        .child(body);
+    let control = elided.and_then(|elided| elided_control(elided, call.id(), cx));
+    Some(
+        window::section(
+            &label,
+            v_flex().w_full().gap_1().child(body).children(control),
+            cx,
+        )
+        .into_any_element(),
+    )
+}
+
+/// `text` as indented JSON, when it is a JSON object or array.
+pub(in crate::chat) fn pretty_json(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with(['{', '[']) {
+        return None;
+    }
+    let value: Value = serde_json::from_str(trimmed).ok()?;
+    serde_json::to_string_pretty(&value).ok()
+}
+
+fn elided_control(elided: ElidedOutput, id: &str, cx: &App) -> Option<AnyElement> {
+    let control_id = SharedString::from(format!("load-output-{id}"));
+    let note = |text: String| {
+        div()
+            .text_secondary(false, cx)
+            .child(text)
+            .into_any_element()
+    };
+    let load = |on_load: ClickHandler| {
+        super::components::changed_files::quiet_control(
+            control_id.clone(),
+            crate::tr!("chat.load_full_output").into_owned().into(),
+            on_load,
+            cx,
+        )
+    };
+    Some(match elided {
+        ElidedOutput::Preview {
+            full_bytes,
+            on_load,
+        } => h_flex()
+            .gap_2()
+            .items_center()
+            .child(note(
+                crate::tr!(
+                    "chat.output_elided",
+                    size = crate::thread_export::format_size(full_bytes as usize)
+                )
+                .into_owned(),
+            ))
+            .child(load(on_load))
+            .into_any_element(),
+        ElidedOutput::Loading => note(crate::tr!("chat.full_output_loading").into_owned()),
+        ElidedOutput::Loaded(_) => return None,
+        ElidedOutput::Failed { error, on_load } => h_flex()
+            .gap_2()
+            .items_center()
+            .child(note(
+                crate::tr!("chat.full_output_failed", error = error).into_owned(),
+            ))
+            .child(load(on_load))
+            .into_any_element(),
+    })
+}
+
+/// The images a call was shown, as thumbnails that open the image viewer.
+pub(in crate::chat) fn thumbnails(call: &Call<'_>, ctx: &ToolCtx<'_, '_>) -> Option<AnyElement> {
+    if call.images.is_empty() || !ctx.images_inline {
+        return None;
+    }
+    let session_id = ctx.session_id();
+    let cx = ctx.app();
+    let tiles = (0..call.images.len()).map(|index| {
+        super::components::images::item_tile(
+            call.entry,
+            index,
+            format!("{} · {}", call.name.tool, index + 1),
+            None,
+            &session_id,
+            cx,
+        )
+    });
+    Some(
+        h_flex()
+            .w_full()
+            .gap_2()
+            .flex_wrap()
+            .children(tiles)
+            .into_any_element(),
+    )
+}
+
+/// `path` as the workspace shows it.
+pub(in crate::chat) fn display_path(path: &str, cwd: &Path) -> String {
+    crate::workspace_walk::relativize_to_workspace(path, cwd)
+}
+
+/// A string field that may be absent or not a string.
+pub(in crate::chat) fn str_field<'v>(value: &'v Value, keys: &[&str]) -> Option<&'v str> {
+    keys.iter()
+        .find_map(|key| value.get(key)?.as_str())
+        .filter(|text| !text.is_empty())
+}
+
+/// The body sections stacked with the rail's spacing.
+pub(in crate::chat) fn body(sections: impl IntoIterator<Item = AnyElement>) -> AnyElement {
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .children(sections)
+        .into_any_element()
+}
+
+#[cfg(test)]
+pub(in crate::chat) mod tests;

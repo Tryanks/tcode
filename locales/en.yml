@@ -43,15 +43,10 @@ chat:
   command_run: "Command run"
   file_edit: "Code edit"
   thinking: "Thinking"
-  thinking_live: "Thinking…"
-  thinking_done: "Thought"
   activity_details: "Toggle activity details"
   command: "Command"
-  input: "Input"
-  output: "Output tail"
   output_elided: "%{size} in all"
   load_full_output: "Load full output"
-  full_output: "Full output"
   full_output_loading: "Loading full output…"
   full_output_failed: "Could not load the full output: %{error}"
   subagent_completed: "Completed"
@@ -88,7 +83,6 @@ chat:
   copy_title: "Copy title"
   copy_command: "Copy command"
   copy_output: "Copy output"
-  copy_input: "Copy input"
   copy_text: "Copy text"
   copy_error: "Copy error"
   capacity_retry:
@@ -2614,3 +2608,86 @@ panes:
   layout_one_beside_two: "One beside two"
   layout_single: "Single pane"
   spread_agents: "Show this thread's agents beside it"
+tools:
+  verb:
+    call:
+      running: "Calling"
+      done: "Called"
+      asked: "Call"
+    run:
+      running: "Running"
+      done: "Ran"
+      asked: "Run"
+    send_input:
+      running: "Sending input"
+      done: "Sent input"
+      asked: "Send input"
+    think:
+      running: "Thinking…"
+      done: "Thought"
+      asked: "Think"
+    read:
+      running: "Reading"
+      done: "Read"
+      asked: "Read"
+    view:
+      running: "Viewing"
+      done: "Viewed"
+      asked: "View"
+    edit:
+      running: "Editing"
+      done: "Edited"
+      asked: "Edit"
+    create:
+      running: "Creating"
+      done: "Created"
+      asked: "Create"
+    delete:
+      running: "Deleting"
+      done: "Deleted"
+      asked: "Delete"
+    rename:
+      running: "Moving"
+      done: "Moved"
+      asked: "Move"
+    search:
+      running: "Searching"
+      done: "Searched"
+      asked: "Search"
+    find:
+      running: "Finding"
+      done: "Found"
+      asked: "Find"
+    list:
+      running: "Listing"
+      done: "Listed"
+      asked: "List"
+    fetch:
+      running: "Fetching"
+      done: "Fetched"
+      asked: "Fetch"
+    search_web:
+      running: "Searching the web"
+      done: "Searched the web"
+      asked: "Search the web"
+    plan:
+      running: "Updating the plan"
+      done: "Updated the plan"
+      asked: "Update the plan"
+    agent:
+      running: "Running agent"
+      done: "Ran agent"
+      asked: "Run agent"
+  status:
+    interrupted: "Interrupted"
+    declined: "Declined"
+  exit_code: "exit %{code}"
+  input: "Input"
+  output: "Output"
+  error: "Error"
+  no_output: "No output"
+  more_lines: "+%{count} lines"
+  show_less: "Show less"
+  items: "[%{count} items]"
+  keys: "{%{count} keys}"
+  copy_arguments: "Copy arguments"

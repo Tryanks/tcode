@@ -17,6 +17,7 @@ mod header;
 pub(crate) mod model;
 pub(crate) use model::format_duration;
 mod timeline;
+pub(crate) mod tools;
 
 pub(crate) use header::{
     HEADER_COMPACT_MIN_WIDTH, HEADER_OVERFLOW_MIN_WIDTH, PANE_CLOSE_WIDTH, header_extra_width_for,
