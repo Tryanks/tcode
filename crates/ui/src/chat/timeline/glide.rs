@@ -400,8 +400,11 @@ mod tests {
         store: Entity<WorkspaceStore>,
         incoming: async_channel::Sender<String>,
         records: Vec<StoredEvent>,
+        /// The first record the window holds; the ones before it are history
+        /// pages.
+        held_from: usize,
         status: tcode_protocol::SessionStatus,
-        _outgoing: async_channel::Receiver<String>,
+        outgoing: async_channel::Receiver<String>,
         _pump: gpui::Task<()>,
     }
 
@@ -468,7 +471,14 @@ mod tests {
     }
 
     impl ScriptedThread {
-        fn new(cx: &mut TestAppContext, events: Vec<agent::AgentEvent>, running: bool) -> Self {
+        /// The thread holding `events`, its window starting at record
+        /// `held_from`.
+        fn new(
+            cx: &mut TestAppContext,
+            events: Vec<agent::AgentEvent>,
+            held_from: usize,
+            running: bool,
+        ) -> Self {
             use tcode_runtime::pipe::{HostServices, spawn_host};
             use tcode_services::store::SessionStore;
 
@@ -523,8 +533,9 @@ mod tests {
                 store,
                 incoming,
                 records: Vec::new(),
+                held_from,
                 status,
-                _outgoing: outgoing,
+                outgoing,
                 _pump: pump,
             };
             thread.event(
@@ -590,14 +601,47 @@ mod tests {
             self.event(
                 events_topic(),
                 ServerEvent::SessionSnapshot {
-                    from: 0,
+                    from: self.held_from as u64,
                     end,
-                    records: self.records.clone(),
+                    records: self.records[self.held_from..].to_vec(),
                     total: end,
                     total_turns,
                     truncated: false,
                 },
             );
+        }
+
+        /// Answer the history page the client asked for with every record
+        /// before the window. False when it asked for none.
+        fn answer_page(&mut self) -> bool {
+            use tcode_protocol::{ClientPayload, Query, QueryResponse};
+            let asked = std::iter::from_fn(|| self.outgoing.try_recv().ok())
+                .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+                .find_map(|message| match message.payload {
+                    ClientPayload::Query(Query::SessionHistoryPage { before, .. }) => {
+                        Some((message.id, before))
+                    }
+                    _ => None,
+                });
+            let Some((id, before)) = asked else {
+                return false;
+            };
+            self.held_from = 0;
+            self.incoming
+                .try_send(
+                    tcode_protocol::encode_line(&HostMessage::QueryResult {
+                        id,
+                        result: Ok(QueryResponse::SessionHistoryPage {
+                            records: self.records[..before as usize].to_vec(),
+                            from: 0,
+                            end: before,
+                            truncated: false,
+                        }),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            true
         }
 
         /// The host records `event` and streams it, as it does while the
@@ -671,7 +715,7 @@ mod tests {
     #[gpui::test]
     fn a_row_that_arrives_live_rises_from_below_on_the_followed_tail(cx: &mut TestAppContext) {
         for reduce in [false, true] {
-            let mut thread = ScriptedThread::new(cx, earlier_turns_and_a_running_one(4), true);
+            let mut thread = ScriptedThread::new(cx, earlier_turns_and_a_running_one(4), 0, true);
             cx.update(|cx| cx.set_reduce_motion(reduce));
             let (chat, cx) = thread.open(cx);
             thread.deliver(cx);
@@ -755,5 +799,248 @@ mod tests {
             draw_settled(cx);
             cx.update(|_, cx| cx.set_reduce_motion(false));
         }
+    }
+
+    fn streamed(id: &str, text: &str) -> agent::AgentEvent {
+        agent::AgentEvent::Delta {
+            item_id: id.into(),
+            kind: agent::DeltaKind::AssistantText,
+            text: text.into(),
+        }
+    }
+
+    /// The followed end of a running turn glides to each new measurement of
+    /// what it shows: a streamed paragraph rises in over several frames
+    /// instead of popping its height, and the end stays on the bottom edge.
+    #[gpui::test]
+    fn a_streamed_paragraph_rises_into_the_followed_tail(cx: &mut TestAppContext) {
+        let mut events = earlier_turns_and_a_running_one(4);
+        events.push(agent::AgentEvent::ItemStarted(agent::ThreadItem {
+            id: "streaming".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::AssistantMessage {
+                text: "The first paragraph of the reply.\n\n".into(),
+                summarized: false,
+            },
+        }));
+        let mut thread = ScriptedThread::new(cx, events, 0, true);
+        let (chat, cx) = thread.open(cx);
+        thread.deliver(cx);
+        for _ in 0..20 {
+            frame(cx);
+        }
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        let rows = list.item_count();
+        let above = rows - 2;
+        for paragraph in 0..3 {
+            let before = tail(&chat, above, cx);
+            thread.live(streamed(
+                "streaming",
+                &format!("Paragraph {paragraph} arrives in one delta, long enough to wrap.\n\n")
+                    .repeat(3),
+            ));
+            thread.deliver(cx);
+            let mut seen = Vec::new();
+            for _ in 0..16 {
+                frame(cx);
+                assert_eq!(list.item_count(), rows, "the reply grows in place");
+                let now = tail(&chat, above, cx);
+                assert!(
+                    now.bottom_gap.abs() <= px(1.),
+                    "paragraph {paragraph}: the tail left the bottom edge: {now:?}"
+                );
+                seen.push(now);
+            }
+            let settled = *seen.last().unwrap();
+            assert!(
+                settled.height > before.height + px(40.),
+                "paragraph {paragraph} has height: {before:?} -> {settled:?}"
+            );
+            let heights: Vec<_> = seen.iter().map(|tail| tail.height).collect();
+            assert!(
+                heights.windows(2).all(|pair| pair[1] >= pair[0]),
+                "paragraph {paragraph}: the reply shrank as it grew: {heights:?}"
+            );
+            let growing = heights.windows(2).filter(|pair| pair[1] > pair[0]).count();
+            assert!(
+                growing >= 6,
+                "paragraph {paragraph} popped in over {growing} frames: {heights:?}"
+            );
+        }
+    }
+
+    /// A reader who scrolled up while the agent works is not moved: rows
+    /// arriving and a reply streaming below leave every pixel on screen in
+    /// place, frame by frame.
+    #[gpui::test]
+    fn a_reader_scrolled_up_stays_put_while_rows_arrive(cx: &mut TestAppContext) {
+        let mut thread = ScriptedThread::new(cx, earlier_turns_and_a_running_one(6), 0, true);
+        let (chat, cx) = thread.open(cx);
+        thread.deliver(cx);
+        for _ in 0..20 {
+            frame(cx);
+        }
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        cx.simulate_event(gpui::ScrollEvent {
+            position: list.viewport_bounds().center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(240.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        });
+        for _ in 0..4 {
+            frame(cx);
+        }
+        assert!(!list.is_following_tail(), "the wheel paused the follow");
+        let rows = list.item_count();
+        let on_screen = |cx: &mut VisualTestContext| {
+            (0..rows)
+                .filter_map(|row| cx.debug_bounds(format!("timeline-row-{row}").leak()))
+                .filter(|bounds| bounds.intersects(&list.viewport_bounds()))
+                .collect::<Vec<_>>()
+        };
+        let reading = on_screen(cx);
+        assert!(!reading.is_empty());
+
+        thread.live(answer(
+            "answer-6",
+            &"Done; here is the summary.\n\n".repeat(4),
+        ));
+        thread.live(agent::AgentEvent::ItemStarted(agent::ThreadItem {
+            id: "more".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::AssistantMessage {
+                text: String::new(),
+                summarized: false,
+            },
+        }));
+        thread.deliver(cx);
+        for step in 0..16 {
+            if step % 4 == 0 {
+                thread.live(streamed("more", "Another streamed paragraph.\n\n"));
+                thread.deliver(cx);
+            }
+            frame(cx);
+            assert!(
+                !list.is_following_tail(),
+                "step {step}: the reader was pulled down"
+            );
+            assert_eq!(on_screen(cx), reading, "step {step}: the reader was moved");
+        }
+        assert!(
+            list.item_count() > rows,
+            "the rows arrived below the reader"
+        );
+    }
+
+    /// Rows a fold brings were already in the thread; they are in place at
+    /// once, on the first frame that shows them: the window a thread opens
+    /// with, a history page that lands above it, and the records a client
+    /// catches up on.
+    #[gpui::test]
+    fn rows_a_fold_brings_are_in_place_at_once(cx: &mut TestAppContext) {
+        // Of six finished turns the window holds the last; the rest are a
+        // page above it.
+        let events: Vec<_> = (0..6).flat_map(turn).collect();
+        let held_from = events.len() - 4;
+        let mut thread = ScriptedThread::new(cx, events, held_from, false);
+        let (chat, cx) = thread.open(cx);
+        thread.deliver(cx);
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        // What a frame shows, as the rows' heights: a row still rising would
+        // differ from the frames after it.
+        let heights = |cx: &mut VisualTestContext| {
+            (0..list.item_count())
+                .map(|row| {
+                    cx.debug_bounds(format!("timeline-row-{row}").leak())
+                        .map(|bounds| bounds.size.height)
+                })
+                .collect::<Vec<_>>()
+        };
+        // A page in flight shows its spinner, which never rests: frames
+        // spanning a glide stand in for coming to rest.
+        let glide = |cx: &mut VisualTestContext| {
+            for _ in 0..16 {
+                frame(cx);
+            }
+        };
+        draw(cx);
+        let opened = heights(cx);
+        assert!(
+            opened.iter().all(Option::is_some),
+            "the window fits the screen"
+        );
+        glide(cx);
+        assert_eq!(
+            heights(cx),
+            opened,
+            "the window the thread opened with rose in"
+        );
+
+        // The window does not fill the screen, so the timeline asks for the
+        // page above it.
+        let rows = list.item_count();
+        let mut asked = false;
+        for _ in 0..20 {
+            frame(cx);
+            if thread.answer_page() {
+                asked = true;
+                break;
+            }
+        }
+        assert!(asked, "the timeline asks for the page above its window");
+        thread.deliver(cx);
+        draw(cx);
+        assert!(list.item_count() > rows, "the page landed");
+        let paged = heights(cx);
+        glide(cx);
+        assert_eq!(heights(cx), paged, "the history page rose in");
+
+        // The host sends its window again with a turn the client missed.
+        let rows = list.item_count();
+        thread.send_window(turn(6).into());
+        thread.deliver(cx);
+        draw(cx);
+        assert!(list.item_count() > rows, "the missed turn is shown");
+        let caught_up = heights(cx);
+        glide(cx);
+        assert_eq!(heights(cx), caught_up, "the records caught up on rose in");
+        assert!(list.is_following_tail());
+    }
+
+    /// A scrolling screenshot shows every row whole: rows still rising when
+    /// it begins are drawn at rest by the next frame.
+    #[gpui::test]
+    fn a_capture_shows_rising_rows_whole(cx: &mut TestAppContext) {
+        let mut thread = ScriptedThread::new(cx, earlier_turns_and_a_running_one(4), 0, true);
+        let (chat, cx) = thread.open(cx);
+        thread.deliver(cx);
+        for _ in 0..20 {
+            frame(cx);
+        }
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        let rows = list.item_count();
+        let reply = &"The build passes; here is what changed.\n\n".repeat(5);
+        thread.live(answer("answer-4", reply));
+        thread.deliver(cx);
+        draw(cx);
+        frame(cx);
+        let rising = tail(&chat, rows - 1, cx);
+        assert!(chat.update(cx, |chat, cx| chat.capture_begin(cx)));
+        draw(cx);
+        let captured = tail(&chat, rows - 1, cx);
+        assert!(chat.read_with(cx, |chat, _| chat.capture_settled()));
+        assert!(
+            captured.height > rising.height + px(40.),
+            "the capture's frame shows the row still rising: {rising:?} -> {captured:?}"
+        );
+        chat.update(cx, |chat, cx| chat.capture_end(cx));
+        for _ in 0..16 {
+            frame(cx);
+        }
+        assert_eq!(
+            tail(&chat, rows - 1, cx).height,
+            captured.height,
+            "the row the capture showed is the row at rest"
+        );
     }
 }
