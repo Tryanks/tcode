@@ -737,3 +737,61 @@ fn a_search_reads_as_its_pattern_and_opens_on_what_it_found(cx: &mut TestAppCont
     assert!(shows(cx, "tool-result-shape-pi-grep-12"));
     thread.shutdown(cx);
 }
+
+/// A fetch reads as its URL and opens on the prompt it was asked with and
+/// what came back; a web search as its query and the links it found, each
+/// opening its page, with the text around them; a search item with no
+/// query says only that it searched.
+#[gpui::test]
+fn a_web_call_reads_as_its_url_or_query(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/web.jsonl"), 1_024.);
+    let fetch = "toolu_01AjUWd82mqBqGyPmhUMzhTS:toolu_013j1D9CWuGU1W1v9VEQaWyt";
+    let search = "toolu_01ARRsmtUMKF9Jr8HaVd9DaE:toolu_01UnWqBEoDTfn52xSKRMa3yD";
+    for (id, expected) in [
+        (
+            fetch,
+            read(
+                "Fetched",
+                None,
+                Some("https://helpx.adobe.com/animate/kb/end-of-life.html"),
+                None,
+            ),
+        ),
+        (
+            search,
+            Read {
+                chips: vec![Chip::Count("9 links".to_owned())],
+                ..read(
+                    "Searched the web",
+                    None,
+                    Some("嘉立创 亚克力 激光切割 乳白 下单 CNC 钣金"),
+                    None,
+                )
+            },
+        ),
+        (
+            "exec-2f58edd8-f98d-4a06-ba20-0f55a5486be1",
+            read("Searched the web", None, Some("'font'"), None),
+        ),
+        (
+            "exec-24caa8e4-8398-460e-8cd0-d7bbda29ca96",
+            read("Searched the web", None, None, None),
+        ),
+    ] {
+        assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+
+    thread.open_work_log(fetch, cx);
+    click(cx, &format!("activity-row-{fetch}"));
+    assert!(shows(cx, &format!("tool-text-{fetch}-prompt")));
+    assert!(shows(cx, &format!("tool-text-{fetch}-output")));
+    click(cx, &format!("activity-row-{fetch}"));
+    click(cx, &format!("activity-row-{search}"));
+    for index in 0..9 {
+        assert!(shows(cx, &format!("tool-link-{search}-{index}")), "{index}");
+    }
+    assert!(shows(cx, &format!("tool-text-{search}-output")));
+    thread.shutdown(cx);
+}

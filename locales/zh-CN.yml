@@ -2693,3 +2693,7 @@ tools:
   more_results: "另 %{count} 个"
   copy_pattern: "复制模式"
   copy_results: "复制结果"
+  prompt: "提示"
+  links: "%{count} 个链接"
+  copy_url: "复制网址"
+  copy_query: "复制查询"
