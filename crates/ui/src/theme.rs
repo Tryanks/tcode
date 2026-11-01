@@ -153,8 +153,9 @@ struct ThemeConfig {
     mode: String,
     #[serde(rename = "font.family")]
     font_family: String,
-    #[serde(rename = "mono_font.family")]
-    mono_font_family: String,
+    /// Absent, the platform's monospace family gpui-base defaults to.
+    #[serde(rename = "mono_font.family", default)]
+    mono_font_family: Option<String>,
     radius: f32,
     #[serde(rename = "radius.lg")]
     radius_lg: f32,
@@ -184,6 +185,11 @@ impl TryFrom<ThemeConfig> for Theme {
     type Error = String;
 
     fn try_from(config: ThemeConfig) -> Result<Self, Self::Error> {
+        let mono: SharedString = config
+            .mono_font_family
+            .clone()
+            .map(Into::into)
+            .unwrap_or_else(|| TypographyTokens::default().mono);
         let mode = match config.mode.as_str() {
             "light" => ThemeMode::Light,
             "dark" => ThemeMode::Dark,
@@ -247,7 +253,7 @@ impl TryFrom<ThemeConfig> for Theme {
             // Sizes and line heights are gpui-base's scale on purpose.
             typography: TypographyTokens {
                 sans: config.font_family.clone().into(),
-                mono: config.mono_font_family.clone().into(),
+                mono: mono.clone(),
                 ..Default::default()
             },
             ..Default::default()
@@ -274,7 +280,7 @@ impl TryFrom<ThemeConfig> for Theme {
             list_active: color("list.active.background")?,
             list_hover: color("list.hover.background")?,
             mode,
-            mono_font_family: config.mono_font_family.into(),
+            mono_font_family: mono,
             muted,
             muted_foreground,
             popover,
