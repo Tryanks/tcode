@@ -16,6 +16,8 @@ chat:
   work_log: "工作日志"
   work_log_tool_one: "1 次工具调用"
   work_log_tools: "%{count} 次工具调用"
+  work_log_computer_one: "1 次电脑操作"
+  work_log_computer: "%{count} 次电脑操作"
   work_log_edit_one: "1 处编辑"
   work_log_edits: "%{count} 处编辑"
   work_log_command_one: "1 条命令"
@@ -2673,6 +2675,202 @@ tools:
       running: "代理运行中"
       done: "代理已运行"
       asked: "运行代理"
+    script:
+      running: "运行电脑操作脚本中"
+      done: "已运行电脑操作脚本"
+      asked: "运行电脑操作脚本"
+    reset_script:
+      running: "重置脚本内核中"
+      done: "已重置脚本内核"
+      asked: "重置脚本内核"
+    use_computer:
+      running: "操作电脑中"
+      done: "已操作电脑"
+      asked: "操作电脑"
+    find_windows:
+      running: "查找窗口中"
+      done: "已查找窗口"
+      asked: "查找窗口"
+    observe:
+      running: "观察中"
+      done: "已观察"
+      asked: "观察"
+    expand:
+      running: "展开中"
+      done: "已展开"
+      asked: "展开"
+    inspect:
+      running: "检查中"
+      done: "已检查"
+      asked: "检查"
+    press:
+      running: "按下中"
+      done: "已按下"
+      asked: "按下"
+    click:
+      running: "点击中"
+      done: "已点击"
+      asked: "点击"
+    set_text:
+      running: "设置文本中"
+      done: "已设置文本"
+      asked: "设置文本"
+    type:
+      running: "输入中"
+      done: "已输入"
+      asked: "输入"
+    keypress:
+      running: "按键中"
+      done: "已按键"
+      asked: "按键"
+    scroll:
+      running: "滚动中"
+      done: "已滚动"
+      asked: "滚动"
+    drag:
+      running: "拖动中"
+      done: "已拖动"
+      asked: "拖动"
+    move_mouse:
+      running: "移动指针中"
+      done: "已移动指针"
+      asked: "移动指针"
+    act:
+      running: "操作中"
+      done: "已操作"
+      asked: "操作"
+    wait_for:
+      running: "等待中"
+      done: "已等待"
+      asked: "等待"
+    wait:
+      running: "等待中"
+      done: "已等待"
+      asked: "等待"
+    open:
+      running: "打开中"
+      done: "已打开"
+      asked: "打开"
+    check_page:
+      running: "查看页面中"
+      done: "已查看页面"
+      asked: "查看页面"
+    snapshot:
+      running: "读取页面中"
+      done: "已读取页面"
+      asked: "读取页面"
+    screenshot:
+      running: "截图中"
+      done: "已截图"
+      asked: "截图"
+    resize:
+      running: "调整预览尺寸中"
+      done: "已调整预览尺寸"
+      asked: "调整预览尺寸"
+    evaluate:
+      running: "执行脚本中"
+      done: "已执行脚本"
+      asked: "执行脚本"
+    outline:
+      running: "概览中"
+      done: "已概览"
+      asked: "概览"
+    look_up:
+      running: "查看中"
+      done: "已查看"
+      asked: "查看"
+    list_threads:
+      running: "列出对话中"
+      done: "已列出对话"
+      asked: "列出对话"
+    message:
+      running: "发送消息中"
+      done: "已发送消息"
+      asked: "发送消息"
+    start_thread:
+      running: "新建对话中"
+      done: "已新建对话"
+      asked: "新建对话"
+    update_threads:
+      running: "更新对话中"
+      done: "已更新对话"
+      asked: "更新对话"
+    notify_when:
+      running: "设置提醒中"
+      done: "已设置提醒"
+      asked: "设置提醒"
+    settle_self:
+      running: "安排收尾本对话中"
+      done: "已安排收尾本对话"
+      asked: "安排收尾本对话"
+    request_grant:
+      running: "申请权限中"
+      done: "已申请权限"
+      asked: "申请权限"
+    dispatch:
+      running: "派发中"
+      done: "已派发"
+      asked: "派发"
+    result:
+      running: "读取结果中"
+      done: "已读取结果"
+      asked: "读取结果"
+    check_threads:
+      running: "查看状态中"
+      done: "已查看状态"
+      asked: "查看状态"
+    settle:
+      running: "收尾中"
+      done: "已收尾"
+      asked: "收尾"
+    archive:
+      running: "归档中"
+      done: "已归档"
+      asked: "归档"
+    cancel:
+      running: "取消中"
+      done: "已取消"
+      asked: "取消"
+    approve:
+      running: "答复审批中"
+      done: "已答复审批"
+      asked: "答复审批"
+    report:
+      running: "汇报中"
+      done: "已汇报"
+      asked: "汇报"
+    load_tools:
+      running: "加载工具中"
+      done: "已加载工具"
+      asked: "加载工具"
+    skill:
+      running: "启动技能中"
+      done: "已启动技能"
+      asked: "启动技能"
+    propose_plan:
+      running: "提出计划中"
+      done: "已提出计划"
+      asked: "提出计划"
+    review:
+      running: "审查中"
+      done: "已审查"
+      asked: "审查"
+    review_approved:
+      running: "批准中"
+      done: "已批准"
+      asked: "批准"
+    review_denied:
+      running: "拒绝中"
+      done: "已拒绝"
+      asked: "拒绝"
+    ask:
+      running: "提问中"
+      done: "已提问"
+      asked: "提问"
+    generate_image:
+      running: "生成图片中"
+      done: "已生成图片"
+      asked: "生成图片"
   status:
     interrupted: "已中断"
     declined: "已拒绝"
@@ -2702,3 +2900,54 @@ tools:
   copy_query: "复制查询"
   steps_done: "已完成 %{done}/%{total}"
   copy_plan: "复制计划"
+  code_lines: "显示代码 · %{count} 行"
+  hide_code: "隐藏代码"
+  copy_code: "复制代码"
+  elements_one: "1 个元素"
+  elements: "%{count} 个元素"
+  elements_not_shown: "另有 %{count} 个元素未显示"
+  ui_tree: "界面树"
+  windows_one: "1 个窗口"
+  windows: "%{count} 个窗口"
+  windows_caption: "窗口"
+  matches_one: "1 个匹配"
+  matches: "%{count} 个匹配"
+  steps: "%{count} 步"
+  steps_caption: "步骤"
+  until_absent: "消失"
+  timed_out: "已超时"
+  page_elements: "可交互元素"
+  visible_text: "可见文本"
+  copy_selector: "复制选择器"
+  hits_one: "1 处命中"
+  hits: "%{count} 处命中"
+  threads_one: "1 个对话"
+  threads: "%{count} 个对话"
+  threads_caption: "对话"
+  message: "消息"
+  brief: "任务说明"
+  reason: "理由"
+  copy_link: "复制链接"
+  tools_one: "1 个工具"
+  tools: "%{count} 个工具"
+  loaded: "已加载"
+  plan: "计划"
+  rationale: "审查理由"
+  risk: "风险：%{level}"
+  questions: "%{count} 个问题"
+  answered: "回答：%{answer}"
+  copy_prompt: "复制提示词"
+  actions_one: "1 次操作"
+  actions: "%{count} 次操作"
+  actions_failed: "%{count} 次失败"
+  outcome:
+    worked: "成功"
+    didnt: "未生效"
+    unknown: "未确认"
+    not_run: "未执行"
+  expect:
+    label: "预期"
+    verified: "已验证"
+    preexisting: "原本已满足"
+    failed: "未满足"
+    pending: "待定"

@@ -194,7 +194,9 @@ pub(crate) fn segment_entries<'a>(
         match &entry.content {
             EntryContent::Item(item)
                 if matches!(item, ItemContent::ImageRead { .. })
-                    || matches!(item, ItemContent::ToolCall { image_reads, status: ItemStatus::Completed, .. } if !image_reads.is_empty()) =>
+                    || matches!(item, ItemContent::ToolCall { image_reads, status: ItemStatus::Completed, .. } if !image_reads.is_empty())
+                        // A computer run keeps its screenshots in its window.
+                        && !super::tools::run::is_computer(entry) =>
             {
                 flush_activities(
                     &mut segments,
@@ -302,6 +304,7 @@ pub(crate) struct WorkLogCounts {
     pub(crate) files: usize,
     pub(crate) reads: usize,
     pub(crate) searches: usize,
+    pub(crate) computer: usize,
     pub(crate) tools: usize,
     pub(crate) subagents: usize,
 }
@@ -317,6 +320,7 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             Some(Family::Edit(paths)) => files.extend(paths),
             Some(Family::Read) => counts.reads += 1,
             Some(Family::Search) => counts.searches += 1,
+            Some(Family::Computer) => counts.computer += 1,
             Some(Family::Tool) => counts.tools += 1,
             Some(Family::Agent) => counts.subagents += 1,
             None => {}
@@ -333,6 +337,13 @@ pub(crate) fn work_log_capsule_label(counts: &WorkLogCounts, activity_count: usi
             crate::tr!("chat.work_log_tool_one").into_owned()
         } else {
             crate::tr!("chat.work_log_tools", count = counts.tools).into_owned()
+        });
+    }
+    if counts.computer > 0 {
+        clauses.push(if counts.computer == 1 {
+            crate::tr!("chat.work_log_computer_one").into_owned()
+        } else {
+            crate::tr!("chat.work_log_computer", count = counts.computer).into_owned()
         });
     }
     if counts.files > 0 {
@@ -646,8 +657,8 @@ pub(crate) fn live_edit_rows(changes: &[FileChange], cwd: &Path) -> Vec<LiveEdit
         .collect()
 }
 
-/// Maximum number of entries kept directly visible at the tail of a live
-/// activity run. Older entries move into a separate collapsed Work Log; once
+/// Maximum number of windows kept directly visible at the tail of a live
+/// activity run. Older ones move into a separate collapsed Work Log; once
 /// prose ends the run, the full run becomes that settled Work Log instead.
 pub(crate) const LIVE_ACTIVITY_WINDOW: usize = 5;
 
@@ -655,12 +666,13 @@ pub(crate) fn partition_activity_run<'a>(
     activities: &'a [&'a TimelineEntry],
     live: bool,
 ) -> (&'a [&'a TimelineEntry], &'a [&'a TimelineEntry]) {
-    let visible = if live {
-        activities.len().min(LIVE_ACTIVITY_WINDOW)
-    } else {
-        0
-    };
-    activities.split_at(activities.len() - visible)
+    if !live {
+        return activities.split_at(activities.len());
+    }
+    // The window counts windows, so a computer run is never split.
+    let windows = super::tools::run::windows(activities);
+    let first_visible = windows.len().saturating_sub(LIVE_ACTIVITY_WINDOW);
+    activities.split_at(windows.get(first_visible).map_or(0, |window| window.start))
 }
 
 /// Format a unix-ms timestamp as a local 12-hour clock, e.g. "2:39 AM".
@@ -1363,6 +1375,7 @@ pub(in crate::chat) mod tests {
             files: 3,
             reads: 1,
             searches: 2,
+            computer: 4,
             tools: 1,
             subagents: 2,
         };
@@ -1373,13 +1386,13 @@ pub(in crate::chat) mod tests {
         for (locale, full_label, tools_label, fallback) in [
             (
                 crate::LANGUAGE_ENGLISH,
-                "1 tool call · 3 edits · 2 commands · 1 read · 2 searches",
+                "1 tool call · 4 computer actions · 3 edits · 2 commands · 1 read · 2 searches",
                 "2 tool calls",
                 "1 activity",
             ),
             (
                 crate::LANGUAGE_SIMPLIFIED_CHINESE,
-                "1 次工具调用 · 3 处编辑 · 2 条命令 · 1 次读取 · 2 次搜索",
+                "1 次工具调用 · 4 次电脑操作 · 3 处编辑 · 2 条命令 · 1 次读取 · 2 次搜索",
                 "2 次工具调用",
                 "1 项活动",
             ),

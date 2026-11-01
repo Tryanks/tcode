@@ -406,7 +406,9 @@ fn segment_parts(
         range.start..range.start,
     )];
     let mut start = range.start;
-    for activity in folded {
+    // A computer run is one window, so one part.
+    for window in crate::chat::tools::run::windows(folded) {
+        let activity = &folded[window.end - 1];
         let end = start
             + entries[start..range.end]
                 .iter()

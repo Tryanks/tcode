@@ -143,6 +143,7 @@ pub(in crate::chat) fn shows(cx: &mut VisualTestContext, selector: &str) -> bool
 pub(in crate::chat) struct Read {
     pub(in crate::chat) verb: Option<String>,
     pub(in crate::chat) subject: Option<String>,
+    pub(in crate::chat) title: Option<String>,
     pub(in crate::chat) argument: Option<String>,
     pub(in crate::chat) detail: Option<String>,
     pub(in crate::chat) chips: Vec<Chip>,
@@ -157,6 +158,7 @@ impl Read {
                 .verb
                 .map(|verb| verb.text(activity.status).to_string()),
             subject: header.subject.as_ref().map(|subject| subject.to_string()),
+            title: header.title.as_ref().map(|title| title.to_string()),
             argument: header
                 .argument
                 .as_ref()
@@ -180,6 +182,7 @@ pub(in crate::chat) fn read(
     Read {
         verb: Some(verb.to_owned()),
         subject: subject.map(str::to_owned),
+        title: None,
         argument: argument.map(str::to_owned),
         detail: None,
         chips: Vec::new(),
@@ -188,15 +191,16 @@ pub(in crate::chat) fn read(
 }
 
 /// A call no family claims reads as its server and tool and the value that
-/// names it; a failure as its own first line, which a Codex result stored
-/// as MCP JSON has once the host reads the log back; an item canonicalization
-/// does not model as its kind and the path in its summary, never as JSON.
+/// names it — a Codex connector's whose result was stored as MCP JSON as
+/// much as a Claude Code MCP call's; an item canonicalization does not
+/// model as its kind and the value in its summary, never as JSON.
 #[gpui::test]
 fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/generic.jsonl"), 1_024.);
     let mcp = "toolu_01D3QR5wqdMAMUrcBoPhrb1u";
+    let connector = "exec-88fd27ec-2db0-4847-848a-ae9f453befeb";
     for (id, expected) in [
         (
             mcp,
@@ -208,54 +212,34 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
             ),
         ),
         (
-            "toolu_01GYbQaLznEUcjv91J9ZFWNn",
-            read("Called", Some("ToolSearch"), Some("select:Monitor"), None),
-        ),
-        (
-            "toolu_01FQ8S6KvXR7rVJXYYVMHhp3",
+            connector,
             read(
                 "Called",
-                Some("tcode_control · search"),
-                Some("心智"),
-                Some("refused: scope host is wider than your grant's project"),
-            ),
-        ),
-        (
-            "exec-d4bae9da-f150-466c-a7e0-3a3fc1bd167c",
-            read(
-                "Called",
-                Some("tcode_preview · preview_screenshot"),
+                Some("codex_apps · github.search_installed_repositories_v2"),
+                Some("SampleGame"),
                 None,
-                Some("preview browser has no visible area"),
             ),
         ),
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");
     }
-    for (id, kind, argument) in [
+    let other = "call_9e4cTBeI2xb0W4DZfy2oKPAB";
+    let header = thread.header(other, cx);
+    assert_eq!(
+        (header.verb, header.subject, header.argument),
         (
-            "exec-5bd102db-8280-4811-a3c3-6146bd58a20c",
-            "imageView",
-            "/tmp/tcode-before.png",
+            None,
+            Some("subAgentActivity".to_owned()),
+            Some("/root".to_owned())
         ),
-        ("call_wmvrnLAr0GTnBoYQog6Gvjq0", "sleep", "20000"),
-    ] {
-        let header = thread.header(id, cx);
-        assert_eq!(
-            (header.verb, header.subject, header.argument),
-            (None, Some(kind.to_owned()), Some(argument.to_owned())),
-            "{id}"
-        );
-    }
+    );
 
     thread.open_work_log(mcp, cx);
-    for failed in [
-        "toolu_01FQ8S6KvXR7rVJXYYVMHhp3",
-        "exec-d4bae9da-f150-466c-a7e0-3a3fc1bd167c",
-    ] {
-        assert!(shows(cx, &format!("tool-error-{failed}")), "{failed}");
-    }
     assert!(!shows(cx, &format!("tool-error-{mcp}")));
+    // The connector's result reads as the text and payload it returned.
+    click(cx, &format!("activity-row-{connector}"));
+    assert!(shows(cx, &format!("tool-text-{connector}-output")));
+    click(cx, &format!("activity-row-{connector}"));
 
     // Open, the input reads as keys and values; the 13 notes stay folded
     // until asked for, and the output is printed as indented JSON, too long
@@ -271,7 +255,6 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
     assert!(shows(cx, &format!("tool-text-{mcp}-output-more")));
 
     // An item canonicalization does not model has nothing more to open.
-    let other = "exec-5bd102db-8280-4811-a3c3-6146bd58a20c";
     click(cx, &format!("activity-row-{other}"));
     assert!(!shows(cx, &format!("tool-detail-{other}")));
     thread.shutdown(cx);
@@ -921,5 +904,506 @@ fn a_shortened_output_loads_whole_when_asked(cx: &mut TestAppContext) {
     }
     click(cx, "tool-text-long-output-more");
     assert!(shows(cx, "tool-text-long-output"));
+    thread.shutdown(cx);
+}
+
+fn titled(title: &str, error: Option<&str>) -> Read {
+    Read {
+        verb: None,
+        subject: None,
+        title: Some(title.to_owned()),
+        argument: None,
+        detail: None,
+        chips: Vec::new(),
+        error: error.map(str::to_owned),
+    }
+}
+
+/// A computer-use script reads as the title the model gave it, verbatim in
+/// the user's language, never as its code; a failure by the server's own
+/// line; an imported one with the wall time its harness reported. Opened,
+/// it shows the screenshot it got back, what it printed, and its code a
+/// click away.
+#[gpui::test]
+fn a_computer_use_script_reads_as_its_title_and_shows_what_it_got_back(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/script.jsonl"), 1_024.);
+    let first = "call_WdPy4laY4Ov28Z0wb0rwTLr6";
+    let shot = "call_eCkCDGIgrTwMGt9JIPQK7WVO";
+    let failed = "call_laYExxOR0UWZ9HfL3wHwdMRP";
+    let imported = "call_mLYh6qpMr3E3n0GTeZcMWu80";
+    for (id, expected) in [
+        (first, titled("Open the seeded tcode desktop app", None)),
+        (shot, titled("核对引脚表当前内容", None)),
+        (
+            failed,
+            titled(
+                "点击图纸放置 RP2040",
+                Some("Computer Use server error -10005: noWindowsAvailable"),
+            ),
+        ),
+        (imported, titled("Refilter cases by initial node", None)),
+        (
+            "call_QR1C3qJxdBRhhcHJ71eoq7VO",
+            read("Reset the script kernel", None, None, None),
+        ),
+    ] {
+        assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+    let entry = thread.entry(imported, cx);
+    let header = activity(&entry, false, std::path::Path::new("")).header;
+    assert_eq!(header.elapsed_ms, Some(3_874));
+
+    let entries = thread.entries(cx);
+    let refs: Vec<&TimelineEntry> = entries.iter().map(Arc::as_ref).collect();
+    let counts = crate::chat::model::work_log_counts(&refs);
+    assert_eq!((counts.computer, counts.tools), (9, 0));
+
+    thread.open_work_log(first, cx);
+    click(cx, &format!("activity-row-run-{first}"));
+    click(cx, &format!("activity-row-{shot}"));
+    assert!(shows(cx, &format!("image-read-{shot}-0")));
+    assert!(shows(cx, &format!("tool-text-{shot}-output")));
+    let code = format!("tool-code-{shot}");
+    assert!(!shows(cx, &code), "the code stays shut until asked for");
+    click(cx, &format!("{code}-toggle"));
+    assert!(shows(cx, &code));
+    thread.shutdown(cx);
+}
+
+/// Tcode's own computer-use server reads in the formats it writes: an
+/// observation as the app it saw and how many elements, its outline folded
+/// to that count and its screenshot; a transaction as its steps with the
+/// outcome of each; a wait that timed out says so; a refusal is the
+/// server's message, not its JSON.
+#[gpui::test]
+fn a_desktop_call_reads_as_the_window_it_saw_and_the_steps_it_took(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/desktop.jsonl"), 1_024.);
+    let roots = "toolu_01NQJSSZLJPJ8sqjTfgSsDRB";
+    let observe = "toolu_017Q2ubQL1y3N7Q6G6nrmsJa:toolu_01C9td26NuYvzsayZDbUJedP";
+    let codex_observe = "exec-68ab8f51-9ce2-4b33-9bf9-0ecaa88f99c1";
+    let act = "exec-e7482230-19ea-45c9-8fcb-97c6bd764327";
+    let with = |read: Read, detail: Option<&str>, chips: Vec<Chip>| Read {
+        detail: detail.map(str::to_owned),
+        chips,
+        ..read
+    };
+    let count = |text: &str| vec![Chip::Count(text.to_owned())];
+    for (id, expected) in [
+        (
+            roots,
+            with(
+                read("Found windows", None, Some("pid 77739"), None),
+                None,
+                count("0 windows"),
+            ),
+        ),
+        (
+            observe,
+            with(
+                read("Observed", None, Some("tcode"), None),
+                Some("Tcode"),
+                count("6 elements"),
+            ),
+        ),
+        (
+            codex_observe,
+            with(
+                read("Observed", None, Some("tcode"), None),
+                None,
+                count("6 elements"),
+            ),
+        ),
+        (
+            "toolu_01Ns9tGxLtoMYTQxqB7WLyGB",
+            with(
+                read("Searched", None, Some("终端"), None),
+                None,
+                count("0 matches"),
+            ),
+        ),
+        (
+            "toolu_01YamGZ6qjcLmnYdocyvENVR",
+            read("Moved the pointer", None, Some("(220, 250)"), None),
+        ),
+        (act, read("Clicked", None, Some("(625, 432)"), None)),
+        (
+            "toolu_01HecLyWpPRByj9kFuaqBPW5",
+            with(
+                read("Waited for", None, Some("\"Threads\""), None),
+                None,
+                vec![Chip::Warning("timed out".to_owned())],
+            ),
+        ),
+        (
+            "toolu_01GHuvDnmLGCzz3TPBdmxyYf",
+            read(
+                "Observed",
+                None,
+                None,
+                Some("no AX window matched root @r20"),
+            ),
+        ),
+        (
+            "toolu_01XWGXfmuiByFbAif8Kpgim3",
+            read(
+                "Read",
+                None,
+                None,
+                Some("failed to deserialize parameters: missing field `ref`"),
+            ),
+        ),
+    ] {
+        assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+
+    thread.open_work_log(roots, cx);
+    click(cx, &format!("activity-row-run-{roots}"));
+    click(cx, &format!("activity-row-{observe}"));
+    assert!(shows(cx, &format!("image-read-{observe}-0")));
+    let tree = format!("tool-tree-{observe}");
+    assert!(!shows(cx, &tree), "the outline stays folded to its count");
+    click(cx, &format!("{tree}-toggle"));
+    for row in 0..6 {
+        assert!(shows(cx, &format!("{tree}-{row}")), "element {row}");
+    }
+    assert!(!shows(cx, &format!("{tree}-6")));
+    click(cx, &format!("activity-row-{observe}"));
+    // A transaction lists its one step; its successor diff is an outline
+    // of the element that changed.
+    click(cx, &format!("activity-row-{act}"));
+    assert!(shows(cx, &format!("tool-step-{act}-0")));
+    assert!(!shows(cx, &format!("tool-step-{act}-1")));
+    click(cx, &format!("tool-tree-{act}-toggle"));
+    assert!(shows(cx, &format!("tool-tree-{act}-0")));
+    assert!(!shows(cx, &format!("tool-tree-{act}-1")));
+    thread.shutdown(cx);
+}
+
+/// The preview browser reads as what the agent did to the page: the URL it
+/// opened, the selector it clicked, the text it typed and where, the keys,
+/// the scroll, the page a snapshot read and how many elements it found;
+/// a screenshot opens on the picture, a failed one on the browser's words.
+#[gpui::test]
+fn a_preview_call_reads_as_what_it_did_to_the_page(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/preview.jsonl"), 1_024.);
+    let status = "toolu_01KS7AVK8D5rAHPgk3WkGAAW:toolu_013GGKGccaHprbMwkZFNsR8J";
+    let snapshot = "exec-8919949d-a629-45b8-9377-f4ce815c25fe";
+    let evaluate = "toolu_01KS7AVK8D5rAHPgk3WkGAAW:toolu_01ECxEjKA1AXdoNAeHhDygDe";
+    let screenshot = "toolu_01F6CrbmXUvasJ6vjNrR5wQe";
+    for (id, expected) in [
+        (
+            status,
+            read("Checked the page", None, Some("about:blank"), None),
+        ),
+        (
+            "toolu_01P2BLtgGU73xSPBupeRsT5T",
+            read("Opened", None, Some("http://localhost:3110/"), None),
+        ),
+        (
+            snapshot,
+            Read {
+                chips: vec![Chip::Count("12 elements".to_owned())],
+                ..read(
+                    "Read the page",
+                    None,
+                    Some("登录 - DigVPS - 专注服务器测评，总有一款服务器适合您！"),
+                    None,
+                )
+            },
+        ),
+        (
+            "toolu_014bi2P56XPcvHKchawYF8Lg",
+            read("Clicked", None, Some("header button"), None),
+        ),
+        (
+            "toolu_01WeNMNrE8DcifVjUj9yPWeT",
+            Read {
+                detail: Some("#auth input".to_owned()),
+                ..read("Typed", None, Some("\"testpass123\""), None)
+            },
+        ),
+        (
+            "toolu_012K8JSPa5Xfh1DvDJd8muwD",
+            read("Pressed keys", None, Some("Escape"), None),
+        ),
+        (
+            "toolu_01WJGxramGWcxon7DAAbGqcq",
+            read("Scrolled", None, Some("y+1500"), None),
+        ),
+        (screenshot, read("Took a screenshot", None, None, None)),
+        (
+            "exec-d4bae9da-f150-466c-a7e0-3a3fc1bd167c",
+            read(
+                "Took a screenshot",
+                None,
+                None,
+                Some("preview browser has no visible area"),
+            ),
+        ),
+    ] {
+        assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+
+    thread.open_work_log(status, cx);
+    click(cx, &format!("activity-row-run-{status}"));
+    click(cx, &format!("activity-row-{screenshot}"));
+    assert!(shows(cx, &format!("image-read-{screenshot}-0")));
+    click(cx, &format!("activity-row-{snapshot}"));
+    click(cx, &format!("tool-tree-{snapshot}-toggle"));
+    for row in 0..12 {
+        assert!(shows(cx, &format!("tool-tree-{snapshot}-{row}")), "{row}");
+    }
+    click(cx, &format!("activity-row-{evaluate}"));
+    assert!(shows(cx, &format!("tool-text-{evaluate}-output")));
+    assert!(shows(cx, &format!("tool-code-{evaluate}-toggle")));
+    thread.shutdown(cx);
+}
+
+/// Consecutive computer calls, with the thoughts between them, are one
+/// window, "Used computer · N actions", telling the latest step and keeping
+/// the latest screenshot in view; a command between two runs keeps them
+/// apart, and a thought after the last call stays out. Opened, it holds
+/// each call's own window under the id it has alone, so a window keeps its
+/// identity as its run grows.
+#[gpui::test]
+fn consecutive_computer_calls_share_one_window_with_the_latest_screenshot(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/run.jsonl"), 1_024.);
+    let observe = "toolu_017Q2ubQL1y3N7Q6G6nrmsJa:toolu_01C9td26NuYvzsayZDbUJedP";
+    let act = "toolu_01YamGZ6qjcLmnYdocyvENVR";
+    let script = "call_eCkCDGIgrTwMGt9JIPQK7WVO";
+
+    let entries = thread.entries(cx);
+    let refs: Vec<&TimelineEntry> = entries.iter().map(Arc::as_ref).collect();
+    let counts = crate::chat::model::work_log_counts(&refs);
+    assert_eq!((counts.computer, counts.commands), (3, 1));
+
+    thread.open_work_log(observe, cx);
+    let run = format!("activity-row-run-{observe}");
+    assert!(shows(cx, &run));
+    assert!(shows(cx, &format!("activity-row-run-{script}")));
+    assert!(shows(cx, "activity-row-thought-after"));
+    assert!(shows(cx, "activity-row-command-between"));
+    // Shut, the run tells its latest step and shows the observation's
+    // screenshot, the latest it got.
+    assert!(shows(cx, &format!("image-read-{observe}-0")));
+    assert!(!shows(cx, &format!("activity-row-{act}")));
+    click(cx, &run);
+    for inside in [observe, "thought-between", act] {
+        assert!(shows(cx, &format!("activity-row-{inside}")), "{inside}");
+    }
+    thread.shutdown(cx);
+}
+
+/// A call about Tcode's threads reads as what it did to which thread, by
+/// the title the call gave it or the head of its id, and the entries it
+/// names: a refusal by its own words. Opened, every thread and entry it
+/// names is a link.
+#[gpui::test]
+fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/threads.jsonl"), 1_024.);
+    let outline = "toolu_012QMT71dp98e55BupiJURf6:toolu_01PVcJdSBA51bmNhQcD7vCPN";
+    let notify = "toolu_01XWjf1cgHqAZxrE9sURd7Gb";
+    let with = |read: Read, detail: Option<&str>, chips: Vec<Chip>| Read {
+        detail: detail.map(str::to_owned),
+        chips,
+        ..read
+    };
+    for (id, expected) in [
+        (
+            outline,
+            read("Outlined", None, Some("打包 Go 与 Rust UDF 分发包"), None),
+        ),
+        (
+            "toolu_014TLy6G9bmwfudQJRXy3KaV",
+            read("Read", None, Some("0f0027c4 #1855–#1903"), None),
+        ),
+        (
+            "toolu_01SZQhAHqfTmKVScua8iLLGi",
+            with(
+                read("Searched", None, Some("抽象"), None),
+                Some("1c4a9ef6"),
+                vec![Chip::Count("0 hits".to_owned())],
+            ),
+        ),
+        (
+            "toolu_01FQ8S6KvXR7rVJXYYVMHhp3",
+            read(
+                "Searched",
+                None,
+                Some("心智"),
+                Some("refused: scope host is wider than your grant's project"),
+            ),
+        ),
+        (
+            "toolu_01GprWTPcsBNkJ7DmcEjBVDb",
+            with(
+                read("Searched", None, Some("git_commit"), None),
+                Some("92ba1a19 #33670"),
+                Vec::new(),
+            ),
+        ),
+        (
+            "toolu_017ZJVGuFzkcNidvsaj1RoB8",
+            with(
+                read("Listed threads", None, Some("多窗格"), None),
+                None,
+                vec![Chip::Count("1 thread".to_owned())],
+            ),
+        ),
+        (
+            "toolu_01AoVkVQP25t5xSZqB1ru1Hd",
+            with(
+                read(
+                    "Started a thread",
+                    None,
+                    Some("工作包 8：预检台与大屏"),
+                    None,
+                ),
+                Some("claude · claude-fable-5-1"),
+                Vec::new(),
+            ),
+        ),
+        (
+            "toolu_01RyxSsh7j4FTxBcFtnm4rWW",
+            read("Updated threads", None, Some("interrupt f7419215"), None),
+        ),
+        (
+            notify,
+            read("Set a watch on", None, Some("0f0027c4, bb008ad2"), None),
+        ),
+        (
+            "toolu_01XtnFUpXBHJRqTz5kxibApB",
+            with(
+                read(
+                    "Dispatched",
+                    None,
+                    Some("Investigate plan-mode persistence/replay lifecycle"),
+                    None,
+                ),
+                Some("codex · gpt-5.6-sol"),
+                Vec::new(),
+            ),
+        ),
+        (
+            "toolu_01CpV5xZDbdN8sHK2rddZX8G",
+            read(
+                "Read the result of",
+                None,
+                Some("4a00e630"),
+                Some("thread is still running"),
+            ),
+        ),
+    ] {
+        assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+
+    thread.open_work_log(outline, cx);
+    click(cx, &format!("activity-row-{notify}"));
+    for link in 0..2 {
+        assert!(shows(cx, &format!("tool-thread-{notify}-{link}")), "{link}");
+    }
+    assert!(!shows(cx, &format!("tool-thread-{notify}-2")));
+    thread.shutdown(cx);
+}
+
+/// The harness's calls about the session read as what they did: the tools
+/// a search loaded, the skill launched, a plan proposed as a call, a
+/// question asked and the answer it got, the reviewer's verdict with its
+/// risk and, when it denied, its rationale; a wait, an image viewed before
+/// views carried images and an image generated read as such, not as their
+/// kind and summary.
+#[gpui::test]
+fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/harness.jsonl"), 1_024.);
+    let review = "6edd6799-9365-40eb-bb46-1b81349825ce";
+    let ask = "toolu_01ATcf9PyE343ETE6mET6bu9";
+    let codex_ask = "call_xOISWlfXvmW4R9A8oaZnC3uD";
+    let rationale = "该脚本通过 DOM 查询定位控件，违反用户明确禁止用页面脚本替代正常交互、\
+                     读取隐藏页面状态的限制；应改用可见控件快照定位或停止。";
+    for (id, expected) in [
+        (
+            review,
+            Read {
+                chips: vec![Chip::Count("Risk: low".to_owned())],
+                ..read(
+                    "Denied",
+                    None,
+                    Some("MCP tool: tcode_preview/preview_evaluate"),
+                    Some(rationale),
+                )
+            },
+        ),
+        (
+            "toolu_01GYbQaLznEUcjv91J9ZFWNn",
+            Read {
+                chips: vec![Chip::Count("1 tool".to_owned())],
+                ..read("Loaded tools", None, Some("select:Monitor"), None)
+            },
+        ),
+        (
+            "toolu_01GpvHKPqmxfntp6jA11WR8e",
+            read("Launched skill", None, Some("pr"), None),
+        ),
+        (
+            "toolu_01VyJhZhVpFpWy43VaLQUsCR",
+            read(
+                "Proposed a plan",
+                None,
+                Some("Migrate the settings page in one pass"),
+                None,
+            ),
+        ),
+        (
+            ask,
+            read(
+                "Asked",
+                None,
+                Some("Which release scope should this publish use?"),
+                None,
+            ),
+        ),
+        (
+            "call_wmvrnLAr0GTnBoYQog6Gvjq0",
+            read("Waited", None, Some("20.0s"), None),
+        ),
+        (
+            "exec-5bd102db-8280-4811-a3c3-6146bd58a20c",
+            read("Viewed", None, Some("/tmp/tcode-before.png"), None),
+        ),
+        (
+            "exec-89f575db-4c35-4d77-a024-611fdd5d1d50",
+            read(
+                "Generated an image",
+                None,
+                Some(
+                    "Edit the reference image: keep the subject, make the background transparent.",
+                ),
+                None,
+            ),
+        ),
+    ] {
+        assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+
+    thread.open_work_log(review, cx);
+    assert!(shows(cx, &format!("tool-error-{review}")));
+    click(cx, "activity-row-toolu_01GYbQaLznEUcjv91J9ZFWNn");
+    assert!(shows(cx, "tool-loaded-toolu_01GYbQaLznEUcjv91J9ZFWNn-0"));
+    for id in [ask, codex_ask] {
+        click(cx, &format!("activity-row-{id}"));
+        assert!(shows(cx, &format!("tool-question-{id}-0")), "{id}");
+    }
     thread.shutdown(cx);
 }

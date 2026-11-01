@@ -976,7 +976,18 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
-        for (activity_index, entry) in activities.iter().enumerate() {
+        for range in tools::run::windows(activities) {
+            if tools::run::is_run(activities, &range) {
+                rows.push(self.compose_computer_run(
+                    &activities[range],
+                    cwd,
+                    live_reasoning_id,
+                    window,
+                    cx,
+                ));
+                continue;
+            }
+            let (activity_index, entry) = (range.start, activities[range.start]);
             let recency = AutoActivityRecency::from_newer_activity_count(
                 activities.len() - activity_index - 1,
             );
