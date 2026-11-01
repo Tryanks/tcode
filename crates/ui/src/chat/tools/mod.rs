@@ -834,6 +834,45 @@ pub(in crate::chat) fn code_section(
         .into_any_element()
 }
 
+/// The output a body read a structured view from, as the call returned
+/// it: folded until asked for, then bounded as any output is.
+pub(in crate::chat) fn raw_section(
+    call: &Call<'_>,
+    text: &str,
+    ctx: &mut ToolCtx<'_, '_>,
+) -> AnyElement {
+    let key = format!("tool-raw-{}", call.id());
+    let open = ctx.is_open(&key);
+    let on_click = ctx.toggle(call.entry, key.clone());
+    let label = if open {
+        crate::tr!("tools.hide_raw")
+    } else {
+        crate::tr!("tools.show_raw")
+    };
+    let toggle = format!("{key}-toggle");
+    let control = h_flex().child(
+        div()
+            .debug_selector({
+                let toggle = toggle.clone();
+                move || toggle.clone()
+            })
+            .child(super::components::changed_files::quiet_control(
+                SharedString::from(toggle),
+                label.into_owned().into(),
+                on_click,
+                ctx.app(),
+            )),
+    );
+    let raw = open.then(|| bounded_text(call.entry, "output", text, true, Bound::HEAD, ctx));
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1()
+        .child(control)
+        .children(raw)
+        .into_any_element()
+}
+
 /// `path` as the workspace shows it.
 pub(in crate::chat) fn display_path(path: &str, cwd: &Path) -> String {
     crate::workspace_walk::relativize_to_workspace(path, cwd)

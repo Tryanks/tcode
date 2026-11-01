@@ -99,40 +99,24 @@ fn quoted(text: &str) -> Option<(String, &str)> {
     None
 }
 
-/// A tool's text with its outline lifted out: the elements, and every
-/// other line as it came.
-pub(in crate::chat) struct Split {
-    pub(in crate::chat) nodes: Vec<Node>,
-    pub(in crate::chat) rest: String,
-}
-
 /// The harness's notes after an observation, whose candidate lines
 /// (`- @e1 window "…"`) are shaped like a diff's removals but list targets.
 const NOTES_OPEN: &str = "<computer_use_harness>";
 const NOTES_CLOSE: &str = "</computer_use_harness>";
 
-pub(in crate::chat) fn split(text: &str) -> Split {
+/// The elements a tool's text lists, outside the harness's notes.
+pub(in crate::chat) fn nodes(text: &str) -> Vec<Node> {
     let mut nodes = Vec::new();
-    let mut rest = Vec::new();
     let mut in_notes = false;
     for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed == NOTES_OPEN {
-            in_notes = true;
-        } else if trimmed == NOTES_CLOSE {
-            in_notes = false;
-            rest.push(line);
-            continue;
-        }
-        match parse_line(line).filter(|_| !in_notes) {
-            Some(node) => nodes.push(node),
-            None => rest.push(line),
+        match line.trim() {
+            NOTES_OPEN => in_notes = true,
+            NOTES_CLOSE => in_notes = false,
+            _ if !in_notes => nodes.extend(parse_line(line)),
+            _ => {}
         }
     }
-    Split {
-        nodes,
-        rest: rest.join("\n").trim().to_owned(),
-    }
+    nodes
 }
 
 /// The outline as a section of a body: shut, `count` — how many elements

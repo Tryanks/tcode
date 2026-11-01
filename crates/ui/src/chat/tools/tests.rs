@@ -1071,7 +1071,18 @@ fn a_desktop_call_reads_as_the_window_it_saw_and_the_steps_it_took(cx: &mut Test
         assert!(shows(cx, &format!("{tree}-{row}")), "element {row}");
     }
     assert!(!shows(cx, &format!("{tree}-6")));
+    // The text the outline was read from is not printed again, but stays
+    // one click away.
+    let raw = format!("tool-text-{observe}-output");
+    assert!(!shows(cx, &raw));
+    click(cx, &format!("tool-raw-{observe}-toggle"));
+    assert!(shows(cx, &raw));
     click(cx, &format!("activity-row-{observe}"));
+    // With nothing to read a structure from, the text shows open.
+    click(cx, &format!("activity-row-{roots}"));
+    assert!(shows(cx, &format!("tool-text-{roots}-output")));
+    assert!(!shows(cx, &format!("tool-raw-{roots}-toggle")));
+    click(cx, &format!("activity-row-{roots}"));
     // A transaction lists its one step; its successor diff is an outline
     // of the element that changed.
     click(cx, &format!("activity-row-{act}"));
@@ -1159,6 +1170,10 @@ fn a_preview_call_reads_as_what_it_did_to_the_page(cx: &mut TestAppContext) {
     for row in 0..12 {
         assert!(shows(cx, &format!("tool-tree-{snapshot}-{row}")), "{row}");
     }
+    let raw = format!("tool-text-{snapshot}-output");
+    assert!(!shows(cx, &raw), "the snapshot's JSON stays folded");
+    click(cx, &format!("tool-raw-{snapshot}-toggle"));
+    assert!(shows(cx, &raw));
     click(cx, &format!("activity-row-{evaluate}"));
     assert!(shows(cx, &format!("tool-text-{evaluate}-output")));
     assert!(shows(cx, &format!("tool-code-{evaluate}-toggle")));
