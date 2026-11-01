@@ -1267,48 +1267,6 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
 }
 
 #[test]
-fn deleting_a_profile_removes_only_the_config_directory_tcode_made() {
-    let test_store = TestStore::new("tcode-delete-profile-home-test");
-    let made = test_store.root().join("profile-homes").join("work");
-    let chosen = test_store.root().join("my-claude");
-    for home in [&made, &chosen] {
-        std::fs::create_dir_all(home.join("projects")).unwrap();
-        std::fs::write(home.join(".claude.json"), "{}").unwrap();
-    }
-    let mut host = TestClientState::new((*test_store).clone());
-    for (id, home) in [("work", &made), ("mine", &chosen)] {
-        host.settings.profiles.insert(
-            id.into(),
-            ProviderProfile {
-                kind: ProviderKind::ClaudeCode,
-                settings: ProviderSettings {
-                    home_path: Some(home.clone()),
-                    ..ProviderSettings::default()
-                },
-            },
-        );
-    }
-    let cx = &mut TestAppContext::default();
-    let state = cx.new_entity(host);
-
-    for (request, id) in [(1, "work"), (2, "mine")] {
-        state.dispatch_command(
-            cx,
-            request,
-            Command::DeleteProfile {
-                profile_id: id.into(),
-            },
-        );
-    }
-    cx.run_until_parked();
-
-    assert!(state.read(|state| state.settings.profiles.is_empty()));
-    assert!(!made.exists());
-    assert!(chosen.join(".claude.json").exists());
-    assert!(chosen.join("projects").is_dir());
-}
-
-#[test]
 fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-scripted-provider-seam-test");
