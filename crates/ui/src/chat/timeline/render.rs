@@ -992,6 +992,11 @@ impl ChatView {
         }
 
         if !visible.is_empty() && !header_only {
+            // The activities a collapse folds away stood between the header
+            // and the live window.
+            if !folded.is_empty() {
+                flow = flow.children(std::mem::take(&mut self.row_folds));
+            }
             flow = flow.child(
                 v_flex()
                     .w_full()

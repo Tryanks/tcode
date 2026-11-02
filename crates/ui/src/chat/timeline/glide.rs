@@ -1,12 +1,5 @@
-//! Timeline rows that rise from below.
-//!
-//! gpui's `list` has no insert or item-height motion and gpui-base has no
-//! animated list scroll. gpui-base's `MotionReveal` scales its previous
-//! frame's measurement by a progress, and its measurement, like every keyed
-//! state, ends when a row leaves the list's rendered window. So a row's
-//! height glide is [`RowGlide`], driven by arrival stamps the timeline owns
-//! (one per row identity, written only for rows that arrive live), until gpui
-//! or gpui-base moves list rows themselves.
+//! Which timeline rows rise from below: the timeline's stamp policy over
+//! [`crate::motion::list_rows`].
 //!
 //! While the reader follows the tail the list keeps its end on the
 //! viewport's bottom edge, so a row whose layout height grows carries the
@@ -14,332 +7,26 @@
 
 use std::ops::Range;
 
-use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, ContentMask, Element, ElementId, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, ParentElement as _, Pixels, Style, Styled as _,
-    Window, div, point, prelude::FluentBuilder as _, px, relative, size,
-};
-use gpui_base::motion::{Easing, MotionStatus, Timing};
+use gpui::App;
 use tcode_core::session::EntryContent;
 
-use super::super::{ChatView, Instant};
+use crate::motion::list_rows::{Arrival, Attach};
 
-/// How a row that arrived while the reader was looking came in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::chat) enum Arrival {
-    /// After every row the list had: the row above gives up the end's
-    /// padding, which the glide hands over.
-    Appended,
-    /// Between rows the list keeps.
-    Inserted,
-    /// In place of a row that went, such as an empty turn's.
-    Replaced,
-}
+use super::super::ChatView;
+use super::LeftRow;
+use super::rows::{RowPart, TimelineRow};
 
-/// A row's arrival, stamped when the list learns of it.
-#[derive(Clone, Copy, Debug)]
-pub(in crate::chat) struct RowArrival {
-    pub(in crate::chat) at: Instant,
-    pub(in crate::chat) arrival: Arrival,
-    /// The row is the first on screen of its turn, so the turn's trailer
-    /// (its working status) arrives with it rather than moving down to it.
-    pub(in crate::chat) brings_turn: bool,
-}
-
-impl RowArrival {
-    /// How far in the row is, from absent to at rest, `now`.
-    pub(in crate::chat) fn progress(&self, now: Instant) -> f32 {
-        Timing::new(crate::edge_back::SETTLE)
-            .ease(Easing::Custom(std::rc::Rc::new(
-                gpui_base::animation::ease_out_cubic,
-            )))
-            .sample(now.saturating_duration_since(self.at))
-            .directed_progress
-    }
-
-    pub(in crate::chat) fn settled(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.at) >= crate::edge_back::SETTLE
-    }
-}
-
-/// What a [`RowGlide`] does this frame.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::chat) enum Glide {
-    /// Laid out as a plain child: no measurement, no clip, no frame.
-    Rest,
-    /// Arriving: its height is its measurement scaled by the progress, and
-    /// it fades and rises in.
-    Enter(f32),
-    /// The live end of a running turn the reader follows: each time its
-    /// `content` changes, its height glides to the new measurement. At rest
-    /// it is laid out as a plain child, so height that changes on its own (a
-    /// fold inside it, an image that loaded) moves once, by its own motion.
-    Tail { content: u64 },
-}
-
-/// A timeline row's content, gliding its layout height.
-///
-/// The same element in every [`Glide`], so what it draws keeps its element
-/// ids, and with them its state, when a glide starts or ends.
-pub(in crate::chat) struct RowGlide {
-    id: ElementId,
-    glide: Glide,
-    child: AnyElement,
-}
-
-impl RowGlide {
-    pub(in crate::chat) fn new(
-        id: impl Into<ElementId>,
-        glide: Glide,
-        child: impl IntoElement,
-    ) -> Self {
-        let child = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .when_some(
-                match glide {
-                    Glide::Enter(progress) if progress < 1. => Some(progress),
-                    _ => None,
-                },
-                |child, progress| child.opacity(progress),
-            )
-            .child(child)
-            .into_any_element();
-        Self {
-            id: id.into(),
-            glide,
-            child,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct Measured {
-    /// The child's height as last laid out.
-    height: Option<Pixels>,
-    /// The tail's content when the glide last took aim.
-    content: Option<u64>,
-    /// The measurement the tail glides to: the one taken after its content
-    /// last changed.
-    target: Option<Pixels>,
-    /// The content changed; the next measurement is the new target.
-    retarget: bool,
-    /// The height is on its way to `target`.
-    gliding: bool,
-}
-
-pub(in crate::chat) enum GlideLayout {
-    /// The child is this element's layout.
-    Plain,
-    /// This element is laid out at the glided height; the child is laid out
-    /// on its own and clipped to it, `lift` below its top.
-    Clipped { lift: Pixels },
-}
-
-impl IntoElement for RowGlide {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for RowGlide {
-    type RequestLayoutState = GlideLayout;
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        Some(self.id.clone())
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        global_id: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, GlideLayout) {
-        let global_id = global_id.expect("RowGlide has an id");
-        let height = match self.glide {
-            Glide::Rest => None,
-            Glide::Enter(progress) => {
-                let measured = window.with_element_state(global_id, |state, _| {
-                    let state: Measured = state.unwrap_or_default();
-                    (state.height, state)
-                });
-                Some((
-                    measured.unwrap_or_default() * progress,
-                    crate::motion::lift(progress),
-                ))
-            }
-            Glide::Tail { content } => {
-                let state = window.with_element_state(global_id, |state, _| {
-                    let mut state: Measured = state.unwrap_or_default();
-                    if state.content.is_some_and(|seen| seen != content) {
-                        state.retarget = true;
-                    }
-                    state.content = Some(content);
-                    (state, state)
-                });
-                match (state.height, state.target) {
-                    // The frame the content changes still shows the height it
-                    // had; its measurement becomes the target the next frame
-                    // glides to. Height that changes during a glide rides on
-                    // it, a frame late.
-                    (Some(measured), Some(target)) if state.retarget || state.gliding => {
-                        let glided = gpui_base::motion::transition_with_status(
-                            "tail",
-                            target,
-                            crate::motion::settle(),
-                            window,
-                            cx,
-                        );
-                        let gliding =
-                            matches!(glided.status, MotionStatus::Delayed | MotionStatus::Running);
-                        window.with_element_state(global_id, |state, _| {
-                            let mut state: Measured = state.unwrap_or_default();
-                            state.gliding = gliding;
-                            ((), state)
-                        });
-                        Some(((glided.value + measured - target).max(px(0.)), px(0.)))
-                    }
-                    _ => None,
-                }
-            }
-        };
-        match height {
-            None => (self.child.request_layout(window, cx), GlideLayout::Plain),
-            Some((height, lift)) => {
-                let mut style = Style::default();
-                style.size.width = relative(1.).into();
-                style.size.height = height.into();
-                (
-                    window.request_layout(style, None, cx),
-                    GlideLayout::Clipped { lift },
-                )
-            }
-        }
-    }
-
-    fn prepaint(
-        &mut self,
-        global_id: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        layout: &mut GlideLayout,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let lift = match layout {
-            GlideLayout::Plain => {
-                self.child.prepaint(window, cx);
-                if matches!(self.glide, Glide::Tail { .. }) {
-                    let height = bounds.size.height;
-                    window.with_element_state(
-                        global_id.expect("RowGlide has an id"),
-                        |state, _| {
-                            let mut state: Measured = state.unwrap_or_default();
-                            state.height = Some(height);
-                            state.target = Some(height);
-                            ((), state)
-                        },
-                    );
-                }
-                return;
-            }
-            GlideLayout::Clipped { lift } => *lift,
-        };
-        let measured = self
-            .child
-            .layout_as_root(
-                size(
-                    AvailableSpace::Definite(bounds.size.width),
-                    AvailableSpace::MinContent,
-                ),
-                window,
-                cx,
-            )
-            .height;
-        let moved =
-            window.with_element_state(global_id.expect("RowGlide has an id"), |state, _| {
-                let mut state: Measured = state.unwrap_or_default();
-                let mut moved = state.height != Some(measured);
-                state.height = Some(measured);
-                if state.retarget {
-                    moved |= state.target != Some(measured);
-                    state.target = Some(measured);
-                    state.retarget = false;
-                    state.gliding = true;
-                }
-                (moved, state)
-            });
-        if moved {
-            window.request_animation_frame();
-        }
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            self.child
-                .prepaint_at(bounds.origin + point(px(0.), lift), window, cx);
-        });
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        layout: &mut GlideLayout,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        match layout {
-            GlideLayout::Plain => self.child.paint(window, cx),
-            GlideLayout::Clipped { .. } => {
-                window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                    self.child.paint(window, cx);
-                });
-            }
-        }
-    }
-}
-
-/// The rows a sync's splices bring in, by their index among the new rows,
-/// and how each came in. The splices in `carried` hand rows already on
-/// screen over to new ones, so nothing in them arrives.
-pub(super) fn arrived_rows(
-    splices: &[(Range<usize>, usize)],
-    carried: &[Range<usize>],
-    old_len: usize,
-) -> Vec<(usize, Arrival)> {
-    let mut arrived = Vec::new();
-    let mut shift = 0isize;
-    for (range, count) in splices {
-        let start = range.start.saturating_add_signed(shift);
-        shift += *count as isize - range.len() as isize;
-        if carried.contains(range) {
-            continue;
-        }
-        arrived.extend((0..*count).map(|offset| {
-            let arrival = if offset < range.len() {
-                Arrival::Replaced
-            } else if range.end == old_len {
-                Arrival::Appended
-            } else {
-                Arrival::Inserted
-            };
-            (start + offset, arrival)
-        }));
-    }
-    arrived
-}
+/// The rows a regroup takes out, each with the survivor it folds against.
+/// The reader's anchor is never among them: the header they collapse is on
+/// screen above them.
+#[derive(Default)]
+pub(super) struct Leaving(Vec<(u64, LeftRow, Attach)>);
 
 impl ChatView {
-    /// Stamp the rows that just arrived live, so they rise in. A reader who
+    /// Stamp the rows that just arrived live, so they rise in; each notes
+    /// whether it is the first on screen of its turn, so the turn's trailer
+    /// (its working status) arrives with it rather than moving down to it.
+    /// A reader who
     /// paused above the tail is not moved: only rows below the one at the top
     /// of the viewport arrive, and they only grow downward.
     pub(super) fn stamp_arrivals(
@@ -378,17 +65,82 @@ impl ChatView {
                             });
                         (!on_screen).then_some((
                             row.identity,
-                            RowArrival {
-                                at,
-                                arrival,
-                                brings_turn: old_last_turn.is_none_or(|turn| row.turn > turn),
-                            },
+                            arrival,
+                            old_last_turn.is_none_or(|turn| row.turn > turn),
                         ))
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        self.arrivals.extend(stamps);
+        for (key, arrival, brings_turn) in stamps {
+            self.rows_motion.arrive(key, arrival, brings_turn, at);
+        }
+    }
+}
+
+impl ChatView {
+    /// The rows of `old` the splices take out with nothing in their place,
+    /// as they were drawn: a collapsed Work Log's activities. An expanded
+    /// live window is not among them: its activities stay on screen in the
+    /// run's own row.
+    pub(super) fn rows_leaving(
+        &self,
+        old: &[TimelineRow],
+        splices: &[(Range<usize>, usize)],
+        carried: &[Range<usize>],
+        cx: &App,
+    ) -> Leaving {
+        let removed = crate::motion::list_rows::removed_rows(splices, carried);
+        if removed.is_empty() {
+            return Leaving::default();
+        }
+        let survives = |index: usize| !removed.contains(&index);
+        let attach = |index: usize| {
+            (0..index)
+                .rev()
+                .find(|&above| survives(above))
+                .map(|above| Attach::Below(old[above].identity))
+                .or_else(|| {
+                    (index + 1..old.len())
+                        .find(|&below| survives(below))
+                        .map(|below| Attach::Above(old[below].identity))
+                })
+        };
+        let rows = self
+            .workspace_store
+            .read(cx)
+            .with_timeline_for(self.session_id.as_deref(), |timeline| {
+                removed
+                    .iter()
+                    .filter(|&&index| old[index].part != RowPart::WorkLogLive)
+                    .filter_map(|&index| {
+                        let row = &old[index];
+                        let own = timeline.entries.get(row.entry_range.clone())?.to_vec();
+                        Some((
+                            row.identity,
+                            LeftRow {
+                                row: TimelineRow {
+                                    last_in_turn: false,
+                                    ..row.clone()
+                                },
+                                turn: timeline.turns.get(row.turn).cloned().unwrap_or_default(),
+                                own,
+                            },
+                            attach(index)?,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Leaving(rows)
+    }
+
+    /// Fold the rows a regroup took out away against their survivors.
+    pub(super) fn fold_away(&mut self, leaving: Leaving, cx: &App) {
+        let at = cx.background_executor().now();
+        for (key, row, attach) in leaving.0 {
+            self.rows_motion.leave(key, row, attach, at);
+        }
     }
 }
 
@@ -996,6 +748,162 @@ mod tests {
                     "call {step}: the tail left the bottom edge"
                 );
             }
+        }
+    }
+
+    /// Four finished turns, then one that ran six commands and answered.
+    fn turns_ending_with_a_work_log() -> Vec<agent::AgentEvent> {
+        let mut events: Vec<_> = (0..4).flat_map(turn).collect();
+        events.extend([
+            agent::AgentEvent::TurnStarted {
+                turn_id: "4".into(),
+            },
+            user_event("user-4", "Run the checks."),
+        ]);
+        events.extend((0..6).map(|index| command(&format!("check-{index}"))));
+        events.extend([
+            answer_event("answer-4", &"Every check passed.\n\n".repeat(6)),
+            agent::AgentEvent::TurnCompleted {
+                turn_id: "4".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            },
+        ]);
+        events
+    }
+
+    /// Where the Work Log's header and the answer's row below it start.
+    fn work_log_tops(
+        chat: &Entity<ChatView>,
+        cx: &mut VisualTestContext,
+    ) -> (gpui::Pixels, gpui::Pixels) {
+        let last = chat.read_with(cx, |chat, _| chat.rows.len() - 1);
+        let header = cx
+            .debug_bounds("worklog-header-4-check-0")
+            .expect("the Work Log's header is on screen");
+        let answer = cx
+            .debug_bounds(format!("timeline-row-{last}").leak())
+            .expect("the answer is on screen");
+        (header.top(), answer.top())
+    }
+
+    /// How a Work Log's fold moved what is below it, frame by frame: the
+    /// header holds still; with motion the answer goes one way, a little
+    /// each frame, never in one step; without, it is there at once.
+    fn assert_folds(tops: &[(gpui::Pixels, gpui::Pixels)], down: bool, reduce: bool) {
+        assert!(
+            tops.iter().all(|top| (top.0 - tops[0].0).abs() <= px(0.5)),
+            "reduce {reduce}: the header moved: {tops:?}"
+        );
+        if reduce {
+            assert_eq!(tops[0], *tops.last().unwrap(), "{tops:?}");
+            return;
+        }
+        assert!(
+            tops.windows(2).all(|pair| if down {
+                pair[1].1 >= pair[0].1 - px(0.5)
+            } else {
+                pair[1].1 <= pair[0].1 + px(0.5)
+            }),
+            "the answer moved back: {tops:?}"
+        );
+        let total = (tops.last().unwrap().1 - tops[0].1).abs();
+        assert!(
+            tops.windows(2)
+                .all(|pair| (pair[1].1 - pair[0].1).abs() < total / 2.),
+            "the answer jumped: {tops:?}"
+        );
+        assert!(
+            tops.windows(2)
+                .filter(|pair| (pair[1].1 - pair[0].1).abs() > px(0.5))
+                .count()
+                >= 6,
+            "the fold took too few frames: {tops:?}"
+        );
+    }
+
+    /// Expanding a Work Log folds its activities in under its header, and
+    /// collapsing it folds them out: the header stays where the reader
+    /// clicked it, the reader stays where they read, and the answer below
+    /// moves with the fold. A row folding out takes no press. With motion
+    /// reduced both happen at once.
+    #[gpui::test]
+    fn a_work_log_folds_its_rows_in_and_out_under_its_header(cx: &mut TestAppContext) {
+        for reduce in [false, true] {
+            let thread = ScriptedThread::new(cx, turns_ending_with_a_work_log(), 0, false);
+            cx.update(|cx| cx.set_reduce_motion(reduce));
+            let (chat, cx) = thread.open_at(gpui::size(px(1_024.), px(1_000.)), cx);
+            thread.deliver(cx);
+            draw_settled(cx);
+            // The reader scrolls up a little, so the follow pauses with the
+            // header well inside the viewport.
+            let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+            cx.simulate_event(gpui::ScrollEvent {
+                position: list.viewport_bounds().center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(40.))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+            draw_settled(cx);
+            assert!(!list.is_following_tail());
+            let header = cx
+                .debug_bounds("worklog-header-4-check-0")
+                .unwrap()
+                .center();
+            let reading = list.logical_scroll_top();
+
+            let closed = work_log_tops(&chat, cx);
+            cx.simulate_click(header, gpui::Modifiers::none());
+            draw(cx);
+            let mut opening = vec![closed, work_log_tops(&chat, cx)];
+            for _ in 0..16 {
+                frame(cx);
+                opening.push(work_log_tops(&chat, cx));
+            }
+            assert!(cx.debug_bounds("activity-row-check-5").is_some());
+            let open = *opening.last().unwrap();
+            assert!(
+                open.1 > closed.1 + px(100.),
+                "the activities opened: {opening:?}"
+            );
+            assert_folds(&opening[1..], true, reduce);
+            assert!(!list.is_following_tail());
+            assert_eq!(list.logical_scroll_top().item_ix, reading.item_ix);
+            draw_settled(cx);
+            let output_open = crate::chat::tests::command_open(cx, "check-2").is_some();
+
+            cx.simulate_click(header, gpui::Modifiers::none());
+            draw(cx);
+            let mut closing = vec![work_log_tops(&chat, cx)];
+            for step in 0..16 {
+                if step == 3 && !reduce {
+                    // A press on a row still folding away reaches nothing.
+                    let leaving = cx
+                        .debug_bounds("activity-row-check-2")
+                        .expect("the activity is still folding away");
+                    let press = gpui::point(leaving.center().x, leaving.top() + px(4.));
+                    cx.simulate_click(press, gpui::Modifiers::none());
+                }
+                frame(cx);
+                closing.push(work_log_tops(&chat, cx));
+            }
+            assert_folds(&closing, false, reduce);
+            assert!(
+                (closing.last().unwrap().1 - closed.1).abs() <= px(0.5),
+                "the answer came back to its place: {closing:?}"
+            );
+            draw_settled(cx);
+            assert!(cx.debug_bounds("activity-row-check-2").is_none());
+            assert_eq!(list.logical_scroll_top().item_ix, reading.item_ix);
+
+            cx.simulate_click(header, gpui::Modifiers::none());
+            draw_settled(cx);
+            assert_eq!(
+                crate::chat::tests::command_open(cx, "check-2").is_some(),
+                output_open,
+                "the press on the folding row reached it"
+            );
+            cx.update(|_, cx| cx.set_reduce_motion(false));
         }
     }
 }

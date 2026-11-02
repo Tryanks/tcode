@@ -73,6 +73,56 @@ impl ChatView {
                 ) else {
                     return div().into_any_element();
                 };
+                let now = cx.background_executor().now();
+                let (above, below) = this.rows_motion.leaving(row.identity, now);
+                let gone = |left: Vec<crate::motion::list_rows::Left<'_, LeftRow>>| {
+                    left.into_iter()
+                        .map(|left| (left.key, left.value.clone(), left.progress))
+                        .collect::<Vec<_>>()
+                };
+                let (above, below) = (gone(above), gone(below));
+                if !above.is_empty() || !below.is_empty() {
+                    window.request_animation_frame();
+                }
+                // A Work Log part keeps the Work Log's rhythm as it folds.
+                let rem = gpui::rems(0.25).to_pixels(window.rem_size());
+                let mut fold = |(key, left): (u64, LeftRow),
+                                progress: f32,
+                                above: bool,
+                                window: &mut Window,
+                                cx: &mut Context<Self>| {
+                    let content = this
+                        .render_row(
+                            (
+                                &left.row,
+                                &left.turn,
+                                &item_cwd,
+                                &left.own,
+                                &[],
+                                (last_user_id.as_deref(), last_assistant_id.as_deref()),
+                            ),
+                            window,
+                            cx,
+                        )
+                        .content;
+                    RowGlide::leaving(
+                        ("timeline-row-leaving", key),
+                        progress,
+                        div()
+                            .w_full()
+                            .map(|fold| if above { fold.pb(rem) } else { fold.pt(rem) })
+                            .child(content),
+                    )
+                    .into_any_element()
+                };
+                let above: Vec<_> = above
+                    .into_iter()
+                    .map(|(key, left, progress)| fold((key, left), progress, true, window, cx))
+                    .collect();
+                this.row_folds = below
+                    .into_iter()
+                    .map(|(key, left, progress)| fold((key, left), progress, false, window, cx))
+                    .collect();
                 let rendered = this.render_row(
                     (
                         &row,
@@ -85,22 +135,23 @@ impl ChatView {
                     window,
                     cx,
                 );
-                let now = cx.background_executor().now();
+                let below = std::mem::take(&mut this.row_folds);
                 let moving = !cx.reduce_motion() && this.capture.is_none();
                 let arrival = |row: &TimelineRow| {
-                    let arrival = this.arrivals.get(&row.identity)?;
-                    (moving && !arrival.settled(now)).then(|| (*arrival, arrival.progress(now)))
+                    moving
+                        .then(|| this.rows_motion.entering(row.identity, now))
+                        .flatten()
                 };
                 let entering = arrival(&row);
                 // The row below took the end's padding from this one; this
                 // one gives it up as that one rises.
-                let below = this
+                let below_arrival = this
                     .rows
                     .get(index + 1)
                     .and_then(arrival)
                     .filter(|(next, _)| next.arrival == Arrival::Appended)
                     .map(|(_, progress)| progress);
-                if entering.is_some() || below.is_some() {
+                if entering.is_some() || below_arrival.is_some() {
                     window.request_animation_frame();
                 }
                 // The followed end of a running turn glides, and so does the
@@ -112,7 +163,7 @@ impl ChatView {
                     None if moving
                         && turn.running
                         && following
-                        && (index + 1 == item_count || below.is_some()) =>
+                        && (index + 1 == item_count || below_arrival.is_some()) =>
                     {
                         Glide::Tail {
                             content: row.content,
@@ -126,9 +177,8 @@ impl ChatView {
                 let opening = entering
                     .filter(|(arrival, _)| arrival.arrival != Arrival::Appended)
                     .map_or(1., |(_, progress)| progress);
-                let padding = below.unwrap_or(1.) * opening;
+                let padding = below_arrival.unwrap_or(1.) * opening;
                 // The rhythm below a row is set by the row after it.
-                let rem = gpui::rems(0.25).to_pixels(window.rem_size());
                 let strip = this.phone_strip_height;
                 let edge_below = |next: Option<&TimelineRow>| match next {
                     None => px(TIMELINE_EDGE_PADDING) + strip,
@@ -162,9 +212,7 @@ impl ChatView {
                 // otherwise the trailer was on screen, and moves down to it.
                 let trailer = rendered.trailer.map(|(trailer, gap)| {
                     let (trailer_glide, gap_scale) = match entering {
-                        Some((arrival, progress)) if arrival.brings_turn => {
-                            (Glide::Enter(progress), 1.)
-                        }
+                        Some((arrival, progress)) if arrival.note => (Glide::Enter(progress), 1.),
                         _ => (Glide::Rest, opening),
                     };
                     RowGlide::new(
@@ -268,11 +316,13 @@ impl ChatView {
                             .max_w(px(CONTENT_MAX_WIDTH))
                             .flex()
                             .flex_col()
+                            .children(above)
                             .child(RowGlide::new(
                                 ("timeline-row-glide", row.identity),
                                 glide,
                                 rendered.content,
                             ))
+                            .children(below)
                             .children(trailer),
                     )
                     .into_any_element()

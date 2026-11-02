@@ -7,15 +7,23 @@ mod render;
 mod residency;
 pub(super) mod rows;
 
+use crate::motion::list_rows::{Arrival, Glide, RowGlide};
 pub(super) use expansion::{
     AutoActivityExpansions, AutoActivityRecency, auto_activity_snapshot_keys,
 };
-pub(super) use glide::RowArrival;
-use glide::{Arrival, Glide, RowGlide};
 pub(super) use render::{ActivityRow, FullOutput};
 pub(super) use residency::{
     PendingMarkdownBuild, tail_row_window, transcript_selection, viewport_row_window,
 };
+
+/// A row that left while the reader looked: what it was drawn from, kept
+/// until it has folded away against the row above it.
+#[derive(Clone)]
+pub(super) struct LeftRow {
+    pub(super) row: TimelineRow,
+    pub(super) turn: TurnMeta,
+    pub(super) own: Vec<Arc<TimelineEntry>>,
+}
 
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
@@ -138,7 +146,7 @@ impl ChatView {
                 origin: list.logical_scroll_top(),
             });
             // Rows still rising settle at once: a tile shows each row whole.
-            self.arrivals.clear();
+            self.rows_motion.clear();
             self.reservation_scroll_back = None;
             cx.notify();
         }
@@ -236,12 +244,16 @@ impl ChatView {
         // what it missed, a page of history) brings rows that were already
         // there; the store holds the timeline still while it catches up, and
         // folds once it has.
-        let live = !session_changed
+        let regrouped = std::mem::take(&mut self.rows_regrouped);
+        // The reader sees the rows change: a live record, or a Work Log they
+        // expanded or collapsed.
+        let seen = !session_changed
             && folds == self.timeline_folds
-            && !std::mem::take(&mut self.rows_regrouped)
             && self.capture.is_none()
             && !cx.reduce_motion();
         self.timeline_folds = folds;
+        // A collapsed Work Log's rows fold away from what they showed.
+        let old_rows = (seen && regrouped).then(|| self.rows.clone());
         let (list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
@@ -279,7 +291,7 @@ impl ChatView {
             .as_deref()
             .and_then(|session_id| self.workspace_store.read(cx).pending_chat_turn(session_id));
         if session_changed {
-            self.arrivals.clear();
+            self.rows_motion.clear();
             self.md_states.clear();
             self.selection
                 .update(cx, |selection, cx| selection.clear(cx));
@@ -358,11 +370,14 @@ impl ChatView {
                 let carried_offset = (!self.list_state.is_following_tail()
                     && carried.iter().any(|range| range.contains(&anchor.item_ix)))
                 .then_some(anchor.offset_in_item);
-                let arrived = if live {
-                    glide::arrived_rows(&splices, &carried, old_len)
+                let arrived = if seen {
+                    crate::motion::list_rows::arrived_rows(&splices, &carried, old_len)
                 } else {
                     Vec::new()
                 };
+                let left = old_rows
+                    .map(|old| self.rows_leaving(&old, &splices, &carried, cx))
+                    .unwrap_or_default();
                 for (range, count) in splices.into_iter().rev() {
                     // The row above a splice changes its padding (the former
                     // last row hands its edge padding to the new one); its
@@ -387,7 +402,22 @@ impl ChatView {
                     });
                     self.carried_anchor = true;
                 }
+                let arrived = if regrouped {
+                    // An expanded live window was the collapsed run's, on
+                    // screen already.
+                    arrived
+                        .into_iter()
+                        .filter(|(index, _)| {
+                            self.rows
+                                .get(*index)
+                                .is_some_and(|row| row.part != RowPart::WorkLogLive)
+                        })
+                        .collect()
+                } else {
+                    arrived
+                };
                 self.stamp_arrivals(arrived, old_last_turn, cx);
+                self.fold_away(left, cx);
             }
         }
 

@@ -17,6 +17,7 @@ mod image_fade;
 pub(crate) mod keyed;
 mod list_flip;
 mod list_hover;
+pub(crate) mod list_rows;
 mod list_scroll;
 mod size_glide;
 
