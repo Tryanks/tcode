@@ -85,32 +85,36 @@ impl Composer {
         let usage = usage_line(&goal);
         let foreground = theme.foreground;
         let touch = self.compact;
-        let last_check = crate::motion::shown(
-            self.motion_id("goal-last-check"),
-            goal.last_check
-                .clone()
-                .filter(|_| goal.status != GoalStatus::Complete),
-            window,
-            cx,
-        )
-        .map(|shown| {
-            shown.fold(
-                div()
-                    .w_full()
-                    .pt_0p5()
-                    .line_clamp(2)
-                    .text_secondary(touch, cx)
-                    .child(crate::tr!(
-                        "composer.goal_last_check",
-                        reason = shown.value.as_str()
-                    )),
+        let last_check = self
+            .motion
+            .shown(
+                self.motion_key("goal-last-check"),
+                goal.last_check
+                    .clone()
+                    .filter(|_| goal.status != GoalStatus::Complete),
+                window,
+                cx,
             )
-        });
+            .map(|shown| {
+                shown.fold(
+                    div()
+                        .w_full()
+                        .pt_0p5()
+                        .line_clamp(2)
+                        .text_secondary(touch, cx)
+                        .child(crate::tr!(
+                            "composer.goal_last_check",
+                            reason = shown.value.as_str()
+                        )),
+                )
+            });
         let objective = goal.objective.clone();
         let status_icon =
             crate::motion::status_icon(self.motion_id("goal-status"), icon, color, window, cx);
-        let pause =
-            crate::motion::shown(self.motion_id("goal-pause"), pause, window, cx).map(|shown| {
+        let pause = self
+            .motion
+            .shown(self.motion_key("goal-pause"), pause, window, cx)
+            .map(|shown| {
                 let (status, label) = shown.value;
                 let icon = if status == GoalStatus::Paused {
                     IconName::Pause
@@ -119,6 +123,7 @@ impl Composer {
                 };
                 shown.fold_across(
                     Button::new("goal-pause")
+                        .motion(&self.button_motion())
                         .debug_selector(|| "goal-pause".into())
                         .ghost()
                         .xsmall()
@@ -158,6 +163,7 @@ impl Composer {
             .children(pause)
             .child(
                 Button::new("goal-edit")
+                    .motion(&self.button_motion())
                     .debug_selector(|| "goal-edit".into())
                     .ghost()
                     .xsmall()
@@ -172,6 +178,7 @@ impl Composer {
             )
             .child(
                 Button::new("goal-clear")
+                    .motion(&self.button_motion())
                     .debug_selector(|| "goal-clear".into())
                     .ghost()
                     .xsmall()

@@ -74,6 +74,7 @@ impl Composer {
             .child(div().flex_1().child(title))
             .child(
                 Button::new("fallback-dismiss")
+                    .motion(&self.button_motion())
                     .ghost()
                     .xsmall()
                     .icon(IconName::Close)
@@ -90,40 +91,46 @@ impl Composer {
         let rewind_turn = refused.as_ref().map(|(turn, _)| *turn);
         // Each action folds in along the row as it becomes possible,
         // carrying the gap before it.
-        let edit_retry = crate::motion::shown(
-            self.motion_id("fallback-edit-retry"),
-            can_rewind.then(|| rewind_turn.unwrap_or_default()),
-            window,
-            cx,
-        )
-        .map(|shown| {
-            let turn = shown.value;
-            shown.fold_across(
-                div().pl_2().child(
-                    Button::new("fallback-edit-retry")
-                        .outline()
-                        .chip()
-                        .label(crate::tr!("fallback.edit_retry"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store.update(cx, |store, _cx| {
-                                store.rewind_turn_for(
-                                    this.session_id.clone().unwrap_or_default(),
-                                    turn,
-                                    RewindMode::Conversation,
-                                );
-                                store.dismiss_fallback_block_for(this.session_id.as_deref());
-                            });
-                            cx.notify();
-                        })),
-                ),
+        let edit_retry = self
+            .motion
+            .shown(
+                self.motion_key("fallback-edit-retry"),
+                can_rewind.then(|| rewind_turn.unwrap_or_default()),
+                window,
+                cx,
             )
-        });
-        let retry = crate::motion::shown(self.motion_id("fallback-retry"), retry_text, window, cx)
+            .map(|shown| {
+                let turn = shown.value;
+                shown.fold_across(
+                    div().pl_2().child(
+                        Button::new("fallback-edit-retry")
+                            .motion(&self.button_motion())
+                            .outline()
+                            .chip()
+                            .label(crate::tr!("fallback.edit_retry"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.rewind_turn_for(
+                                        this.session_id.clone().unwrap_or_default(),
+                                        turn,
+                                        RewindMode::Conversation,
+                                    );
+                                    store.dismiss_fallback_block_for(this.session_id.as_deref());
+                                });
+                                cx.notify();
+                            })),
+                    ),
+                )
+            });
+        let retry = self
+            .motion
+            .shown(self.motion_key("fallback-retry"), retry_text, window, cx)
             .map(|shown| {
                 let text = shown.value.clone();
                 shown.fold_across(
                     div().pl_2().child(
                         Button::new("fallback-retry-opus")
+                            .motion(&self.button_motion())
                             .primary()
                             .chip()
                             .label(crate::tr!("fallback.retry_on", model = model.clone()))
@@ -207,6 +214,7 @@ impl Composer {
             .child(div().flex_1().child(crate::tr!("fallback.review_title")))
             .child(
                 Button::new("fallback-review-dismiss")
+                    .motion(&self.button_motion())
                     .ghost()
                     .xsmall()
                     .icon(IconName::Close)
@@ -244,6 +252,7 @@ impl Composer {
             )
             .child(
                 Button::new("fallback-review-send")
+                    .motion(&self.button_motion())
                     .primary()
                     .with_size(px(SEND_SIZE))
                     .icon(IconName::ArrowUp)

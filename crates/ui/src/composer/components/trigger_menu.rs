@@ -353,9 +353,9 @@ impl Composer {
             } else {
                 empty_text.into()
             };
-            let id = self.motion_id("trigger-empty");
+            let (motion, key) = (self.motion.clone(), self.motion_key("trigger-empty"));
             crate::motion::Sampled::new(move |window, cx| {
-                crate::motion::cross_fade(id, text, window, cx, |text, _, cx| {
+                motion.cross_fade_value(key, text, window, cx, |text, _, cx| {
                     crate::material::empty_row(text.clone(), cx).into_any_element()
                 })
             })

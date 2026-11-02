@@ -35,8 +35,8 @@ impl Composer {
     ) -> AnyElement {
         let count = pending.count;
         let session_id = pending.session_id.clone();
-        crate::motion::cross_fade(
-            self.motion_id("control-request"),
+        self.motion.cross_fade_value(
+            self.motion_key("control-request"),
             pending.request.clone(),
             window,
             cx,
@@ -107,6 +107,7 @@ impl Composer {
                     .flex_wrap()
                     .child(
                         Button::new("control-request-approve")
+                            .motion(&self.button_motion())
                             .primary()
                             .chip()
                             .touch(self.compact)
@@ -116,6 +117,7 @@ impl Composer {
                     )
                     .child(
                         Button::new("control-request-decline")
+                            .motion(&self.button_motion())
                             .danger()
                             .outline()
                             .chip()

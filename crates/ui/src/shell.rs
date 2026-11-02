@@ -14174,6 +14174,135 @@ mod tests {
         assert_between("the travelling steer", pending, taken, partway);
     }
 
+    /// Types `draft` into thread-1's composer on a wide tablet, and a
+    /// quarter of the way into what the draft set moving turns the window
+    /// compact, which draws the composer under another parent. What `at`
+    /// measures on the compact page: part way on, on the first frame it is
+    /// drawn on screen as the page glides in, then at rest with the draft
+    /// cleared and with it typed again, as `[cleared, partway, drafted]`.
+    fn draft_across_breakpoint(
+        cx: &mut TestAppContext,
+        draft: &str,
+        at: impl Fn(&mut VisualTestContext) -> Option<f32>,
+    ) -> [f32; 3] {
+        let at_first = &at;
+        let at = |cx: &mut VisualTestContext| at_first(cx).expect("drawn on screen");
+        let (shell, host, cx) = mount_panes(cx);
+        as_mobile(cx);
+        resize(cx, 1024.);
+        settle_frames(cx);
+        let _ = sent(&host);
+        let focus_composer = |cx: &mut VisualTestContext| {
+            let composer = shell.read_with(cx, |shell, cx| {
+                shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                    .read(cx)
+                    .chat()
+                    .read(cx)
+                    .composer()
+            });
+            let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+            cx.update(|window, cx| focus.focus(window, cx));
+            draw(cx);
+        };
+        focus_composer(cx);
+        cx.simulate_input(draft);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(cx);
+        cx.simulate_resize(size(px(899.), px(800.)));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
+        display_frame(cx);
+        let mut partway = at_first(cx);
+        for _ in 0..4 {
+            if partway.is_some() {
+                break;
+            }
+            display_frame(cx);
+            partway = at_first(cx);
+        }
+        let partway = partway.expect("drawn on screen part way");
+        settle_frames(cx);
+        let drafted = at(cx);
+        focus_composer(cx);
+        cx.simulate_keystrokes("secondary-a backspace");
+        settle_frames(cx);
+        let cleared = at(cx);
+        focus_composer(cx);
+        cx.simulate_input(draft);
+        settle_frames(cx);
+        assert_eq!(at(cx), drafted, "typed again, it comes to rest there");
+        [cleared, partway, drafted]
+    }
+
+    /// Send is dim while there is nothing to send, and brightens as text
+    /// comes. The window turning compact part way draws the button on the
+    /// compact page, keeping its clock in the composer (`Button::motion`):
+    /// it carries on brightening from where it was, not from its end.
+    #[gpui::test]
+    fn the_send_button_carries_on_brightening_when_the_window_turns_compact(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // How opaque the button's fill is painted.
+        let fill = |cx: &mut VisualTestContext| {
+            let button = cx.debug_bounds("send-message").expect("the send button");
+            cx.update(|window, _| {
+                let button = button.scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|quad| {
+                        quad.bounds.contains(&button.center())
+                            && (quad.bounds.size.width.0 - button.size.width.0).abs() < 1.
+                            && (quad.bounds.size.height.0 - button.size.height.0).abs() < 1.
+                    })
+                    .filter_map(|quad| quad.background.as_solid().map(|fill| fill.a))
+                    .reduce(f32::max)
+            })
+        };
+        let [dim, partway, bright] = draft_across_breakpoint(cx, "Look at the build.", fill);
+        assert!(
+            dim + 0.1 < bright,
+            "the button brightens: {dim} -> {bright}"
+        );
+        // In hundredths, for the half-point margin the comparison allows.
+        assert_between(
+            "the send button's dim",
+            px(dim * 100.),
+            px(bright * 100.),
+            px(partway * 100.),
+        );
+    }
+
+    /// The field grows a line at a time as the draft does, its height
+    /// gliding there. The window turning compact part way draws the
+    /// composer on the compact page, the glide kept by the composer: the
+    /// field carries on growing from where it was.
+    #[gpui::test]
+    fn the_draft_carries_on_growing_when_the_window_turns_compact(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let card = |cx: &mut VisualTestContext| {
+            let card = cx.debug_bounds("composer-card").expect("the card");
+            Some(f32::from(card.size.height))
+        };
+        let [one_line, partway, four_lines] =
+            draft_across_breakpoint(cx, "one\ntwo\nthree\nfour", card);
+        assert!(
+            one_line + 30. < four_lines,
+            "the field grew: {one_line} -> {four_lines}"
+        );
+        assert_between(
+            "the draft's height",
+            px(one_line),
+            px(four_lines),
+            px(partway),
+        );
+    }
+
     /// A control the keyboard is on keeps it, and with it its fading ring,
     /// which is kept by its focus handle, when its view is drawn under a new
     /// parent: a command's header in the left of two panes, as the pane is

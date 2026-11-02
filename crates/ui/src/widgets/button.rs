@@ -10,7 +10,7 @@ use gpui::{
     IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
     StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::motion::{Transition, transition};
+use gpui_base::motion::{Interpolate, Transition, transition};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -93,6 +93,8 @@ pub struct Button {
     press_then: Option<super::popover::SheetToggle>,
     /// The handle the caller tracks, when it keeps its own.
     focus: Option<gpui::FocusHandle>,
+    /// The view's store its clocks are kept in, when its view keeps them.
+    motion: Option<crate::motion::owned::Owned>,
 }
 
 pub(crate) type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -125,6 +127,7 @@ impl Button {
             on_hover: None,
             press_then: None,
             focus: None,
+            motion: None,
         }
     }
     pub fn outline(mut self) -> Self {
@@ -165,6 +168,15 @@ impl Button {
     /// on hover shows while it holds keyboard focus too.
     pub fn track_focus(mut self, handle: &gpui::FocusHandle) -> Self {
         self.focus = Some(handle.clone());
+        self
+    }
+    /// Keep the button's colours, dim, spinner and glyph fade in `motion`,
+    /// under the button's id, rather than under its element path: for a
+    /// button its view draws under another parent (the composer's, as the
+    /// window turns compact or wide), where each would otherwise start over
+    /// at its end. Two buttons with one id share their clocks in one store.
+    pub(crate) fn motion(mut self, motion: &crate::motion::owned::Owned) -> Self {
+        self.motion = Some(motion.scope(format!("button:{}", self.id)));
         self
     }
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
@@ -285,26 +297,27 @@ impl RenderOnce for Button {
         // colour can glide; pressing has no style and stays immediate.
         let hovered = window.use_keyed_state((self.id.clone(), "hovered"), cx, |_, _| false);
         let is_hovered = *hovered.read(cx);
-        let settle = || Transition::new(crate::edge_back::SETTLE);
-        let spinning = transition(
-            (self.id.clone(), "loading"),
+        let clocks = Clocks {
+            id: self.id.clone(),
+            motion: self.motion.take(),
+        };
+        let spinning = clocks.transition(
+            "loading",
             if self.loading && self.icon.is_some() {
                 1.
             } else {
                 0.
             },
-            settle(),
             window,
             cx,
         );
-        let dimmed = transition(
-            (self.id.clone(), "opacity"),
+        let dimmed = clocks.transition(
+            "opacity",
             if self.disabled || self.loading {
                 0.5
             } else {
                 1.
             },
-            settle(),
             window,
             cx,
         );
@@ -384,9 +397,9 @@ impl RenderOnce for Button {
             (false, true) => (theme.muted, theme.primary),
             (false, false) => (bg, border),
         };
-        let bg = transition((self.id.clone(), "bg"), bg, settle(), window, cx);
-        let fg = transition((self.id.clone(), "fg"), fg, settle(), window, cx);
-        let border = transition((self.id.clone(), "border"), border, settle(), window, cx);
+        let bg = clocks.transition("bg", bg, window, cx);
+        let fg = clocks.transition("fg", fg, window, cx);
+        let border = clocks.transition("border", border, window, cx);
         let accessibility_label = self.aria_label.clone().or_else(|| self.label.clone());
         // gpui-base's Button keeps its own focus handle, leaving only GPUI's
         // `focus_visible`, which switches at once, to show the keyboard's
@@ -415,16 +428,24 @@ impl RenderOnce for Button {
             let glyph = icon.glyph().clone();
             let leaving = icon.clone();
             let mut current = Some(icon);
-            crate::motion::cross_fade_part(
-                ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "icon".into()),
-                glyph.clone(),
-                window,
-                cx,
-                move |shown, _, _| match current.take().filter(|_| *shown == glyph) {
-                    Some(icon) => icon.into_any_element(),
-                    None => leaving.clone().path(shown.clone()).into_any_element(),
-                },
-            )
+            let shown = glyph.clone();
+            let build = move |shown: &SharedString, _: &mut Window, _: &mut App| match current
+                .take()
+                .filter(|_| *shown == glyph)
+            {
+                Some(icon) => icon.into_any_element(),
+                None => leaving.clone().path(shown.clone()).into_any_element(),
+            };
+            match &clocks.motion {
+                Some(motion) => motion.cross_fade_part("icon", shown, window, cx, build),
+                None => crate::motion::cross_fade_part(
+                    ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "icon".into()),
+                    shown,
+                    window,
+                    cx,
+                    build,
+                ),
+            }
         });
         let content =
             gpui_base::h_flex()
@@ -531,5 +552,44 @@ impl RenderOnce for Button {
             cx,
         )
         .opacity(dimmed)
+    }
+}
+
+/// Where a [`Button`]'s clocks are kept: under its element path, or in its
+/// view's store when the view keeps them ([`Button::motion`]).
+struct Clocks {
+    id: ElementId,
+    motion: Option<crate::motion::owned::Owned>,
+}
+
+impl Clocks {
+    /// The value now of the button's `channel` gliding to `target` over
+    /// `SETTLE`.
+    fn transition<T>(
+        &self,
+        channel: &'static str,
+        target: T,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> T
+    where
+        T: Interpolate + PartialEq + 'static,
+    {
+        match &self.motion {
+            Some(motion) => motion.transition(
+                channel,
+                target,
+                &crate::motion::owned::Curve::settle(),
+                window,
+                cx,
+            ),
+            None => transition(
+                (self.id.clone(), channel),
+                target,
+                Transition::new(crate::edge_back::SETTLE),
+                window,
+                cx,
+            ),
+        }
     }
 }

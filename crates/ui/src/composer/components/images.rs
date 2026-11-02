@@ -484,14 +484,18 @@ impl Composer {
             (0..self.pending_image_loads).map(|slot| (format!("loading-{slot}").into(), None)),
         );
         let strip = (!thumbs.is_empty()).then(|| (gpui::SharedString::from("strip"), thumbs));
-        crate::motion::keyed(
-            self.motion_id("image-strip"),
+        crate::motion::keyed::keyed_owned(
+            &self.motion,
+            self.motion_key("image-strip"),
+            crate::motion::keyed::Fold::Down,
             strip,
             window,
             cx,
             |_, thumbs, window, cx| {
-                crate::motion::keyed_across(
-                    self.motion_id("image-thumbs"),
+                crate::motion::keyed::keyed_owned(
+                    &self.motion,
+                    self.motion_key("image-thumbs"),
+                    crate::motion::keyed::Fold::Across(px(0.)),
                     thumbs.clone(),
                     window,
                     cx,
@@ -534,8 +538,9 @@ impl Composer {
         let path = image.path.clone();
         // The picture fades in once it decodes.
         let preview: gpui::ImageSource = crate::store::image_preview(path.clone(), 18., false);
-        let arrival = crate::motion::image_arrival(
-            self.motion_id(format_args!("thumb-arrival-{key}")),
+        let arrival = crate::motion::image_arrival_owned(
+            &self.motion,
+            self.motion_key(format_args!("thumb-arrival-{key}")),
             &preview,
             window,
             cx,
