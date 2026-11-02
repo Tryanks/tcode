@@ -135,6 +135,11 @@ pub(super) struct ConversationView {
     pub(super) list: ListState,
     /// The rows `list` was last brought to.
     pub(super) rows: Vec<super::conversation::Item>,
+    /// Their keys, and the rows that came in while the reader looked.
+    pub(super) keys: Vec<u64>,
+    pub(super) arrivals: crate::motion::list_rows::ListRows<(), ()>,
+    /// The add-reaction chips, which travel between a comment's head and its reactions.
+    pub(super) shared: crate::motion::shared::SharedMoves,
     /// By comment id, with the account its conversation was read as.
     pub(super) markdown:
         std::cell::RefCell<HashMap<String, (String, Entity<crate::markdown::MarkdownState>)>>,
@@ -154,6 +159,9 @@ impl Default for ConversationView {
             scroll: crate::motion::ListScroll::default(),
             list: ListState::new(0, ListAlignment::Top, px(200.)),
             rows: Vec::new(),
+            keys: Vec::new(),
+            arrivals: Default::default(),
+            shared: Default::default(),
             markdown: Default::default(),
             replies: HashMap::new(),
             expanded: HashSet::new(),
@@ -2907,6 +2915,81 @@ mod tests {
             (after.item_ix, after.offset_in_item),
             (before.item_ix, before.offset_in_item),
             "a new comment below keeps the row and offset the reader was at"
+        );
+    }
+
+    /// A comment that comes in where the reader looks opens its room: what is below it moves
+    /// down over several frames rather than in one, and ends where the comment puts it.
+    #[gpui::test]
+    fn a_comment_that_arrives_in_view_opens_its_room(cx: &mut TestAppContext) {
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        let with_comments = |count: usize| {
+            let mut conversation = conversation();
+            conversation.comments = (0..count)
+                .map(|index| PullRequestComment {
+                    id: format!("C_{index}"),
+                    body: format!("Comment {index}"),
+                    created_at: format!("2026-10-02T00:00:{index:02}Z"),
+                    ..conversation.description.clone()
+                })
+                .collect();
+            PullRequestReadResponse::Conversation(Box::new(conversation))
+        };
+        let later = now() + 3600;
+        for (id, read) in reads(&requests) {
+            match read {
+                PullRequestRead::Conversation => answer(&incoming, id, with_comments(2), now()),
+                PullRequestRead::Files { cursor: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..1, None)),
+                    later,
+                ),
+                read => answer_other(&incoming, id, read, later),
+            }
+        }
+        view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
+        settle(cx);
+        let composer = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("pr-conversation-Composer")
+                .expect("the composer's row is drawn")
+                .top()
+        };
+        let before = composer(cx);
+        let reread = reads(&requests)
+            .into_iter()
+            .find(|(_, read)| *read == PullRequestRead::Conversation)
+            .expect("an expired conversation is read again");
+        answer(&incoming, reread.0, with_comments(3), later);
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        let mut tops = vec![composer(cx)];
+        for _ in 0..20 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                _ = window.draw(cx);
+            });
+            tops.push(composer(cx));
+        }
+        let after = *tops.last().unwrap();
+        assert_eq!(tops[0], before, "the frame it arrives moves nothing");
+        assert!(after > before, "it took its room: {tops:?}");
+        let steps = tops.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        assert!(steps >= 5, "it opened in {steps} frames: {tops:?}");
+        assert!(
+            tops.windows(2).all(|pair| pair[1] >= pair[0]),
+            "what is below went back: {tops:?}"
         );
     }
 

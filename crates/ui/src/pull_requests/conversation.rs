@@ -163,12 +163,78 @@ fn reaction_chip(id: SharedString, label: String, own: bool, cx: &App) -> Button
 
 impl super::detail::ConversationView {
     /// Splices only the rows that changed, so a re-read keeps the reader where they were.
-    fn sync_rows(&mut self, items: Vec<Item>) {
-        if self.rows != items {
-            crate::diff::list::reconcile_rows(&self.list, &self.rows, &items);
-            self.rows = items;
+    /// A row that comes in where the reader looks (a new comment, the merge, a pending
+    /// review) opens its room; the rows a conversation opens with are in place at once.
+    fn sync_rows(
+        &mut self,
+        items: Vec<Item>,
+        conversation: Option<&tcode_protocol::PullRequestConversation>,
+        cx: &App,
+    ) {
+        if self.rows == items {
+            return;
         }
+        let keys = item_keys(&items, conversation);
+        if !self.keys.is_empty() && !cx.reduce_motion() {
+            let top = self.list.logical_scroll_top();
+            let viewport = self.list.viewport_bounds();
+            let shown = (top.item_ix..self.rows.len())
+                .take_while(|index| {
+                    self.list.bounds_for_item(*index).is_some_and(|bounds| {
+                        bounds.top() < viewport.bottom() && bounds.bottom() >= viewport.top()
+                    })
+                })
+                .count();
+            let reach = top.item_ix..top.item_ix + shown;
+            let at = cx.background_executor().now();
+            for (index, arrival) in crate::motion::list_rows::changes(&self.keys, &keys).arrived {
+                if reach.contains(&index) {
+                    self.arrivals.arrive(keys[index], arrival, (), at);
+                }
+            }
+        }
+        crate::diff::list::reconcile_rows(&self.list, &self.rows, &items);
+        self.rows = items;
+        self.keys = keys;
     }
+}
+
+/// Each row's key: what it shows, not where it is, so a comment keeps its key as others
+/// come in before it.
+fn item_keys(
+    items: &[Item],
+    conversation: Option<&tcode_protocol::PullRequestConversation>,
+) -> Vec<u64> {
+    let key = |name: &dyn Fn(&mut std::hash::DefaultHasher)| {
+        use std::hash::Hasher as _;
+        let mut hasher = std::hash::DefaultHasher::new();
+        name(&mut hasher);
+        hasher.finish()
+    };
+    items
+        .iter()
+        .map(|item| {
+            use std::hash::Hash as _;
+            key(&|hasher| match item {
+                Item::Comment(index) => (
+                    "comment",
+                    conversation
+                        .and_then(|conversation| conversation.comments.get(*index))
+                        .map(|comment| comment.id.as_str()),
+                )
+                    .hash(hasher),
+                Item::Thread(index) => (
+                    "thread",
+                    conversation
+                        .and_then(|conversation| conversation.threads.get(*index))
+                        .map(|thread| thread.id.as_str()),
+                )
+                    .hash(hasher),
+                Item::Event(state, at) => ("event", format!("{state:?}"), at).hash(hasher),
+                other => format!("{other:?}").hash(hasher),
+            })
+        })
+        .collect()
 }
 
 impl PullRequestView {
@@ -227,7 +293,8 @@ impl PullRequestView {
         if let Some(page) = self.page_mut()
             && count > 0
         {
-            page.conversation_view.sync_rows(items);
+            page.conversation_view
+                .sync_rows(items, page.conversation.data.as_ref(), cx);
             let view = &page.conversation_view;
             view.scroll.scroll_to(
                 &view.list,
@@ -416,7 +483,8 @@ impl PullRequestView {
         });
         page.conversation_view.expanded.insert(id.to_owned());
         if let Some(position) = position {
-            page.conversation_view.sync_rows(items);
+            page.conversation_view
+                .sync_rows(items, page.conversation.data.as_ref(), cx);
             let view = &page.conversation_view;
             view.scroll.scroll_to(
                 &view.list,
@@ -785,7 +853,13 @@ impl PullRequestView {
         } else {
             popover
         };
-        popover
+        // The chip moves from the head into the reactions row with the first reaction, and
+        // back with the last one gone, travelling between them.
+        let shared = self
+            .page()
+            .map(|page| page.conversation_view.shared.clone());
+        let travel_key = SharedString::from(format!("pr-reaction-add-{id}"));
+        let popover = popover
             .content(move |_, _, cx| {
                 h_flex()
                     .p_1()
@@ -813,7 +887,15 @@ impl PullRequestView {
                             })
                     }))
             })
-            .into_any_element()
+            .into_any_element();
+        match shared {
+            Some(shared) => {
+                let site = SharedString::new_static(if head { "head" } else { "reactions" });
+                shared.arrive(&travel_key, &site, cx);
+                shared.element(travel_key, popover).into_any_element()
+            }
+            None => popover,
+        }
     }
 
     fn reactions(
@@ -1673,7 +1755,31 @@ impl PullRequestView {
             .into_any_element()
     }
 
-    fn render_item(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// Row `index`, arriving or else gliding to each new height it takes: a long body
+    /// opened, an editor in place of a comment, replies paged in, a reply being written.
+    fn render_item(
+        &mut self,
+        index: usize,
+        scope: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = self.render_row(index, cx);
+        let Some(view) = self.page().map(|page| &page.conversation_view) else {
+            return row;
+        };
+        let key = view.keys.get(index).copied().unwrap_or_default();
+        view.arrivals.around(key, cx).draw(
+            "pr-conversation-row",
+            key,
+            crate::motion::list_rows::Glide::Height { scope },
+            row,
+            |_, _| div().into_any_element(),
+            window,
+        )
+    }
+
+    fn render_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let items = self.items(cx);
         let Some(item) = items.get(index).cloned() else {
             return div().into_any_element();
@@ -1681,7 +1787,7 @@ impl PullRequestView {
         let Some(conversation) = self.page().and_then(|page| page.conversation.data.clone()) else {
             return div().into_any_element();
         };
-        let row = match item {
+        let row = match item.clone() {
             Item::Notice => {
                 let url = self.url(cx);
                 let host_name = self.host_name(cx);
@@ -1749,7 +1855,12 @@ impl PullRequestView {
             }
         };
         let compact = self.compact(cx);
+        let name = match &item {
+            Item::Comment(_) | Item::Thread(_) | Item::Event(..) => None,
+            other => Some(format!("pr-conversation-{other:?}")),
+        };
         div()
+            .when_some(name, |row, name| row.debug_selector(move || name.clone()))
             .px(if compact {
                 px(material::COMPACT_PAGE_INSET)
             } else {
@@ -1843,9 +1954,17 @@ impl PullRequestView {
         let Some(page) = self.page_mut() else {
             return div().into_any_element();
         };
-        page.conversation_view.sync_rows(items);
+        page.conversation_view
+            .sync_rows(items, page.conversation.data.as_ref(), cx);
         let state = page.conversation_view.list.clone();
         page.conversation_view.scroll.step(&state, window, cx);
+        let now = cx.background_executor().now();
+        page.conversation_view.arrivals.settle(now);
+        page.conversation_view
+            .shared
+            .begin_frame(state.viewport_bounds(), cx);
+        // A resize of the list puts every row at its new height at once.
+        let scope = u64::from(f32::from(state.viewport_bounds().size.width).to_bits());
         let view = cx.entity();
         div()
             .id("pr-conversation")
@@ -1853,8 +1972,8 @@ impl PullRequestView {
             .min_h_0()
             .size_full()
             .child(
-                list(state, move |index, _, cx| {
-                    view.update(cx, |view, cx| view.render_item(index, cx))
+                list(state, move |index, window, cx| {
+                    view.update(cx, |view, cx| view.render_item(index, scope, window, cx))
                 })
                 .size_full(),
             )
