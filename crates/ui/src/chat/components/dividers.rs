@@ -22,6 +22,13 @@ pub(crate) fn divider_stub(cx: &App) -> Div {
 /// the event is, so no divider can shout louder than another.
 fn divider(id: SharedString, label: String, tint: Hsla, cx: &App) -> AnyElement {
     let stub = || divider_stub(cx);
+    // A label that changes (compaction running, then done) cross-fades.
+    let label_id = SharedString::from(format!("{id}-label"));
+    let label = crate::motion::Sampled::new(move |window, cx| {
+        crate::motion::cross_fade(label_id, label, window, cx, |label, _, _| {
+            div().child(label.clone()).into_any_element()
+        })
+    });
     h_flex()
         .id(id)
         .w_full()
