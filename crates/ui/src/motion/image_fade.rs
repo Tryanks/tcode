@@ -84,7 +84,15 @@ pub(crate) fn image_arrival(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
     use gpui::{
         Context, ImageSource, IntoElement, ParentElement as _, Render, RenderImage, Styled as _,
@@ -113,13 +121,13 @@ mod tests {
         }
     }
 
-    fn tile(ready: Rc<Cell<bool>>, drawn: Rc<RefCell<Vec<f32>>>) -> Tile {
+    fn tile(ready: Arc<AtomicBool>, drawn: Rc<RefCell<Vec<f32>>>) -> Tile {
         let picture = Arc::new(RenderImage::new(vec![image::Frame::new(
             image::ImageBuffer::from_pixel(4, 4, image::Rgba([0, 0, 255, 255])),
         )]));
         Tile {
             source: ImageSource::Custom(Arc::new(move |_, _| {
-                ready.get().then(|| Ok(picture.clone()))
+                ready.load(Ordering::Relaxed).then(|| Ok(picture.clone()))
             })),
             drawn,
         }
@@ -131,7 +139,7 @@ mod tests {
     #[gpui::test]
     fn a_picture_fades_in_once_it_decodes(cx: &mut TestAppContext) {
         let drawn = Rc::new(RefCell::new(Vec::new()));
-        let ready = Rc::new(Cell::new(false));
+        let ready = Arc::new(AtomicBool::new(false));
         let (view, cx) = cx.add_window_view({
             let (ready, drawn) = (ready.clone(), drawn.clone());
             move |_, _| tile(ready, drawn)
@@ -139,7 +147,7 @@ mod tests {
         draw_settled(cx);
         assert!(drawn.borrow().iter().all(|opacity| *opacity == 0.));
         drawn.borrow_mut().clear();
-        ready.set(true);
+        ready.store(true, Ordering::Relaxed);
         view.update(cx, |_, cx| cx.notify());
         draw(cx);
         for _ in 0..20 {
@@ -165,7 +173,7 @@ mod tests {
         let decoded = Rc::new(RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view({
             let decoded = decoded.clone();
-            move |_, _| tile(Rc::new(Cell::new(true)), decoded)
+            move |_, _| tile(Arc::new(AtomicBool::new(true)), decoded)
         });
         draw(cx);
         assert!(

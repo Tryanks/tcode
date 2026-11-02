@@ -163,6 +163,7 @@ impl InlineFlow {
         self.view.read(cx).glide(&format!("{}/image/{ix}", self.id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn image_element(
         ix: usize,
         view: Entity<MarkdownState>,
