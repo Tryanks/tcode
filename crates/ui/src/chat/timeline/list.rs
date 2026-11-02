@@ -78,10 +78,6 @@ impl ChatView {
                     window,
                     cx,
                 );
-                // An expanded Work Log's parts keep the Work Log's own rhythm.
-                let continued = this.rows.get(index + 1).is_some_and(|next| {
-                    matches!(next.part, RowPart::WorkLogActivity | RowPart::WorkLogLive)
-                });
                 let now = cx.background_executor().now();
                 let moving = !cx.reduce_motion() && this.capture.is_none();
                 let arrival = |row: &TimelineRow| {
@@ -124,6 +120,37 @@ impl ChatView {
                     .filter(|(arrival, _)| arrival.arrival != Arrival::Appended)
                     .map_or(1., |(_, progress)| progress);
                 let padding = below.unwrap_or(1.) * opening;
+                // The rhythm below a row is set by the row after it.
+                let rem = gpui::rems(0.25).to_pixels(window.rem_size());
+                let strip = this.phone_strip_height;
+                let edge_below = |next: Option<&TimelineRow>| match next {
+                    None => px(TIMELINE_EDGE_PADDING) + strip,
+                    Some(next) if next.turn != row.turn => px(TURN_GAP),
+                    // An expanded Work Log's parts keep the Work Log's own rhythm.
+                    Some(next)
+                        if matches!(next.part, RowPart::WorkLogActivity | RowPart::WorkLogLive) =>
+                    {
+                        rem
+                    }
+                    Some(_) => px(SEGMENT_GAP),
+                };
+                let inserted = |row: &TimelineRow| {
+                    arrival(row)
+                        .filter(|(arrival, _)| arrival.arrival == Arrival::Inserted)
+                        .map(|(_, progress)| progress)
+                };
+                let mut edge = edge_below(this.rows.get(index + 1));
+                // A row inserted below this one changes the rhythm it ends
+                // with; the change goes as fast as the row opens, so what was
+                // on screen does not move.
+                if let Some(progress) = this.rows.get(index + 1).and_then(inserted) {
+                    let before = edge_below(
+                        this.rows[index + 1..]
+                            .iter()
+                            .find(|row| inserted(row).is_none()),
+                    );
+                    edge = before + (edge - before) * progress;
+                }
                 // A row that opens its turn brings the turn's trailer with it;
                 // otherwise the trailer was on screen, and moves down to it.
                 let trailer = rendered.trailer.map(|(trailer, gap)| {
@@ -139,6 +166,29 @@ impl ChatView {
                         trailer.when(gap, |trailer| trailer.pt(px(SEGMENT_GAP) * gap_scale)),
                     )
                 });
+                // A turn a search result jumped to is marked, and the mark
+                // fades in and out.
+                let highlight = cx.theme().list_active;
+                let highlight = gpui_base::motion::transition(
+                    gpui::ElementId::from(("timeline-highlight", row.identity)),
+                    if this.highlighted_turn == Some(row.turn) {
+                        highlight
+                    } else {
+                        highlight.opacity(0.)
+                    },
+                    crate::motion::settle(),
+                    window,
+                    cx,
+                );
+                let history_activity = (index == 0)
+                    .then(|| {
+                        let loading = this
+                            .workspace_store
+                            .read(cx)
+                            .history_loading_for(this.session_id.as_deref());
+                        crate::motion::shown("history-activity", loading.then_some(()), window, cx)
+                    })
+                    .flatten();
                 let painted = this.painted_rows.clone();
                 v_flex()
                     .id(("timeline-row", row.identity))
@@ -157,21 +207,10 @@ impl ChatView {
                     } else {
                         CONTENT_MIN_PADDING
                     }))
-                    .when(this.highlighted_turn == Some(row.turn), |item| {
-                        item.rounded(crate::material::radius_card(cx))
-                            .bg(cx.theme().list_active)
-                    })
+                    .rounded(crate::material::radius_card(cx))
+                    .bg(highlight)
                     .when(index == 0, |item| item.pt(px(TIMELINE_EDGE_PADDING)))
-                    .pb(padding
-                        * if index + 1 == item_count {
-                            px(TIMELINE_EDGE_PADDING) + this.phone_strip_height
-                        } else if row.last_in_turn {
-                            px(TURN_GAP)
-                        } else if continued {
-                            gpui::rems(0.25).to_pixels(window.rem_size())
-                        } else {
-                            px(SEGMENT_GAP)
-                        })
+                    .pb(padding * edge)
                     // `min_w_0`: a turn holds nowrap content (diff rows, command
                     // output). Without it this flex item grows to that content
                     // and the column runs past the page inset instead of
@@ -187,27 +226,22 @@ impl ChatView {
                                     .flex()
                                     .flex_col()
                                     .justify_end()
-                                    .when(
-                                        this.workspace_store
-                                            .read(cx)
-                                            .history_loading_for(this.session_id.as_deref()),
-                                        |space| {
-                                            space.child(
-                                                div()
-                                                    .id("history-activity")
-                                                    .h(px(24.))
-                                                    .flex_none()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .child(
-                                                        crate::widgets::spinner::Spinner::new()
-                                                            .xsmall()
-                                                            .color(cx.theme().muted_foreground),
-                                                    ),
-                                            )
-                                        },
-                                    ),
+                                    .children(history_activity.map(|shown| {
+                                        shown.fade(
+                                            div()
+                                                .id("history-activity")
+                                                .w_full()
+                                                .h(px(24.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(
+                                                    crate::widgets::spinner::Spinner::new()
+                                                        .xsmall()
+                                                        .color(cx.theme().muted_foreground),
+                                                ),
+                                        )
+                                    })),
                             )
                         },
                     )
