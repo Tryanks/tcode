@@ -216,52 +216,75 @@ impl AccessSection {
         // removes it from every machine of the group. A browser is listed
         // under a UUID and never is one.
         let group = model.group().map(|group| group.name.clone());
-        let mut rows = Vec::new();
-        for device in &devices {
-            let space = match &device.access {
-                DeviceAccess::Space { space_id } => space_name(space_id),
-                DeviceAccess::Full => None,
-            };
-            let in_group = group.clone().filter(|_| {
-                device.access == DeviceAccess::Full
-                    && tcode_client::pairing::valid_host_id(&device.id)
-            });
-            let status_color = gpui_base::motion::transition(
-                (
-                    SharedString::from(format!("device-status-{}", device.id)),
-                    "color",
-                ),
-                match &device.path {
-                    Some(_) => cx.theme().success,
-                    None => cx.theme().muted_foreground,
-                },
-                crate::motion::settle(),
-                window,
-                cx,
-            );
-            let path = crate::motion::cross_fade(
-                SharedString::from(format!("device-path-{}", device.id)),
-                super::path_label(device.path.as_ref()),
-                window,
-                cx,
-                move |label, _, cx| {
-                    div()
-                        .text_secondary(compact, cx)
-                        .text_color(status_color)
-                        .child(label.clone())
-                        .into_any_element()
-                },
-            );
-            let spaces = spaces.clone();
-            let id = device.id.clone();
-            let name = device.name.clone();
-            let revoke = move |window: &mut Window, cx: &mut App| {
-                let task = spaces.update(cx, |spaces, cx| {
-                    spaces.act_hosting(HostingAction::RevokeDevice(id.clone()), cx)
+        // The empty row is one more row, which leaves as the first device
+        // pairs and comes back once the last is revoked.
+        let rows = if devices.is_empty() {
+            vec![(SharedString::from("devices-empty"), None)]
+        } else {
+            devices
+                .into_iter()
+                .map(|device| {
+                    (
+                        SharedString::from(format!("device-{}", device.id)),
+                        Some(device),
+                    )
+                })
+                .collect()
+        };
+        // On a compact window a device's controls go under its name.
+        let reflow = crate::motion::reflow("remote-devices", window, cx);
+        let rows = crate::motion::keyed(
+            "remote-devices",
+            rows,
+            window,
+            cx,
+            |_, device, window, cx| {
+                let Some(device) = device else {
+                    return empty_row(crate::tr!("remote.devices.empty"), cx).into_any_element();
+                };
+                let space = match &device.access {
+                    DeviceAccess::Space { space_id } => space_name(space_id),
+                    DeviceAccess::Full => None,
+                };
+                let in_group = group.clone().filter(|_| {
+                    device.access == DeviceAccess::Full
+                        && tcode_client::pairing::valid_host_id(&device.id)
                 });
-                report("remote.devices.revoke_failed", task, window, cx);
-            };
-            rows.push(
+                let status_color = gpui_base::motion::transition(
+                    (
+                        SharedString::from(format!("device-status-{}", device.id)),
+                        "color",
+                    ),
+                    match &device.path {
+                        Some(_) => cx.theme().success,
+                        None => cx.theme().muted_foreground,
+                    },
+                    crate::motion::settle(),
+                    window,
+                    cx,
+                );
+                let path = crate::motion::cross_fade(
+                    SharedString::from(format!("device-path-{}", device.id)),
+                    super::path_label(device.path.as_ref()),
+                    window,
+                    cx,
+                    move |label, _, cx| {
+                        div()
+                            .text_secondary(compact, cx)
+                            .text_color(status_color)
+                            .child(label.clone())
+                            .into_any_element()
+                    },
+                );
+                let spaces = spaces.clone();
+                let id = device.id.clone();
+                let name = device.name.clone();
+                let revoke = move |window: &mut Window, cx: &mut App| {
+                    let task = spaces.update(cx, |spaces, cx| {
+                        spaces.act_hosting(HostingAction::RevokeDevice(id.clone()), cx)
+                    });
+                    report("remote.devices.revoke_failed", task, window, cx);
+                };
                 row_frame(compact, cx)
                     .child(
                         h_flex()
@@ -279,48 +302,57 @@ impl AccessSection {
                             .children(space.map(|name| super::spaces::member_badge(&name, cx))),
                     )
                     .child(
-                        h_flex()
-                            .gap_3()
-                            .items_center()
-                            .when(compact, |controls| controls.w_full().justify_between())
-                            .child(path)
-                            .child(
-                                Button::new(SharedString::from(format!("revoke-{}", device.id)))
+                        reflow.part(
+                            format!("controls-{}", device.id),
+                            h_flex()
+                                .gap_3()
+                                .items_center()
+                                .when(compact, |controls| controls.w_full().justify_between())
+                                .child(path)
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "revoke-{}",
+                                        device.id
+                                    )))
                                     .ghost()
                                     .compact()
                                     .danger()
                                     .label(crate::tr!("remote.devices.revoke"))
-                                    .on_click(move |_, window, cx| match in_group.clone() {
-                                        Some(group) => super::group::confirm_group_removal(
-                                            name.clone(),
-                                            group,
-                                            revoke.clone(),
-                                            window,
-                                            cx,
-                                        ),
-                                        None => super::confirm_destructive(
-                                            crate::tr!(
-                                                "remote.devices.revoke_title",
-                                                name = name.clone()
-                                            )
-                                            .into_owned(),
-                                            crate::tr!("remote.devices.revoke_description")
+                                    .on_click(
+                                        move |_, window, cx| match in_group.clone() {
+                                            Some(group) => super::group::confirm_group_removal(
+                                                name.clone(),
+                                                group,
+                                                revoke.clone(),
+                                                window,
+                                                cx,
+                                            ),
+                                            None => super::confirm_destructive(
+                                                crate::tr!(
+                                                    "remote.devices.revoke_title",
+                                                    name = name.clone()
+                                                )
                                                 .into_owned(),
-                                            crate::tr!("remote.devices.revoke").into_owned(),
-                                            revoke.clone(),
-                                            window,
-                                            cx,
-                                        ),
-                                    }),
-                            ),
+                                                crate::tr!("remote.devices.revoke_description")
+                                                    .into_owned(),
+                                                crate::tr!("remote.devices.revoke").into_owned(),
+                                                revoke.clone(),
+                                                window,
+                                                cx,
+                                            ),
+                                        },
+                                    ),
+                                ),
+                        ),
                     )
-                    .into_any_element(),
-            );
-        }
-        if rows.is_empty() {
-            rows.push(empty_row(crate::tr!("remote.devices.empty"), cx).into_any_element());
-        }
-        settings_group(crate::tr!("remote.devices.section"), rows, cx).into_any_element()
+                    .into_any_element()
+            },
+        );
+        reflow.render(settings_group(
+            crate::tr!("remote.devices.section"),
+            vec![rows.render(v_flex().w_full())],
+            cx,
+        ))
     }
 }
 

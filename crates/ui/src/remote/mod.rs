@@ -1197,6 +1197,7 @@ impl RemotePanel {
         let ready = !busy && self.form.request(cx).is_some() && self.form.typed_address(cx).is_ok();
         let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
         let action = Button::new("hosts-pair-submit")
+            .debug_selector(|| "hosts-pair-submit".into())
             .primary()
             .loading(busy)
             .disabled(!ready)
@@ -1213,6 +1214,10 @@ impl RemotePanel {
         let field = Input::new(&self.form.invitation)
             .placeholder(crate::tr!("hosts.pair.invitation_placeholder"));
         let as_is = |line: AnyElement, _: &App| div().w_full().child(line);
+        // A window turning compact moves the field, the scan button and the
+        // action into a page with the action pinned at its foot; each glides
+        // there from where it was, and back.
+        let reflow = crate::motion::reflow("hosts-pair", window, cx);
         if !compact {
             let form = group_row_stacked(cx)
                 .child(crate::settings_rows::row_labels(
@@ -1227,9 +1232,9 @@ impl RemotePanel {
                         .w_full()
                         .gap(cx.theme().tokens.spacing.sm)
                         .items_center()
-                        .child(div().flex_1().min_w_0().child(field))
-                        .children(scan)
-                        .child(action),
+                        .child(reflow.part("field", div().flex_1().min_w_0().child(field)))
+                        .children(scan.map(|scan| reflow.part("scan", scan)))
+                        .child(reflow.part("action", action)),
                 )
                 .children(self.attempt_status(compact, as_is, window, cx))
                 .children(self.address_prompt(false, compact, as_is, window, cx));
@@ -1238,7 +1243,7 @@ impl RemotePanel {
                     .debug_selector(|| "hosts-pair-form".into())
                     .child(form),
             );
-            return self.page(page, &self.pair_scroll, cx);
+            return reflow.render(self.page(page, &self.pair_scroll, cx));
         }
         let body = v_flex()
             .gap(section_gap(cx))
@@ -1257,12 +1262,13 @@ impl RemotePanel {
                             .text_caption(cx)
                             .child(crate::tr!("hosts.pair.invitation")),
                     )
-                    .child(field),
+                    .child(reflow.part("field", field)),
             )
             .children(self.attempt_status(compact, as_is, window, cx))
             .children(self.address_prompt(false, compact, as_is, window, cx))
-            .children(scan.map(|scan| scan.w_full()));
-        self.page_with_footer(body, action.w_full().into_any_element(), cx)
+            .children(scan.map(|scan| reflow.part("scan", scan.w_full())));
+        let action = reflow.part("action", action.w_full());
+        reflow.render(self.page_with_footer(body, action, cx))
     }
 
     /// The scrolling page body: the settings content column, so the page's
@@ -1758,6 +1764,92 @@ mod tests {
             opening > before && opening < below(cx),
             "it folds in, so what is below moves down as it opens"
         );
+    }
+
+    /// A phone turned to a width whose layout is compact moves the pairing
+    /// form's action from beside the field to the page's foot: it is drawn
+    /// where it was, glides there, and with motion reduced is there at once.
+    #[gpui::test]
+    fn the_pair_action_glides_to_the_foot_when_the_window_turns_compact(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        struct Phone;
+        impl ClientHost for Phone {
+            fn device_name(&self) -> String {
+                "Phone".into()
+            }
+            fn device_id(&self) -> String {
+                "phone".into()
+            }
+            fn device_platform(&self) -> Option<String> {
+                None
+            }
+            fn load_hosts(&self) -> Vec<PairedHost> {
+                Vec::new()
+            }
+            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
+                Default::default()
+            }
+            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
+            fn save_hosts(&self, _: &[PairedHost]) {}
+            fn last_host_id(&self) -> Option<String> {
+                None
+            }
+            fn set_last_host_id(&self, _: Option<&str>) {}
+            fn connect(&self, _: &PairedHost) -> tcode_client::host::Transport {
+                unreachable!("nothing connects")
+            }
+        }
+        /// Sets the layout for the window's width as it draws, as the shell
+        /// does, so a resize and the layout it calls for land in one frame.
+        struct PairProbe(Entity<RemotePanel>, Entity<WindowState>);
+        impl Render for PairProbe {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let compact = window.viewport_size().width < px(900.);
+                self.1
+                    .update(cx, |state, cx| state.set_compact(compact, cx));
+                v_flex()
+                    .size_full()
+                    .child(self.0.update(cx, |panel, cx| panel.render_pair(window, cx)))
+            }
+        }
+        cx.update(crate::theme::init);
+        cx.update(|cx| cx.set_global(ClientAttachment::new(Rc::new(Phone), false, |_, _, _| {})));
+        let state = cx.new(|_| WindowState::new(false));
+        let window = cx.open_window(gpui::size(px(1024.), px(852.)), |window, cx| {
+            PairProbe(
+                cx.new(|cx| RemotePanel::new(None, state.clone(), window, cx)),
+                state.clone(),
+            )
+        });
+        let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+        let turn = |width: f32, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_resize(gpui::size(px(width), px(852.)));
+            crate::test_frames::draw(cx);
+        };
+        let action = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("hosts-pair-submit")
+                .expect("the action is drawn")
+                .origin
+        };
+        crate::test_frames::draw_settled(cx);
+        let beside = action(cx);
+
+        turn(393., cx);
+        assert_eq!(action(cx), beside, "the action starts where it was");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        let gliding = action(cx);
+        crate::test_frames::draw_settled(cx);
+        let foot = action(cx);
+        assert!(foot.y > px(852. / 2.), "settled, the action is at the foot");
+        assert!(
+            gliding.y > beside.y && gliding.y < foot.y,
+            "the action is on its way down, at {gliding:?}"
+        );
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        turn(1024., cx);
+        assert_eq!(action(cx), beside, "with motion reduced it is back at once");
     }
 
     /// A scanned link that opens no path to the machine: the Hosts page asks

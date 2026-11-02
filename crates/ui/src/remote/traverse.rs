@@ -16,10 +16,11 @@ use tcode_protocol::{
 };
 
 use super::hosting::{
-    RemoteController, apply_hosting_settings, custom_traverse_url, field_labels, field_row,
+    RemoteController, apply_hosting_settings, custom_traverse_url, field_labels,
+    reflowing_field_row,
 };
 use crate::icon::{Icon, IconName};
-use crate::material::{group_caption, grouped};
+use crate::material::group_caption;
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::settings_rows::{FIELD_WIDTH, ToggleRow, footnote};
 use crate::sizing::Sizable as _;
@@ -263,116 +264,141 @@ impl TraversePanel {
             .map(|controller| (controller.is_hosting(), controller.traverse_status()))
             .unwrap_or_default();
         self.sync_ticker(hosting, cx);
-        let mut rows = Vec::new();
-        for (index, (source, url)) in self.rows.iter().zip(urls).enumerate() {
-            // The status names a source as invitations do.
-            let key = match &url {
-                None => Some(tcode_client::pairing::TRAVERSE_OFFICIAL.to_owned()),
-                Some(Ok(url)) => Some(url.to_string()),
-                Some(Err(_)) => None,
-            };
-            let status = key
-                .filter(|_| hosting)
-                .and_then(|key| statuses.iter().find(|status| status.source == key));
-            let chip = crate::motion::shown(
-                ("remote-traverse-chip", index),
-                source.enabled.then_some(()),
+        // A source keeps its key for as long as it is listed, whatever its
+        // place: a removed one folds away and the ones below move up.
+        let sources: Vec<_> = self
+            .rows
+            .iter()
+            .zip(urls)
+            .enumerate()
+            .map(|(index, (source, url))| {
+                let input = source.url.as_ref().map(|(input, _)| input.clone());
+                let key = match &input {
+                    None => SharedString::from("official"),
+                    Some(input) => format!("custom-{}", input.entity_id()).into(),
+                };
+                (key, (index, source.enabled, source.expanded, input, url))
+            })
+            .collect();
+        let sources =
+            crate::settings_rows::grouped_keyed(
+                "remote-traverse-sources",
+                sources,
                 window,
                 cx,
-            )
-            .map(|shown| shown.fade(status_chip(index, status, source.expanded, window, cx)));
-            let detail = status.filter(|_| source.enabled).map(|status| {
-                div()
-                    .w_full()
-                    .px(px(crate::material::CARD_INSET))
-                    .pb(cx.theme().tokens.spacing.sm)
-                    .child(
-                        crate::widgets::Collapsible::new(
-                            ("remote-traverse-detail", index),
-                            source.expanded,
-                        )
-                        .w_full()
-                        .content(status_detail(index, status, window, cx)),
-                    )
-            });
-            let switch_id = SharedString::from(format!("remote-traverse-{index}"));
-            let set_enabled = cx.listener(move |this, checked: &bool, window, cx| {
-                this.set_enabled(index, *checked, window, cx);
-            });
-            let element = match (&source.url, url) {
-                (Some((input, _)), Some(url)) => {
-                    let description = match url {
-                        Ok(_) => crate::tr!("remote.traverse.url_description")
-                            .into_owned()
-                            .into(),
-                        Err(error) => error,
+                |key, (index, enabled, expanded, input, url), window, cx| {
+                    let (index, enabled, expanded) = (*index, *enabled, *expanded);
+                    // The status names a source as invitations do.
+                    let status_key = match &url {
+                        None => Some(tcode_client::pairing::TRAVERSE_OFFICIAL.to_owned()),
+                        Some(Ok(url)) => Some(url.to_string()),
+                        Some(Err(_)) => None,
                     };
-                    let remove = Button::new(SharedString::from(format!(
-                        "remote-traverse-remove-{index}"
-                    )))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Close)
-                    .aria_label(crate::tr!("remote.traverse.remove"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.remove(index, window, cx);
-                    }));
-                    field_row(compact, cx)
-                        .child(field_labels(
-                            crate::tr!("remote.traverse.custom").into_owned().into(),
-                            Some(description),
-                            compact,
-                            cx,
-                        ))
-                        .child(
-                            h_flex()
-                                .min_w_0()
-                                .gap_3()
-                                .items_center()
-                                .when(compact, |controls| controls.w_full())
-                                .child(
-                                    field(compact).child(Input::new(input).placeholder(
-                                        crate::tr!("remote.traverse.url_placeholder"),
-                                    )),
+                    let status = status_key.filter(|_| hosting).and_then(|status_key| {
+                        statuses.iter().find(|status| status.source == status_key)
+                    });
+                    let chip = crate::motion::shown(
+                        SharedString::from(format!("remote-traverse-chip-{key}")),
+                        enabled.then_some(()),
+                        window,
+                        cx,
+                    )
+                    .map(|shown| shown.fade(status_chip(index, key, status, expanded, window, cx)));
+                    let detail = status.filter(|_| enabled).map(|status| {
+                        div()
+                            .w_full()
+                            .px(px(crate::material::CARD_INSET))
+                            .pb(cx.theme().tokens.spacing.sm)
+                            .child(
+                                crate::widgets::Collapsible::new(
+                                    ("remote-traverse-detail", index),
+                                    expanded,
                                 )
-                                .child(remove)
-                                .children(chip)
-                                // Beside a text field the row cannot be one
-                                // control, so the switch is its own.
-                                .child(
-                                    Switch::new(switch_id)
-                                        .checked(source.enabled)
-                                        .on_click(set_enabled),
-                                ),
-                        )
+                                .w_full()
+                                .content(status_detail(key, status, window, cx)),
+                            )
+                    });
+                    let switch_id = SharedString::from(format!("remote-traverse-{index}"));
+                    let set_enabled = cx.listener(move |this, checked: &bool, window, cx| {
+                        this.set_enabled(index, *checked, window, cx);
+                    });
+                    let element =
+                        match (input, url) {
+                            (Some(input), Some(url)) => {
+                                let description = match url {
+                                    Ok(_) => crate::tr!("remote.traverse.url_description")
+                                        .into_owned()
+                                        .into(),
+                                    Err(error) => error.clone(),
+                                };
+                                let remove = Button::new(SharedString::from(format!(
+                                    "remote-traverse-remove-{index}"
+                                )))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Close)
+                                .aria_label(crate::tr!("remote.traverse.remove"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.remove(index, window, cx);
+                                }));
+                                let labels = field_labels(
+                                    crate::tr!("remote.traverse.custom").into_owned().into(),
+                                    Some(description),
+                                    compact,
+                                    cx,
+                                );
+                                let controls = h_flex()
+                                    .min_w_0()
+                                    .gap_3()
+                                    .items_center()
+                                    .when(compact, |controls| controls.w_full())
+                                    .child(field(compact).child(Input::new(input).placeholder(
+                                        crate::tr!("remote.traverse.url_placeholder"),
+                                    )))
+                                    .child(remove)
+                                    .children(chip)
+                                    // Beside a text field the row cannot be one
+                                    // control, so the switch is its own.
+                                    .child(
+                                        Switch::new(switch_id)
+                                            .checked(enabled)
+                                            .on_click(set_enabled),
+                                    );
+                                reflowing_field_row(
+                                    SharedString::from(format!("remote-traverse-field-{key}")),
+                                    labels,
+                                    controls,
+                                    compact,
+                                    window,
+                                    cx,
+                                )
+                            }
+                            _ => ToggleRow::new(
+                                switch_id,
+                                crate::tr!("remote.traverse.official"),
+                                enabled,
+                                compact,
+                                set_enabled,
+                            )
+                            .accessory(chip.map(|chip| {
+                                // The accessory takes the room the labels leave, so the
+                                // chip sits by the switch at the row's end.
+                                h_flex()
+                                    .flex_1()
+                                    .justify_end()
+                                    .child(chip)
+                                    .into_any_element()
+                            }))
+                            .into_any_element(),
+                        };
+                    v_flex()
+                        .w_full()
+                        .child(element)
+                        .children(detail)
                         .into_any_element()
-                }
-                _ => ToggleRow::new(
-                    switch_id,
-                    crate::tr!("remote.traverse.official"),
-                    source.enabled,
-                    compact,
-                    set_enabled,
-                )
-                .accessory(chip.map(|chip| {
-                    // The accessory takes the room the labels leave, so the
-                    // chip sits by the switch at the row's end.
-                    h_flex()
-                        .flex_1()
-                        .justify_end()
-                        .child(chip)
-                        .into_any_element()
-                }))
-                .into_any_element(),
-            };
-            rows.push(
-                v_flex()
-                    .w_full()
-                    .child(element)
-                    .children(detail)
-                    .into_any_element(),
+                },
             );
-        }
+        let mut rows = vec![sources];
         let addition = self.typed_addition(cx);
         let add_description = match &addition {
             Some(Err(error)) => error.clone(),
@@ -380,41 +406,45 @@ impl TraversePanel {
                 .into_owned()
                 .into(),
         };
-        rows.push(
-            field_row(compact, cx)
-                .child(field_labels(
-                    crate::tr!("remote.traverse.add_title").into_owned().into(),
-                    Some(add_description),
-                    compact,
-                    cx,
-                ))
-                .child(
-                    h_flex()
-                        .min_w_0()
-                        .gap_3()
-                        .items_center()
-                        .when(compact, |controls| controls.w_full())
-                        .child(
-                            field(compact).child(
-                                Input::new(&self.add_input)
-                                    .placeholder(crate::tr!("remote.traverse.url_placeholder")),
-                            ),
-                        )
-                        .child(
-                            Button::new("remote-traverse-add")
-                                .ghost()
-                                .outline()
-                                .compact()
-                                .icon(IconName::Plus)
-                                .label(crate::tr!("remote.traverse.add"))
-                                .disabled(!matches!(addition, Some(Ok(_))))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add(window, cx);
-                                })),
-                        ),
-                )
-                .into_any_element(),
+        let labels = field_labels(
+            crate::tr!("remote.traverse.add_title").into_owned().into(),
+            Some(add_description),
+            compact,
+            cx,
         );
+        rows.push(crate::settings_rows::hairlined(
+            reflowing_field_row(
+                "remote-traverse-add-row",
+                labels,
+                h_flex()
+                    .min_w_0()
+                    .gap_3()
+                    .items_center()
+                    .when(compact, |controls| controls.w_full())
+                    .child(
+                        field(compact).child(
+                            Input::new(&self.add_input)
+                                .placeholder(crate::tr!("remote.traverse.url_placeholder")),
+                        ),
+                    )
+                    .child(
+                        Button::new("remote-traverse-add")
+                            .ghost()
+                            .outline()
+                            .compact()
+                            .icon(IconName::Plus)
+                            .label(crate::tr!("remote.traverse.add"))
+                            .disabled(!matches!(addition, Some(Ok(_))))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add(window, cx);
+                            })),
+                    ),
+                compact,
+                window,
+                cx,
+            ),
+            cx,
+        ));
         rows
     }
 }
@@ -481,6 +511,7 @@ fn chip_style(state: Option<TraverseManifestState>, cx: &App) -> (SharedString, 
 /// to show, the disclosure that opens every relay and lookup under the row.
 fn status_chip(
     index: usize,
+    key: &SharedString,
     status: Option<&TraverseSourceStatus>,
     expanded: bool,
     window: &mut Window,
@@ -489,7 +520,7 @@ fn status_chip(
     let (label, tone) = chip_style(status.map(|status| status.manifest.state), cx);
     // A new state cross-fades from the chip that showed the last one.
     let chip = crate::motion::cross_fade(
-        ("remote-traverse-state", index),
+        SharedString::from(format!("remote-traverse-state-{key}")),
         (label.clone(), tone),
         window,
         cx,
@@ -503,7 +534,7 @@ fn status_chip(
         return chip;
     }
     let turned = gpui_base::motion::transition(
-        ("remote-traverse-chevron", index.to_string()),
+        SharedString::from(format!("remote-traverse-chevron-{key}")),
         if expanded { 1. } else { 0. },
         crate::motion::settle(),
         window,
@@ -545,7 +576,7 @@ fn relay_name(relay: &TraverseRelayStatus) -> String {
 
 /// Every relay with its latency, and every lookup with its last check.
 fn status_detail(
-    index: usize,
+    source: &SharedString,
     status: &TraverseSourceStatus,
     window: &mut Window,
     cx: &mut App,
@@ -553,7 +584,7 @@ fn status_detail(
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
     let id = move |part: &str, key: &str| {
-        SharedString::from(format!("remote-traverse-{index}-{part}-{key}"))
+        SharedString::from(format!("remote-traverse-{source}-{part}-{key}"))
     };
     let heading = |text: SharedString, cx: &App| {
         div()
@@ -609,8 +640,12 @@ fn status_detail(
         window,
         cx,
     );
-    let mut column = crate::material::card(cx)
+    // A relay or a lookup the service adds or drops folds in or out where
+    // it is; each carries the gap above it, and a heading folds with the
+    // first of its kind and the last.
+    let column = crate::material::card(cx)
         .w_full()
+        .gap_0()
         .text_token(&cx.theme().tokens.typography.xs)
         .child(with_error(
             line(
@@ -623,84 +658,128 @@ fn status_detail(
             ),
             manifest_error,
         ));
-    if !status.relays.is_empty() {
-        column = column.child(heading(
+    let titled = |key: &str, title: Option<SharedString>, window: &mut Window, cx: &mut App| {
+        crate::motion::shown(id(key, "heading"), title, window, cx)
+            .map(|shown| shown.fold(div().pt(gap).child(heading(shown.value.clone(), cx))))
+    };
+    let relays_title = titled(
+        "relays",
+        (!status.relays.is_empty()).then(|| {
             crate::tr!("remote.traverse.status.relays_title")
                 .into_owned()
-                .into(),
-            cx,
-        ));
-    }
-    for relay in &status.relays {
-        let latency = match relay.latency_ms {
-            Some(ms) => crate::tr!("remote.traverse.status.latency", ms = ms),
-            None => crate::tr!("remote.traverse.status.unmeasured"),
-        };
-        let home =
-            crate::motion::shown(id("home", &relay.url), relay.home.then_some(()), window, cx).map(
-                |shown| {
-                    shown.fade(crate::material::semantic_chip(
-                        crate::tr!("remote.traverse.status.home").into_owned(),
-                        cx.theme().success.opacity(0.15),
-                        cx.theme().success,
-                        cx,
-                    ))
-                },
-            );
-        let relay_error = error(id("relay", &relay.url), relay.error.as_deref(), window, cx);
-        column = column.child(with_error(
-            line(
-                relay_name(relay),
-                h_flex()
-                    .flex_none()
-                    .gap_2()
-                    .items_center()
-                    .children(home)
-                    .child(div().text_color(muted).child(latency.into_owned()))
-                    .into_any_element(),
-            ),
-            relay_error,
-        ));
-    }
-    if !status.lookups.is_empty() {
-        column = column.child(heading(
+                .into()
+        }),
+        window,
+        cx,
+    );
+    let relays = status
+        .relays
+        .iter()
+        .map(|relay| (SharedString::from(relay.url.clone()), relay.clone()));
+    let relays = crate::motion::keyed(
+        id("relays", "rows"),
+        relays,
+        window,
+        cx,
+        |_, relay, window, cx| {
+            let latency = match relay.latency_ms {
+                Some(ms) => crate::tr!("remote.traverse.status.latency", ms = ms),
+                None => crate::tr!("remote.traverse.status.unmeasured"),
+            };
+            let home =
+                crate::motion::shown(id("home", &relay.url), relay.home.then_some(()), window, cx)
+                    .map(|shown| {
+                        shown.fade(crate::material::semantic_chip(
+                            crate::tr!("remote.traverse.status.home").into_owned(),
+                            cx.theme().success.opacity(0.15),
+                            cx.theme().success,
+                            cx,
+                        ))
+                    });
+            let relay_error = error(id("relay", &relay.url), relay.error.as_deref(), window, cx);
+            div()
+                .w_full()
+                .pt(gap)
+                .child(with_error(
+                    line(
+                        relay_name(relay),
+                        h_flex()
+                            .flex_none()
+                            .gap_2()
+                            .items_center()
+                            .children(home)
+                            .child(div().text_color(muted).child(latency.into_owned()))
+                            .into_any_element(),
+                    ),
+                    relay_error,
+                ))
+                .into_any_element()
+        },
+    );
+    let lookups_title = titled(
+        "lookups",
+        (!status.lookups.is_empty()).then(|| {
             crate::tr!("remote.traverse.status.lookups_title")
                 .into_owned()
-                .into(),
-            cx,
-        ));
-    }
-    for lookup in &status.lookups {
-        let name = url::Url::parse(&lookup.url)
-            .ok()
-            .and_then(|url| url.host_str().map(str::to_owned))
-            .unwrap_or_else(|| lookup.url.clone());
-        let (value, color) = match lookup.state {
-            TraverseLookupState::Ok => (crate::tr!("remote.traverse.status.ok"), muted),
-            TraverseLookupState::Pending => (crate::tr!("remote.traverse.status.pending"), muted),
-            TraverseLookupState::Failed => (crate::tr!("remote.traverse.status.failed"), danger),
-        };
-        let value = crate::motion::cross_fade(
-            id("lookup", &lookup.url),
-            (SharedString::from(value.into_owned()), color),
-            window,
-            cx,
-            |(value, color), _, _| {
-                div()
-                    .flex_none()
-                    .text_color(*color)
-                    .child(value.clone())
-                    .into_any_element()
-            },
-        );
-        let lookup_error = error(
-            id("lookup-error", &lookup.url),
-            lookup.error.as_deref(),
-            window,
-            cx,
-        );
-        column = column.child(with_error(line(name, value), lookup_error));
-    }
+                .into()
+        }),
+        window,
+        cx,
+    );
+    let lookups = status
+        .lookups
+        .iter()
+        .map(|lookup| (SharedString::from(lookup.url.clone()), lookup.clone()));
+    let lookups = crate::motion::keyed(
+        id("lookups", "rows"),
+        lookups,
+        window,
+        cx,
+        |_, lookup, window, cx| {
+            let name = url::Url::parse(&lookup.url)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| lookup.url.clone());
+            let (value, color) = match lookup.state {
+                TraverseLookupState::Ok => (crate::tr!("remote.traverse.status.ok"), muted),
+                TraverseLookupState::Pending => {
+                    (crate::tr!("remote.traverse.status.pending"), muted)
+                }
+                TraverseLookupState::Failed => {
+                    (crate::tr!("remote.traverse.status.failed"), danger)
+                }
+            };
+            let value = crate::motion::cross_fade(
+                id("lookup", &lookup.url),
+                (SharedString::from(value.into_owned()), color),
+                window,
+                cx,
+                |(value, color), _, _| {
+                    div()
+                        .flex_none()
+                        .text_color(*color)
+                        .child(value.clone())
+                        .into_any_element()
+                },
+            );
+            let lookup_error = error(
+                id("lookup-error", &lookup.url),
+                lookup.error.as_deref(),
+                window,
+                cx,
+            );
+            div()
+                .w_full()
+                .pt(gap)
+                .child(with_error(line(name, value), lookup_error))
+                .into_any_element()
+        },
+    );
+    let column = column
+        .children(relays_title)
+        .child(relays.render(v_flex().w_full()))
+        .children(lookups_title)
+        .child(lookups.render(v_flex().w_full()));
     column.into_any_element()
 }
 
@@ -713,7 +792,7 @@ impl Render for TraversePanel {
             .min_w_0()
             .debug_selector(|| "traverse-settings".into())
             .child(group_caption(crate::tr!("remote.traverse.section"), cx))
-            .child(grouped(rows, cx))
+            .child(crate::material::group(cx).children(rows))
             .child(footnote(
                 crate::tr!("remote.traverse.description"),
                 compact,
@@ -729,6 +808,78 @@ mod tests {
     use tcode_client::HostLink;
     use tcode_core::settings::Settings;
     use tcode_traverse::HostMux;
+
+    /// A self-hosted instance added folds in under the ones listed, pushing
+    /// the row to add another down as it opens; removed, it folds away again.
+    #[gpui::test]
+    fn an_instance_folds_in_and_away(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = crate::store::tests::scratch_root("traverse-fold");
+        std::fs::create_dir_all(&root).unwrap();
+        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let (attachments, _attachment_rx) = async_channel::unbounded();
+        cx.update(crate::theme::init);
+        cx.update(|cx| {
+            cx.set_global(RemoteController::new(
+                HostMux::new(attachments, from_host.clone()),
+                root.clone(),
+                HostLink::new(to_host, from_host),
+                Settings::default(),
+            ))
+        });
+        struct Page(Entity<TraversePanel>);
+        impl Render for Page {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                v_flex().size_full().child(self.0.clone())
+            }
+        }
+        let mut panel = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let traverse = cx.new(|cx| TraversePanel::new(window, cx));
+            panel = Some(traverse.clone());
+            Page(traverse)
+        });
+        let panel = panel.unwrap();
+        let height = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("traverse-settings")
+                .expect("the section is drawn")
+                .size
+                .height
+        };
+        crate::test_frames::draw_settled(cx);
+        let one = height(cx);
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.add_input.update(cx, |input, cx| {
+                input.set_value("https://traverse.example", window, cx)
+            });
+            panel.add(window, cx);
+        });
+        crate::test_frames::draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        let opening = height(cx);
+        crate::test_frames::draw_settled(cx);
+        let two = height(cx);
+        assert!(
+            one < opening && opening < two,
+            "the instance folds in: {one:?} < {opening:?} < {two:?}"
+        );
+
+        panel.update_in(cx, |panel, window, cx| panel.remove(1, window, cx));
+        crate::test_frames::draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        let closing = height(cx);
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            one < closing && closing < two,
+            "the instance folds away: {one:?} < {closing:?} < {two:?}"
+        );
+        assert_eq!(height(cx), one);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// A source's switch, addition or removal takes effect when it is made:
     /// it is saved at once, and a self-hosted instance joins only once its

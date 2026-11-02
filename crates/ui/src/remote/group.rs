@@ -154,12 +154,22 @@ impl GroupSection {
         &self,
         group: &GroupInfo,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut rows = Vec::new();
-        for machine in &group.machines {
-            let remove = machine.clone();
-            rows.push(
+        // A machine that joins folds in; one removed folds away and the ones
+        // below move up.
+        let machines = group
+            .machines
+            .iter()
+            .map(|machine| (SharedString::from(machine.id.clone()), machine.clone()));
+        let rows = crate::motion::keyed(
+            "group-machines",
+            machines,
+            window,
+            cx,
+            |_, machine, _, cx| {
+                let remove = machine.clone();
                 group_row(cx)
                     .child(
                         div()
@@ -194,10 +204,15 @@ impl GroupSection {
                             )),
                         )
                     })
-                    .into_any_element(),
-            );
-        }
-        settings_group(crate::tr!("group.machines.section"), rows, cx).into_any_element()
+                    .into_any_element()
+            },
+        );
+        settings_group(
+            crate::tr!("group.machines.section"),
+            vec![rows.render(v_flex().w_full())],
+            cx,
+        )
+        .into_any_element()
     }
 
     /// The devices waiting for this machine, folding in as the first
@@ -217,10 +232,18 @@ impl GroupSection {
             window,
             cx,
         )?;
-        let mut rows = Vec::new();
-        for device in &shown.value {
-            let id = device.id.clone();
-            rows.push(
+        // The list leaving is drawn from the last devices it had.
+        let devices = shown
+            .value
+            .iter()
+            .map(|device| (SharedString::from(device.id.clone()), device.clone()));
+        let rows = crate::motion::keyed(
+            "group-declined-rows",
+            devices,
+            window,
+            cx,
+            |_, device, _, cx| {
+                let id = device.id.clone();
                 row_frame(compact, cx)
                     .child(
                         div()
@@ -243,16 +266,25 @@ impl GroupSection {
                                 section.act(GroupAction::Admit(id.clone()), window, cx);
                             })),
                     )
-                    .into_any_element(),
-            );
-        }
-        Some(shown.fold(div().pt(gap).child(
-            settings_group(crate::tr!("group.declined.section"), rows, cx).child(footnote(
-                crate::tr!("group.declined.description"),
-                compact,
-                cx,
-            )),
-        )))
+                    .into_any_element()
+            },
+        );
+        Some(
+            shown.fold(
+                div().pt(gap).child(
+                    settings_group(
+                        crate::tr!("group.declined.section"),
+                        vec![rows.render(v_flex().w_full())],
+                        cx,
+                    )
+                    .child(footnote(
+                        crate::tr!("group.declined.description"),
+                        compact,
+                        cx,
+                    )),
+                ),
+            ),
+        )
     }
 
     /// In a group: its name and size, its machines, the devices waiting for
@@ -317,7 +349,11 @@ impl GroupSection {
                     ),
                 ),
             )
-            .child(div().pt(gap).child(self.machines_group(group, compact, cx)))
+            .child(
+                div()
+                    .pt(gap)
+                    .child(self.machines_group(group, compact, window, cx)),
+            )
             .children(self.declined_group(group, compact, gap, window, cx))
             .child(
                 div()
