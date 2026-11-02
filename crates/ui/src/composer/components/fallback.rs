@@ -18,6 +18,7 @@ impl Composer {
     pub(in super::super) fn render_fallback_panel(
         &self,
         block: &FallbackBlock,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -87,14 +88,18 @@ impl Composer {
 
         let retry_text = refused.as_ref().map(|(_, text)| text.clone());
         let rewind_turn = refused.as_ref().map(|(turn, _)| *turn);
-        let actions = h_flex()
-            .w_full()
-            .gap_2()
-            .items_center()
-            .child(div().flex_1())
-            .when(can_rewind, |this| {
-                let turn = rewind_turn.unwrap_or_default();
-                this.child(
+        // Each action folds in along the row as it becomes possible,
+        // carrying the gap before it.
+        let edit_retry = crate::motion::shown(
+            self.motion_id("fallback-edit-retry"),
+            can_rewind.then(|| rewind_turn.unwrap_or_default()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let turn = shown.value;
+            shown.fold_across(
+                div().pl_2().child(
                     Button::new("fallback-edit-retry")
                         .outline()
                         .chip()
@@ -110,28 +115,39 @@ impl Composer {
                             });
                             cx.notify();
                         })),
-                )
-            })
-            .when_some(retry_text, |this, text| {
-                this.child(
-                    Button::new("fallback-retry-opus")
-                        .primary()
-                        .chip()
-                        .label(crate::tr!("fallback.retry_on", model = model.clone()))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.workspace_store.update(cx, |store, _cx| {
-                                store.set_active_model_for(
-                                    this.session_id.clone().unwrap_or_default(),
-                                    ProviderKind::ClaudeCode,
-                                    Some(model.clone()),
-                                    None,
-                                );
-                                store.dismiss_fallback_block_for(this.session_id.as_deref());
-                            });
-                            this.set_input_text(text.clone(), window, cx);
-                        })),
+                ),
+            )
+        });
+        let retry = crate::motion::shown(self.motion_id("fallback-retry"), retry_text, window, cx)
+            .map(|shown| {
+                let text = shown.value.clone();
+                shown.fold_across(
+                    div().pl_2().child(
+                        Button::new("fallback-retry-opus")
+                            .primary()
+                            .chip()
+                            .label(crate::tr!("fallback.retry_on", model = model.clone()))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.set_active_model_for(
+                                        this.session_id.clone().unwrap_or_default(),
+                                        ProviderKind::ClaudeCode,
+                                        Some(model.clone()),
+                                        None,
+                                    );
+                                    store.dismiss_fallback_block_for(this.session_id.as_deref());
+                                });
+                                this.set_input_text(text.clone(), window, cx);
+                            })),
+                    ),
                 )
             });
+        let actions = h_flex()
+            .w_full()
+            .items_center()
+            .child(div().flex_1())
+            .children(edit_retry)
+            .children(retry);
 
         crate::material::card_raised(cx)
             .w_full()

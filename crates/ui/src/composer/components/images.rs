@@ -460,84 +460,144 @@ impl Composer {
         }
     }
 
+    /// The pending images under the field, and a slot for each still
+    /// loading. A thumbnail that goes narrows away and the ones after it move
+    /// over; the strip folds in with its first and away with its last. Each
+    /// thumbnail carries the gap after and above it, so a gap goes with it.
     pub(in super::super) fn render_image_strip(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if self.pending_images.is_empty() && self.pending_image_loads == 0 {
-            return None;
-        }
-        let mut row = h_flex().w_full().gap_1().flex_wrap();
-        for (index, image) in self.pending_images.iter().enumerate() {
-            let path = image.path.clone();
-            let menu_path = path.to_string_lossy().into_owned();
-            let name = image.name.clone();
-            row = row.child(
-                Button::new(("thumb", index))
-                    .secondary()
-                    .small()
-                    .chip()
-                    .aria_label(name.clone())
-                    // A long file name truncates rather than taking the strip.
-                    .max_w(px(220.))
+    ) -> AnyElement {
+        let mut thumbs: Vec<(gpui::SharedString, Option<(usize, PendingImage)>)> = self
+            .pending_images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                (
+                    image.path.to_string_lossy().into_owned().into(),
+                    Some((index, image.clone())),
+                )
+            })
+            .collect();
+        thumbs.extend(
+            (0..self.pending_image_loads).map(|slot| (format!("loading-{slot}").into(), None)),
+        );
+        let strip = (!thumbs.is_empty()).then(|| (gpui::SharedString::from("strip"), thumbs));
+        crate::motion::keyed(
+            self.motion_id("image-strip"),
+            strip,
+            window,
+            cx,
+            |_, thumbs, window, cx| {
+                crate::motion::keyed_across(
+                    self.motion_id("image-thumbs"),
+                    thumbs.clone(),
+                    window,
+                    cx,
+                    |key, thumb, window, cx| {
+                        let thumb = match thumb {
+                            Some((index, image)) => {
+                                self.render_thumb(key, *index, image, window, cx)
+                            }
+                            None => Button::new(gpui::ElementId::NamedChild(
+                                std::sync::Arc::new("thumb".into()),
+                                key.clone(),
+                            ))
+                            .secondary()
+                            .small()
+                            .chip()
+                            .icon(IconName::Image)
+                            .loading(true)
+                            .aria_label(crate::tr!("composer.loading"))
+                            .into_any_element(),
+                        };
+                        div().pr_1().pt_1().child(thumb).into_any_element()
+                    },
+                )
+                .render(h_flex().w_full().flex_wrap().pt_0p5())
+            },
+        )
+        .render(v_flex().w_full())
+    }
+
+    /// The thumbnail of the pending image at `index`; `key` names it for as
+    /// long as it is pending, wherever it moves in the strip.
+    fn render_thumb(
+        &self,
+        key: &gpui::SharedString,
+        index: usize,
+        image: &PendingImage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let path = image.path.clone();
+        // The picture fades in once it decodes.
+        let preview: gpui::ImageSource = crate::store::image_preview(path.clone(), 18., false);
+        let arrival = crate::motion::image_arrival(
+            self.motion_id(format_args!("thumb-arrival-{key}")),
+            &preview,
+            window,
+            cx,
+        );
+        let menu_path = path.to_string_lossy().into_owned();
+        let name = image.name.clone();
+        let id = |part: &'static str| {
+            gpui::ElementId::NamedChild(std::sync::Arc::new(part.into()), key.clone())
+        };
+        Button::new(id("thumb"))
+            .secondary()
+            .small()
+            .chip()
+            .aria_label(name.clone())
+            // A long file name truncates rather than taking the strip.
+            .max_w(px(220.))
+            .overflow_hidden()
+            // The thumbnail is decoded at the size it draws, inside the
+            // chip's height; no owner sizes a chip's leading image.
+            .child(
+                img(preview)
+                    .opacity(arrival)
+                    .id("attachment-image")
+                    .size(px(18.))
+                    .rounded(crate::material::radius_chip(cx))
+                    .with_fallback(crate::image_viewer::unpreviewed(false, false, cx)),
+            )
+            .child(
+                div()
+                    .min_w_0()
                     .overflow_hidden()
-                    // The thumbnail is decoded at the size it draws, inside the
-                    // chip's height; no owner sizes a chip's leading image.
-                    .child(
-                        img(crate::store::image_preview(path, 18., false))
-                            .id("attachment-image")
-                            .size(px(18.))
-                            .rounded(crate::material::radius_chip(cx))
-                            .with_fallback(crate::image_viewer::unpreviewed(false, false, cx)),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_meta_mono(self.compact, cx)
-                            .child(crate::widgets::fade_text(name)),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_image_preview(index, window, cx);
-                    }))
-                    .child(
-                        Button::new(("thumb-x", index))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .aria_label(crate::tr!("composer.remove_image"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.remove_image(index, cx);
-                            })),
-                    )
-                    .context_menu(move |menu, _, _| {
-                        menu.menu(
-                            crate::tr!("markdown.open_image").into_owned(),
-                            Box::new(ComposerMenu::ImageOpen(index)),
-                        )
-                        .separator()
-                        .path_items(&menu_path, None)
-                        .separator()
-                        .menu(
-                            crate::tr!("composer.remove_image").into_owned(),
-                            Box::new(ComposerMenu::ImageRemove(index)),
-                        )
-                    }),
-            );
-        }
-        for index in 0..self.pending_image_loads {
-            row = row.child(
-                Button::new(("thumb-loading", index))
-                    .secondary()
-                    .small()
-                    .chip()
-                    .icon(IconName::Image)
-                    .loading(true)
-                    .aria_label(crate::tr!("composer.loading")),
-            );
-        }
-        Some(row.into_any_element())
+                    .text_meta_mono(self.compact, cx)
+                    .child(crate::widgets::fade_text(name)),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_image_preview(index, window, cx);
+            }))
+            .child(
+                Button::new(id("thumb-x"))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .aria_label(crate::tr!("composer.remove_image"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.remove_image(index, cx);
+                    })),
+            )
+            .context_menu(move |menu, _, _| {
+                menu.menu(
+                    crate::tr!("markdown.open_image").into_owned(),
+                    Box::new(ComposerMenu::ImageOpen(index)),
+                )
+                .separator()
+                .path_items(&menu_path, None)
+                .separator()
+                .menu(
+                    crate::tr!("composer.remove_image").into_owned(),
+                    Box::new(ComposerMenu::ImageRemove(index)),
+                )
+            })
+            .into_any_element()
     }
 
     /// Open the clicked thumbnail as a window-level lightbox (see

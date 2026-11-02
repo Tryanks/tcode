@@ -98,6 +98,12 @@ impl Render for ContextWindowDialog {
                 .any(|option| tokens_of(&option.value) == Some(selected))
         });
         let compact = crate::window_seam::window_is_compact(window, cx);
+        let invalid = crate::motion::shown(
+            "context-window-invalid",
+            self.invalid.then_some(()),
+            window,
+            cx,
+        );
         let primary = cx.theme().primary;
         let default_suffix = crate::tr!("composer.option_default").into_owned();
 
@@ -161,11 +167,13 @@ impl Render for ContextWindowDialog {
             v_flex()
                 .px_2()
                 .pt_1()
-                .gap_1()
                 .child(Input::new(&self.custom))
-                .when(self.invalid, |this| {
-                    this.child(
+                // The error folds in under the field on Apply and away as
+                // the field is edited.
+                .children(invalid.map(|shown| {
+                    shown.fold(
                         div()
+                            .pt_1()
                             .text_secondary(compact, cx)
                             .text_color(cx.theme().danger)
                             .child(crate::tr!(
@@ -177,7 +185,7 @@ impl Render for ContextWindowDialog {
                                 ))
                             )),
                     )
-                }),
+                })),
         )
         .into_any_element()
     }

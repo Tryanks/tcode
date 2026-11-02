@@ -50,36 +50,70 @@ impl Composer {
     /// leaves the screen however long the question runs. A blocking question
     /// arrives open, because the agent is waiting; a non-blocking one arrives
     /// closed and can be hidden, because the agent keeps working.
+    ///
+    /// Hiding the card folds it away as the pill that brings it back folds
+    /// in, and back.
     pub(in super::super) fn render_user_input_panel(
         &self,
         pending: &PendingUserInput,
-        window: &Window,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Hiding is local to this client; the question stays open on the host,
+        // so a way back remains while the sidebar still asks for an answer.
+        let hidden = !pending.delivery.is_blocking()
+            && self.ui_dismissed_request_id.as_ref() == Some(&pending.request_id);
+        crate::motion::keyed(
+            self.motion_id(format_args!("user-input-{}", pending.request_id)),
+            [(
+                gpui::SharedString::from(if hidden { "pill" } else { "card" }),
+                hidden,
+            )],
+            window,
+            cx,
+            |_, hidden, window, cx| {
+                if *hidden {
+                    self.render_user_input_pill(cx)
+                } else {
+                    self.render_user_input_card(pending, window, cx)
+                }
+            },
+        )
+        .render(v_flex().w_full())
+    }
+
+    fn render_user_input_pill(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .w_full()
+            .child(
+                Button::new("ui-reveal")
+                    .debug_selector(|| "ui-reveal".into())
+                    .ghost()
+                    .xsmall()
+                    .touch(self.compact)
+                    .icon(IconName::Info)
+                    .label(crate::tr!("userinput.async_header"))
+                    .tooltip(crate::tr!("userinput.answer"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.ui_dismissed_request_id = None;
+                        this.ui_expanded = true;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The question card: a strip naming the question, over the answer area
+    /// that folds open and shut under it. Moving to another question
+    /// cross-fades the question and its options.
+    fn render_user_input_card(
+        &self,
+        pending: &PendingUserInput,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let request_id = pending.request_id.clone();
         let blocking = pending.delivery.is_blocking();
-        // Hiding is local to this client; the question stays open on the host,
-        // so a way back remains while the sidebar still asks for an answer.
-        if !blocking && self.ui_dismissed_request_id.as_ref() == Some(&request_id) {
-            return h_flex()
-                .w_full()
-                .child(
-                    Button::new("ui-reveal")
-                        .debug_selector(|| "ui-reveal".into())
-                        .ghost()
-                        .xsmall()
-                        .touch(self.compact)
-                        .icon(IconName::Info)
-                        .label(crate::tr!("userinput.async_header"))
-                        .tooltip(crate::tr!("userinput.answer"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.ui_dismissed_request_id = None;
-                            this.ui_expanded = true;
-                            cx.notify();
-                        })),
-                )
-                .into_any_element();
-        }
         let questions = pending.questions.clone();
         let total = questions.len();
         let index = self.ui_question_index.min(total.saturating_sub(1));
@@ -96,10 +130,17 @@ impl Composer {
             .ghost()
             .xsmall()
             .touch(self.compact)
-            .icon(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronUp
+            .icon({
+                // Up while shut, turning to point down as the answer area
+                // opens.
+                let turn = gpui_base::motion::transition(
+                    self.motion_id(format_args!("ui-toggle-{request_id}")),
+                    if expanded { 1f32 } else { 0. },
+                    crate::motion::settle(),
+                    window,
+                    cx,
+                );
+                Icon::new(IconName::ChevronUp).rotate(gpui::radians(turn * std::f32::consts::PI))
             })
             .tooltip(if expanded {
                 crate::tr!("userinput.collapse")
@@ -136,18 +177,27 @@ impl Composer {
                 .text_title(cx)
                 .child(crate::widgets::fade_text(title)),
         )
-        .when(!expanded, |strip| {
-            strip.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_body(self.compact, cx)
-                    .text_color(muted)
-                    .child(crate::widgets::fade_text(question.question.clone())),
-            )
+        // The question, previewed beside the title while the answer area is
+        // shut, fades as it opens; its room stays the strip's spacer.
+        .child({
+            let preview = gpui_base::motion::transition(
+                self.motion_id(format_args!("ui-preview-{request_id}")),
+                if expanded { 0f32 } else { 1. },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .opacity(preview)
+                .text_body(self.compact, cx)
+                .text_color(muted)
+                .when(preview > 0., |text| {
+                    text.child(crate::widgets::fade_text(question.question.clone()))
+                })
         })
-        .when(expanded, |strip| strip.child(div().flex_1()))
         .when(total > 1, |strip| {
             let questions_previous = questions.clone();
             let questions_next = questions.clone();
@@ -216,11 +266,135 @@ impl Composer {
             cx.notify();
         }));
 
-        let card = crate::material::card_raised(cx).w_full().child(strip);
-        if !expanded {
-            return card.into_any_element();
-        }
+        let card = crate::material::card_raised(cx)
+            .w_full()
+            .gap_0()
+            .child(strip);
+        let body = crate::motion::cross_fade(
+            self.motion_id(format_args!("ui-question-{request_id}")),
+            index,
+            window,
+            cx,
+            |index, window, cx| {
+                let question = questions[*index].clone();
+                self.render_user_input_question(&questions, &question, &request_id, window, cx)
+            },
+        );
+        let multi_done = multi && user_input_all_answered(&questions, &self.ui_selections);
+        let done = crate::motion::shown(
+            self.motion_id(format_args!("ui-done-{request_id}")),
+            multi_done.then_some(()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let questions_submit = questions.clone();
+            let request_id = request_id.clone();
+            shown.fold_across(
+                div().pl_2().child(
+                    Button::new("ui-done")
+                        .primary()
+                        .chip()
+                        .touch(self.compact)
+                        .label(crate::tr!("userinput.done"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.ui_submit(&questions_submit, request_id.clone(), window, cx);
+                        })),
+                ),
+            )
+        });
+        let custom_input = self.user_input_custom.clone();
+        let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
+        let custom_answer = h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .pl_2()
+            .rounded(crate::material::radius_input(cx))
+            .border_1()
+            .border_color(cx.theme().input)
+            .bg(cx.theme().background)
+            .child(
+                div().flex_1().min_w_0().child(
+                    Textarea::new(&self.user_input_custom)
+                        .placeholder(crate::tr!("userinput.custom_placeholder"))
+                        .appearance(false),
+                ),
+            )
+            .child(
+                Button::new("ui-custom-submit")
+                    .ghost()
+                    .xsmall()
+                    .touch(self.compact)
+                    .icon(IconName::ArrowUp)
+                    .disabled(!custom_has_text)
+                    .tooltip(crate::tr!("userinput.submit_custom"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.submit_custom_user_input(&custom_input, window, cx);
+                    })),
+            );
 
+        // Answers submit themselves: a single-select click that completes the
+        // set submits it, so the only finishing affordance is Done on a
+        // multi-select question, where clicks cannot signal "I'm finished".
+        let hint = if multi {
+            Some(crate::tr!("userinput.multi_hint"))
+        } else if !blocking {
+            Some(crate::tr!("userinput.async_hint"))
+        } else {
+            None
+        };
+        let footer = h_flex()
+            .w_full()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_secondary(self.compact, cx)
+                    .children(hint),
+            )
+            .children(done);
+
+        // The card's gap is carried above each part of the answer area, so
+        // it folds with it.
+        let gap = cx.theme().tokens.spacing.sm;
+        card.child(
+            crate::widgets::Collapsible::new(
+                self.motion_id(format_args!("ui-answer-{request_id}")),
+                expanded,
+            )
+            .w_full()
+            .content(
+                v_flex()
+                    .w_full()
+                    .gap(gap)
+                    .pt(gap)
+                    .child(body)
+                    .child(custom_answer)
+                    .child(footer),
+            ),
+        )
+        .into_any_element()
+    }
+
+    /// One question and its options, scrolling together within a share of
+    /// the window.
+    fn render_user_input_question(
+        &self,
+        questions: &[UserInputQuestion],
+        question: &UserInputQuestion,
+        request_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let request_id = request_id.to_owned();
+        let muted = cx.theme().muted_foreground;
+        let primary = cx.theme().primary;
+        let multi = question.multi_select;
+        let blocking = self
+            .pending_user_input(cx)
+            .is_none_or(|pending| pending.delivery.is_blocking());
         let selected = self
             .ui_selections
             .get(&question.id)
@@ -236,8 +410,20 @@ impl Composer {
             let is_selected = selected.iter().any(|l| l == &option.label);
             let label = option.label.clone();
             let question_for_click = question.clone();
-            let questions_for_click = questions.clone();
+            let questions_for_click = questions.to_vec();
             let request_for_click = request_id.clone();
+            // The mark fills and its dot comes in as the option is chosen, so
+            // the choice registers before the card moves on.
+            let chosen = gpui_base::motion::transition(
+                self.motion_id(format_args!(
+                    "ui-opt-{request_id}-{}-{opt_index}",
+                    question.id
+                )),
+                if is_selected { 1f32 } else { 0. },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
             let mark = div()
                 .size(px(16.))
                 .flex()
@@ -249,11 +435,23 @@ impl Composer {
                     crate::material::radius_input(cx)
                 })
                 .border_1()
-                .border_color(if is_selected { primary } else { muted })
-                .when(is_selected, |mark| {
-                    mark.bg(primary)
-                        .child(div().size(px(6.)).rounded_full().bg(gpui::white()))
-                });
+                .border_color(gpui_base::motion::transition(
+                    self.motion_id(format_args!(
+                        "ui-opt-border-{request_id}-{}-{opt_index}",
+                        question.id
+                    )),
+                    if is_selected { primary } else { muted },
+                    crate::motion::settle(),
+                    window,
+                    cx,
+                ))
+                .bg(primary.opacity(chosen))
+                .child(
+                    div()
+                        .size(px(6.) * chosen)
+                        .rounded_full()
+                        .bg(gpui::white().opacity(chosen)),
+                );
             options = options.child(
                 crate::material::menu_item_frame(self.compact, cx)
                     .id(("ui-opt", opt_index))
@@ -265,7 +463,7 @@ impl Composer {
                     .items_start()
                     .text_body(self.compact, cx)
                     .cursor_pointer()
-                    .when(is_selected, |s| s.bg(cx.theme().list_active))
+                    .bg(cx.theme().list_active.opacity(chosen))
                     .hover(|s| s.bg(cx.theme().muted))
                     .child(
                         div()
@@ -320,7 +518,7 @@ impl Composer {
         // The question and its options scroll together within a share of the
         // window, leaving the rest to the conversation and the composer.
         let body_cap = px((f32::from(window.viewport_size().height) * 0.4).clamp(120., 360.));
-        let body = div()
+        div()
             .id("user-input-body-scroll")
             .w_full()
             .max_h(body_cap)
@@ -335,78 +533,7 @@ impl Composer {
                             .child(question.question.clone()),
                     )
                     .when(!question.options.is_empty(), |this| this.child(options)),
-            );
-
-        let custom_input = self.user_input_custom.clone();
-        let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
-        let custom_answer = h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .pl_2()
-            .rounded(crate::material::radius_input(cx))
-            .border_1()
-            .border_color(cx.theme().input)
-            .bg(cx.theme().background)
-            .child(
-                div().flex_1().min_w_0().child(
-                    Textarea::new(&self.user_input_custom)
-                        .placeholder(crate::tr!("userinput.custom_placeholder"))
-                        .appearance(false),
-                ),
             )
-            .child(
-                Button::new("ui-custom-submit")
-                    .ghost()
-                    .xsmall()
-                    .touch(self.compact)
-                    .icon(IconName::ArrowUp)
-                    .disabled(!custom_has_text)
-                    .tooltip(crate::tr!("userinput.submit_custom"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.submit_custom_user_input(&custom_input, window, cx);
-                    })),
-            );
-
-        // Answers submit themselves: a single-select click that completes the
-        // set submits it, so the only finishing affordance is Done on a
-        // multi-select question, where clicks cannot signal "I'm finished".
-        let all_answered = user_input_all_answered(&questions, &self.ui_selections);
-        let questions_submit = questions.clone();
-        let hint = if multi {
-            Some(crate::tr!("userinput.multi_hint"))
-        } else if !blocking {
-            Some(crate::tr!("userinput.async_hint"))
-        } else {
-            None
-        };
-        let footer = h_flex()
-            .w_full()
-            .gap_2()
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_secondary(self.compact, cx)
-                    .children(hint),
-            )
-            .when(multi && all_answered, |this| {
-                this.child(
-                    Button::new("ui-done")
-                        .primary()
-                        .chip()
-                        .touch(self.compact)
-                        .label(crate::tr!("userinput.done"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.ui_submit(&questions_submit, request_id.clone(), window, cx);
-                        })),
-                )
-            });
-
-        card.child(body)
-            .child(custom_answer)
-            .child(footer)
             .into_any_element()
     }
 
@@ -689,6 +816,9 @@ mod tests {
         let (composer, cx) =
             cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
         cx.simulate_resize(size(px(800.), px(600.)));
+        // The turn the question arrived in runs throughout, so motion is
+        // reduced and each click's outcome is drawn at rest.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         move |selector: &'static str| {
             cx.update(|window, cx| window.draw(cx).clear(cx));
             if !selector.is_empty() {

@@ -49,7 +49,7 @@ use thread::ThreadReplica;
 mod snapshots;
 
 pub(crate) use snapshots::PanelState;
-pub use snapshots::{ComposerQueue, ComposerState};
+pub use snapshots::{ComposerCheckoutState, ComposerQueue, ComposerState};
 pub use tcode_protocol::ForkAvailability;
 
 /// Payload-free topic discriminant used by views to subscribe only to the
@@ -241,7 +241,7 @@ pub struct NativeRewindState {
     pub blocked: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FallbackBlock {
     pub category: Option<agent::ClassifierCategory>,
     /// The model that refused (or was expected, on a silent reroute).
@@ -254,7 +254,7 @@ pub struct FallbackBlock {
 /// A second model's read on a classifier stop: whether it looks like a false
 /// positive, plus a clarification the user may review, edit and send. Both are
 /// suggestions — nothing here is sent without a click.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FallbackReview {
     pub assessment: String,
     /// Empty when the reviewer did not judge the flag a false positive.

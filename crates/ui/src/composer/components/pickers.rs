@@ -225,12 +225,26 @@ impl Composer {
                     .items_center()
                     .text_chip(cx)
                     .child(tinted_provider_glyph(provider, store))
-                    .child(
+                    .child({
+                        // A new model's name cross-fades over the last one's.
+                        let id = self.motion_id("model-label");
+                        let display: gpui::SharedString = display.into();
                         div()
                             .min_w_0()
                             .overflow_hidden()
-                            .child(crate::widgets::fade_text(display)),
-                    )
+                            .child(crate::motion::Sampled::new(move |window, cx| {
+                                crate::motion::cross_fade_part(
+                                    id,
+                                    display,
+                                    window,
+                                    cx,
+                                    |display, _, _| {
+                                        crate::widgets::fade_text(display.clone())
+                                            .into_any_element()
+                                    },
+                                )
+                            }))
+                    })
                     .child(
                         Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
                     ),
@@ -376,7 +390,11 @@ impl Composer {
                     .items_center()
                     .text_chip(cx)
                     .text_color(muted)
-                    .child(div().whitespace_nowrap().child(label))
+                    .child(glided_label(
+                        self.motion_id("traits-label"),
+                        self.motion_id("traits-label-glide"),
+                        label.into(),
+                    ))
                     .child(Icon::new(IconName::ChevronDown)),
             );
 
@@ -438,11 +456,28 @@ impl Composer {
             .touch(self.compact)
             .disabled(!self.interactive(cx))
             // The ring is a glyph at an icon's default size.
-            .child(div().size(px(16.)).child(crate::widgets::ring::ring_canvas(
-                pct.unwrap_or(0.0),
-                ring_color,
-                track,
-            )));
+            // The ring sweeps to a new reading and its colour glides as it
+            // crosses into overload.
+            .child(div().size(px(16.)).child({
+                let id = self.motion_id("context-ring");
+                crate::motion::Sampled::new(move |window, cx| {
+                    let pct = gpui_base::motion::transition(
+                        (id.clone(), "pct"),
+                        pct.unwrap_or(0.0),
+                        crate::motion::settle(),
+                        window,
+                        cx,
+                    );
+                    let color = gpui_base::motion::transition(
+                        (id, "color"),
+                        ring_color,
+                        crate::motion::settle(),
+                        window,
+                        cx,
+                    );
+                    crate::widgets::ring::ring_canvas(pct, color, track).into_any_element()
+                })
+            }));
 
         let session_id = self.session_id.clone();
         crate::material::overlay_popover("context-popover", cx)
@@ -854,12 +889,7 @@ fn render_model_pane(
             .child(render_compact_model_footer(store_entity, session_id, cx))
             .into_any_element();
     }
-    pane.with_animation(
-        "model-picker-pop-in",
-        Animation::new(Duration::from_millis(150)),
-        |element, delta| element.opacity(delta),
-    )
-    .into_any_element()
+    pane.into_any_element()
 }
 
 fn render_compact_model_footer(
@@ -1387,15 +1417,7 @@ fn render_permission_pane(
                 .child(caption(hint.into())),
         );
     }
-    if compact {
-        return pane.into_any_element();
-    }
-    pane.with_animation(
-        "permission-picker-pop-in",
-        Animation::new(Duration::from_millis(150)),
-        |element, delta| element.opacity(delta),
-    )
-    .into_any_element()
+    pane.into_any_element()
 }
 
 /// The traits pane's effort control, in Codex's model-picker style: the
@@ -2022,6 +2044,34 @@ fn render_context_meter_pane(
     }
 
     pane.into_any_element()
+}
+
+/// A chip's label that cross-fades to a new text while the chip's width
+/// glides to fit it, so what is beside the chip moves over rather than jumps.
+fn glided_label(
+    id: gpui::ElementId,
+    glide: gpui::ElementId,
+    label: gpui::SharedString,
+) -> impl IntoElement {
+    crate::motion::Sampled::new(move |window, cx| {
+        let key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            label.hash(&mut hasher);
+            hasher.finish()
+        };
+        let glide = crate::motion::GlideState::keyed(glide, window, cx);
+        let text = crate::motion::cross_fade_part(id, label, window, cx, |label, _, _| {
+            div()
+                .whitespace_nowrap()
+                .child(label.clone())
+                .into_any_element()
+        });
+        crate::motion::SizeGlide::new(&glide, text)
+            .axes(crate::motion::GlideAxes::Width)
+            .on_change(key)
+            .into_any_element()
+    })
 }
 
 #[cfg(test)]

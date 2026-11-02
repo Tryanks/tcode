@@ -191,7 +191,7 @@ pub(crate) fn composer_destination(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 /// Which glyph a trigger-menu row shows.
 pub(super) enum MenuIcon {
     File,
@@ -202,7 +202,7 @@ pub(super) enum MenuIcon {
     Thread,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 /// What accepting a trigger-menu row does.
 pub(super) enum MenuAccept {
     /// Insert the serialized `[basename](path)` mention for this relative path.
@@ -223,7 +223,7 @@ pub(super) enum MenuAccept {
     OpenModelPicker,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 /// One selectable row in a trigger (`@`/`/`/`$`) menu.
 pub(super) struct MenuRow {
     /// Bold primary text (basename / command label).
