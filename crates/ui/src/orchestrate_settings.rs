@@ -25,6 +25,7 @@ use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
 use crate::settings::{ChildApprovalMode, OrchestrateChildModel, provider_label};
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 
+#[derive(Clone)]
 struct ChildRowState {
     provider: ProviderKind,
     model: String,
@@ -732,38 +733,56 @@ impl OrchestrateSettingsPanel {
             )))
         });
 
-        let mut rows: Vec<AnyElement> = Vec::new();
-        for (index, row) in self.child_rows.iter().enumerate().skip(offset).take(count) {
-            let Some(profile) = models.get(index) else {
-                continue;
-            };
-            let provider = row.provider;
-            let name = self.model_name(provider, &row.model, row.profile_id.as_deref(), cx);
-            let subtitle = if let Some(id) = row.profile_id.as_deref() {
-                let profile_settings = self.store.read(cx).provider_profile_settings(id);
-                let profile_name = profile_settings
-                    .display_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(id);
-                format!(
-                    "{} · {} · {}",
-                    provider_label(provider),
-                    row.model,
-                    profile_name
-                )
-            } else {
-                format!("{} · {}", provider_label(provider), row.model)
-            };
-            let reset = crate::settings_rows::reset_action(
-                ("reset-orchestrate-child", index),
-                !profile.description.is_empty() && profile.bundled_guidance(decision).is_some(),
-                cx.listener(move |this, _, window, cx| {
-                    this.reset_child_definition(index, window, cx)
-                }),
-            );
-            rows.push(
+        // A model's rows are keyed by the model, so one removed folds away
+        // and the ones below it move up into its place.
+        let rows: Vec<_> = self
+            .child_rows
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(count)
+            .filter_map(|(index, row)| {
+                let profile = models.get(index)?;
+                let key = format!("{}-{}", provider_label(row.provider), row.model);
+                Some((
+                    gpui::SharedString::from(key),
+                    (index, row.clone(), profile.clone()),
+                ))
+            })
+            .collect();
+        let rows = crate::settings_rows::grouped_keyed(
+            gpui::SharedString::from(format!("{list_id}-rows")),
+            rows,
+            window,
+            cx,
+            |key, (index, row, profile), window, cx| {
+                let (index, row, profile) = (*index, row, profile);
+                let provider = row.provider;
+                let name = self.model_name(provider, &row.model, row.profile_id.as_deref(), cx);
+                let subtitle = if let Some(id) = row.profile_id.as_deref() {
+                    let profile_settings = self.store.read(cx).provider_profile_settings(id);
+                    let profile_name = profile_settings
+                        .display_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(id);
+                    format!(
+                        "{} · {} · {}",
+                        provider_label(provider),
+                        row.model,
+                        profile_name
+                    )
+                } else {
+                    format!("{} · {}", provider_label(provider), row.model)
+                };
+                let reset = crate::settings_rows::reset_action(
+                    ("reset-orchestrate-child", index),
+                    !profile.description.is_empty() && profile.bundled_guidance(decision).is_some(),
+                    cx.listener(move |this, _, window, cx| {
+                        this.reset_child_definition(index, window, cx)
+                    }),
+                );
                 crate::material::group_row_stacked(cx)
                     .items_stretch()
                     .child(
@@ -789,7 +808,7 @@ impl OrchestrateSettingsPanel {
                                     (cx.theme().muted, cx.theme().muted_foreground)
                                 };
                                 let chip =
-                                    gpui::SharedString::from(format!("{list_id}-chip-{index}"));
+                                    gpui::SharedString::from(format!("{list_id}-chip-{key}"));
                                 let settle =
                                     || gpui_base::motion::Transition::new(crate::edge_back::SETTLE);
                                 let bg = gpui_base::motion::transition(
@@ -864,7 +883,7 @@ impl OrchestrateSettingsPanel {
                         // Keep a stored `fast` visible even when the catalog no
                         // longer declares support, so it can be switched off.
                         let fast = crate::motion::shown(
-                            gpui::SharedString::from(format!("{list_id}-fast-{index}")),
+                            gpui::SharedString::from(format!("{list_id}-fast-{key}")),
                             (fast_supported || profile.fast).then_some(()),
                             window,
                             cx,
@@ -920,16 +939,16 @@ impl OrchestrateSettingsPanel {
                             "orchestrate.children.description_placeholder"
                         )),
                     )
-                    .into_any_element(),
-            );
-        }
+                    .into_any_element()
+            },
+        );
         // The rows and the warning that there are none cross-fade.
         let slot = if profiles.is_empty() { "empty" } else { "rows" };
         let mut listed = (!profiles.is_empty()).then(|| {
             v_flex()
                 .w_full()
                 .children(warning)
-                .child(crate::material::grouped(rows, cx))
+                .child(crate::material::group(cx).child(rows))
         });
         let body = crate::motion::cross_fade(
             (gpui::ElementId::from(list_id), "body"),

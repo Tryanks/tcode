@@ -912,8 +912,14 @@ impl Render for SourceControlPanel {
         let hosts = listed(&settings);
         let rows = hosts
             .iter()
-            .map(|(host, kind)| self.row(host, *kind, window, cx))
-            .collect();
+            .map(|(host, kind)| (SharedString::from(host.clone()), (host.clone(), *kind)));
+        let rows = crate::settings_rows::grouped_keyed(
+            "source-control-hosts",
+            rows,
+            window,
+            cx,
+            |_, (host, kind), window, cx| self.row(host, *kind, window, cx),
+        );
         let compact = self.window_state.read(cx).compact;
         let store = self.store.clone();
         let listed_hosts: Vec<String> = hosts.into_iter().map(|(host, _)| host).collect();
@@ -952,7 +958,7 @@ impl Render for SourceControlPanel {
                         crate::tr!("settings.hosts_section"),
                         cx,
                     ))
-                    .child(crate::material::grouped(rows, cx)),
+                    .child(crate::material::group(cx).child(rows)),
             )
             .child(if compact {
                 v_flex().gap_2().child(add).child(note)

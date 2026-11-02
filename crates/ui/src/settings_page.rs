@@ -1865,11 +1865,26 @@ impl SettingsPage {
             |store, checked| store.set_provider_update_checks_disabled(!checked),
         )];
 
-        let provider_rows: Vec<AnyElement> = self
+        let provider_rows = self
             .provider_cards
             .iter()
-            .map(|(_, card)| card.clone().into_any_element())
-            .collect();
+            .map(|(id, card)| (SharedString::from(id.clone()), card.clone()));
+        let provider_rows = crate::settings_rows::grouped_keyed(
+            "provider-cards",
+            provider_rows,
+            window,
+            cx,
+            |_, card, _, _| card.clone().into_any_element(),
+        );
+        // A card carries the gap above it, so the gap leaves with it.
+        let acp_cards = self
+            .acp_cards
+            .iter()
+            .map(|(id, card)| (SharedString::from(id.clone()), card.clone()));
+        let acp_cards =
+            crate::motion::keyed("acp-cards", acp_cards, window, cx, |_, card, _, _| {
+                div().w_full().pt_3().child(card.clone()).into_any_element()
+            });
 
         let mut section = v_flex().w_full().gap_3().child(header);
         if let Some(shown) = crate::motion::shown("provider-update-run", run, window, cx) {
@@ -1901,10 +1916,12 @@ impl SettingsPage {
                 ),
             );
         }
-        section = section.child(crate::material::grouped(provider_rows, cx));
-        for (_, card) in &self.acp_cards {
-            section = section.child(card.clone());
-        }
+        section = section.child(
+            v_flex()
+                .w_full()
+                .child(crate::material::group(cx).child(provider_rows))
+                .child(acp_cards.render(v_flex().w_full())),
+        );
         // The update toggle follows the cards it governs; above them its caption
         // would stack straight under the page's own header row.
         section.child(div().pt(crate::material::section_gap(cx)).child(
@@ -1977,105 +1994,154 @@ impl SettingsPage {
                 })),
         );
 
-        let mut section = v_flex().w_full().gap_3().child(header);
+        // Each card and the note carry the gap above them, so it comes and
+        // goes with them.
+        let mut section = v_flex().w_full().child(header);
         if let Some(none) = crate::motion::shown(
             "usage-no-profiles",
             rows.is_empty().then_some(()),
             window,
             cx,
         ) {
-            section = section.child(none.fade(crate::material::grouped(
-                vec![self.usage_note_row(crate::tr!("usage.no_profiles").into_owned(), None, cx)],
-                cx,
+            section = section.child(div().w_full().pt_3().child(none.fade(
+                crate::material::grouped(
+                    vec![self.usage_note_row(
+                        crate::tr!("usage.no_profiles").into_owned(),
+                        None,
+                        cx,
+                    )],
+                    cx,
+                ),
             )));
         }
-        for (profile_id, name, kind, usage, checking) in rows {
-            let card_id =
-                gpui::ElementId::from(SharedString::from(format!("usage-card-{profile_id}")));
-            let plan = crate::motion::shown(
-                (card_id.clone(), "plan"),
-                usage.as_ref().and_then(|u| u.plan.clone()),
-                window,
-                cx,
-            );
-            let header = self.usage_card_header(&name, kind, plan, cx);
-            let reported = usage
-                .as_ref()
-                .filter(|usage| usage.error.is_some() || !usage.windows.is_empty());
-            let error = crate::motion::shown(
-                (card_id.clone(), "error"),
-                reported.and_then(|usage| usage.error.clone()),
-                window,
-                cx,
-            );
-            let hairline =
-                |cx: &App| crate::material::row_hairline(px(crate::material::CARD_INSET), cx);
-            let slot = match reported {
-                Some(_) => "windows",
-                None if checking => "checking",
-                None => "no-data",
-            };
-            let body = crate::motion::cross_fade(
-                (card_id.clone(), "body"),
-                slot,
-                window,
-                cx,
-                |slot, _, cx| {
-                    let slot = *slot;
-                    let rows = match slot {
-                        "windows" => {
-                            let mut rows = Vec::new();
-                            rows.push(match error.as_ref() {
-                                Some(error) => error.fold(div().child(hairline(cx)).child(
-                                    self.usage_note_row(
-                                        crate::tr!("usage.unavailable").into_owned(),
-                                        Some(error.value.clone()),
-                                        cx,
-                                    ),
-                                )),
-                                None => div().into_any_element(),
-                            });
-                            let now = now_secs();
-                            rows.extend(reported.into_iter().flat_map(|usage| {
-                                usage
-                                    .windows
-                                    .iter()
-                                    .map(|window| self.usage_window_row(window, now, cx))
-                                    .collect::<Vec<_>>()
-                            }));
-                            rows
-                        }
-                        "checking" => vec![self.usage_note_row(
-                            crate::tr!("usage.checking").into_owned(),
-                            None,
-                            cx,
-                        )],
-                        _ => vec![self.usage_note_row(
-                            crate::tr!("usage.no_data").into_owned(),
-                            None,
-                            cx,
-                        )],
-                    };
-                    // The error fold draws its own hairline, so it can fold
-                    // away with it.
-                    let mut body = v_flex().w_full();
-                    for (index, row) in rows.into_iter().enumerate() {
-                        body = body
-                            .when(index > 0 || slot != "windows", |body| {
-                                body.child(hairline(cx))
-                            })
-                            .child(row);
-                    }
-                    body.into_any_element()
-                },
-            );
-            section = section.child(
+        let cards = rows
+            .into_iter()
+            .map(|row| (SharedString::from(row.0.clone()), row));
+        let cards = crate::motion::keyed(
+            "usage-cards",
+            cards,
+            window,
+            cx,
+            |_, (profile_id, name, kind, usage, checking), window, cx| {
                 div()
-                    .id(card_id)
-                    .child(crate::material::grouped(vec![header, body], cx)),
-            );
-        }
-        section
+                    .w_full()
+                    .pt_3()
+                    .child(self.usage_card(
+                        profile_id,
+                        name,
+                        *kind,
+                        usage.as_ref(),
+                        *checking,
+                        window,
+                        cx,
+                    ))
+                    .into_any_element()
+            },
+        );
+        section.child(cards.render(v_flex().w_full()))
+    }
+
+    /// One profile's usage: its header, then its windows, or why there are
+    /// none.
+    #[allow(clippy::too_many_arguments)]
+    fn usage_card(
+        &self,
+        profile_id: &str,
+        name: &str,
+        kind: agent::ProviderKind,
+        usage: Option<&tcode_core::usage::ProviderUsage>,
+        checking: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let card_id = gpui::ElementId::from(SharedString::from(format!("usage-card-{profile_id}")));
+        let plan = crate::motion::shown(
+            (card_id.clone(), "plan"),
+            usage.and_then(|u| u.plan.clone()),
+            window,
+            cx,
+        );
+        let header = self.usage_card_header(name, kind, plan, cx);
+        let reported = usage.filter(|usage| usage.error.is_some() || !usage.windows.is_empty());
+        let error = crate::motion::shown(
+            (card_id.clone(), "error"),
+            reported.and_then(|usage| usage.error.clone()),
+            window,
+            cx,
+        );
+        let hairline =
+            |cx: &App| crate::material::row_hairline(px(crate::material::CARD_INSET), cx);
+        let slot = match reported {
+            Some(_) => "windows",
+            None if checking => "checking",
+            None => "no-data",
+        };
+        let body = crate::motion::cross_fade(
+            (card_id.clone(), "body"),
+            slot,
+            window,
+            cx,
+            |slot, window, cx| match *slot {
+                "windows" => {
+                    // The error fold draws its own hairline, and each window
+                    // the one above it, so each line folds away with its row.
+                    let error = match error.as_ref() {
+                        Some(error) => {
+                            error.fold(div().child(hairline(cx)).child(self.usage_note_row(
+                                crate::tr!("usage.unavailable").into_owned(),
+                                Some(error.value.clone()),
+                                cx,
+                            )))
+                        }
+                        None => div().into_any_element(),
+                    };
+                    let now = now_secs();
+                    let windows = reported
+                        .into_iter()
+                        .flat_map(|usage| usage.windows.iter())
+                        .map(|window| {
+                            (
+                                SharedString::from(crate::usage::window_label(window)),
+                                window.clone(),
+                            )
+                        });
+                    let windows = crate::motion::keyed(
+                        (card_id.clone(), "windows"),
+                        windows,
+                        window,
+                        cx,
+                        |_, window, _, cx| {
+                            crate::settings_rows::hairlined(
+                                self.usage_window_row(window, now, cx),
+                                cx,
+                            )
+                        },
+                    );
+                    v_flex()
+                        .w_full()
+                        .child(error)
+                        .child(windows.render(v_flex().w_full()))
+                        .into_any_element()
+                }
+                slot => v_flex()
+                    .w_full()
+                    .child(hairline(cx))
+                    .child(self.usage_note_row(
+                        if slot == "checking" {
+                            crate::tr!("usage.checking").into_owned()
+                        } else {
+                            crate::tr!("usage.no_data").into_owned()
+                        },
+                        None,
+                        cx,
+                    ))
+                    .into_any_element(),
+            },
+        );
+        div()
+            .id(card_id)
+            .child(crate::material::grouped(vec![header, body], cx))
+            .into_any_element()
     }
 
     fn usage_card_header(
@@ -2173,50 +2239,57 @@ impl SettingsPage {
             "empty"
         };
         let mut groups = Some(groups).filter(|groups| !groups.is_empty());
-        let body = crate::motion::cross_fade("archived-body", slot, window, cx, |slot, _, cx| {
-            match *slot {
-                "list" => match groups.take() {
-                    Some(groups) => self.render_archived_list(groups, cx).into_any_element(),
-                    // A list leaving for the empty state has no rows left.
-                    None => div().into_any_element(),
-                },
-                slot => v_flex()
-                    .gap(crate::material::section_gap(cx))
-                    .child(crate::material::group_caption(
-                        crate::tr!("settings.archived_section"),
-                        cx,
-                    ))
-                    .child(if slot == "loading" {
-                        crate::material::empty_row(crate::tr!("settings.archived_loading"), cx)
-                    } else {
-                        crate::material::empty_state(
-                            Icon::new(Section::Archived.icon()),
-                            crate::tr!("settings.archived_empty"),
-                            crate::tr!("settings.archived_empty_desc"),
+        let body =
+            crate::motion::cross_fade("archived-body", slot, window, cx, |slot, window, cx| {
+                match *slot {
+                    "list" => match groups.take() {
+                        Some(groups) => self
+                            .render_archived_list(groups, window, cx)
+                            .into_any_element(),
+                        // A list leaving for the empty state has no rows left.
+                        None => div().into_any_element(),
+                    },
+                    slot => v_flex()
+                        .gap(crate::material::section_gap(cx))
+                        .child(crate::material::group_caption(
+                            crate::tr!("settings.archived_section"),
                             cx,
-                        )
-                    })
-                    .into_any_element(),
-            }
-        });
+                        ))
+                        .child(if slot == "loading" {
+                            crate::material::empty_row(crate::tr!("settings.archived_loading"), cx)
+                        } else {
+                            crate::material::empty_state(
+                                Icon::new(Section::Archived.icon()),
+                                crate::tr!("settings.archived_empty"),
+                                crate::tr!("settings.archived_empty_desc"),
+                                cx,
+                            )
+                        })
+                        .into_any_element(),
+                }
+            });
         v_flex().child(body)
     }
 
     fn render_archived_list(
         &mut self,
         groups: Vec<tcode_core::project::ProjectGroup>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let full = self.store.read(cx).scope().is_full();
 
-        let flat: Vec<(SharedString, SessionMeta)> = groups
+        let flat: Vec<((SharedString, SharedString), SessionMeta)> = groups
             .into_iter()
             .flat_map(|group| {
-                let project_name = SharedString::from(group.project.name);
+                let project = (
+                    SharedString::from(group.project.id),
+                    SharedString::from(group.project.name),
+                );
                 group
                     .sessions
                     .into_iter()
-                    .map(move |meta| (project_name.clone(), meta))
+                    .map(move |meta| (project.clone(), meta))
             })
             .collect();
         let total = flat.len();
@@ -2224,8 +2297,10 @@ impl SettingsPage {
         self.archived_page = page;
 
         let now = now_secs();
-        let mut col = v_flex()
-            .gap(crate::material::section_gap(cx))
+        // Each part below the controls carries the gap above it, so a project
+        // whose last archived thread goes takes its gap with it.
+        let gap = crate::material::section_gap(cx);
+        let col = v_flex()
             .child(
                 gpui_base::h_flex()
                     .items_center()
@@ -2275,86 +2350,105 @@ impl SettingsPage {
                         )
                     }),
             )
-            .child(crate::material::group_caption(
+            .child(div().pt(gap).child(crate::material::group_caption(
                 crate::tr!("settings.archived_section"),
                 cx,
-            ));
-        {
-            let mut group_name: Option<SharedString> = None;
-            let mut rows: Vec<AnyElement> = Vec::new();
-            for (offset, (project_name, meta)) in flat[start..end].iter().enumerate() {
-                if group_name.as_ref() != Some(project_name)
-                    && let Some(previous) = group_name.replace(project_name.clone())
-                {
-                    col = col.child(
-                        v_flex()
-                            .child(crate::material::group_caption(previous, cx))
-                            .child(crate::material::group(cx).children(std::mem::take(&mut rows))),
-                    );
-                }
-                let key = start + offset;
-                let archived_at = meta.archived_at.unwrap_or(meta.created_at);
-                let archived_when = humanize_ago(now.saturating_sub(archived_at));
-                let created_when = humanize_ago(now.saturating_sub(meta.created_at));
-                let desc = format!(
-                    "{} · {}",
-                    crate::tr!("settings.archived_at", when = archived_when),
-                    crate::tr!("settings.archived_created", when = created_when),
-                );
-                let id_unarchive = meta.id.clone();
-                let id_delete = meta.id.clone();
-                let title = meta.title.clone();
-                rows.push(
-                    crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-                        .child(crate::settings_rows::row_labels(
-                            meta.title.clone(),
-                            Some(desc.into()),
-                            None,
-                            self.window_state.read(cx).compact,
-                            cx,
-                        ))
-                        .child(
-                            gpui_base::h_flex()
-                                .flex_none()
-                                .gap_2()
-                                .child(
-                                    Button::new(("unarchive", key))
-                                        .outline()
-                                        .small()
-                                        .label(crate::tr!("settings.unarchive"))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            let id = id_unarchive.clone();
-                                            this.store.update(cx, |store, _cx| {
-                                                store.unarchive_session(id);
-                                            });
-                                        })),
-                                )
-                                .when(full, |row| {
-                                    row.child(
-                                        Button::new(("delete-perm", key))
-                                            .danger()
-                                            .small()
-                                            .label(crate::tr!("settings.delete_permanently"))
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.confirm_delete_archived(
-                                                    &id_delete, &title, window, cx,
-                                                );
-                                            })),
-                                    )
-                                }),
-                        )
-                        .into_any_element(),
-                );
-            }
-            if let Some(previous) = group_name {
-                col = col.child(
-                    v_flex()
-                        .child(crate::material::group_caption(previous, cx))
-                        .child(crate::material::group(cx).children(rows)),
-                );
+            )));
+        // The page's rows by project, in order; a page turned is a new set of
+        // rows, so the old page folds away as the new one folds in.
+        let mut projects: Vec<(SharedString, (SharedString, Vec<SessionMeta>))> = Vec::new();
+        for ((project_id, project_name), meta) in &flat[start..end] {
+            match projects.last_mut() {
+                Some((id, (_, sessions))) if id == project_id => sessions.push(meta.clone()),
+                _ => projects.push((
+                    project_id.clone(),
+                    (project_name.clone(), vec![meta.clone()]),
+                )),
             }
         }
-        col
+        let compact = self.window_state.read(cx).compact;
+        let projects = crate::motion::keyed(
+            "archived-projects",
+            projects,
+            window,
+            cx,
+            |project_id, (project_name, sessions), window, cx| {
+                let rows = sessions
+                    .iter()
+                    .map(|meta| (SharedString::from(meta.id.clone()), meta.clone()));
+                let rows = crate::motion::keyed(
+                    SharedString::from(format!("archived-rows-{project_id}")),
+                    rows,
+                    window,
+                    cx,
+                    |_, meta, _, cx| self.archived_row(meta, now, full, compact, cx),
+                );
+                v_flex()
+                    .pt(gap)
+                    .child(crate::material::group_caption(project_name.clone(), cx))
+                    .child(rows.render(crate::material::group(cx)))
+                    .into_any_element()
+            },
+        );
+        col.child(projects.render(v_flex().w_full()))
+    }
+
+    fn archived_row(
+        &self,
+        meta: &SessionMeta,
+        now: u64,
+        full: bool,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let archived_at = meta.archived_at.unwrap_or(meta.created_at);
+        let archived_when = humanize_ago(now.saturating_sub(archived_at));
+        let created_when = humanize_ago(now.saturating_sub(meta.created_at));
+        let desc = format!(
+            "{} · {}",
+            crate::tr!("settings.archived_at", when = archived_when),
+            crate::tr!("settings.archived_created", when = created_when),
+        );
+        let id_unarchive = meta.id.clone();
+        let id_delete = meta.id.clone();
+        let title = meta.title.clone();
+        crate::settings_rows::row_frame(compact, cx)
+            .child(crate::settings_rows::row_labels(
+                meta.title.clone(),
+                Some(desc.into()),
+                None,
+                compact,
+                cx,
+            ))
+            .child(
+                gpui_base::h_flex()
+                    .flex_none()
+                    .gap_2()
+                    .child(
+                        Button::new(SharedString::from(format!("unarchive-{}", meta.id)))
+                            .outline()
+                            .small()
+                            .label(crate::tr!("settings.unarchive"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let id = id_unarchive.clone();
+                                this.store.update(cx, |store, _cx| {
+                                    store.unarchive_session(id);
+                                });
+                            })),
+                    )
+                    .when(full, |row| {
+                        row.child(
+                            Button::new(SharedString::from(format!("delete-perm-{}", meta.id)))
+                                .danger()
+                                .small()
+                                .label(crate::tr!("settings.delete_permanently"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_delete_archived(&id_delete, &title, window, cx);
+                                })),
+                        )
+                    }),
+            )
+            .into_any_element()
     }
 
     fn confirm_delete_archived(
