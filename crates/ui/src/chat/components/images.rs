@@ -156,14 +156,22 @@ pub(crate) fn item_tile(tile: Tile, session_id: &str, cx: &App) -> AnyElement {
             .rounded(crate::material::radius_card(cx))
             .overflow_hidden()
             .bg(cx.theme().muted)
-            .child(
-                img(preview())
-                    .id("tool-image")
-                    .w_full()
-                    .h_full()
-                    .object_fit(ObjectFit::Cover)
-                    .with_fallback(crate::image_viewer::unpreviewed(true, false, cx)),
-            ),
+            .child(crate::motion::Sampled::new({
+                let source = preview();
+                let id = SharedString::from(format!("image-read-{entry_id}-{index}"));
+                // The picture fades in over the tile's fill once it decodes.
+                move |window, cx| {
+                    let arrived = crate::motion::image_arrival(id, &source, window, cx);
+                    img(source)
+                        .id("tool-image")
+                        .w_full()
+                        .h_full()
+                        .object_fit(ObjectFit::Cover)
+                        .opacity(arrived)
+                        .with_fallback(crate::image_viewer::unpreviewed(true, false, cx))
+                        .into_any_element()
+                }
+            })),
         SharedString::from(format!("image-read-{entry_id}-{index}")),
         Role::Button,
         title.clone(),

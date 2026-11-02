@@ -96,6 +96,11 @@ pub struct MarkdownState {
     pub(super) list_state: ListState,
     item_heights: Rc<RefCell<render::ItemHeights>>,
     image_sizes: HashMap<String, Size<Pixels>>,
+    /// The glides of parts whose size changes at rest (a picture that
+    /// decoded, a formula shown as its source), by render path. Kept here,
+    /// not in element state, because the document measures its blocks under
+    /// other element ids than it paints them, and both must size alike.
+    glides: RefCell<HashMap<String, crate::motion::GlideState>>,
     layout_revision: usize,
     /// The document this view's text is selected in, when it is selectable.
     pub(super) selection: Option<Membership>,
@@ -165,6 +170,7 @@ impl MarkdownState {
             item_heights: Rc::new(RefCell::new(render::ItemHeights::new(items.len()))),
             items,
             image_sizes: HashMap::new(),
+            glides: RefCell::default(),
             layout_revision: 0,
             selection: None,
             owns_selection: false,
@@ -385,6 +391,15 @@ impl MarkdownState {
             None => path,
         };
         host_file(path)
+    }
+
+    /// The glide of the part at render `path`, whose size changes at rest.
+    pub(super) fn glide(&self, path: &str) -> crate::motion::GlideState {
+        self.glides
+            .borrow_mut()
+            .entry(path.to_string())
+            .or_default()
+            .clone()
     }
 
     pub(super) fn image_layout(&self, path: &str) -> (usize, Option<Size<Pixels>>) {
@@ -621,6 +636,7 @@ impl MarkdownState {
     fn reparse_reset(&mut self, cx: &mut Context<Self>) {
         self.stream_fade.clear();
         self.image_sizes.clear();
+        self.glides.borrow_mut().clear();
         render::clear_code_measurements(cx.entity_id(), cx);
         self.prepare_reparse();
         let parsed_document = super::parse::parse_document(&self.text);
@@ -775,7 +791,22 @@ impl Render for MarkdownState {
             self.item_heights.borrow_mut().invalidate(items.clone());
             self.list_state.remeasure_items(items);
         }
-        if diagrams.moving {
+        // A part on its way to a new size is measured again each frame, so
+        // the blocks after it follow it down.
+        let now = cx.background_executor().now();
+        let gliding: Vec<String> = self
+            .glides
+            .borrow()
+            .iter()
+            .filter(|(_, glide)| glide.moving(now))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in &gliding {
+            let items = self.items_of(path);
+            self.item_heights.borrow_mut().invalidate(items.clone());
+            self.list_state.remeasure_items(items);
+        }
+        if diagrams.moving || !gliding.is_empty() {
             window.request_animation_frame();
         }
         mermaid::release_retired(cx);

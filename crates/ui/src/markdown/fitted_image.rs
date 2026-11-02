@@ -5,14 +5,19 @@
 //! letterboxes the picture inside it. This element gives `img` a size that
 //! is already proportional, until `img` derives its height from a clamped
 //! width itself.
+//!
+//! The picture fades in over its tile once it decodes, and the block's size
+//! glides from the tile's to the picture's, so the blocks after it move down
+//! rather than jump: `img` reports neither.
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, GlobalElementId,
-    ImageSource, InspectorElementId, IntoElement, LayoutId, ObjectFit, Pixels, Size, Style, Styled,
-    StyledImage as _, WeakEntity, Window, div, img, px, relative, size,
+    ImageSource, InspectorElementId, IntoElement, LayoutId, ObjectFit, Pixels, SharedString, Size,
+    Style, Styled, StyledImage as _, WeakEntity, Window, div, img, px, relative, size,
 };
 
 use super::state::MarkdownState;
+use crate::motion::GlideState;
 
 pub(super) const MAX_HEIGHT: Pixels = px(720.);
 const MIN_SIDE: Pixels = px(15.);
@@ -29,6 +34,14 @@ pub(super) struct FittedImage<E> {
     path: String,
     revision: usize,
     previous_size: Option<Size<Pixels>>,
+    glide: GlideState,
+}
+
+/// What a fitted image found while it laid out: the picture's own size, and
+/// how far the picture is in over its tile.
+pub(super) struct FittedLayout {
+    intrinsic: Size<Pixels>,
+    arrived: f32,
 }
 
 impl<E: IntoElement + Styled + 'static> FittedImage<E> {
@@ -42,6 +55,7 @@ impl<E: IntoElement + Styled + 'static> FittedImage<E> {
         cx: &App,
     ) -> Self {
         let (revision, previous_size) = owner.read(cx).image_layout(&path);
+        let glide = owner.read(cx).glide(&path);
         Self {
             source,
             image: Some(image),
@@ -49,6 +63,7 @@ impl<E: IntoElement + Styled + 'static> FittedImage<E> {
             path,
             revision,
             previous_size,
+            glide,
         }
     }
 }
@@ -62,7 +77,7 @@ impl<E: IntoElement + Styled + 'static> IntoElement for FittedImage<E> {
 }
 
 impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
-    type RequestLayoutState = Size<Pixels>;
+    type RequestLayoutState = FittedLayout;
     type PrepaintState = Option<AnyElement>;
 
     fn id(&self) -> Option<ElementId> {
@@ -102,19 +117,29 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
                 });
             });
         }
+        // The picture fades in over its tile once it decodes, and the block
+        // glides from the tile's size to the picture's.
+        let arrived = crate::motion::image_arrival(
+            SharedString::from(format!("markdown-image-{}", self.path)),
+            &self.source,
+            window,
+            cx,
+        );
+        let shows = crate::motion::size_key(intrinsic);
+        let glide = self.glide.clone();
         let mut style = Style::default();
         style.max_size.width = relative(1.).into();
         let layout_id = window.request_measured_layout(
             style,
-            move |known_dimensions, available_space, _, _| {
+            move |known_dimensions, available_space, _, cx| {
                 let available_width = known_dimensions.width.or(match available_space.width {
                     AvailableSpace::Definite(width) => Some(width),
                     AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
                 });
-                fit(intrinsic, available_width)
+                glide.toward(shows, fit(intrinsic, available_width), cx)
             },
         );
-        (layout_id, intrinsic)
+        (layout_id, FittedLayout { intrinsic, arrived })
     }
 
     fn prepaint(
@@ -122,16 +147,24 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        intrinsic: &mut Self::RequestLayoutState,
+        layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let fitted = fit(*intrinsic, Some(bounds.size.width));
+        self.glide.painted_at(bounds.size, window);
+        // At rest the block is the fitted size; while it glides the picture
+        // is contained in the block's size on the way.
+        let fitted = if self.glide.moving(cx.background_executor().now()) {
+            bounds.size
+        } else {
+            fit(layout.intrinsic, Some(bounds.size.width))
+        };
         let mut image = self
             .image
             .take()?
             .w(fitted.width)
             .h(fitted.height)
+            .opacity(layout.arrived)
             .into_any_element();
         image.prepaint_as_root(
             bounds.origin,
@@ -174,4 +207,134 @@ pub(super) fn fit(intrinsic: Size<Pixels>, available_width: Option<Pixels>) -> S
         .map_or(intrinsic.width, |available| intrinsic.width.min(available))
         .min(MAX_HEIGHT / ratio);
     size(width.max(MIN_SIDE), (width * ratio).max(MIN_SIDE))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
+
+    use gpui::{
+        AppContext as _, Context, Entity, ImageSource, IntoElement, ListAlignment, ListState,
+        ParentElement as _, Render, RenderImage, Styled as _, TestAppContext, VisualTestContext,
+        Window, div, px,
+    };
+
+    use crate::markdown::{ImageResolver, MarkdownState, MarkdownView};
+    use crate::test_frames::{draw, draw_settled};
+
+    /// A reply in a timeline row whose picture decodes when `ready` is set.
+    struct Reply {
+        markdown: Entity<MarkdownState>,
+        list: ListState,
+    }
+
+    impl Render for Reply {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let markdown = self.markdown.clone();
+            div().size_full().child(
+                gpui::list(self.list.clone(), move |_, _, _| {
+                    div()
+                        .w(px(400.))
+                        .child(MarkdownView::new(&markdown))
+                        .into_any_element()
+                })
+                .size_full(),
+            )
+        }
+    }
+
+    fn reply(
+        ready: Rc<Cell<bool>>,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Reply>, &mut VisualTestContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let picture = Arc::new(RenderImage::new(vec![image::Frame::new(
+            image::ImageBuffer::from_pixel(300, 150, image::Rgba([0, 0, 255, 255])),
+        )]));
+        let source = ImageSource::Custom(Arc::new(move |_, _| {
+            ready.get().then(|| Ok(picture.clone()))
+        }));
+        cx.add_window_view(move |_, cx| {
+            let markdown = cx.new(|cx| {
+                let mut state = MarkdownState::new("Before\n\n![pic](test:pic)\n\nAfter\n", cx);
+                state.set_image_resolver(
+                    Some(ImageResolver {
+                        source: Rc::new(move |_| Some(source.clone())),
+                        pending: Rc::new(|_, _, _, _| None),
+                    }),
+                    cx,
+                );
+                state
+            });
+            Reply {
+                markdown,
+                list: ListState::new(1, ListAlignment::Top, px(400.)),
+            }
+        })
+    }
+
+    fn after(cx: &mut VisualTestContext) -> gpui::Pixels {
+        cx.debug_bounds("markdown-block-2")
+            .expect("the paragraph after the picture")
+            .top()
+    }
+
+    /// A picture that decodes after its reply is drawn grows from its tile
+    /// to its own size, and the text after it moves down with it one way,
+    /// without a jump, to where the picture puts it; with motion reduced it
+    /// is there at once. A picture decoded when its reply is first drawn is
+    /// at its size on that frame.
+    #[gpui::test]
+    fn a_picture_that_decodes_moves_the_text_after_it_down_smoothly(cx: &mut TestAppContext) {
+        let decoded_first = {
+            let (_, cx) = reply(Rc::new(Cell::new(true)), cx);
+            draw(cx);
+            let first = after(cx);
+            draw_settled(cx);
+            assert_eq!(
+                after(cx),
+                first,
+                "a decoded picture grew after its first frame"
+            );
+            first
+        };
+        for reduce in [false, true] {
+            cx.update(|cx| cx.set_reduce_motion(reduce));
+            let ready = Rc::new(Cell::new(false));
+            let (root, cx) = reply(ready.clone(), cx);
+            draw_settled(cx);
+            let tile = after(cx);
+            assert!(tile < decoded_first, "the tile is smaller than the picture");
+            ready.set(true);
+            let markdown = root.read_with(cx, |root, _| root.markdown.clone());
+            markdown.update(cx, |_, cx| cx.notify());
+            draw(cx);
+            if reduce {
+                draw_settled(cx);
+                assert_eq!(after(cx), decoded_first);
+                continue;
+            }
+            let mut seen = vec![after(cx)];
+            for _ in 0..20 {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.update(|window, cx| window.simulate_next_frame(cx));
+                draw(cx);
+                seen.push(after(cx));
+            }
+            assert_eq!(seen[0], tile, "the text jumped as the picture decoded");
+            assert!(
+                seen.windows(2)
+                    .all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] < px(30.)),
+                "the text jumped or went back: {seen:?}"
+            );
+            assert!(
+                seen.windows(2).filter(|pair| pair[1] > pair[0]).count() >= 6,
+                "the text moved in one step: {seen:?}"
+            );
+            draw_settled(cx);
+            assert_eq!(after(cx), decoded_first, "{seen:?}");
+            cx.update(|_, cx| cx.set_reduce_motion(false));
+        }
+    }
 }

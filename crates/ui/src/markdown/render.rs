@@ -840,19 +840,36 @@ fn pending_images(
                     .zip(pending)
                     .enumerate()
                     .map(|(ix, (image, pending))| {
-                        pending.unwrap_or_else(|| {
+                        // The picture fades in where its stand-in stood, and
+                        // the slot's height glides from one to the other.
+                        let slot = format!("{path}/image/{ix}/slot");
+                        let standing = pending.is_some();
+                        let arrived = gpui_base::motion::transition(
+                            SharedString::from(slot.clone()),
+                            if standing { 0f32 } else { 1. },
+                            crate::motion::settle(),
+                            window,
+                            cx,
+                        );
+                        let content = pending.unwrap_or_else(|| {
                             let source = state.read(cx).image_source(&image.url);
-                            FittedImage::new(
-                                source.clone(),
-                                img(source).object_fit(ObjectFit::Contain).with_fallback(
-                                    crate::image_viewer::unpreviewed(true, true, cx),
-                                ),
-                                state,
-                                format!("{path}/image/{ix}"),
-                                cx,
-                            )
+                            div()
+                                .w_full()
+                                .opacity(arrived)
+                                .child(FittedImage::new(
+                                    source.clone(),
+                                    img(source).object_fit(ObjectFit::Contain).with_fallback(
+                                        crate::image_viewer::unpreviewed(true, true, cx),
+                                    ),
+                                    state,
+                                    format!("{path}/image/{ix}"),
+                                    cx,
+                                ))
+                                .into_any_element()
+                        });
+                        crate::motion::SizeGlide::new(&state.read(cx).glide(&slot), content)
+                            .on_change(standing as u64)
                             .into_any_element()
-                        })
                     }),
             )
             .into_any_element(),
