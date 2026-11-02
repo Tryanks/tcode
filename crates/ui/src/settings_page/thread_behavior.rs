@@ -363,7 +363,8 @@ impl SettingsPage {
                         cx,
                     )
                     .cursor_pointer()
-                    .hover(|row| row.bg(cx.theme().list_hover))
+                    .relative()
+                    .child(crate::material::row_hover(gpui::px(0.), cx))
                     .text_body(true, cx)
                     .child(crate::project_icon::artwork(project, 16.))
                     .child(
@@ -771,7 +772,8 @@ fn rule_selector<T: Clone + 'static>(
                 )
                 .aria_selected(checked)
                 .cursor_pointer()
-                .hover(|row| row.bg(cx.theme().list_hover))
+                .relative()
+                .child(crate::material::row_hover(gpui::px(0.), cx))
                 .text_body(true, cx)
                 .child(div().flex_1().child(label))
                 .when(mark > 0., |row| {

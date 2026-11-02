@@ -339,7 +339,8 @@ pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stat
         .gap_3()
         .items_center()
         .cursor_pointer()
-        .hover(|style| style.bg(cx.theme().list_hover))
+        .relative()
+        .child(row_hover(px(0.), cx))
         .active(|style| style.bg(cx.theme().list_active))
 }
 
@@ -364,7 +365,8 @@ pub fn panel_row(
         .gap(spacing.sm)
         .items_center()
         .rounded(radius_card(cx))
-        .hover(|style| style.bg(cx.theme().list_hover))
+        .relative()
+        .child(row_hover(radius_card(cx), cx))
 }
 
 /// What fills a [`menu_item_frame`] beneath its content.
@@ -389,6 +391,13 @@ impl ItemFill {
             Self::Hover
         }
     }
+}
+
+/// A row's list hover fill, gliding as the pointer comes and goes, for the
+/// row's first child; the row must be positioned and have an id.
+pub(crate) fn row_hover(radius: Pixels, cx: &App) -> crate::motion::Sampled {
+    let hover = cx.theme().list_hover;
+    crate::motion::hover_layer(hover.opacity(0.), hover, radius)
 }
 
 /// One item of a menu or a menu-like picker: its inset, gap, radius and, on a

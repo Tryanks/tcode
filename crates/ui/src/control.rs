@@ -210,48 +210,69 @@ pub(crate) fn grant_editor(
                     on_change(next, window, cx);
                 })
         });
-    let mut editor = v_flex()
+    // The checklist folds in under the scope choice and away again, drawn
+    // with the projects it had checked while it goes.
+    let checklist = {
+        let (id, grant, on_change) = (id.clone(), grant.clone(), on_change.clone());
+        let projects = projects.to_vec();
+        let shown_projects =
+            matches!(grant.scope, ControlScope::Projects(_)).then(|| selected_projects.clone());
+        crate::motion::Sampled::new(move |window, cx| {
+            let Some(shown) = crate::motion::shown(
+                SharedString::from(format!("{id}-projects")),
+                shown_projects,
+                window,
+                cx,
+            ) else {
+                return div().into_any_element();
+            };
+            let selected_projects = &shown.value;
+            let mut list = v_flex().gap_1();
+            if projects.is_empty() {
+                list = list.child(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("control.scope.no_projects")),
+                );
+            }
+            for project in &projects {
+                let checked = selected_projects.contains(&project.id);
+                let grant = grant.clone();
+                let on_change = on_change.clone();
+                let project_id = project.id.clone();
+                list = list.child(
+                    Checkbox::new(SharedString::from(format!("{id}-project-{}", project.id)))
+                        .label(project.name.clone())
+                        .checked(checked)
+                        .on_click(move |checked, window, cx| {
+                            let mut next = grant.clone();
+                            if let ControlScope::Projects(ids) = &mut next.scope {
+                                ids.retain(|id| id != &project_id);
+                                if *checked {
+                                    ids.push(project_id.clone());
+                                }
+                            }
+                            on_change(next, window, cx);
+                        }),
+                );
+            }
+            shown.fold(list.pt_2())
+        })
+    };
+    let editor = v_flex()
         .w_full()
         .gap_2()
         .child(caption(crate::tr!("control.scope.title").into_owned()))
         .child(
-            ChoiceGroup::new(SharedString::from(format!("{id}-scope")))
-                .compact(compact)
-                .aria_label(crate::tr!("control.scope.title"))
-                .choices(scope_choices),
+            v_flex()
+                .child(
+                    ChoiceGroup::new(SharedString::from(format!("{id}-scope")))
+                        .compact(compact)
+                        .aria_label(crate::tr!("control.scope.title"))
+                        .choices(scope_choices),
+                )
+                .child(checklist),
         );
-    if matches!(grant.scope, ControlScope::Projects(_)) {
-        let mut list = v_flex().gap_1();
-        if projects.is_empty() {
-            list = list.child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!("control.scope.no_projects")),
-            );
-        }
-        for project in projects {
-            let checked = selected_projects.contains(&project.id);
-            let grant = grant.clone();
-            let on_change = on_change.clone();
-            let project_id = project.id.clone();
-            list = list.child(
-                Checkbox::new(SharedString::from(format!("{id}-project-{}", project.id)))
-                    .label(project.name.clone())
-                    .checked(checked)
-                    .on_click(move |checked, window, cx| {
-                        let mut next = grant.clone();
-                        if let ControlScope::Projects(ids) = &mut next.scope {
-                            ids.retain(|id| id != &project_id);
-                            if *checked {
-                                ids.push(project_id.clone());
-                            }
-                        }
-                        on_change(next, window, cx);
-                    }),
-            );
-        }
-        editor = editor.child(list);
-    }
     let tier_rows = ControlTier::ALL
         .into_iter()
         .map(|tier| {
