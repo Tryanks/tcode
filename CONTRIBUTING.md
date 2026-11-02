@@ -54,14 +54,21 @@ is derived from it. **Process** is how to build, check and submit work.
 
 6. **gpui-base is the infrastructure; no house UI principles.** Tcode follows
    the recommendations and defaults of gpui-base and gpui-kit, and keeps no
-   separate design contract in sync with the code. Everything gpui-base
+   separate design contract in sync with the code: no house-wide UI rules of
+   its own, such as a single duration for every transition or classes of
+   change that must stay instant. Everything gpui-base
    provides on top of GPUI — selection, scrolling, positioning, dismissal,
    focus, theme tokens, motion, virtual lists, form controls — is used as it
    is, defaults included, before anything of the kind is written in Tcode.
    Tcode's own components are styled compositions of those primitives; they
-   never re-derive a primitive's rules locally. A primitive is reimplemented,
-   or a default overridden, only where gpui-base demonstrably cannot meet the
-   need; the site names that gap, and it is removed once gpui-base closes it.
+   never re-derive a primitive's rules locally. Where gpui-base demonstrably
+   cannot meet the need, Tcode builds what is missing — a primitive
+   reimplemented, a default overridden, or an element gpui-base does not have
+   — and the site names that gap; it is removed once gpui-base closes it.
+   This principle decides how something is built, never whether it is built:
+   what the interface does is the maintainer's call, and a primitive
+   gpui-base lacks is never a reason to leave an effect out, make it instant,
+   or settle for less.
 
 7. **Code and tests are the only source of truth.** This section is the only
    maintainer-authored text; comments, issues and other documents are derived
@@ -69,7 +76,11 @@ is derived from it. **Process** is how to build, check and submit work.
    comment is kept only when it states a constraint the code cannot express or
    the reason an obvious alternative was rejected; narrated steps, history and
    "mirrors X" notes are deleted when touched. A constraint drafted by an AI is
-   not a requirement until it appears here. A test, whatever its form, is
+   not a requirement until it appears here. Rules and conventions written into
+   audits, hand-offs, briefs or agent instructions bind no one: they are
+   notes, never cited as requirements or used to send work back, and where
+   one would narrow what the maintainer asked for, the maintainer's request
+   wins. A test, whatever its form, is
    truth only for a contract real use needs, and only while it is the test
    that proves it by driving the code the way the running app does. The suite
    is larger than its contracts: a test met while working on its area is
