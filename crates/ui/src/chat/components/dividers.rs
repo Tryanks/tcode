@@ -21,13 +21,29 @@ pub(crate) fn divider_stub(cx: &App) -> Div {
 /// `tint` colors the label alone — the rules stay border-quiet no matter what
 /// the event is, so no divider can shout louder than another.
 fn divider(id: SharedString, label: String, tint: Hsla, cx: &App) -> AnyElement {
+    divider_in(id, label, tint, None, cx)
+}
+
+/// [`divider`] whose label changes (compaction running, then done) and
+/// cross-fades as it does, on `motion`'s clock when the chat keeps it.
+fn divider_in(
+    id: SharedString,
+    label: String,
+    tint: Hsla,
+    motion: Option<&crate::motion::owned::Owned>,
+    cx: &App,
+) -> AnyElement {
     let stub = || divider_stub(cx);
-    // A label that changes (compaction running, then done) cross-fades.
     let label_id = SharedString::from(format!("{id}-label"));
+    let motion = motion.cloned();
     let label = crate::motion::Sampled::new(move |window, cx| {
-        crate::motion::cross_fade(label_id, label, window, cx, |label, _, _| {
+        let build = |label: &String, _: &mut gpui::Window, _: &mut App| {
             div().child(label.clone()).into_any_element()
-        })
+        };
+        match motion {
+            Some(motion) => motion.cross_fade_value(label_id, label, window, cx, build),
+            None => crate::motion::cross_fade(label_id, label, window, cx, build),
+        }
     });
     h_flex()
         .id(id)
@@ -106,6 +122,7 @@ pub(crate) fn model_change_divider(
 pub(crate) fn context_compacted_divider(
     id: &str,
     metadata: Option<&agent::Compaction>,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let mut label = if metadata.is_some_and(|c| c.in_progress) {
@@ -132,10 +149,11 @@ pub(crate) fn context_compacted_divider(
             ));
         }
     }
-    divider(
+    divider_in(
         SharedString::from(format!("context-compacted-{id}")),
         label,
         cx.theme().warning,
+        Some(motion),
         cx,
     )
 }

@@ -74,6 +74,8 @@ pub(crate) struct AssistantData<'a> {
     pub(crate) copied: bool,
     /// The timeline's hover, which reveals the message's actions.
     pub(crate) hover: crate::motion::ListHover,
+    /// The chat's motion, which keeps the action row's fold.
+    pub(crate) motion: crate::motion::owned::Owned,
 }
 
 /// The message's own context-menu item: the whole text, as the hover Copy
@@ -108,6 +110,7 @@ pub(crate) fn assistant(
         show_actions,
         copied,
         hover,
+        motion,
     } = data;
     let menu_items = copy_message_items(Arc::from(text));
     let content = markdown.map_or_else(
@@ -159,12 +162,7 @@ pub(crate) fn assistant(
         .when(reveals, |message| message.on_hover(on_hover))
         .child(message)
         .child(crate::motion::Sampled::new(
-            move |window, cx| match crate::motion::shown(
-                fold_id,
-                show_actions.then_some(()),
-                window,
-                cx,
-            ) {
+            move |window, cx| match motion.shown(fold_id, show_actions.then_some(()), window, cx) {
                 Some(fold) => {
                     let reveal = hover.reveal(&hover_key, window, cx);
                     let actions = h_flex()

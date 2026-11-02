@@ -131,6 +131,7 @@ impl ChatView {
                         title,
                     ),
                     self.session_key.as_deref().unwrap_or_default(),
+                    &self.motion,
                     cx,
                 )
             });
@@ -145,7 +146,7 @@ impl ChatView {
             .join("\n");
         let mut copy_items = Vec::new();
         super::copy(&mut copy_items, "chat.copy_text", &copy);
-        let detail = match window::fold(&key, open, window, cx) {
+        let detail = match window::fold(&self.motion, &key, open, window, cx) {
             Some(shown) => {
                 let rows: Vec<AnyElement> = run
                     .iter()
@@ -192,6 +193,7 @@ impl ChatView {
                 copy: copy_items,
                 path: None,
                 hover: self.hover.clone(),
+                motion: self.motion.clone(),
             },
             detail,
             cx.listener(move |this, _, _, cx| {

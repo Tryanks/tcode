@@ -6,9 +6,9 @@ use std::ops::Range;
 
 use agent::ItemStatus;
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, HighlightStyle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Role, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, Div, HighlightStyle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -221,31 +221,28 @@ impl Detail {
 /// The fold of a window's body: `Some` while it is open or still folding
 /// shut, when the body has to be built.
 pub(in crate::chat) fn fold(
+    motion: &crate::motion::owned::Owned,
     id: &str,
     open: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<crate::motion::Shown<()>> {
-    crate::motion::shown(
-        SharedString::from(format!("tool-fold-{id}")),
-        open.then_some(()),
-        window,
-        cx,
-    )
+    motion.shown(format!("tool-fold-{id}"), open.then_some(()), window, cx)
 }
 
 /// An open body whose height glides when what it shows changes at rest:
 /// the whole output replacing the preview, the output arriving, a part of it
 /// opening.
-fn glide_body(key: &str, shows: u64, body: AnyElement) -> AnyElement {
-    let id = SharedString::from(format!("tool-body-glide-{key}"));
-    crate::motion::Sampled::new(move |window, cx| {
-        let glide = crate::motion::GlideState::keyed(id, window, cx);
-        crate::motion::SizeGlide::new(&glide, body)
-            .on_change(shows)
-            .into_any_element()
-    })
-    .into_any_element()
+fn glide_body(
+    motion: &crate::motion::owned::Owned,
+    key: &str,
+    shows: u64,
+    body: AnyElement,
+) -> AnyElement {
+    let glide = motion.glide_state(format!("tool-body-glide-{key}"));
+    crate::motion::SizeGlide::new(&glide, body)
+        .on_change(shows)
+        .into_any_element()
 }
 
 pub(in crate::chat) struct WindowSpec {
@@ -263,6 +260,8 @@ pub(in crate::chat) struct WindowSpec {
     pub(in crate::chat) path: Option<(String, std::path::PathBuf)>,
     /// The timeline's hover, which the header's fill follows.
     pub(in crate::chat) hover: crate::motion::ListHover,
+    /// The chat's motion, which keeps the window's fold, glyph and chevron.
+    pub(in crate::chat) motion: crate::motion::owned::Owned,
 }
 
 /// How long an item took, when its start and its end were both seen.
@@ -297,6 +296,7 @@ pub(in crate::chat) fn tool_window(
         copy,
         path,
         hover,
+        motion,
     } = spec;
     let expandable = detail.expandable();
     let open = match &detail {
@@ -309,7 +309,7 @@ pub(in crate::chat) fn tool_window(
     let fill =
         expandable.then(|| hover.layer(format!("activity-row-{key}"), cx.theme().accent, radius));
     let row = header_row(
-        &key, header, status, elapsed_ms, compact, expandable, open, fill, cx,
+        &motion, &key, header, status, elapsed_ms, compact, expandable, open, fill, cx,
     );
     let row: AnyElement = if expandable {
         crate::material::accessible_clickable(
@@ -353,14 +353,14 @@ pub(in crate::chat) fn tool_window(
     // The space above the body is the body's own, so it folds with it and
     // nothing below moves by it as the fold starts or ends.
     let detail = match detail {
-        Detail::Fold(shown, content, shows) => Some(
-            shown.fold(
-                div()
-                    .w_full()
-                    .pt_1()
-                    .child(glide_body(&key, shows, body(content))),
-            ),
-        ),
+        Detail::Fold(shown, content, shows) => {
+            Some(shown.fold(div().w_full().pt_1().child(glide_body(
+                &motion,
+                &key,
+                shows,
+                body(content),
+            ))))
+        }
         Detail::Open(content) => Some(
             div()
                 .w_full()
@@ -414,6 +414,7 @@ fn error_line(key: &str, error: String, cx: &App) -> AnyElement {
 
 #[allow(clippy::too_many_arguments)]
 fn header_row(
+    motion: &crate::motion::owned::Owned,
     key: &str,
     header: Header,
     status: ItemStatus,
@@ -461,7 +462,7 @@ fn header_row(
         .when(!compact, |row| row.py_0p5())
         .text_body(false, cx)
         .when_some(fill, |row, fill| row.relative().child(fill))
-        .child(status_glyph(key, icon, status, cx))
+        .child(status_glyph(motion, key, icon, status, cx))
         .child(
             h_flex()
                 .min_w_0()
@@ -558,6 +559,7 @@ fn header_row(
                     SharedString::from(format!("tool-chevron-{key}")),
                     open,
                 )
+                .owned(motion)
                 .text_color(muted),
             )
         })
@@ -629,6 +631,7 @@ enum Glyph {
 /// a small red X off its corner, on a disc of the row background so the
 /// badge stays legible over whatever it overlaps.
 pub(in crate::chat) fn status_glyph(
+    motion: &crate::motion::owned::Owned,
     key: &str,
     icon: SharedString,
     status: ItemStatus,
@@ -640,13 +643,14 @@ pub(in crate::chat) fn status_glyph(
             failed: status == ItemStatus::Failed,
         },
     };
-    let id = ElementId::from(SharedString::from(format!("tool-status-{key}")));
+    let id = SharedString::from(format!("tool-status-{key}"));
+    let motion = motion.clone();
     let primary = cx.theme().primary;
     let muted = cx.theme().muted_foreground;
     let background = cx.theme().background;
     let danger = cx.theme().danger;
     crate::motion::Sampled::new(move |window, cx| {
-        crate::motion::cross_fade_part(id, glyph, window, cx, move |glyph, _, _| match glyph {
+        motion.cross_fade_part(id, glyph, window, cx, move |glyph, _, _| match glyph {
             Glyph::Running => Spinner::new().color(primary).into_any_element(),
             Glyph::Settled { failed } => {
                 let icon = Icon::empty()

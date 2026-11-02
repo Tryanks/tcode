@@ -34,6 +34,7 @@ pub(crate) fn subagent_row(
     on_open: Option<ClickHandler>,
     shown: bool,
     hover: crate::motion::ListHover,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let EntryContent::Item(ItemContent::Subagent {
@@ -62,6 +63,7 @@ pub(crate) fn subagent_row(
     // the agent, how it stands, how long it took. The model and the summary
     // arrive after the pill does, and widen into it.
     let glyph = crate::chat::tools::window::status_glyph(
+        motion,
         &entry.id,
         crate::icon::IconNamed::path(IconName::Bot),
         *status,
@@ -85,73 +87,69 @@ pub(crate) fn subagent_row(
     );
     // A pane showing the agent fills the pill, and its check comes in.
     let clickable = on_open.is_some();
+    let motion = motion.clone();
     crate::motion::Sampled::new(move |window, cx| {
         let muted = cx.theme().muted_foreground;
         let gap = gpui::rems(0.5).to_pixels(window.rem_size());
-        let fill = gpui_base::motion::transition(
-            SharedString::from(format!("subagent-fill-{id}")),
+        let fill = motion.transition(
+            format!("subagent-fill-{id}"),
             if shown && clickable {
                 cx.theme().accent
             } else {
                 crate::material::content_surface(cx)
             },
-            crate::motion::settle(),
+            &crate::motion::owned::Curve::settle(),
             window,
             cx,
         );
         let check_id = SharedString::from(format!("subagent-shown-{id}"));
-        let check = crate::motion::shown(
-            check_id.clone(),
-            (shown && clickable).then_some(()),
-            window,
-            cx,
-        )
-        .map(|check| {
-            let label = SharedString::from(crate::tr!("panes.shown_beside").into_owned());
-            check.fold_across_gap(
-                gap,
-                div()
-                    .id(check_id)
-                    .debug_selector(|| "subagent-shown".into())
-                    .role(Role::Status)
-                    .aria_label(label.clone())
-                    .with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(label.clone()))
-                    .child(Icon::new(IconName::Check).text_color(muted)),
+        let check = motion
+            .shown(
+                check_id.clone(),
+                (shown && clickable).then_some(()),
+                window,
+                cx,
             )
-        });
-        let chip = crate::motion::shown(
-            SharedString::from(format!("subagent-model-{id}")),
-            chip,
-            window,
-            cx,
-        )
-        .map(|chip| {
-            let theme = cx.theme();
-            chip.fold_across_gap(
-                gap,
-                semantic_chip(chip.value.clone(), theme.muted.opacity(0.4), muted, cx)
-                    .font_family(theme.mono_font_family.clone()),
-            )
-        });
-        let summary = crate::motion::shown(
-            SharedString::from(format!("subagent-summary-{id}")),
-            summary,
-            window,
-            cx,
-        )
-        .map(|summary| {
-            let danger = cx.theme().danger;
-            summary.fold_across_gap(
-                gap,
-                div()
-                    .max_w(px(180.))
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_meta_mono(false, cx)
-                    .when(failed, |summary| summary.text_color(danger))
-                    .child(crate::widgets::fade_text(summary.value.clone())),
-            )
-        });
+            .map(|check| {
+                let label = SharedString::from(crate::tr!("panes.shown_beside").into_owned());
+                check.fold_across_gap(
+                    gap,
+                    div()
+                        .id(check_id)
+                        .debug_selector(|| "subagent-shown".into())
+                        .role(Role::Status)
+                        .aria_label(label.clone())
+                        .with_tooltip(move |_, _| {
+                            crate::widgets::tooltip::Tooltip::new(label.clone())
+                        })
+                        .child(Icon::new(IconName::Check).text_color(muted)),
+                )
+            });
+        let chip = motion
+            .shown(format!("subagent-model-{id}"), chip, window, cx)
+            .map(|chip| {
+                let theme = cx.theme();
+                chip.fold_across_gap(
+                    gap,
+                    semantic_chip(chip.value.clone(), theme.muted.opacity(0.4), muted, cx)
+                        .font_family(theme.mono_font_family.clone()),
+                )
+            });
+        let summary = motion
+            .shown(format!("subagent-summary-{id}"), summary, window, cx)
+            .map(|summary| {
+                let danger = cx.theme().danger;
+                summary.fold_across_gap(
+                    gap,
+                    div()
+                        .max_w(px(180.))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_meta_mono(false, cx)
+                        .when(failed, |summary| summary.text_color(danger))
+                        .child(crate::widgets::fade_text(summary.value.clone())),
+                )
+            });
         let row = h_flex()
             .debug_selector({
                 let id = id.clone();

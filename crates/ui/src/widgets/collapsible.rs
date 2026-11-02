@@ -62,6 +62,9 @@ pub struct Chevron {
     id: ElementId,
     open: bool,
     icon: Icon,
+    /// Where its turn is kept when its view keeps it; in element state
+    /// otherwise.
+    motion: Option<crate::motion::owned::Owned>,
 }
 
 impl Chevron {
@@ -70,7 +73,26 @@ impl Chevron {
             id: id.into(),
             open,
             icon: Icon::new(IconName::ChevronRight),
+            motion: None,
         }
+    }
+
+    /// The chevron with its turn kept by `motion`, under its id, so it
+    /// carries on turning when its view is drawn under a new parent.
+    pub(crate) fn owned(mut self, motion: &crate::motion::owned::Owned) -> Self {
+        self.motion = Some(motion.clone());
+        self
+    }
+
+    /// [`Self::icon`] with its turn kept by `motion`; see [`Self::owned`].
+    pub(crate) fn owned_icon(
+        motion: &crate::motion::owned::Owned,
+        id: impl Into<ElementId>,
+        open: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Icon {
+        Self::new(id, open).owned(motion).turned(window, cx)
     }
 
     /// The chevron's icon as it stands this frame, for a control that draws
@@ -80,13 +102,23 @@ impl Chevron {
     }
 
     fn turned(self, window: &mut Window, cx: &mut App) -> Icon {
-        let turn = transition(
-            (self.id, "chevron"),
-            if self.open { 1. } else { 0. },
-            Transition::new(crate::edge_back::SETTLE),
-            window,
-            cx,
-        );
+        let target = if self.open { 1. } else { 0. };
+        let turn = match &self.motion {
+            Some(motion) => motion.transition(
+                format!("{}/chevron", self.id),
+                target,
+                &crate::motion::owned::Curve::settle(),
+                window,
+                cx,
+            ),
+            None => transition(
+                (self.id, "chevron"),
+                target,
+                Transition::new(crate::edge_back::SETTLE),
+                window,
+                cx,
+            ),
+        };
         self.icon
             .rotate(gpui::radians(turn * std::f32::consts::FRAC_PI_2))
     }

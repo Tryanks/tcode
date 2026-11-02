@@ -104,6 +104,7 @@ impl ChatView {
                             EntryContent::ContextCompacted(c) => Some(c),
                             _ => None,
                         },
+                        &self.motion,
                         cx,
                     ));
                 }
@@ -135,6 +136,7 @@ impl ChatView {
                         images,
                         cwd,
                         self.session_key.as_deref().unwrap_or_default(),
+                        &self.motion.clone(),
                         window,
                         cx,
                     ));
@@ -191,6 +193,7 @@ impl ChatView {
                             show_actions: !turn.running && row.last_assistant,
                             copied,
                             hover: self.hover.clone(),
+                            motion: self.motion.clone(),
                         },
                         cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
@@ -369,13 +372,15 @@ impl ChatView {
             .workspace_store
             .read(cx)
             .chat_turn_changes_for(self.session_id.as_deref(), index);
-        let changes_fold = crate::motion::shown(
-            SharedString::from(format!("changed-files-fold-{index}")),
-            (!turn.running && !changes.is_empty()).then_some(()),
-            window,
-            cx,
-        )
-        .filter(|_| !changes.is_empty());
+        let changes_fold = self
+            .motion
+            .shown(
+                format!("changed-files-fold-{index}"),
+                (!turn.running && !changes.is_empty()).then_some(()),
+                window,
+                cx,
+            )
+            .filter(|_| !changes.is_empty());
         let changes = changes_fold.map(|fold| {
             let more_key = format!("changed-files-more-{index}");
             let show_all = self.expanded.contains(&more_key);
@@ -408,6 +413,7 @@ impl ChatView {
                         completeness,
                         show_all,
                         handlers,
+                        &self.motion,
                         cx,
                     )),
             )
@@ -437,10 +443,12 @@ impl ChatView {
                 &SharedString::from(row.identity.to_string()),
                 cx,
             );
+            let motion = self.motion.clone();
+            let indicator_motion = motion.clone();
             status = Some(self.shared.element(
                 status_key,
-                crate::motion::cross_fade(
-                    SharedString::from(format!("turn-status-{index}")),
+                motion.cross_fade_value(
+                    format!("turn-status-{index}"),
                     turn.running,
                     window,
                     cx,
@@ -459,6 +467,7 @@ impl ChatView {
                                     index,
                                     turn.start_ts,
                                     served_model.clone(),
+                                    &indicator_motion,
                                     cx,
                                 ))
                                 .into_any_element(),
@@ -481,8 +490,10 @@ impl ChatView {
             .collect();
         trailing |= !pending.is_empty();
         let gap = px(SEGMENT_GAP);
-        let steers = crate::motion::keyed(
-            SharedString::from(format!("pending-steers-{index}")),
+        let steers = crate::motion::keyed::keyed_owned(
+            &self.motion.clone(),
+            format!("pending-steers-{index}"),
+            crate::motion::keyed::Fold::Down,
             pending,
             window,
             cx,
@@ -690,6 +701,7 @@ impl ChatView {
                 rewind,
                 rewind_menu,
                 hover: self.hover.clone(),
+                motion: self.motion.clone(),
             },
             components::bubble::BubbleHandlers {
                 copy: Box::new(cx.listener(move |this, _, _, cx| {
@@ -971,6 +983,7 @@ impl ChatView {
             }),
             on_open,
             self.hover.clone(),
+            &self.motion,
             cx,
         )
     }
@@ -993,6 +1006,7 @@ impl ChatView {
             cx.listener(move |this, _, _, cx| {
                 this.toggle_expanded(turn, &toggle_key, cx);
             }),
+            &self.motion,
             cx,
         )
     }
@@ -1069,6 +1083,7 @@ impl ChatView {
                     running,
                     rows,
                     hover: self.hover.clone(),
+                    motion: self.motion.clone(),
                 },
                 cx.listener(move |this, _, _, cx| {
                     this.toggle_expanded(index, &toggle_section_key, cx);
@@ -1145,8 +1160,10 @@ impl ChatView {
             (SharedString::from(ids[0].clone()), (ids, newer))
         });
         let gap = gpui::rems(0.25).to_pixels(window.rem_size());
-        crate::motion::keyed(
-            SharedString::from(format!("live-window-{index}-{segment_id}")),
+        crate::motion::keyed::keyed_owned(
+            &self.motion.clone(),
+            format!("live-window-{index}-{segment_id}"),
+            crate::motion::keyed::Fold::Down,
             items,
             window,
             cx,
@@ -1259,7 +1276,7 @@ impl ChatView {
             let detail = if file.row.counts.is_none() {
                 tools::window::Detail::None
             } else {
-                match tools::window::fold(&window_key, expanded, window, cx) {
+                match tools::window::fold(&self.motion, &window_key, expanded, window, cx) {
                     Some(shown) => tools::window::Detail::Fold(
                         shown,
                         self.inline_diffs.render(&key, file, cx),
@@ -1287,6 +1304,7 @@ impl ChatView {
                     copy: tools::diff::file_copy_items(file),
                     path: Some((file.row.path.clone(), cwd.to_path_buf())),
                     hover: self.hover.clone(),
+                    motion: self.motion.clone(),
                 },
                 detail,
                 cx.listener(move |this, _, _, cx| {
@@ -1337,7 +1355,7 @@ impl ChatView {
         let detail = if !expandable {
             tools::window::Detail::None
         } else {
-            match tools::window::fold(&entry.id, expanded, window, cx) {
+            match tools::window::fold(&self.motion, &entry.id, expanded, window, cx) {
                 Some(shown) => {
                     let shows = self.activity_body_key(entry, status);
                     let body = self.activity_body(entry, cwd, row.images_inline, cx);
@@ -1359,6 +1377,7 @@ impl ChatView {
                 copy,
                 path: path.map(|path| (path, cwd.to_path_buf())),
                 hover: self.hover.clone(),
+                motion: self.motion.clone(),
             },
             detail,
             cx.listener(move |this, _, _, cx| {
@@ -1558,7 +1577,14 @@ impl ChatView {
                 );
             }) as components::subagent::ClickHandler
         });
-        components::subagent::subagent_row(entry, on_open, shown, self.hover.clone(), cx)
+        components::subagent::subagent_row(
+            entry,
+            on_open,
+            shown,
+            self.hover.clone(),
+            &self.motion,
+            cx,
+        )
     }
 
     /// Show the "Copied!" confirmation on `key` for 2s; a second copy re-arms the timer.

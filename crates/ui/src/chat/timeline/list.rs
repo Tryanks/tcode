@@ -91,6 +91,10 @@ impl ChatView {
                                 above: bool,
                                 window: &mut Window,
                                 cx: &mut Context<Self>| {
+                    // Drawn from what it was, under its own keys, so what it
+                    // draws keeps clear of a row that shows it now.
+                    let motion = this.motion.clone();
+                    this.motion = motion.scope(format!("leaving-{key}"));
                     let content = this
                         .render_row(
                             (
@@ -105,6 +109,7 @@ impl ChatView {
                             cx,
                         )
                         .content;
+                    this.motion = motion;
                     RowGlide::leaving(
                         ("timeline-row-leaving", key),
                         progress,
@@ -113,6 +118,7 @@ impl ChatView {
                             .map(|fold| if above { fold.pb(rem) } else { fold.pt(rem) })
                             .child(content),
                     )
+                    .owned(&this.motion)
                     .into_any_element()
                 };
                 let above: Vec<_> = above
@@ -220,19 +226,20 @@ impl ChatView {
                         trailer_glide,
                         trailer.when(gap, |trailer| trailer.pt(px(SEGMENT_GAP) * gap_scale)),
                     )
+                    .owned(&this.motion)
                 });
                 // The turn the reader jumped to is marked, and the mark
                 // fades in and out.
                 let highlighted = highlighted_turn == Some(row.turn);
                 let highlight = cx.theme().list_active;
-                let highlight = gpui_base::motion::transition(
-                    gpui::ElementId::from(("timeline-highlight", row.identity)),
+                let highlight = this.motion.transition(
+                    format!("timeline-highlight-{}", row.identity),
                     if highlighted {
                         highlight
                     } else {
                         highlight.opacity(0.)
                     },
-                    crate::motion::settle(),
+                    &crate::motion::owned::Curve::settle(),
                     window,
                     cx,
                 );
@@ -242,7 +249,8 @@ impl ChatView {
                             .workspace_store
                             .read(cx)
                             .history_loading_for(this.session_id.as_deref());
-                        crate::motion::shown("history-activity", loading.then_some(()), window, cx)
+                        this.motion
+                            .shown("history-activity", loading.then_some(()), window, cx)
                     })
                     .flatten();
                 let painted = this.painted_rows.clone();
@@ -317,11 +325,14 @@ impl ChatView {
                             .flex()
                             .flex_col()
                             .children(above)
-                            .child(RowGlide::new(
-                                ("timeline-row-glide", row.identity),
-                                glide,
-                                rendered.content,
-                            ))
+                            .child(
+                                RowGlide::new(
+                                    ("timeline-row-glide", row.identity),
+                                    glide,
+                                    rendered.content,
+                                )
+                                .owned(&this.motion),
+                            )
                             .children(below)
                             .children(trailer),
                     )

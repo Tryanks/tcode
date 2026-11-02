@@ -558,6 +558,9 @@ struct OutputModel {
 struct Panel {
     turn: usize,
     rendered: bool,
+    /// The panel's height glide, kept with the panel rather than in element
+    /// state, so it carries on when the chat is drawn under a new parent.
+    glide: crate::motion::GlideState,
     command: String,
     /// Rendered lazily so the first paint already carries the theme colours.
     command_model: Option<(TerminalModel, usize, u16)>,
@@ -657,7 +660,6 @@ impl Panel {
         let output_id = id.to_string();
         // The rows held for the screen are a guess; when the host's screen
         // lands, the panel's height glides to the rows it takes.
-        let glide_id = gpui::SharedString::from(format!("command-panel-glide-{id}"));
         let landed = screen.frame.is_some() as u64;
         let panel = div()
             .w_full()
@@ -685,13 +687,9 @@ impl Panel {
                 })
             })
             .into_any_element();
-        crate::motion::Sampled::new(move |window, cx| {
-            let glide = crate::motion::GlideState::keyed(glide_id, window, cx);
-            crate::motion::SizeGlide::new(&glide, panel)
-                .on_change(landed)
-                .into_any_element()
-        })
-        .into_any_element()
+        crate::motion::SizeGlide::new(&self.glide, panel)
+            .on_change(landed)
+            .into_any_element()
     }
 }
 

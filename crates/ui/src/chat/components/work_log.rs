@@ -37,6 +37,9 @@ pub(crate) struct WorkLogData {
     pub(crate) rows: Vec<AnyElement>,
     /// The timeline's hover, which the header's fill follows.
     pub(crate) hover: crate::motion::ListHover,
+    /// The chat's motion, which keeps the chevron's turn and the state's
+    /// cross-fade.
+    pub(crate) motion: crate::motion::owned::Owned,
 }
 
 /// One work log as a naked disclosure: a hugging header row, then the trace
@@ -57,6 +60,7 @@ pub(crate) fn work_log(
         running,
         rows,
         hover,
+        motion,
     } = data;
     let muted = cx.theme().muted_foreground;
     let key = format!("worklog-header-{index}-{segment_id}");
@@ -92,10 +96,12 @@ pub(crate) fn work_log(
             SharedString::from(format!("worklog-chevron-{index}-{segment_id}")),
             expanded,
         )
+        .owned(&motion)
         .text_color(muted),
     )
     .child(capsule_label)
     .child(settled_state(
+        &motion,
         SharedString::from(format!("worklog-state-{index}-{segment_id}")),
         running,
         outcome,
@@ -124,6 +130,7 @@ pub(crate) fn work_log_body(rows: Vec<AnyElement>) -> Div {
 /// The spinner while the run goes on; once it settles, how long it took and,
 /// only for a bad ending, a chip saying so. One cross-fades into the other.
 fn settled_state(
+    motion: &crate::motion::owned::Owned,
     id: SharedString,
     running: bool,
     outcome: TurnStatus,
@@ -132,8 +139,9 @@ fn settled_state(
 ) -> AnyElement {
     let primary = cx.theme().primary;
     let danger = cx.theme().danger;
+    let motion = motion.clone();
     crate::motion::Sampled::new(move |window, cx| {
-        crate::motion::cross_fade_part(id, running, window, cx, move |running, _, cx| {
+        motion.cross_fade_part(id, running, window, cx, move |running, _, cx| {
             if *running {
                 return Spinner::new().color(primary).into_any_element();
             }

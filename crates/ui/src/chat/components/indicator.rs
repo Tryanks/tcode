@@ -174,8 +174,10 @@ pub(crate) fn turn_working_indicator(
     turn: usize,
     started_at: Option<u64>,
     served_model: Option<String>,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
+    let motion = motion.clone();
     let warning = cx.theme().warning;
     h_flex()
         .gap_2()
@@ -188,7 +190,7 @@ pub(crate) fn turn_working_indicator(
         })
         .child(crate::motion::Sampled::new(move |window, cx| {
             let id = SharedString::from(format!("served-model-{turn}"));
-            match crate::motion::shown(id.clone(), served_model, window, cx) {
+            match motion.shown(id.clone(), served_model, window, cx) {
                 Some(served) => {
                     let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
                     served.fade(

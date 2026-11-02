@@ -12,8 +12,8 @@
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, GlobalElementId,
-    ImageSource, InspectorElementId, IntoElement, LayoutId, ObjectFit, Pixels, SharedString, Size,
-    Style, Styled, StyledImage as _, WeakEntity, Window, div, img, px, relative, size,
+    ImageSource, InspectorElementId, IntoElement, LayoutId, ObjectFit, Pixels, Size, Style, Styled,
+    StyledImage as _, WeakEntity, Window, div, img, px, relative, size,
 };
 
 use super::state::MarkdownState;
@@ -35,6 +35,7 @@ pub(super) struct FittedImage<E> {
     revision: usize,
     previous_size: Option<Size<Pixels>>,
     glide: GlideState,
+    motion: crate::motion::owned::Owned,
 }
 
 /// What a fitted image found while it laid out: the picture's own size, and
@@ -56,6 +57,7 @@ impl<E: IntoElement + Styled + 'static> FittedImage<E> {
     ) -> Self {
         let (revision, previous_size) = owner.read(cx).image_layout(&path);
         let glide = owner.read(cx).glide(&path);
+        let motion = owner.read(cx).motion();
         Self {
             source,
             image: Some(image),
@@ -64,6 +66,7 @@ impl<E: IntoElement + Styled + 'static> FittedImage<E> {
             revision,
             previous_size,
             glide,
+            motion,
         }
     }
 }
@@ -119,8 +122,9 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
         }
         // The picture fades in over its tile once it decodes, and the block
         // glides from the tile's size to the picture's.
-        let arrived = crate::motion::image_arrival(
-            SharedString::from(format!("markdown-image-{}", self.path)),
+        let arrived = crate::motion::image_arrival_owned(
+            &self.motion,
+            format!("markdown-image-{}", self.path),
             &self.source,
             window,
             cx,
