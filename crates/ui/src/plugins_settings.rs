@@ -508,8 +508,7 @@ impl PluginsSettingsPanel {
             .debug_selector(move || section_id.clone())
             .w_full();
 
-        let mut card = vec![header.into_any_element()];
-        card.extend(self.status_rows(&profile_id, catalog.as_ref().filter(|_| on), window, cx));
+        let status = self.status_rows(&profile_id, catalog.as_ref().filter(|_| on), window, cx);
         // Switching a provider off folds its catalog away under the header;
         // a shut fold is not built.
         let body_id = SharedString::from(format!("plugins-body-{profile_id}"));
@@ -541,7 +540,7 @@ impl PluginsSettingsPanel {
             listed.render(layers).w_full()
         });
         section
-            .child(material::grouped(card, cx))
+            .child(material::group(cx).child(header).children(status))
             .child(
                 Collapsible::new(body_id, on)
                     .w_full()
@@ -658,13 +657,19 @@ impl PluginsSettingsPanel {
                     ));
                 }
                 if state.shows(2) && !installed.is_empty() {
-                    let rows = installed
-                        .into_iter()
-                        .map(|(index, entry)| {
-                            self.installed_row(&profile_id, &catalog, index, entry, window, cx)
-                        })
-                        .collect();
-                    layers.push((2, material::grouped(rows, cx).into_any_element()));
+                    let rows = installed.into_iter().map(|(index, entry)| {
+                        (SharedString::from(entry.id.clone()), (index, entry.clone()))
+                    });
+                    let rows = crate::settings_rows::grouped_keyed(
+                        SharedString::from(format!("plugins-installed-rows-{profile_id}")),
+                        rows,
+                        window,
+                        cx,
+                        |_, (index, entry), window, cx| {
+                            self.installed_row(&profile_id, &catalog, *index, entry, window, cx)
+                        },
+                    );
+                    layers.push((2, material::group(cx).child(rows).into_any_element()));
                 }
                 state.render(layers).w_full().into_any_element()
             }
@@ -733,17 +738,27 @@ impl PluginsSettingsPanel {
                     .child(crate::tr!("providers.plugins.list_failed").into_owned())
                     .child(verbatim(message, cx)),
             };
-            rows.push(slot.fold(row));
+            rows.push(slot.fold(crate::settings_rows::hairlined(row, cx)));
         }
-        for error in catalog.iter().flat_map(|catalog| &catalog.errors) {
-            rows.push(
-                material::group_row_stacked(cx)
-                    .text_secondary(false, cx)
-                    .text_color(warning)
-                    .child(verbatim(error.clone(), cx))
-                    .into_any_element(),
-            );
-        }
+        // Each line under the header draws the hairline above it, so the
+        // line comes and goes with it.
+        let errors = text_keys(catalog.iter().flat_map(|catalog| &catalog.errors));
+        let errors = crate::motion::keyed(
+            SharedString::from(format!("plugins-catalog-errors-{profile_id}")),
+            errors,
+            window,
+            cx,
+            |_, error, _, cx| {
+                crate::settings_rows::hairlined(
+                    material::group_row_stacked(cx)
+                        .text_secondary(false, cx)
+                        .text_color(warning)
+                        .child(verbatim(error.clone(), cx)),
+                    cx,
+                )
+            },
+        );
+        rows.push(errors.render(v_flex().w_full()));
         rows
     }
 
@@ -868,7 +883,7 @@ impl PluginsSettingsPanel {
                 )
             });
 
-        let scope_lines: Vec<AnyElement> = SCOPES
+        let scopes: Vec<(SharedString, PluginScope)> = SCOPES
             .into_iter()
             .filter(|scope| {
                 entry
@@ -877,7 +892,18 @@ impl PluginsSettingsPanel {
                     .any(|installation| installation.scope == *scope)
                     || entry.actions.iter().any(|action| action.scope() == *scope)
             })
-            .map(|scope| {
+            .map(|scope| (SharedString::from(scope_key(scope)), scope))
+            .collect();
+        let any_scope = !scopes.is_empty();
+        // A scope's line, and an action on it, comes and goes as an install,
+        // an enable or a removal changes what the entry has where.
+        let scope_lines = crate::motion::keyed(
+            SharedString::from(format!("{row_id}-scopes")),
+            scopes,
+            window,
+            cx,
+            |scope_id, scope, window, cx| {
+                let scope = *scope;
                 let installation = entry
                     .installations
                     .iter()
@@ -905,48 +931,79 @@ impl PluginsSettingsPanel {
                                 })
                             }),
                     });
-                let actions: Vec<PluginAction> = entry
-                    .actions
-                    .iter()
-                    .copied()
-                    .filter(|action| action.scope() == scope)
-                    .collect();
-                h_flex()
-                    .w_full()
-                    .min_h(px(material::bar_height(material::Bar::Section, false)))
-                    .flex_wrap()
-                    .items_center()
-                    .gap_x_3()
-                    .gap_y_1()
-                    .text_token(&cx.theme().tokens.typography.xs)
-                    .child(
+                let actions: Vec<(SharedString, PluginAction)> = ordered(
+                    entry
+                        .actions
+                        .iter()
+                        .copied()
+                        .filter(|action| action.scope() == scope)
+                        .collect(),
+                )
+                .into_iter()
+                .map(|action| (SharedString::from(format!("{action:?}")), action))
+                .collect();
+                // Each button carries the gap before it, so the gap goes
+                // with the button.
+                let actions = crate::motion::keyed_across(
+                    SharedString::from(format!("{row_id}-{scope_id}-actions")),
+                    actions,
+                    window,
+                    cx,
+                    |_, action, _, _| {
                         div()
-                            .flex_none()
-                            // One column, so the scopes' facts line up.
-                            .w(px(72.))
-                            .text_caption(cx)
-                            .child(scope_label(scope)),
-                    )
-                    .child(facts)
+                            .pl_1()
+                            .child(action_button(
+                                &self.store,
+                                profile_id,
+                                &entry.id,
+                                *action,
+                                catalog.context_cwd.clone(),
+                                busy,
+                            ))
+                            .into_any_element()
+                    },
+                );
+                div()
+                    .w_full()
+                    .pt(cx.theme().tokens.spacing.sm)
                     .child(
                         h_flex()
-                            .ml_auto()
-                            .gap_1()
-                            .children(ordered(actions).into_iter().map(|action| {
-                                action_button(
-                                    &self.store,
-                                    profile_id,
-                                    &entry.id,
-                                    action,
-                                    catalog.context_cwd.clone(),
-                                    busy,
-                                )
-                            })),
+                            .w_full()
+                            .min_h(px(material::bar_height(material::Bar::Section, false)))
+                            .flex_wrap()
+                            .items_center()
+                            .gap_x_3()
+                            .gap_y_1()
+                            .text_token(&cx.theme().tokens.typography.xs)
+                            .child(
+                                div()
+                                    .flex_none()
+                                    // One column, so the scopes' facts line up.
+                                    .w(px(72.))
+                                    .text_caption(cx)
+                                    .child(scope_label(scope)),
+                            )
+                            .child(facts)
+                            .child(actions.render(h_flex().ml_auto())),
                     )
                     .into_any_element()
-            })
-            .collect();
+            },
+        );
 
+        let errors = crate::motion::keyed(
+            SharedString::from(format!("{row_id}-errors")),
+            text_keys(&entry.errors),
+            window,
+            cx,
+            |_, error, _, cx| {
+                div()
+                    .pt_1p5()
+                    .text_secondary(false, cx)
+                    .text_color(cx.theme().danger)
+                    .child(verbatim(error.clone(), cx))
+                    .into_any_element()
+            },
+        );
         material::group_row_stacked(cx)
             .id((SharedString::from(row_id.clone()), index))
             .debug_selector(move || row_id.clone())
@@ -956,15 +1013,13 @@ impl PluginsSettingsPanel {
                 col.child(div().text_secondary(false, cx).child(description))
             })
             .child(source_line(entry, cx))
-            .when(!scope_lines.is_empty(), |col| {
-                col.child(material::card(cx).w_full().children(scope_lines))
+            .when(any_scope, |col| {
+                // Each line carries the gap above it, so it goes with it.
+                col.child(scope_lines.render(material::card(cx).w_full().gap_0().pt_0()))
             })
-            .children(entry.errors.iter().map(|error| {
-                div()
-                    .text_secondary(false, cx)
-                    .text_color(cx.theme().danger)
-                    .child(verbatim(error.clone(), cx))
-            }))
+            // Each error carries the gap above it; the list gives back the
+            // gap the column puts before it, so no errors take no room.
+            .child(errors.render(v_flex().w_full().mt(gpui::rems(-0.375))))
             .child(
                 Collapsible::new("plugin-details", expanded)
                     .w_full()
@@ -1225,10 +1280,19 @@ impl PluginsSettingsPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let rows: Vec<AnyElement> = catalog
-            .marketplaces
-            .iter()
-            .map(|marketplace| {
+        let listed = !catalog.marketplaces.is_empty();
+        let rows = catalog.marketplaces.iter().map(|marketplace| {
+            (
+                SharedString::from(marketplace.name.clone()),
+                marketplace.clone(),
+            )
+        });
+        let rows = crate::settings_rows::grouped_keyed(
+            SharedString::from(format!("plugin-marketplace-rows-{profile_id}")),
+            rows,
+            window,
+            cx,
+            |_, marketplace, window, cx| {
                 let removable = catalog.marketplace_actions.iter().any(|action| {
                     matches!(action, MarketplaceAction::Remove { marketplace: name, .. } if *name == marketplace.name)
                 });
@@ -1241,8 +1305,10 @@ impl PluginsSettingsPanel {
                     window,
                     cx,
                 );
-                let remove_id =
-                    format!("plugin-marketplace-remove-{profile_id}-{}", marketplace.name);
+                let remove_id = format!(
+                    "plugin-marketplace-remove-{profile_id}-{}",
+                    marketplace.name
+                );
                 let location = marketplace
                     .location
                     .as_ref()
@@ -1262,16 +1328,20 @@ impl PluginsSettingsPanel {
                                     .flex_wrap()
                                     .items_center()
                                     .gap_2()
-                                    .child(div().text_body(false, cx).child(marketplace.name.clone()))
+                                    .child(
+                                        div().text_body(false, cx).child(marketplace.name.clone()),
+                                    )
                                     .child(material::semantic_chip(
                                         source_kind_label(marketplace.kind),
                                         cx.theme().muted,
                                         muted,
                                         cx,
                                     ))
-                                    .children(spinner.map(|spinner| {
-                                        spinner.fade(Spinner::new().color(muted))
-                                    })),
+                                    .children(
+                                        spinner.map(|spinner| {
+                                            spinner.fade(Spinner::new().color(muted))
+                                        }),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1305,11 +1375,11 @@ impl PluginsSettingsPanel {
                         )
                     })
                     .into_any_element()
-            })
-            .collect();
+            },
+        );
         let state = crate::motion::CrossFade::new(
             SharedString::from(format!("plugin-marketplaces-{profile_id}")),
-            usize::from(!rows.is_empty()),
+            usize::from(listed),
             2,
             window,
             cx,
@@ -1321,8 +1391,8 @@ impl PluginsSettingsPanel {
                 self.note_card(crate::tr!("providers.plugins.no_marketplaces"), cx),
             ));
         }
-        if state.shows(1) && !rows.is_empty() {
-            layers.push((1, material::grouped(rows, cx).into_any_element()));
+        if state.shows(1) && listed {
+            layers.push((1, material::group(cx).child(rows).into_any_element()));
         }
         let list = state.render(layers).w_full();
         let can_add = catalog
@@ -1452,6 +1522,20 @@ impl Render for PluginsSettingsPanel {
                 ),
             })
     }
+}
+
+/// Keys for lines that are only their text, such as errors: a line keeps its
+/// key while it stays, and two alike are told apart by their order.
+fn text_keys<'a>(lines: impl IntoIterator<Item = &'a String>) -> Vec<(SharedString, String)> {
+    let mut seen = std::collections::HashMap::<&str, usize>::new();
+    lines
+        .into_iter()
+        .map(|line| {
+            let count = seen.entry(line.as_str()).or_default();
+            *count += 1;
+            (SharedString::from(format!("{count}-{line}")), line.clone())
+        })
+        .collect()
 }
 
 fn manages(management: PluginManagement) -> bool {
@@ -1991,6 +2075,45 @@ mod tests {
             ],
             diagnostics: Vec::new(),
         }
+    }
+
+    /// An uninstalled plugin's row folds away where it was, and the row below
+    /// it moves up as it goes rather than jumping into its place.
+    #[gpui::test]
+    fn an_uninstalled_plugin_folds_away_and_the_next_moves_up(cx: &mut TestAppContext) {
+        let beta = ProviderPluginEntry {
+            id: "beta@mkt".into(),
+            name: "beta".into(),
+            ..alpha()
+        };
+        let (host, cx) = open_plugins(
+            claude_managed(),
+            catalog(vec![alpha(), beta.clone()], Vec::new()),
+            cx,
+        );
+        crate::test_frames::draw_settled(cx);
+        let top = |row: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(row).expect("the row is drawn").top()
+        };
+        let first = top("plugin-row-claude-alpha@mkt", cx);
+        let second = top("plugin-row-claude-beta@mkt", cx);
+
+        host.replicate(catalog(vec![beta], Vec::new()), cx);
+        assert!(
+            cx.debug_bounds("plugin-row-claude-alpha@mkt").is_some(),
+            "an uninstalled plugin is drawn while it leaves"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        let moving = top("plugin-row-claude-beta@mkt", cx);
+        assert!(
+            moving > first && moving < second,
+            "beta is on its way up, at {moving:?}"
+        );
+
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("plugin-row-claude-alpha@mkt").is_none());
+        assert_eq!(top("plugin-row-claude-beta@mkt", cx), first);
     }
 
     #[gpui::test]
