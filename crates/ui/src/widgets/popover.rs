@@ -9,10 +9,13 @@ use gpui::{
     MouseButton, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
     prelude::FluentBuilder as _,
 };
-use gpui::{Focusable as _, Role, SharedString, StatefulInteractiveElement, deferred, div, px};
+use gpui::{
+    Focusable as _, Role, SharedString, StatefulInteractiveElement, Task, deferred, div, px,
+};
 use gpui_base::StyledExt as _;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 pub use gpui_base::PopoverState;
 
@@ -32,6 +35,7 @@ pub struct Popover {
     mouse_button: MouseButton,
     overlay_closable: bool,
     appearance: bool,
+    hover: bool,
     on_open_change: Option<super::ToggleHandler>,
 }
 
@@ -56,6 +60,7 @@ impl Popover {
             mouse_button: MouseButton::Left,
             overlay_closable: true,
             appearance: true,
+            hover: false,
             on_open_change: None,
         }
     }
@@ -86,6 +91,13 @@ impl Popover {
     }
     pub fn appearance(mut self, value: bool) -> Self {
         self.appearance = value;
+        self
+    }
+    /// Open while the pointer rests on the trigger or the content, after
+    /// gpui-base `HoverCard`'s open and close delays, instead of on a press.
+    /// It takes no focus, as a hover card does not.
+    pub fn open_on_hover(mut self) -> Self {
+        self.hover = true;
         self
     }
     pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
@@ -144,6 +156,9 @@ impl RenderOnce for Popover {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         if self.sheet_title.is_some() {
             return self.render_sheet(window, cx);
+        }
+        if self.hover {
+            return self.render_hover(window, cx);
         }
 
         // gpui-base's `overlay_closable` dismisses on the outside press and
@@ -265,6 +280,132 @@ impl RenderOnce for Popover {
             // Keep the base in this render scope so the activation callback
             // and gpui-base resolve the same keyed PopoverState.
             .render(window, cx)
+            .into_any_element()
+    }
+}
+
+/// gpui-base `HoverCard`'s open and close delays, which it does not export.
+const HOVER_OPEN_DELAY: Duration = Duration::from_millis(600);
+const HOVER_CLOSE_DELAY: Duration = Duration::from_millis(300);
+
+/// Whether a hover-opened popover is open, with gpui-base `HoverCard`'s
+/// rules: it opens once the pointer has rested on the trigger, and closes
+/// once the pointer has been off both the trigger and the content.
+#[derive(Default)]
+struct HoverIntent {
+    open: bool,
+    on_trigger: bool,
+    on_content: bool,
+    epoch: usize,
+    task: Option<Task<()>>,
+    on_open_change: Option<super::ToggleHandler>,
+}
+
+impl HoverIntent {
+    fn hover_trigger(&mut self, hovering: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_trigger = hovering;
+        if hovering {
+            self.schedule(true, window, cx);
+        } else if !self.on_content {
+            self.schedule(false, window, cx);
+        }
+    }
+
+    fn hover_content(&mut self, hovering: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_content = hovering;
+        if hovering {
+            self.epoch += 1;
+            self.task = None;
+        } else if !self.on_trigger {
+            self.schedule(false, window, cx);
+        }
+    }
+
+    fn schedule(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.epoch += 1;
+        let epoch = self.epoch;
+        let delay = if open {
+            HOVER_OPEN_DELAY
+        } else {
+            HOVER_CLOSE_DELAY
+        };
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let stays = open || (!this.on_trigger && !this.on_content);
+                if this.epoch == epoch && stays && this.open != open {
+                    this.open = open;
+                    cx.notify();
+                    if let Some(callback) = this.on_open_change.clone() {
+                        callback(&open, window, cx);
+                    }
+                }
+            });
+        }));
+    }
+}
+
+impl Popover {
+    /// gpui-base's `HoverCard` unmounts its content the frame it closes and
+    /// has no presence hook, so a hover card is drawn here: the same
+    /// `Popup` the card draws, with this popover's surface and exit.
+    fn render_hover(self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let intent = window.use_keyed_state((self.id.clone(), "hover"), cx, |_, _| {
+            HoverIntent::default()
+        });
+        intent.update(cx, |intent, _| intent.on_open_change = self.on_open_change);
+        let open = intent.read(cx).open;
+        let shown = window
+            .use_keyed_state((self.id.clone(), "shown"), cx, |_, _| {
+                Rc::new(Cell::new(false))
+            })
+            .read(cx)
+            .clone();
+        let presence = (open || shown.get())
+            .then(|| crate::motion::appear((self.id.clone(), "presence"), open, window, cx));
+        let leaving =
+            !open && presence.is_some_and(|presence| presence.phase == PresencePhase::Exiting);
+        shown.set(open || leaving);
+        let progress = presence.map_or(1., |presence| presence.progress);
+        // On a phone there is no hover; like gpui-base's card, nothing opens
+        // it there but its own trigger's press.
+        let hoverable = !gpui_base::is_mobile();
+        let trigger = div()
+            .id("hover-trigger")
+            .children(self.trigger.map(|trigger| trigger(open, None, window, cx)))
+            .when(hoverable, |trigger| {
+                trigger.on_hover(window.listener_for(&intent, |intent, hovered, window, cx| {
+                    intent.hover_trigger(*hovered, window, cx)
+                }))
+            });
+        let id = self.id.clone();
+        let popup = gpui_base::Popup::new(self.id, trigger).anchor(self.anchor);
+        if !open && !leaving {
+            return popup.into_any_element();
+        }
+        // The content builder's state; nothing opens it, so it takes no focus.
+        let state = window.use_keyed_state((id, "hover-content"), cx, |_, cx| {
+            PopoverState::new(false, cx)
+        });
+        let content = self
+            .content
+            .map(|builder| state.update(cx, |state, cx| builder(state, window, cx)));
+        let surface = surface(self.appearance, progress, cx)
+            .children(content)
+            .children(self.children)
+            .refine_style(&self.style)
+            .when(open && hoverable, |surface| {
+                surface.on_hover(window.listener_for(&intent, |intent, hovered, window, cx| {
+                    intent.hover_content(*hovered, window, cx)
+                }))
+            })
+            // Above the content: a leaving surface takes no hover or press
+            // for its own controls.
+            .when(leaving, |surface| {
+                surface.child(div().absolute().inset_0().occlude())
+            });
+        popup
+            .content(div().id("content").child(surface))
             .into_any_element()
     }
 }
@@ -808,5 +949,74 @@ mod tests {
             .expect("sheet option is laid out");
         window.simulate_click(bounds.center(), gpui::Modifiers::default());
         assert_eq!(selected.get(), 1);
+    }
+
+    struct HoverHarness(Rc<Cell<usize>>);
+    impl Render for HoverHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let chosen = self.0.clone();
+            div().size_full().p(px(40.)).child(
+                Popover::new("hover-popover")
+                    .open_on_hover()
+                    .trigger(
+                        crate::widgets::Button::new("hover-trigger")
+                            .label("Hover")
+                            .debug_selector(|| "hover-trigger".into()),
+                    )
+                    .content(move |_, _, _| {
+                        div()
+                            .id("hover-option")
+                            .debug_selector(|| "hover-option".into())
+                            .size(px(60.))
+                            .on_click(move |_, _, _| chosen.set(chosen.get() + 1))
+                    }),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_hover_popover_opens_on_rest_and_leaves_inert(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let chosen = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let chosen = chosen.clone();
+            move |_, _| HoverHarness(chosen)
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx)
+            });
+        };
+        draw(cx);
+        let trigger = cx.debug_bounds("hover-trigger").unwrap().center();
+        cx.simulate_mouse_move(trigger, None, Default::default());
+        draw(cx);
+        cx.executor().advance_clock(HOVER_OPEN_DELAY);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let option = cx.debug_bounds("hover-option").expect("opened on rest");
+
+        // Onto the content, across the gap: it stays open.
+        cx.simulate_mouse_move(option.center(), None, Default::default());
+        cx.executor().advance_clock(HOVER_CLOSE_DELAY);
+        draw(cx);
+        assert!(cx.debug_bounds("hover-option").is_some(), "kept open");
+
+        cx.simulate_mouse_move(point(px(390.), px(840.)), None, Default::default());
+        cx.executor().advance_clock(HOVER_CLOSE_DELAY);
+        draw(cx);
+        let leaving = cx
+            .debug_bounds("hover-option")
+            .expect("still drawn while it leaves");
+        assert_eq!(leaving.origin.x, option.origin.x);
+        cx.simulate_click(leaving.center(), Default::default());
+        assert_eq!(chosen.get(), 0, "a leaving card takes no press");
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert!(cx.debug_bounds("hover-option").is_none());
     }
 }
