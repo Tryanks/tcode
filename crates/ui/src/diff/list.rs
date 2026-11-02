@@ -29,7 +29,7 @@ use tcode_core::session::ReviewSide;
 use super::model::{ExpandDir, FileNotice, PairedRow, RenderedFile, display_columns};
 use super::parse::RowKind;
 use super::rows::{DisplayRow as DiffListItem, expand, project_file};
-use crate::motion::list_rows::{Arrival, Attach, Glide, ListRows, changes};
+use crate::motion::list_rows::{Arrival, Attach, Glide, ListRows, RowGlide, changes};
 
 /// A code row's context-menu action on the line selection.
 #[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -770,32 +770,39 @@ fn render_item<H: DiffListHost>(
     };
     let motion = diff.motion(split);
     let key = motion.keys.get(index).copied().unwrap_or_default();
-    let content = render_row(host, item, split, wrap, cx);
-    // A row whose height changes (a comment opened under a line, the lines
-    // wrapping) glides to it.
+    let (content, extras) = render_row(host, item, split, wrap, Some((key, scope)), cx);
+    // The lines wrapping or unwrapping, and something coming under a line
+    // or going, change the row's height; it glides to the new one. At rest
+    // it is laid out as itself, so a list of rows at rest costs what it did.
     let around = motion.rows.borrow().around(key, cx);
     around.draw(
         "diff-row",
         key,
-        Glide::Height { scope },
+        Glide::Tail {
+            content: u64::from(wrap) | u64::from(extras) << 1,
+        },
         content,
-        |item, _| render_row(host, item, split, wrap, cx),
+        |item, _| render_row(host, item, split, wrap, None, cx).0,
         window,
     )
 }
 
-/// One row of the list as `item` describes it.
+/// One row of the list as `item` describes it, and whether something is
+/// drawn under its line. `glide` names the row (its key, and the viewport's
+/// scope) when what is under a line (comments, editors) glides to each new
+/// height it takes.
 fn render_row<H: DiffListHost>(
     host: &H,
     item: &DiffListItem,
     split: bool,
     wrap: bool,
+    glide: Option<(u64, u64)>,
     cx: &mut Context<H>,
-) -> AnyElement {
+) -> (AnyElement, bool) {
     let Some(diff) = host.diff_list() else {
-        return div().into_any_element();
+        return (div().into_any_element(), false);
     };
-    match item {
+    let row = match item {
         DiffListItem::Header(file) => render_file_header(host, *file, cx),
         DiffListItem::Notice(file) => host.notice(*file, cx),
         DiffListItem::Hunk { file, hunk } => div()
@@ -845,13 +852,32 @@ fn render_row<H: DiffListHost>(
             };
             let old = left.and_then(|ix| document.all_rows[ix].old);
             let new = right.and_then(|ix| document.all_rows[ix].new);
-            v_flex()
-                .w_full()
-                .child(rendered)
-                .children(host.row_extras(*file, old, new, cx))
-                .into_any_element()
+            let extras = host.row_extras(*file, old, new, cx);
+            if extras.is_empty() {
+                return (rendered, false);
+            }
+            // What is under a line changes height on its own (an editor in
+            // place of a button, a card's text): measured apart from the
+            // list, only while there is something there, it glides.
+            let extras = v_flex().w_full().children(extras);
+            let extras = match glide {
+                Some((key, scope)) => {
+                    RowGlide::new(("diff-row-extras", key), Glide::Height { scope }, extras)
+                        .into_any_element()
+                }
+                None => extras.into_any_element(),
+            };
+            return (
+                v_flex()
+                    .w_full()
+                    .child(rendered)
+                    .child(extras)
+                    .into_any_element(),
+                true,
+            );
         }
-    }
+    };
+    (row, false)
 }
 
 /// The rows of one of the list's views coming and going, by row key.
@@ -1415,11 +1441,11 @@ mod tests {
         }
     }
 
-    /// Two changed files, unified, with a card under `a.rs`'s second line
-    /// while `card` is set.
+    /// Changed files, unified, with a card under the second line of the
+    /// file `card` names.
     struct Reviewed {
         list: DiffList,
-        card: bool,
+        card: Option<usize>,
     }
 
     impl DiffListHost for Reviewed {
@@ -1440,7 +1466,7 @@ mod tests {
             new: Option<u32>,
             _: &mut Context<Self>,
         ) -> Vec<AnyElement> {
-            (self.card && file == 0 && new == Some(2))
+            (self.card == Some(file) && new == Some(2))
                 .then(|| div().h(px(80.)).into_any_element())
                 .into_iter()
                 .collect()
@@ -1493,7 +1519,7 @@ mod tests {
                 Vec::new(),
                 cx,
             ),
-            card: false,
+            card: None,
         });
         cx.update(|_, cx| cx.set_reduce_motion(false));
         crate::test_frames::draw_settled(cx);
@@ -1531,13 +1557,13 @@ mod tests {
         };
 
         viewer.update(cx, |viewer, cx| {
-            viewer.card = true;
+            viewer.card = Some(0);
             cx.notify();
         });
         crate::test_frames::draw(cx);
         gradual(&follow(cx), at_rest, at_rest + px(80.));
         viewer.update(cx, |viewer, cx| {
-            viewer.card = false;
+            viewer.card = None;
             cx.notify();
         });
         crate::test_frames::draw_settled(cx);
@@ -1575,7 +1601,7 @@ mod tests {
         layouts(vec![FileLayout::Header, FileLayout::Rows], cx);
         assert_eq!(top(below, cx), Some(shut), "reduced motion folds at once");
         viewer.update(cx, |viewer, cx| {
-            viewer.card = true;
+            viewer.card = Some(0);
             viewer
                 .list
                 .set_layouts(vec![FileLayout::Rows, FileLayout::Rows]);
@@ -1583,6 +1609,68 @@ mod tests {
         });
         crate::test_frames::draw(cx);
         assert_eq!(top(below, cx), Some(at_rest + px(80.)));
+    }
+
+    /// The row at the top of the view stays where the reader has it while a
+    /// row above the view or below it in the view glides to a new height.
+    #[gpui::test]
+    fn the_row_the_reader_is_at_stays_put_while_rows_around_it_glide(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let files = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"]
+            .into_iter()
+            .map(changed_file)
+            .collect();
+        let (viewer, cx) = cx.add_window_view(|_, cx| Reviewed {
+            list: DiffList::new(files, Vec::new(), cx),
+            card: None,
+        });
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        crate::test_frames::draw_settled(cx);
+        viewer.update(cx, |viewer, cx| {
+            let header = viewer
+                .list
+                .unified_items
+                .iter()
+                .position(|item| matches!(item, DiffListItem::Header(2)))
+                .expect("c.rs has a header");
+            viewer.list.unified_list.scroll_to(ListOffset {
+                item_ix: header,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        });
+        crate::test_frames::draw_settled(cx);
+        let reader = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("diff-line-new-c.rs-1")
+                .expect("the reader's row is on screen")
+                .top()
+        };
+        let at = reader(cx);
+        for card in [Some(0), Some(2)] {
+            viewer.update(cx, |viewer, cx| {
+                viewer.card = card;
+                cx.notify();
+            });
+            crate::test_frames::draw(cx);
+            for _ in 0..20 {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                });
+                crate::test_frames::draw(cx);
+                assert_eq!(
+                    reader(cx),
+                    at,
+                    "a card under file {card:?} moved the reader"
+                );
+            }
+        }
+        let below = cx
+            .debug_bounds("diff-line-new-d.rs-1")
+            .expect("the next file is on screen")
+            .top();
+        assert!(below - at > px(80.), "the card below the reader opened");
     }
 
     #[gpui::test]
