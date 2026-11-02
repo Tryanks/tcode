@@ -120,7 +120,13 @@ impl RenderOnce for Switch {
             window,
             cx,
         );
+        // gpui-base's Switch keeps its own focus handle, leaving only GPUI's
+        // `focus_visible`, which switches at once, to show the keyboard's
+        // focus: it is handed this handle instead, and the ring fades in and
+        // out over the track (`motion::focus_ring`).
+        let focus = crate::motion::focus_ring::handle(&self.id, window, cx);
         gpui_base::Switch::new(self.id.clone())
+            .track_focus(&focus)
             .checked(checked)
             .disabled(self.disabled)
             .when_some(
@@ -134,7 +140,7 @@ impl RenderOnce for Switch {
             .gap_2()
             .items_center()
             .refine_style(&self.style)
-            .child(
+            .child(crate::motion::focus_ring::Ringed::new(
                 SwitchTrack::new((self.id, "track"))
                     .checked(checked)
                     .disabled(self.disabled)
@@ -158,7 +164,10 @@ impl RenderOnce for Switch {
                     .when_some(self.tooltip, |this, text| {
                         this.with_tooltip(move |_, _| Tooltip::new(text.clone()))
                     }),
-            )
+                &focus,
+                crate::motion::focus_ring::corners(height),
+                cx,
+            ))
             .when_some(self.label, |this, label| {
                 this.child(div().line_height(height).child(label))
             })

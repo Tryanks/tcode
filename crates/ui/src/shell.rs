@@ -11873,6 +11873,183 @@ mod tests {
         );
     }
 
+    /// Where `selector` is drawn on the frame the window crosses the
+    /// breakpoint to `width`, half a glide later, and once settled.
+    fn across_breakpoint<T>(
+        cx: &mut VisualTestContext,
+        width: f32,
+        at: impl Fn(&mut VisualTestContext) -> T,
+    ) -> [T; 3] {
+        resize(cx, width);
+        let start = at(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let gliding = at(cx);
+        crate::test_frames::draw_settled(cx);
+        [start, gliding, at(cx)]
+    }
+
+    /// The open palette is drawn under another parent as a tablet crosses
+    /// the breakpoint: it glides from the card it hung as to the bottom
+    /// sheet, growing to the window's width, and back from the sheet to the
+    /// card, without coming in again on the way.
+    #[gpui::test]
+    fn the_open_palette_glides_between_card_and_sheet(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 1024.);
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        window_state.update(cx, |state, cx| state.open_palette(cx));
+        draw(cx);
+        crate::test_frames::draw_settled(cx);
+        let card = |cx: &mut VisualTestContext| cx.debug_bounds("palette-card").expect("the card");
+        let hanging = card(cx);
+        assert!(hanging.size.width < px(899.));
+
+        let [start, gliding, sheet] = across_breakpoint(cx, 899., card);
+        assert_eq!(start, hanging, "the card starts where it hung");
+        assert_eq!(sheet.size.width, px(899.), "the sheet spans the window");
+        assert!(sheet.top() > hanging.top());
+        assert!(
+            gliding.size.width > hanging.size.width
+                && gliding.size.width < sheet.size.width
+                && gliding.top() > hanging.top()
+                && gliding.top() < sheet.top(),
+            "{gliding:?} between {hanging:?} and {sheet:?}"
+        );
+
+        let [start, gliding, end] = across_breakpoint(cx, 1024., card);
+        assert_eq!(start, sheet, "and back from where it is");
+        assert!(
+            gliding.top() < sheet.top() && gliding.top() > hanging.top(),
+            "{gliding:?} between {sheet:?} and {hanging:?}"
+        );
+        assert_eq!(end, hanging);
+    }
+
+    /// The pairing form is drawn under another parent as a tablet crosses
+    /// the breakpoint: Connect glides from the foot of the compact page to
+    /// its place beside the field, and back.
+    #[gpui::test]
+    fn the_pairing_form_glides_across_the_breakpoint(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_initial(cx, None);
+        as_mobile(cx);
+        resize(cx, 899.);
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        window_state.update(cx, |state, cx| state.go(Destination::Pair, cx));
+        draw(cx);
+        crate::test_frames::draw_settled(cx);
+        let action = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("hosts-pair-submit")
+                .expect("the pairing form's action")
+        };
+        let footed = action(cx);
+
+        let [start, gliding, beside] = across_breakpoint(cx, 1024., action);
+        assert_eq!(start.origin, footed.origin, "Connect starts at the foot");
+        assert!(beside.top() < footed.top(), "{beside:?} above {footed:?}");
+        assert!(
+            gliding.top() < footed.top() && gliding.top() > beside.top(),
+            "{gliding:?} between {footed:?} and {beside:?}"
+        );
+
+        let [start, gliding, end] = across_breakpoint(cx, 899., action);
+        assert_eq!(start.origin, beside.origin, "and back from where it is");
+        assert!(
+            gliding.top() > beside.top() && gliding.top() < footed.top(),
+            "{gliding:?} between {beside:?} and {footed:?}"
+        );
+        assert_eq!(end.origin, footed.origin);
+    }
+
+    /// The diff panel is drawn under another parent as a tablet crosses the
+    /// breakpoint: from the compact panel page into the wide right panel,
+    /// its tab strip folds in and the toolbar trades forms, both gliding, so
+    /// the diff below moves to its place rather than jumping there.
+    #[gpui::test]
+    fn the_diff_panel_glides_its_strip_in_across_the_breakpoint(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        seed_wide_diff(&shell, &host, cx);
+        as_mobile(cx);
+        resize(cx, 1024.);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw_until(&shell, cx, &host, "diff-body", None);
+        resize(cx, 899.);
+        shell.update(cx, |shell, cx| shell.go(Destination::Panel, cx));
+        draw_until(&shell, cx, &host, "diff-body", None);
+        crate::test_frames::draw_settled(cx);
+
+        // How far below the panel's top the diff starts.
+        let below = |cx: &mut VisualTestContext| {
+            let body = cx.debug_bounds("diff-body").expect("the diff");
+            let panel = cx
+                .debug_bounds("right-panel")
+                .or_else(|| cx.debug_bounds("right-panel-overlay"))
+                .expect("the right panel");
+            body.top() - panel.top()
+        };
+        let [start, gliding, end] = across_breakpoint(cx, 1024., below);
+        assert!(
+            cx.debug_bounds("right-panel-tabs").is_some(),
+            "the wide panel draws its strip"
+        );
+        assert_ne!(start, end, "the strip and toolbar move the diff");
+        assert!(
+            (start < gliding && gliding < end) || (start > gliding && gliding > end),
+            "{gliding:?} between {start:?} and {end:?}"
+        );
+    }
+
+    /// The composer is drawn under another parent as a tablet crosses the
+    /// breakpoint, which also takes the checkout row under its card away:
+    /// the row folds out, the card settling down over it, rather than going
+    /// at once.
+    #[gpui::test]
+    fn the_checkout_row_folds_out_across_the_breakpoint(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let session = "thread-1";
+        let mut status = session_status(session, std::path::Path::new("/tmp/tcode-compact-panel"));
+        status.git_branch = Some("main".into());
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionStatus {
+                        session_id: session.into(),
+                    },
+                    event: ServerEvent::SessionStatusReplaced(Box::new(status)),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let store = store_of(&shell, cx);
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        as_mobile(cx);
+        resize(cx, 1024.);
+        draw_until(&shell, cx, &host, "composer-checkout", None);
+        crate::test_frames::draw_settled(cx);
+
+        // How far below the card the composer reaches: the checkout row's
+        // share of it.
+        let under_card = |cx: &mut VisualTestContext| {
+            let composer = cx.debug_bounds("chat-composer").expect("the composer");
+            let card = cx.debug_bounds("composer-card").expect("the card");
+            composer.bottom() - card.bottom()
+        };
+        let [start, gliding, end] = across_breakpoint(cx, 899., under_card);
+        assert!(
+            start > gliding && gliding > end,
+            "{gliding:?} between {start:?} and {end:?}"
+        );
+        assert!(cx.debug_bounds("composer-checkout").is_none());
+    }
+
     /// Settings replaces the whole window, unlike the Hosts route: the left
     /// column is the settings rail, so the workspace sidebar — and the feature
     /// area in it — is gone while the route is showing.
@@ -12668,7 +12845,10 @@ mod tests {
                     });
                 let beside = width - sidebar;
                 if beside >= chat_min + RIGHT_PANEL_MIN_WIDTH {
-                    let panel = cx.debug_bounds("right-panel").expect("the docked panel");
+                    let panel = cx
+                        .debug_bounds("right-panel")
+                        .or_else(|| cx.debug_bounds("right-panel-overlay"))
+                        .expect("the right panel");
                     assert_eq!(
                         panel.size.width,
                         px(RIGHT_PANEL_WIDTH.min(beside - chat_min)),

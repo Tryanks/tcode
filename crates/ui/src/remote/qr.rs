@@ -21,9 +21,11 @@ fn qr_modules(payload: &str) -> Option<(usize, Vec<bool>)> {
 /// text rather than putting a fixed-size image beside text that then has
 /// nowhere to wrap; a wide layout too narrow for both wraps the QR under it.
 /// A new payload cross-fades from the code `id` showed before; the QR and the
-/// text glide to where a change of window or a wrap puts them.
+/// text glide, through `reflow`, to where a change of window or a wrap puts
+/// them.
 pub(super) fn beside_qr(
     id: impl Into<ElementId>,
+    reflow: crate::motion::reflow::Reflow,
     text: impl gpui::IntoElement,
     payload: &str,
     compact: bool,
@@ -31,7 +33,6 @@ pub(super) fn beside_qr(
     cx: &mut App,
 ) -> gpui::Div {
     let id = id.into();
-    let reflow = crate::motion::reflow(id.clone(), window, cx);
     let qr = qr_modules(payload).is_some().then(|| {
         let qr = crate::motion::cross_fade(id, payload.to_owned(), window, cx, |payload, _, cx| {
             qr_element(payload, compact, cx).unwrap_or_else(|| div().into_any_element())

@@ -191,21 +191,23 @@ impl Composer {
             );
             shown.fold(div().pb(gap).text_secondary(self.compact, cx).child(line))
         });
-        let offline = crate::motion::shown(
-            self.motion_id(format_args!("approval-offline-{}", request.id)),
-            (self.compact && !self.interactive(cx)).then_some(()),
-            window,
-            cx,
-        )
-        .map(|shown| {
-            shown.fold(
-                div()
-                    .pb(gap)
-                    .text_body(self.compact, cx)
-                    .text_color(muted)
-                    .child(crate::tr!("mobile.offline_action")),
+        let offline = self
+            .motion
+            .shown(
+                self.motion_key(format_args!("approval-offline-{}", request.id)),
+                (self.compact && !self.interactive(cx)).then_some(()),
+                window,
+                cx,
             )
-        });
+            .map(|shown| {
+                shown.fold(
+                    div()
+                        .pb(gap)
+                        .text_body(self.compact, cx)
+                        .text_color(muted)
+                        .child(crate::tr!("mobile.offline_action")),
+                )
+            });
         let detail = crate::widgets::Collapsible::new(
             self.motion_id(format_args!("approval-detail-{}", request.id)),
             expanded,

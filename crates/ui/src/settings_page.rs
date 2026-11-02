@@ -1444,17 +1444,14 @@ impl SettingsPage {
             Section::Maintenance => self.render_maintenance(cx),
         };
         // The rail swaps sections in place, so a newly chosen section fades in;
-        // compact sections arrive through the shell's navigation stack.
+        // compact sections arrive through the shell's navigation stack. The
+        // fade is the page's, so the window turning wide mid-way carries it on
+        // rather than fading the section in again under the page's new parent.
+        let entering = self.motion.entered("section", self.section, window, cx);
         let column = if self.window_state.read(cx).compact {
             column
         } else {
-            let entering = crate::motion::appear(
-                (gpui::ElementId::from(self.section.id()), "section"),
-                true,
-                window,
-                cx,
-            );
-            v_flex().opacity(entering.progress).child(column)
+            v_flex().opacity(entering).child(column)
         };
         let scroll = if self.section == Section::ProjectThreadRules {
             &self.project_rules_scroll

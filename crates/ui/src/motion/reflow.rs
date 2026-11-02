@@ -116,6 +116,8 @@ struct Frame {
     /// scope was drawn last frame where it is drawn now, so the width it
     /// measured then is this layout's.
     follows_width: Cell<bool>,
+    /// Whether parts are placed against the window rather than the scope.
+    in_window: Cell<bool>,
 }
 
 /// The reflow scope `id` of the view rendering it.
@@ -139,6 +141,14 @@ impl Reflow {
     /// not change. Every part it moved glides there.
     pub(crate) fn reflowed(self, reflowed: bool) -> Self {
         self.frame.reflowed.set(reflowed);
+        self
+    }
+
+    /// Measures the parts against the window rather than the scope: for an
+    /// overlay placed against the window, whose scope is wherever its host
+    /// happens to lay it out, and lays it out elsewhere in another layout.
+    pub(crate) fn in_window(self) -> Self {
+        self.frame.in_window.set(true);
         self
     }
 
@@ -208,7 +218,11 @@ impl gpui::Element for Scope {
         cx: &mut App,
     ) {
         let frame = &self.reflow.frame;
-        frame.origin.set(bounds.origin);
+        frame.origin.set(if frame.in_window.get() {
+            Point::default()
+        } else {
+            bounds.origin
+        });
         let mut state = self.reflow.state.borrow_mut();
         let last = state.width.replace(bounds.size.width);
         if let Some(layout) = frame.layout.get() {

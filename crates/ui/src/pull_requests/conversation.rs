@@ -867,8 +867,7 @@ impl PullRequestView {
             })
             .trigger_with(move |_, _, _, _| match hover {
                 // The chip fades in as the pointer comes onto its comment's head, and out as it
-                // leaves. `focus`, not `focus_visible`: the Button paints its ring through
-                // `focus_visible`.
+                // leaves; while it holds focus it stays shown.
                 Some(hover) => crate::motion::Sampled::new(move |window, cx| {
                     let shown = hover.reveal(&head_key, window, cx);
                     chip.opacity(shown)

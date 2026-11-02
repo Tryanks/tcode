@@ -7,7 +7,7 @@
 use crate::widgets::TooltipTrigger as _;
 use crate::{
     icon::Icon,
-    material::{self, TOUCH_TARGET, focus_ring},
+    material::{self, TOUCH_TARGET},
     motion::keyed::{Fold, keyed_in},
     scroll::{ScrollArea, ScrollableElement as _},
     theme::ActiveTheme as _,
@@ -763,8 +763,12 @@ fn render_item(
     let trailing = trailing
         .filter(|_| !icon_only)
         .map(|build| build(window, cx));
+    // gpui-base's Tab takes no focus of its own; a `tab_index` tab stop's
+    // handle is GPUI's, leaving only `focus_visible`, which switches at once,
+    // to show the keyboard's focus. The tab tracks this handle instead, and
+    // the ring fades in and out over it (`motion::focus_ring`).
+    let focus = crate::motion::focus_ring::handle(&id, window, cx);
     let theme = cx.theme();
-    let ring = focus_ring(cx);
     let accessible = match tally {
         Some(tally) => crate::tr!("tabs.with_count", label = label.clone(), count = tally)
             .into_owned()
@@ -780,8 +784,7 @@ fn render_item(
         .selected(selected)
         .when_some(position, |tab, (ix, count)| tab.set_position(ix + 1, count))
         .accessibility_label(accessible)
-        .tab_index(0)
-        .focus_visible(move |style| style.shadow(vec![ring]))
+        .track_focus(&focus)
         .cursor_pointer()
         .gap(gap);
     let has_trailing = trailing.is_some();
@@ -840,13 +843,15 @@ fn render_item(
             tab.on_click(move |event, window, cx| handler(event, window, cx))
         });
     let Some(trailing) = trailing else {
-        let tab = glide.measure(key.clone(), tab);
-        return match context_menu {
+        let mut tab = glide.measure(key.clone(), tab);
+        let corners = tab.style().corner_radii.clone();
+        let tab = match context_menu {
             Some(builder) => tab
                 .context_menu(move |menu, window, cx| builder(menu, window, cx))
                 .into_any_element(),
             None => tab.into_any_element(),
         };
+        return crate::motion::focus_ring::Ringed::new(tab, &focus, corners, cx).into_any_element();
     };
     // The trailing control shares the tab's surface but sits beside the tab,
     // outside its click, focus and accessible name.
@@ -864,13 +869,16 @@ fn render_item(
     .when(form != Form::Rail, |row| {
         row.on_hover(move |hovered, window, cx| on_hover(hovered, window, cx))
     })
-    .child(
-        tab.h_full()
+    .child({
+        let mut tab = tab
+            .h_full()
             .rounded(surface_radius(form, cx))
             .when(form == Form::Rail, |tab| {
                 tab.flex_1().min_w_0().justify_start()
-            }),
-    )
+            });
+        let corners = tab.style().corner_radii.clone();
+        crate::motion::focus_ring::Ringed::new(tab, &focus, corners, cx)
+    })
     .child(div().flex_none().flex().items_center().child(trailing));
     let row = glide.measure(key.clone(), row);
     match context_menu {
