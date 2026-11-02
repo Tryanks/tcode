@@ -202,6 +202,9 @@ pub struct WorkspaceStore {
     /// The open threads' replicas, and those of the threads left most
     /// recently ([`KEPT_THREADS`]).
     threads: HashMap<String, ThreadReplica>,
+    /// Threads a surface still draws after they close, by how many hold
+    /// them: a closed thread keeps its timeline while any does.
+    timeline_leases: HashMap<String, usize>,
     selection_generation: u64,
     providers_replica: ProvidersStatus,
     /// One-shot turn navigation requested by a content-search hit or an
@@ -383,6 +386,7 @@ impl WorkspaceStore {
             conversation_on_screen: false,
             focused_session_id: None,
             threads: HashMap::new(),
+            timeline_leases: HashMap::new(),
             selection_generation: 0,
             providers_replica: ProvidersStatus::default(),
             pending_chat_turn: None,
