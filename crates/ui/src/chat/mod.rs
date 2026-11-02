@@ -1221,6 +1221,7 @@ pub(in crate::chat) mod tests {
         for reduce in [false, true] {
             cx.update(|_, cx| cx.set_reduce_motion(reduce));
             for (timeline, arrives) in [(&with_agent, true), (&plain, false)] {
+                let (_, rest) = stand(cx);
                 replace(timeline, cx);
                 crate::test_frames::draw(cx);
                 let mut frames = vec![stand(cx)];
@@ -1233,18 +1234,26 @@ pub(in crate::chat) mod tests {
                 draw_settled(cx);
                 let (strip, tail) = stand(cx);
                 assert_eq!(strip.is_some(), arrives);
-                let tails: Vec<_> = frames.iter().map(|(_, tail)| *tail).collect();
+                let tails: Vec<_> = std::iter::once(rest)
+                    .chain(frames.iter().map(|(_, tail)| *tail))
+                    .collect();
                 assert!(
                     one_way(&tails, !arrives),
                     "the tail stepped back: {tails:?}"
                 );
+                // The room it gains or gives back is the strip's height.
+                let strip_height = px(crate::material::bar_height(
+                    crate::material::Bar::Toolbar,
+                    true,
+                ));
+                assert_eq!((tail - rest).abs(), strip_height, "{tails:?}");
                 let moving = tails
                     .iter()
-                    .filter(|at| **at != tails[0] && **at != tail)
+                    .filter(|at| **at != rest && **at != tail)
                     .count();
                 let strips: Vec<_> = frames.iter().filter_map(|(strip, _)| *strip).collect();
                 if reduce {
-                    assert_eq!(tails[0], tail, "the tail glided: {tails:?}");
+                    assert_eq!(tails[1], tail, "the tail glided: {tails:?}");
                     assert_eq!(strips.is_empty(), !arrives, "{strips:?}");
                 } else {
                     assert!(moving >= 3, "the tail jumped: {tails:?}");
