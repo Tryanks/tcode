@@ -312,6 +312,15 @@ impl ChatView {
             window,
             |this, _, cx| this.dismiss_highlight(cx),
         ));
+        // The keyboard rests in the composer while the reader reads; a key
+        // pressed anywhere in the view puts it to use. Observed rather than
+        // listened for: a key the field binds to an action (delete, enter,
+        // paste) never reaches a key listener.
+        subscriptions.push(cx.observe_keystrokes(|this, _, window, cx| {
+            if this.focus_handle.contains_focused(window, cx) {
+                this.dismiss_highlight(cx);
+            }
+        }));
         let pull_requests = cx.new(|cx| {
             crate::pull_requests::PullRequestsPanel::new(
                 workspace_store.clone(),
@@ -876,11 +885,9 @@ impl ChatView {
                     .debug_selector(|| "chat-composer".into())
                     .w_full()
                     .flex_none()
-                    // The keyboard rests in the composer while the reader
-                    // reads; a key or a press there puts it to use. Capture,
-                    // so the composer's own handling still runs and cannot
-                    // hide it.
-                    .capture_key_down(cx.listener(|this, _, _, cx| this.dismiss_highlight(cx)))
+                    // A press on the composer puts the keyboard resting
+                    // there to use. Capture, so the composer's own handling
+                    // still runs and cannot hide it.
                     .capture_any_mouse_down(
                         cx.listener(|this, _, _, cx| this.dismiss_highlight(cx)),
                     )

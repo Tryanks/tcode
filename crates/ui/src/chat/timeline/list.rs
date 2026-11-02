@@ -471,6 +471,15 @@ mod tests {
             None,
             "typing in the composer kept the mark"
         );
+        // A key the field binds to an action is typing too.
+        jump(&threads, 3, cx);
+        cx.simulate_keystrokes("backspace");
+        draw_settled(cx);
+        assert_eq!(
+            marked(&panes, cx),
+            None,
+            "deleting in the composer kept the mark"
+        );
 
         jump(&threads, 3, cx);
         let composer = cx.debug_bounds("chat-composer").expect("the composer");
