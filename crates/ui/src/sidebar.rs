@@ -1042,11 +1042,7 @@ impl SessionsSidebar {
     }
 
     /// Track the pointer over `group`'s row for [`Self::hover_progress`].
-    fn track_hover(
-        &self,
-        row: gpui::Stateful<gpui::Div>,
-        group: &str,
-    ) -> gpui::Stateful<gpui::Div> {
+    fn track_hover<R: gpui::StatefulInteractiveElement>(&self, row: R, group: &str) -> R {
         row.on_hover(self.hover.on_hover(group.to_owned()))
     }
     pub fn new(
@@ -2771,7 +2767,7 @@ impl SessionsSidebar {
         is_active: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> crate::material::Clickable<gpui::Div> {
         let session_id = state.session_id.clone();
         let row_id = SharedString::from(format!("{}-row", state.row_key));
         // The selected fill glides from the row left to the row chosen.
@@ -3130,7 +3126,7 @@ impl SessionsSidebar {
 
     fn thread_context_menu(
         &self,
-        row: gpui::Stateful<gpui::Div>,
+        row: crate::material::Clickable<gpui::Div>,
         meta: &SessionMeta,
         state: &ThreadRowState,
         running: bool,

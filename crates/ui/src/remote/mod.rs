@@ -269,7 +269,7 @@ fn submit_actions(
     )
 }
 
-type Row = gpui::Stateful<gpui::Div>;
+type Row = crate::material::Clickable<gpui::Div>;
 
 /// A [`panel_row`] inside one of the page's groups. Compact, a panel row is a
 /// page-inset list row; inside a group it takes the group's inset, so its text

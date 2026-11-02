@@ -330,7 +330,7 @@ pub fn group_caption(label: impl Into<SharedString>, cx: &App) -> Div {
 ///
 /// Settings-like forms use [`grouped`] instead: plain rows for navigable
 /// content, grouped cards for settings-like forms.
-pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stateful<Div> {
+pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Clickable<Div> {
     accessible_clickable(gpui_base::h_flex(), id, Role::Button, label, cx)
         .w_full()
         .min_h(px(LIST_ROW_MIN_HEIGHT))
@@ -352,7 +352,7 @@ pub fn panel_row(
     label: SharedString,
     compact: bool,
     cx: &App,
-) -> Stateful<Div> {
+) -> Clickable<Div> {
     if compact {
         return list_row(id, label, cx);
     }
@@ -801,20 +801,177 @@ pub(crate) fn tracked_uppercase(text: &str) -> Div {
 /// as the component-library controls. GPUI automatically maps Enter/Space to
 /// `on_click` for a focused clickable element; this helper supplies the tab stop,
 /// semantic role/name, and a keyboard-only outline that remains legible in
-/// both themes without changing layout.
-pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement>(
+/// both themes without changing layout, fading in and out with the keyboard's
+/// focus.
+pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement + Styled>(
     el: E,
     id: impl Into<ElementId>,
     role: Role,
     label: impl Into<SharedString>,
     cx: &App,
-) -> Stateful<E> {
-    let ring = focus_ring(cx);
-    el.tab_index(0)
-        .focus_visible(move |style| style.shadow(vec![ring]))
-        .id(id)
-        .role(role)
-        .aria_label(label)
+) -> Clickable<E> {
+    let id = id.into();
+    Clickable {
+        inner: Some(el.id(id.clone()).role(role).aria_label(label)),
+        id,
+        focus: None,
+        ring: focus_ring(cx),
+    }
+}
+
+/// A surface [`accessible_clickable`] made clickable. It holds its own focus
+/// handle, kept under its id, and paints its focus ring over itself fading in
+/// and out ([`crate::motion::focus_ring`]): with GPUI's `tab_index` alone the
+/// handle is GPUI's, and only its `focus_visible` style, which switches at
+/// once, knows the keyboard focused it.
+pub struct Clickable<E: gpui::Element + gpui::InteractiveElement> {
+    inner: Option<Stateful<E>>,
+    id: ElementId,
+    /// The handle the caller tracks, when it keeps its own.
+    focus: Option<gpui::FocusHandle>,
+    ring: BoxShadow,
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement> Clickable<E> {
+    fn inner(&mut self) -> &mut Stateful<E> {
+        self.inner.as_mut().expect("a clickable is laid out once")
+    }
+}
+
+/// What a [`Clickable`] keeps from its layout to its paint: the surface, its
+/// focus handle and its corners.
+pub struct ClickableLayout {
+    surface: gpui::AnyElement,
+    focus: gpui::FocusHandle,
+    corners: gpui::CornersRefinement<gpui::AbsoluteLength>,
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement + Styled + 'static> IntoElement for Clickable<E> {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement + Styled + 'static> gpui::Element
+    for Clickable<E>
+{
+    type RequestLayoutState = ClickableLayout;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ClickableLayout) {
+        let mut inner = self.inner.take().expect("a clickable is laid out once");
+        let corners = inner.style().corner_radii.clone();
+        let focus = match self.focus.clone() {
+            Some(focus) => focus,
+            None => window
+                .use_keyed_state(
+                    ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "focus".into()),
+                    cx,
+                    |_, cx| cx.focus_handle(),
+                )
+                .read(cx)
+                .clone()
+                .tab_index(0)
+                .tab_stop(true),
+        };
+        let mut surface = inner.track_focus(&focus).into_any_element();
+        let layout = surface.request_layout(window, cx);
+        (
+            layout,
+            ClickableLayout {
+                surface,
+                focus,
+                corners,
+            },
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<Pixels>,
+        layout: &mut ClickableLayout,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        layout.surface.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        layout: &mut ClickableLayout,
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        layout.surface.paint(window, cx);
+        crate::motion::focus_ring::paint(
+            &layout.focus,
+            self.ring.clone(),
+            bounds,
+            &layout.corners,
+            window,
+            cx,
+        );
+    }
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement + Styled> Styled for Clickable<E> {
+    fn style(&mut self) -> &mut gpui::StyleRefinement {
+        self.inner().style()
+    }
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement> InteractiveElement for Clickable<E> {
+    fn interactivity(&mut self) -> &mut gpui::Interactivity {
+        self.inner().interactivity()
+    }
+
+    /// A caller that keeps its own focus handle keeps it, and the ring
+    /// follows that handle.
+    fn track_focus(mut self, focus_handle: &gpui::FocusHandle) -> Self {
+        self.focus = Some(focus_handle.clone());
+        self
+    }
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement> gpui::StatefulInteractiveElement
+    for Clickable<E>
+{
+}
+
+impl<E: gpui::Element + gpui::InteractiveElement + gpui::ParentElement> gpui::ParentElement
+    for Clickable<E>
+{
+    fn extend(&mut self, elements: impl IntoIterator<Item = gpui::AnyElement>) {
+        self.inner().extend(elements);
+    }
+}
+
+impl gpui::StyledImage for Clickable<gpui::Img> {
+    fn image_style(&mut self) -> &mut gpui::ImageStyle {
+        self.inner().image_style()
+    }
 }
 
 /// The keyboard focus ring of a clickable that is not a `Button`.

@@ -2033,9 +2033,7 @@ impl Render for TerminalDrawer {
                 .key_context(CONTEXT)
                 .track_focus(&self.focus_handle)
                 .on_key_down(cx.listener(Self::on_key_down))
-                // The accessibility focus ring is painted as a shadow behind this
-                // element. Keep the terminal surface opaque so the shadow cannot
-                // show through the otherwise transparent grid as a solid blue fill.
+                // The grid is transparent; the terminal surface is opaque.
                 .bg(cx.theme().popover)
                 .flex_1()
                 .min_h_0()

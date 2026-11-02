@@ -7,10 +7,10 @@ use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::{
     AnyElement, App, ClickEvent, Div, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{Link, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use tcode_core::notice::{CallbackEvent, HostNotice, OrchestrateCallback};
 
@@ -90,34 +90,39 @@ pub(crate) fn callback_row(
 
 /// The link to a callback's child, its underline fading in at the list's
 /// hover `reveal`. Once the child has gone the link is leaving, and takes no
-/// activation.
+/// activation. Not gpui-base's `Link`: it keeps its focus handle to itself,
+/// so its keyboard focus ring could only switch at once; the clickable's
+/// fades.
 fn open_child_link(
     key: &str,
     on_open: Option<super::subagent::ClickHandler>,
     hover: &crate::motion::ListHover,
     reveal: f32,
     cx: &App,
-) -> Link {
-    let ring = crate::material::focus_ring(cx);
+) -> AnyElement {
     let id = SharedString::from(format!("callback-open-{key}"));
     let primary = cx.theme().primary;
-    let link = Link::new(id.clone())
-        .accessibility_label(SharedString::from(crate::tr!("agents.open").into_owned()))
-        .on_hover(hover.on_hover(id))
-        .when(reveal > 0., |link| {
-            link.underline()
-                .text_decoration_color(primary.opacity(reveal))
-        });
-    match on_open {
-        Some(on_open) => link.on_activate(on_open),
-        None => link,
-    }
+    crate::material::accessible_clickable(
+        div(),
+        id.clone(),
+        Role::Link,
+        SharedString::from(crate::tr!("agents.open").into_owned()),
+        cx,
+    )
+    .on_hover(hover.on_hover(id))
+    .when(reveal > 0., |link| {
+        link.underline()
+            .text_decoration_color(primary.opacity(reveal))
+    })
+    .when_some(on_open, |link, on_open| {
+        link.cursor_pointer()
+            .on_click(move |event, window, cx| on_open(event, window, cx))
+    })
     .flex_none()
     .text_token(&cx.theme().tokens.typography.xs)
     .text_color(primary)
-    .cursor_pointer()
-    .focus_visible(move |style| style.shadow(vec![ring]))
     .child(crate::tr!("agents.open_child"))
+    .into_any_element()
 }
 
 /// A centered disclosure notification with a height-capped verbatim body: the

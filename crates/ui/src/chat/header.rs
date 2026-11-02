@@ -1111,11 +1111,18 @@ impl ChatView {
                         .text_body(false, cx)
                         .child(git_action_icon(action).text_color(muted))
                         .child(div().flex_1().child(label.clone()));
-                    let mut row = if disabled {
-                        frame
+                    let row = if disabled {
+                        let mut row = frame
                             .id(("git-menu-item", index))
                             .role(Role::MenuItem)
                             .aria_label(label)
+                            .text_color(muted);
+                        if let Some(hint) = item.hint {
+                            let text: SharedString =
+                                crate::tr!(git_hint_key(hint)).into_owned().into();
+                            row = row.with_tooltip(move |_, _| Tooltip::new(text.clone()));
+                        }
+                        row.into_any_element()
                     } else {
                         crate::material::accessible_clickable(
                             frame,
@@ -1124,20 +1131,13 @@ impl ChatView {
                             label,
                             cx,
                         )
-                    };
-                    if disabled {
-                        row = row.text_color(muted);
-                        if let Some(hint) = item.hint {
-                            let text: SharedString =
-                                crate::tr!(git_hint_key(hint)).into_owned().into();
-                            row = row.with_tooltip(move |_, _| Tooltip::new(text.clone()));
-                        }
-                    } else {
-                        row = row.cursor_pointer().on_click(move |_, window, cx| {
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
                             popover.update(cx, |st, cx| st.dismiss(window, cx));
                             chat.update(cx, |this, cx| this.trigger_git_action(action, window, cx));
-                        });
-                    }
+                        })
+                        .into_any_element()
+                    };
                     menu = menu.child(row);
                 }
                 menu.into_any_element()
