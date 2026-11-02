@@ -4941,6 +4941,11 @@ impl Render for AppShell {
             .font_family(cx.theme().font_family.clone())
             .children(dismissal.map(|dismissal| dismissal.release_listener().into_any_element()))
             .child(self.within_seam(body, window, cx))
+            .children(
+                self.attachment
+                    .as_ref()
+                    .and_then(|attachment| attachment.preview.read(cx).native_fade(cx)),
+            )
     }
 }
 

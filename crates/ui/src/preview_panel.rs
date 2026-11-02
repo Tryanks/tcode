@@ -579,6 +579,10 @@ mod portable {
 
         pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
 
+        pub(crate) fn native_fade(&self, _cx: &gpui::App) -> Option<AnyElement> {
+            None
+        }
+
         /// Unreachable: without a backend the store never offers the tab.
         pub(super) fn render_body(
             &mut self,

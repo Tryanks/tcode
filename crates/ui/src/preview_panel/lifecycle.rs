@@ -130,6 +130,11 @@ pub struct BrowserLifecycle {
     slots: HashMap<String, WebViewSlot>,
     warm: HashSet<String>,
     active_identity: Option<(String, String)>,
+    /// The key the panel last showed. Any other page still on screen is
+    /// leaving: it fades out through [`Self::native_fade`] and hides when
+    /// that lands.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    wanted: Option<String>,
     /// The size the Preview panel last showed a page at: what a conversation
     /// nobody is looking at would get on screen.
     #[cfg(not(target_os = "android"))]
@@ -207,6 +212,8 @@ impl BrowserLifecycle {
             slots: HashMap::new(),
             warm: HashSet::new(),
             active_identity: None,
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            wanted: None,
             #[cfg(not(target_os = "android"))]
             panel_size: None,
             creator,
@@ -312,17 +319,38 @@ impl BrowserLifecycle {
         availability
     }
 
-    /// Show exactly `key` and hide every other ready native child.
+    /// Show exactly `key` and let every other ready native child go.
     ///
     /// Call this only after the selected WebView element has been laid out in
-    /// the current frame. Pass `None` to hide all children.
+    /// the current frame. Pass `None` to let every child go.
+    ///
+    /// On macOS and iOS a page fades in and out ([`Self::native_fade`]).
+    /// Gap: on Windows, Linux and Android it shows and hides at once.
+    /// gpui-webview 0.8.1 has no opacity, and their child surfaces (a
+    /// WebView2 controller, an X11 child window, an Android view) are not
+    /// faded here; a snapshot drawn by GPUI in the page's place is the open
+    /// alternative.
     pub fn set_visible(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            self.wanted = key.map(str::to_owned);
+        }
         for (candidate, slot) in &self.slots {
             let Some(view) = slot.ready() else {
                 continue;
             };
             let visible = Some(candidate.as_str()) == key;
-            view.update(cx, |view, _| set_webview_visible(view, visible));
+            if visible {
+                view.update(cx, |view, _| {
+                    #[cfg(any(target_os = "macos", target_os = "ios"))]
+                    if !view.visible() {
+                        fade::set_alpha(view.raw(), 0.);
+                    }
+                    set_webview_visible(view, true);
+                });
+            } else {
+                leave(view, cx);
+            }
             #[cfg(not(target_os = "android"))]
             if visible {
                 let size = view.read(cx).bounds().size;
@@ -372,6 +400,10 @@ impl BrowserLifecycle {
     /// Hide children that cannot remain mounted, without showing a newly
     /// selected child before its GPUI owner has current bounds.
     pub(super) fn hide_except(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if self.wanted.as_deref() != key {
+            self.wanted = None;
+        }
         for (candidate, slot) in &self.slots {
             if Some(candidate.as_str()) == key {
                 continue;
@@ -379,8 +411,28 @@ impl BrowserLifecycle {
             let Some(view) = slot.ready() else {
                 continue;
             };
-            view.update(cx, |view, _| set_webview_visible(view, false));
+            leave(view, cx);
         }
+    }
+
+    /// Every ready page and whether the panel wants it on screen, for the
+    /// window to draw once per frame whether or not the panel is mounted: a
+    /// page outlives its panel and fades out where it was.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub(super) fn native_fade(&self) -> crate::motion::native_fade::NativeFade<Entity<WebView>> {
+        self.slots.iter().fold(
+            crate::motion::native_fade::NativeFade::new("preview-pages"),
+            // Keyed by the browser, which keeps its fade when a draft's key
+            // migrates to the stored thread's.
+            |fade, (key, slot)| match slot.ready() {
+                Some(view) => fade.view(
+                    view.entity_id().to_string(),
+                    view.clone(),
+                    self.wanted.as_deref() == Some(key.as_str()),
+                ),
+                None => fade,
+            },
+        )
     }
 
     /// Reconcile the physical session with its stable cache key. Draft -> stored
@@ -688,6 +740,65 @@ impl BrowserLifecycle {
             self.warm.insert(key);
         }
         cx.notify();
+    }
+}
+
+/// A page the panel no longer wants on screen. On macOS and iOS it stays
+/// until [`BrowserLifecycle::native_fade`] has faded it out.
+fn leave(view: &Entity<WebView>, cx: &mut App) {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let _ = (view, cx);
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    view.update(cx, |view, _| set_webview_visible(view, false));
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod fade {
+    use gpui::{App, Bounds, Entity, Pixels};
+    use gpui_webview::WebView;
+
+    use crate::motion::native_fade::NativeView;
+
+    pub(super) fn set_alpha(raw: &wry::WebView, alpha: f32) {
+        #[cfg(target_os = "macos")]
+        {
+            use wry::WebViewExtMacOS as _;
+            raw.webview().setAlphaValue(f64::from(alpha));
+        }
+        #[cfg(target_os = "ios")]
+        {
+            use wry::WebViewExtIOS as _;
+            raw.webview().setAlpha(f64::from(alpha));
+        }
+    }
+
+    impl NativeView for Entity<WebView> {
+        fn shown(&self, cx: &App) -> bool {
+            self.read(cx).visible()
+        }
+
+        fn hide(&self, cx: &mut App) {
+            self.update(cx, |view, _| super::set_webview_visible(view, false));
+        }
+
+        fn set_alpha(&self, alpha: f32, cx: &App) {
+            set_alpha(self.read(cx).raw(), alpha);
+        }
+
+        /// UIKit delivers a touch to the page before GPUI sees it, so no GPUI
+        /// hitbox can cover a leaving page there.
+        #[cfg(target_os = "ios")]
+        fn set_inert(&self, inert: bool, cx: &App) {
+            use wry::WebViewExtIOS as _;
+            self.read(cx)
+                .raw()
+                .webview()
+                .setUserInteractionEnabled(!inert);
+        }
+
+        fn bounds(&self, cx: &App) -> Bounds<Pixels> {
+            self.read(cx).bounds()
+        }
     }
 }
 
