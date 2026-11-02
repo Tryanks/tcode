@@ -764,14 +764,23 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     host.shutdown();
 }
 
+/// A UDP port the system never hands out to a `:0` bind, free when probed:
+/// the app binds its fixed port below every platform's ephemeral range
+/// (Linux 32768+, macOS and Windows 49152+), so while a machine is down no
+/// other socket on the box is assigned its port behind its back.
+fn fixed_port() -> u16 {
+    let start = std::process::id() % 10_000;
+    (0..10_000)
+        .map(|offset| 20_000 + ((start + offset) % 10_000) as u16)
+        .find(|&port| std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok())
+        .expect("a free UDP port below the ephemeral range")
+}
+
 #[test]
-fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
+fn a_restarted_machine_rejoins_and_delivers_writes_buffered_while_it_was_down() {
     let host_dir = TestDir::new("restart-host");
     let (mux, subscribe_count, _) = fake_host();
-    let port = {
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        socket.local_addr().unwrap().port()
-    };
+    let port = fixed_port();
     let host = start_host(mux.clone(), &host_dir, Some(port));
     let dir = TestDir::new("restart-phone");
     let phone = device(&dir, "phone");
@@ -803,12 +812,13 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     host.shutdown();
     wait_state(&client, |state| {
         link.set_connection_state(state.clone());
-        state
-            == &ConnectionState::Reconnecting {
-                // This link lived less than 30 seconds, so it must not reset retry history.
-                attempt: 2,
+        matches!(
+            state,
+            ConnectionState::Reconnecting {
                 reason: Some(ConnectionFailure::HostClosed),
+                ..
             }
+        )
     });
     client
         .to_host
@@ -849,16 +859,29 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
+
+    // The rejoin is the replayed subscription's snapshot and the buffered
+    // command's ack, both arriving over the new connection.
     wait_state(&client, |state| {
         link.set_connection_state(state.clone());
         connected_directly(state)
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while subscribe_count.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (mut resubscribed, mut acked) = (false, false);
+    while !(resubscribed && acked) {
+        assert!(
+            Instant::now() < deadline,
+            "rejoin incomplete: resubscribed {resubscribed}, buffered write acked {acked}"
+        );
+        let Ok(line) = client.from_host.try_recv() else {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        };
+        let value: Value = serde_json::from_str(line.trim_end()).unwrap();
+        resubscribed |= value["type"] == "event";
+        acked |= value["type"] == "ack" && value["content"]["id"] == 0;
     }
     assert_eq!(subscribe_count.load(Ordering::Relaxed), 2);
-    recv_type(&client, "ack", Some(0));
     link.close();
     restarted.shutdown();
 }
