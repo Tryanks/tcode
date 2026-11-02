@@ -7184,7 +7184,13 @@ mod tests {
         cx.simulate_mouse_move(log.center(), None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(log.center(), gpui::Modifiers::default());
-        draw(cx);
+        // The reader presses the row once it has folded in: the subagent
+        // runs, so the window never rests; frames over the fold stand in.
+        for _ in 0..16 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+        }
         assert!(cx.debug_bounds("subagent-shown").is_none());
 
         let row = cx

@@ -570,6 +570,85 @@ mod tests {
         })
     }
 
+    /// A tool call that found what it looked for: a one-line window.
+    fn lookup(id: &str) -> agent::AgentEvent {
+        agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: agent::ItemContent::ToolCall {
+                name: "lookup".into(),
+                input: serde_json::json!({ "query": id }),
+                output: Some("found".into()),
+                status: agent::ItemStatus::Completed,
+                image_reads: Vec::new(),
+            },
+        })
+    }
+
+    /// While a turn runs, its Work Log shows its newest activities; when
+    /// another comes in, the oldest of them leaves into the header by
+    /// folding away, so the activities after it move up over several frames
+    /// instead of jumping, and the new one folds in at the end. The tail
+    /// stays on the bottom edge throughout.
+    #[gpui::test]
+    fn the_oldest_live_activity_folds_away_into_the_header(cx: &mut TestAppContext) {
+        let mut events = earlier_turns_and_a_running_one(4);
+        events.extend((0..6).map(|index| lookup(&format!("live-{index}"))));
+        let mut thread = ScriptedThread::new(cx, events, 0, true);
+        let (chat, cx) = thread.open_at(gpui::size(px(1_024.), px(1_000.)), cx);
+        thread.deliver(cx);
+        for _ in 0..60 {
+            frame(cx);
+        }
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        assert!(cx.debug_bounds("worklog-header-4-live-0").is_some());
+        assert!(cx.debug_bounds("activity-row-live-1").is_some());
+        let next = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("activity-row-live-2")
+                .expect("the activity after the oldest")
+                .top()
+        };
+        let before = next(cx);
+
+        thread.live(lookup("live-6"));
+        thread.deliver(cx);
+        draw(cx);
+        let mut tops = vec![before, next(cx)];
+        let mut leaving = 0;
+        for _ in 0..20 {
+            frame(cx);
+            tops.push(next(cx));
+            leaving += usize::from(cx.debug_bounds("activity-row-live-1").is_some());
+            let status = cx
+                .debug_bounds("working-status-4")
+                .expect("the turn's working status");
+            assert!(
+                (list.viewport_bounds().bottom() - status.bottom()).abs() <= px(30.),
+                "the tail left the bottom edge"
+            );
+        }
+        assert!(list.is_following_tail());
+        assert!(
+            cx.debug_bounds("activity-row-live-1").is_none(),
+            "the oldest activity went into the header"
+        );
+        assert!(leaving >= 6, "it went in {leaving} frames");
+        let total = (*tops.last().unwrap() - before).abs();
+        assert!(
+            total > px(30.),
+            "the next activity took its place: {tops:?}"
+        );
+        assert!(
+            tops.windows(2).all(|pair| pair[1] <= pair[0] + px(0.5)),
+            "the next activity moved back: {tops:?}"
+        );
+        assert!(
+            tops.windows(2)
+                .all(|pair| (pair[1] - pair[0]).abs() < total / 2.),
+            "the next activity jumped: {tops:?}"
+        );
+    }
+
     /// A fold inside the followed tail is the only thing that moves it: the
     /// tail is laid out as it is between its glides, so the turn's working
     /// status stays on the bottom edge and the content above follows the
