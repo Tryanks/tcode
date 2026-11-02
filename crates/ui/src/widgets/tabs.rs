@@ -622,24 +622,24 @@ impl RenderOnce for TabBar {
         let rail = (form == Form::Rail && !shared).then(|| glide.rail(cx));
         let pill = (form == Form::Segmented).then(|| glide.pill(false, cx));
         let underline = (form == Form::Underline).then(|| {
-                let insets = insets.clone();
-                let pad = m.pad;
-                glide.mark(
-                    move |key, tab, list| {
-                        let (start, end) = insets.borrow().get(key).copied().unwrap_or((pad, pad));
-                        // Bottom-aligned with the bar's hairline, which it covers.
-                        Bounds::from_corners(
-                            point(tab.left() + px(start), list.bottom() - px(INDICATOR)),
-                            point(tab.right() - px(end), list.bottom()),
-                        )
-                    },
-                    div()
-                        .rounded(px(INDICATOR / 2.))
-                        .bg(cx.theme().foreground)
-                        .style()
-                        .clone(),
-                )
-            });
+            let insets = insets.clone();
+            let pad = m.pad;
+            glide.mark(
+                move |key, tab, list| {
+                    let (start, end) = insets.borrow().get(key).copied().unwrap_or((pad, pad));
+                    // Bottom-aligned with the bar's hairline, which it covers.
+                    Bounds::from_corners(
+                        point(tab.left() + px(start), list.bottom() - px(INDICATOR)),
+                        point(tab.right() - px(end), list.bottom()),
+                    )
+                },
+                div()
+                    .rounded(px(INDICATOR / 2.))
+                    .bg(cx.theme().foreground)
+                    .style()
+                    .clone(),
+            )
+        });
         let list = Tabs::new(id.clone())
             .when_some(aria_label, |this, label| this.aria_label(label))
             .relative()
@@ -739,8 +739,27 @@ fn render_item(
             _ => (theme.muted_foreground, theme.muted_foreground),
         }
     };
-    let fg = label_color(&id, "fg", fg, window, cx);
+    // A rail's rows glide their own hover fill; a bar's tab lifts its label
+    // and fills under the pointer, both gliding.
+    let (hovered, on_hover) = crate::motion::hovered((id.clone(), "hover"), window, cx);
+    let lit = hovered && !selected && form != Form::Rail;
+    let fg = label_color(
+        &id,
+        "fg",
+        if lit { cx.theme().foreground } else { fg },
+        window,
+        cx,
+    );
     let icon_fg = label_color(&id, "icon-fg", icon_fg, window, cx);
+    let muted = cx.theme().muted;
+    let hover_fill = label_color(
+        &id,
+        "hover-fill",
+        if lit { muted } else { muted.opacity(0.) },
+        window,
+        cx,
+    );
+    let on_hover = Rc::new(on_hover);
     let trailing = trailing
         .filter(|_| !icon_only)
         .map(|build| build(window, cx));
@@ -774,12 +793,17 @@ fn render_item(
             tab.text_color(fg),
             form,
             selected,
+            hover_fill,
             compact,
             icon_only,
             false,
             m,
             cx,
         )
+        .when(form != Form::Rail, |tab| {
+            let on_hover = on_hover.clone();
+            tab.on_hover(move |hovered, window, cx| on_hover(hovered, window, cx))
+        })
     };
     let tab = tab
         .when_some(icon, |this, icon| {
@@ -830,12 +854,16 @@ fn render_item(
         div().id((id, "surface")).text_color(fg),
         form,
         selected,
+        hover_fill,
         compact,
         icon_only,
         true,
         m,
         cx,
     )
+    .when(form != Form::Rail, |row| {
+        row.on_hover(move |hovered, window, cx| on_hover(hovered, window, cx))
+    })
     .child(
         tab.h_full()
             .rounded(surface_radius(form, cx))
@@ -860,14 +888,13 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
     el: E,
     form: Form,
     selected: bool,
+    hover_fill: Hsla,
     compact: bool,
     icon_only: bool,
     trailing: bool,
     m: &Metrics,
     cx: &App,
 ) -> E {
-    let theme = cx.theme();
-    let foreground = theme.foreground;
     let (start, end) = underline_inset(m, compact, icon_only, trailing);
     let el = el
         .relative()
@@ -896,13 +923,11 @@ fn surface<E: Styled + InteractiveElement + ParentElement + FluentBuilder>(
             })
             .map(|this| {
                 if form == Form::Segmented {
-                    return segment(this, selected, true, compact, cx);
+                    return segment(this, hover_fill, compact, cx);
                 }
                 this.h(px(m.item))
                     .rounded(surface_radius(form, cx))
-                    .when(!selected, |this| {
-                        this.hover(move |style| style.bg(theme.muted).text_color(foreground))
-                    })
+                    .bg(hover_fill)
             }),
     }
 }
@@ -968,18 +993,9 @@ fn raised_segment(cx: &App) -> Hsla {
     theme.by_mode(theme.popover, theme.foreground.opacity(0.12))
 }
 
-/// One segment's surface: transparent at rest, under the track's gliding
-/// [`Glide::pill`]. `interactive` is false for a segment that cannot be
-/// chosen.
-pub(crate) fn segment<E: Styled + InteractiveElement + FluentBuilder>(
-    el: E,
-    selected: bool,
-    interactive: bool,
-    compact: bool,
-    cx: &App,
-) -> E {
-    let theme = cx.theme();
-    let (muted, foreground) = (theme.muted, theme.foreground);
+/// One segment's surface: `hover_fill` over the track, under the track's
+/// gliding [`Glide::pill`].
+pub(crate) fn segment<E: Styled>(el: E, hover_fill: Hsla, compact: bool, cx: &App) -> E {
     el.relative()
         .h(px(segment_height(compact)))
         .flex_grow(1.)
@@ -987,9 +1003,7 @@ pub(crate) fn segment<E: Styled + InteractiveElement + FluentBuilder>(
         .flex_shrink_0()
         .justify_center()
         .rounded(segment_radius(cx))
-        .when(!selected && interactive, |this| {
-            this.hover(move |style| style.bg(muted).text_color(foreground))
-        })
+        .bg(hover_fill)
 }
 
 #[cfg(test)]

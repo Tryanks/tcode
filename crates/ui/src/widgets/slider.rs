@@ -96,6 +96,13 @@ impl RenderOnce for Slider {
             cx,
         );
 
+        let opacity = transition(
+            motion_id("slider-dim"),
+            if self.disabled { 0.6 } else { 1. },
+            settle(),
+            window,
+            cx,
+        );
         let theme = cx.theme();
         let fill = self.fill.unwrap_or(theme.primary);
         let foreground = theme.foreground;
@@ -132,7 +139,7 @@ impl RenderOnce for Slider {
             .w_full()
             .h(px(THUMB_SIZE))
             .refine_style(&self.style)
-            .when(self.disabled, |this| this.opacity(0.6))
+            .opacity(opacity)
             .child(
                 SliderTrack::new(&self.state)
                     .disabled(self.disabled)

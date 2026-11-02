@@ -125,6 +125,24 @@ impl RenderOnce for Checkbox {
             cx,
         );
         let check_scale = 0.5 + 0.5 * check;
+        let dim = transition(
+            (self.id.clone(), "dim"),
+            if self.disabled { 1. } else { 0. },
+            settle(),
+            window,
+            cx,
+        );
+        let label_color = transition(
+            (self.id.clone(), "label"),
+            if self.disabled {
+                cx.theme().muted_foreground
+            } else {
+                cx.theme().foreground
+            },
+            settle(),
+            window,
+            cx,
+        );
         self.base
             .checked(checked)
             .disabled(self.disabled)
@@ -141,8 +159,7 @@ impl RenderOnce for Checkbox {
             .gap_2()
             .items_start()
             .line_height(relative(1.))
-            .text_color(cx.theme().foreground)
-            .styles(|styles| styles.disabled(|style| style.text_color(cx.theme().muted_foreground)))
+            .text_color(label_color)
             .refine_style(&self.style)
             .child(
                 CheckboxIndicator::new()
@@ -154,7 +171,7 @@ impl RenderOnce for Checkbox {
                     .rounded(cx.theme().tokens.radius.sm)
                     .bg(bg)
                     .border_color(border)
-                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                    .opacity(1. - 0.5 * dim)
                     .when(check > 0., |this| {
                         this.child(
                             Icon::new(IconName::Check)

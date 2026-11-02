@@ -511,14 +511,30 @@ fn hover_fill_over(
     cx: &mut App,
 ) -> (gpui::Hsla, impl Fn(&bool, &mut Window, &mut App) + 'static) {
     let id = id.into();
-    let hovered = window.use_keyed_state(child_id(&id, "hovered"), cx, |_, _| false);
+    let (hovered, on_hover) = hovered(id.clone(), window, cx);
     let fill = transition(
         child_id(&id, "hover-fill"),
-        if *hovered.read(cx) { hover } else { rest },
+        if hovered { hover } else { rest },
         settle(),
         window,
         cx,
     );
+    (fill, on_hover)
+}
+
+/// Whether the pointer is over the element `id`, as its `on_hover` last
+/// heard, and that handler: for an element whose hover moves more than a
+/// fill (a label's colour too), each part gliding to its hovered value.
+pub(crate) fn hovered<I: Into<ElementId>>(
+    id: I,
+    window: &mut Window,
+    cx: &mut App,
+) -> (
+    bool,
+    impl Fn(&bool, &mut Window, &mut App) + 'static + use<I>,
+) {
+    let hovered = window.use_keyed_state(child_id(&id.into(), "hovered"), cx, |_, _| false);
+    let now = *hovered.read(cx);
     let on_hover = move |is_hovered: &bool, _: &mut Window, cx: &mut App| {
         hovered.update(cx, |hovered, cx| {
             if *hovered != *is_hovered {
@@ -527,7 +543,7 @@ fn hover_fill_over(
             }
         });
     };
-    (fill, on_hover)
+    (now, on_hover)
 }
 
 /// The fill of an item built with `&App` only (a menu item, a selectable

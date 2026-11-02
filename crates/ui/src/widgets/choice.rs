@@ -164,12 +164,29 @@ fn render_choice(
         recommended,
         on_select,
     } = choice;
-    let target = if selected {
+    let (hovered, on_hover) = crate::motion::hovered((id.clone(), "hover"), window, cx);
+    let lit = hovered && !selected && !disabled;
+    let target = if selected || lit {
         cx.theme().foreground
     } else {
         cx.theme().muted_foreground
     };
     let fg = label_color(&id, "fg", target, window, cx);
+    let opacity = gpui_base::motion::transition(
+        (id.clone(), "dim"),
+        if disabled { 0.5 } else { 1. },
+        crate::motion::settle(),
+        window,
+        cx,
+    );
+    let muted = cx.theme().muted;
+    let hover_fill = label_color(
+        &id,
+        "hover-fill",
+        if lit { muted } else { muted.opacity(0.) },
+        window,
+        cx,
+    );
     let ring = focus_ring(cx);
     let accessible: SharedString = if recommended {
         crate::tr!("choice.recommended_option", label = label.clone())
@@ -196,7 +213,8 @@ fn render_choice(
         .whitespace_nowrap()
         .text_color(fg)
         .when(!disabled, |this| this.cursor_pointer())
-        .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+        .on_hover(on_hover)
+        .opacity(opacity)
         .when_some(on_select.filter(|_| !disabled), |this, handler| {
             this.on_change(move |_, _, window, cx| handler(window, cx))
         })
@@ -205,5 +223,5 @@ fn render_choice(
             this.child(Icon::new(IconName::Star).flex_none())
                 .with_tooltip(|_, _| Tooltip::new(crate::tr!("choice.recommended")))
         });
-    glide.measure(key, segment(radio, selected, !disabled, compact, cx))
+    glide.measure(key, segment(radio, hover_fill, compact, cx))
 }
