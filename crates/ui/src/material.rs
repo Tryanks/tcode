@@ -492,6 +492,17 @@ where
     E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
     selectable_surface(el, selectable_row_height(compact), selected, compact, cx)
+        .when(selected, |row| row.bg(cx.theme().list_active))
+}
+
+/// A [`selectable_row`] whose selected fill is a mark its list draws under
+/// it and glides between rows (a [`TabBar`](crate::widgets::tabs::TabBar)
+/// rail).
+pub(crate) fn selectable_row_under_mark<E>(el: E, selected: bool, compact: bool, cx: &App) -> E
+where
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
+{
+    selectable_surface(el, selectable_row_height(compact), selected, compact, cx)
 }
 
 /// The height of a [`selectable_row_two_line`].
@@ -516,6 +527,7 @@ where
         compact,
         cx,
     )
+    .when(selected, |row| row.bg(cx.theme().list_active))
 }
 
 /// The desktop rail's 10pt inset and 6pt gap sit between gpui-base's spacing
@@ -525,7 +537,7 @@ where
     E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
     let theme = cx.theme();
-    let (active, hover) = (theme.list_active, theme.list_hover);
+    let hover = theme.list_hover;
     let gap = if compact {
         theme.tokens.spacing.sm
     } else {
@@ -540,7 +552,6 @@ where
         .gap(gap)
         .px(inset)
         .rounded(radius)
-        .when(selected, |row| row.bg(active))
         // A row the pointer selects lets its hover fill go as it is selected.
         .child(crate::motion::hover_layer(
             hover.opacity(0.),
