@@ -119,17 +119,18 @@ fn pane_menu(panes: crate::shell::PaneControls) -> impl IntoElement {
 
 /// The agents' cue on the button that shows the Agents panel: it fades in
 /// while an agent runs or waits to be settled, and changes colour between the
-/// two.
+/// two, on the header's clock `motion`.
 fn agents_cue_dot(
     cue: Option<gpui::Hsla>,
+    motion: &crate::motion::owned::Owned,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
-    let shown = crate::motion::shown("agents-cue", cue, window, cx)?;
-    let color = gpui_base::motion::transition(
+    let shown = motion.shown("agents-cue", cue, window, cx)?;
+    let color = motion.transition(
         "agents-cue-color",
         shown.value,
-        crate::motion::settle(),
+        &crate::motion::owned::Curve::settle(),
         window,
         cx,
     );
@@ -546,27 +547,30 @@ impl ChatView {
         let overflow = width - compact_extra < HEADER_COMPACT_MIN_WIDTH;
         let traffic_lights = window_caption::traffic_light_inset(window);
         // One cue for either tier, so a tier change leaves it as it was.
-        let mut cue = agents_cue_dot(agents_cue.flatten(), window, cx);
+        let motion = self.header_motion.clone();
+        let mut cue = agents_cue_dot(agents_cue.flatten(), &motion, window, cx);
         // Controls that come and go with what the thread has widen into
         // their rows, so the title and their neighbours move aside.
         // Sampled in every tier and drawn only where the tier has room, so a
-        // change of tier is not a coming or going.
-        let badge = crate::motion::shown(
-            "header-pr-badge-fold",
-            self.active_pull_requests(cx)
-                .filter(|links| !links.is_empty()),
-            window,
-            cx,
-        )
-        .filter(|_| !overflow);
+        // change of tier is not a coming or going. Their clocks are the
+        // view's, so a pane re-parented by the dock carries them on.
+        let badge = motion
+            .shown(
+                "header-pr-badge-fold",
+                self.active_pull_requests(cx)
+                    .filter(|links| !links.is_empty()),
+                window,
+                cx,
+            )
+            .filter(|_| !overflow);
         let toggle_gap = gpui::rems(0.25).to_pixels(window.rem_size());
-        let agents_toggle = crate::motion::shown(
+        let agents_toggle = motion.shown(
             "agents-toggle-fold",
             agents_cue.is_some().then_some(()),
             window,
             cx,
         );
-        let preview_toggle = crate::motion::shown(
+        let preview_toggle = motion.shown(
             "preview-toggle-fold",
             self.workspace_store.read(cx).offers_preview().then_some(()),
             window,
@@ -822,6 +826,7 @@ impl ChatView {
                             )
                             .child(
                                 Button::new("plan-panel")
+                                    .debug_selector(|| "plan-panel".into())
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
@@ -1422,23 +1427,96 @@ mod tests {
         );
     }
 
+    /// A chat drawn under one parent or another, as the dock draws a pane's
+    /// group under a new parent whenever the panes around it change.
+    struct Reparented {
+        chat: gpui::Entity<ChatView>,
+        moved: bool,
+    }
+
+    impl gpui::Render for Reparented {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+            let chat = self.chat.clone();
+            if self.moved {
+                gpui::div()
+                    .size_full()
+                    .child(gpui::div().id("new-parent").size_full().child(chat))
+            } else {
+                gpui::div().size_full().child(chat)
+            }
+        }
+    }
+
+    /// `at` on each frame of a change `change` starts, the chat moved to a
+    /// new parent on the third frame when `moved`, until it has come to rest.
+    fn follow(
+        root: &gpui::Entity<Reparented>,
+        change: impl FnOnce(&mut gpui::VisualTestContext),
+        moved: bool,
+        at: impl Fn(&mut gpui::VisualTestContext) -> gpui::Pixels,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Vec<gpui::Pixels> {
+        let mut seen = vec![at(cx)];
+        change(cx);
+        draw(cx);
+        seen.push(at(cx));
+        for frame in 0..20 {
+            if moved && frame == 2 {
+                root.update(cx, |root, cx| {
+                    root.moved = !root.moved;
+                    cx.notify();
+                });
+            }
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+            seen.push(at(cx));
+        }
+        crate::test_frames::draw_settled(cx);
+        seen.push(at(cx));
+        seen
+    }
+
+    /// Whether `seen` moves one way from its first value to its last, through
+    /// at least three values between them.
+    fn glides(seen: &[gpui::Pixels]) -> bool {
+        let (from, to) = (seen[0], *seen.last().unwrap());
+        from != to
+            && seen.windows(2).all(|pair| {
+                if to > from {
+                    pair[1] >= pair[0]
+                } else {
+                    pair[1] <= pair[0]
+                }
+            })
+            && seen.iter().filter(|at| **at != from && **at != to).count() >= 3
+    }
+
     /// Over a collapsed sidebar the header clears the traffic lights; as its
     /// pane moves off the window's left edge and back the clearance glides
-    /// over several frames, one way each time, and with motion reduced it
+    /// over several frames, one way each time, carrying on when the dock
+    /// draws the pane under a new parent part way; with motion reduced it
     /// changes at once.
     #[cfg(target_os = "macos")]
     #[gpui::test]
     fn the_traffic_light_clearance_glides_as_a_pane_leaves_the_edge(cx: &mut TestAppContext) {
         use crate::chat::WindowEdges;
         use crate::test_frames::draw_settled;
-        use gpui::{VisualTestContext, px, size};
-        use std::time::Duration;
+        use gpui::{AppContext as _, VisualTestContext, px, size};
 
         let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(1));
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            ChatView::new(store.clone(), window_state.clone(), window, cx)
+        let (root, cx) = cx.add_window_view(|window, cx| Reparented {
+            chat: cx.new(|cx| ChatView::new(store.clone(), window_state.clone(), window, cx)),
+            moved: false,
         });
         let cx: &mut VisualTestContext = cx;
+        let view = root.read_with(cx, |root, _| root.chat.clone());
         cx.simulate_resize(size(px(1_024.), px(700.)));
         window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
         draw_settled(cx);
@@ -1451,36 +1529,69 @@ mod tests {
         for reduce in [false, true] {
             cx.update(|_, cx| cx.set_reduce_motion(reduce));
             for left in [false, true] {
-                let from = toggle(cx);
-                view.update(cx, |chat, cx| {
-                    chat.set_edges(WindowEdges { left, right: true }, cx)
-                });
-                draw(cx);
-                let mut seen = vec![from, toggle(cx)];
-                for _ in 0..20 {
-                    cx.executor().advance_clock(Duration::from_millis(16));
-                    cx.update(|window, cx| window.simulate_next_frame(cx));
-                    draw(cx);
-                    seen.push(toggle(cx));
-                }
-                draw_settled(cx);
-                let to = toggle(cx);
-                assert_eq!(left, to == cleared, "{seen:?}");
-                assert!(
-                    seen.windows(2).all(|pair| if to > from {
-                        pair[1] >= pair[0]
-                    } else {
-                        pair[1] <= pair[0]
-                    }),
-                    "the clearance stepped back: {seen:?}"
-                );
-                let between = seen.iter().filter(|at| **at != from && **at != to).count();
+                let edges = |cx: &mut VisualTestContext| {
+                    view.update(cx, |chat, cx| {
+                        chat.set_edges(WindowEdges { left, right: true }, cx)
+                    })
+                };
+                let seen = follow(&root, edges, !reduce, toggle, cx);
+                assert_eq!(left, *seen.last().unwrap() == cleared, "{seen:?}");
                 if reduce {
-                    assert_eq!(seen[1], to, "it glided with motion reduced: {seen:?}");
+                    assert_eq!(seen[1], seen[seen.len() - 1], "it glided: {seen:?}");
                 } else {
-                    assert!(between >= 3, "the clearance jumped: {seen:?}");
+                    assert!(glides(&seen), "the clearance jumped: {seen:?}");
                 }
             }
+        }
+    }
+
+    /// The Agents toggle widens into the header's toolbar with the thread's
+    /// first agent and narrows out with its last, over several frames,
+    /// carrying on when the dock draws the pane under a new parent part way.
+    #[gpui::test]
+    fn the_agents_toggle_folds_on_through_a_new_parent(cx: &mut TestAppContext) {
+        use agent::{ItemContent, ItemStatus};
+        use gpui::{AppContext as _, VisualTestContext, px, size};
+        use tcode_core::session::EntryContent;
+
+        let plain = synthetic_markdown_timeline(1);
+        let mut with_agent = plain.clone();
+        with_agent.entries.insert(
+            1,
+            entry(
+                "agent-1",
+                EntryContent::Item(ItemContent::Subagent {
+                    agent_type: "Explore".into(),
+                    description: "Survey the code".into(),
+                    status: ItemStatus::Completed,
+                    summary: None,
+                    model: None,
+                    effort: None,
+                }),
+            ),
+        );
+        let (store, window_state, session_id) = seed_chat(cx, plain.clone());
+        let (root, cx) = cx.add_window_view(|window, cx| Reparented {
+            chat: cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx)),
+            moved: false,
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        crate::test_frames::draw_settled(cx);
+        // The button before the toggle, which it moves aside.
+        let plan = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("plan-panel")
+                .expect("the plan button")
+                .left()
+        };
+        for timeline in [&with_agent, &plain] {
+            let replace = |cx: &mut VisualTestContext| {
+                store.update(cx, |store, cx| {
+                    store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx)
+                })
+            };
+            let seen = follow(&root, replace, true, plan, cx);
+            assert!(glides(&seen), "the toggle jumped: {seen:?}");
         }
     }
 }

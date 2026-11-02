@@ -100,7 +100,14 @@ pub(crate) struct Shown<T> {
     pub value: T,
     progress: f32,
     leaving: bool,
+    /// Where its fold keeps its measurement when an owner holds it
+    /// ([`owned::Owned::shown`]); in element state otherwise.
+    measure: Option<Measure>,
 }
+
+/// A fold's measured size, kept by an owner rather than in element state, so
+/// a fold under way carries on when its element is drawn under a new parent.
+pub(crate) type Measure = std::rc::Rc<std::cell::Cell<Option<Size<Pixels>>>>;
 
 /// Follow `value` in and out of a page over `SETTLE`. Once it is `None` the
 /// last value it had is kept until it has gone, so whatever leaves is drawn
@@ -133,6 +140,7 @@ pub(crate) fn shown<T: Clone + PartialEq + 'static>(
                 value,
                 progress,
                 leaving: false,
+                measure: None,
             })
         }
         None if progress > 0. => kept.read(cx).clone().map(|value| Shown {
@@ -140,6 +148,7 @@ pub(crate) fn shown<T: Clone + PartialEq + 'static>(
             value,
             progress,
             leaving: true,
+            measure: None,
         }),
         None => {
             if kept.read(cx).is_some() {
@@ -166,6 +175,7 @@ impl<T> Shown<T> {
         Reveal {
             id: child_id(&self.id, "fold"),
             progress: self.progress,
+            measure: self.measure.clone(),
             axis: Axis::Vertical,
             gap: px(0.),
             child: self.frame(content).w_full().into_any_element(),
@@ -187,6 +197,7 @@ impl<T> Shown<T> {
         Reveal {
             id: child_id(&self.id, "fold-across"),
             progress: self.progress,
+            measure: self.measure.clone(),
             axis: Axis::Horizontal,
             gap,
             child: self.frame(content).min_w_0().into_any_element(),
@@ -202,6 +213,7 @@ impl<T> Shown<T> {
         Reveal {
             id: child_id(&self.id, "fold-across"),
             progress: self.progress,
+            measure: self.measure.clone(),
             axis: Axis::Horizontal,
             gap: px(0.),
             child: self.frame(content).min_w(min).into_any_element(),
@@ -259,6 +271,8 @@ impl<T> Shown<T> {
 struct Reveal {
     id: ElementId,
     progress: f32,
+    /// Its measurement, when an owner keeps it.
+    measure: Option<Measure>,
     /// The extent it folds: height in a column, width in a row.
     axis: Axis,
     /// In a row, the gap before it that it brings and takes away.
@@ -306,6 +320,11 @@ impl gpui::Element for Reveal {
         let measured = window.with_element_state(global_id, |size: Option<Size<Pixels>>, _| {
             (size, size.unwrap_or_default())
         });
+        let measured = self
+            .measure
+            .as_ref()
+            .and_then(|measure| measure.get())
+            .or(measured);
         let folded = |size: Size<Pixels>, progress: f32| {
             let mut style = gpui::Style::default();
             match self.axis {
@@ -317,9 +336,21 @@ impl gpui::Element for Reveal {
                     let progress = progress.clamp(0., 1.);
                     // It shrinks with the row as its content would at rest.
                     style.min_size.width = px(0.).into();
-                    style.size.width = (size.width * progress).into();
+                    let width = size.width * progress;
+                    let pull = self.gap * (1. - progress);
+                    // Taffy sizes a row by its children's widths and leaves
+                    // out the margin of a child with no width, so a fold
+                    // pulling its gap back at (almost) no width would widen
+                    // a row sized by its children by the gap. It keeps a
+                    // pixel of width, pulled back with the gap.
+                    let lead = if pull > px(0.) {
+                        (px(1.) - width).max(px(0.))
+                    } else {
+                        px(0.)
+                    };
+                    style.size.width = (width + lead).into();
                     style.size.height = size.height.into();
-                    style.margin.left = (-self.gap * (1. - progress)).into();
+                    style.margin.left = (-(pull + lead)).into();
                 }
             }
             style
@@ -373,6 +404,10 @@ impl gpui::Element for Reveal {
         let changed = window.with_element_state(global_id, |measured: Option<Size<Pixels>>, _| {
             (measured != Some(size), size)
         });
+        let changed = match &self.measure {
+            Some(measure) => measure.replace(Some(size)) != Some(size),
+            None => changed,
+        };
         if changed && matches!(layout, RevealLayout::Clipped) {
             window.request_animation_frame();
         }
@@ -945,24 +980,35 @@ mod tests {
                         .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
                 )
             });
-            div()
-                .flex()
-                .flex_row()
-                .gap(gap)
-                .child(div().w(px(30.)).h(px(20.)))
-                .children(chip)
-                .child(
-                    div()
-                        .debug_selector(|| "after".into())
-                        .w(px(30.))
-                        .h(px(20.)),
-                )
+            // A row as wide as its children, at the right end of its parent,
+            // so its own width follows what the chip takes.
+            div().w(px(400.)).flex().justify_end().child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .gap(gap)
+                    .child(
+                        div()
+                            .debug_selector(|| "before".into())
+                            .w(px(30.))
+                            .h(px(20.)),
+                    )
+                    .children(chip)
+                    .child(
+                        div()
+                            .debug_selector(|| "after".into())
+                            .w(px(30.))
+                            .h(px(20.)),
+                    ),
+            )
         }
     }
 
     /// A chip that comes into a row widens into it, gap and all, so the
-    /// neighbour after it moves aside one way without a jump; going, it
-    /// narrows out the same way and takes no clicks.
+    /// neighbour before it moves aside one way without a jump while the one
+    /// after it holds the row's end; going, it narrows out the same way and
+    /// takes no clicks.
     #[gpui::test]
     fn a_chip_widens_into_its_row_and_narrows_out(cx: &mut TestAppContext) {
         use crate::test_frames::{draw, draw_settled};
@@ -971,15 +1017,19 @@ mod tests {
             chip: false,
             clicks: clicks.clone(),
         });
-        let after = |cx: &mut VisualTestContext| cx.debug_bounds("after").unwrap().left();
-        assert_eq!(after(cx), px(38.));
-        for (chip, from, to) in [(true, px(38.), px(96.)), (false, px(96.), px(38.))] {
+        let before = |cx: &mut VisualTestContext| {
+            let end = cx.debug_bounds("after").unwrap().right();
+            assert_eq!(end, px(400.), "the row's end moved");
+            cx.debug_bounds("before").unwrap().left()
+        };
+        assert_eq!(before(cx), px(332.));
+        for (chip, from, to) in [(true, px(332.), px(274.)), (false, px(274.), px(332.))] {
             pill.update(cx, |pill, cx| {
                 pill.chip = chip;
                 cx.notify();
             });
             draw(cx);
-            let mut seen = vec![after(cx)];
+            let mut seen = vec![before(cx)];
             if !chip {
                 let leaving = cx.debug_bounds("chip").expect("drawn while it goes");
                 cx.simulate_click(leaving.center(), Default::default());
@@ -989,10 +1039,10 @@ mod tests {
                     .advance_clock(std::time::Duration::from_millis(16));
                 cx.update(|window, cx| window.simulate_next_frame(cx));
                 draw(cx);
-                seen.push(after(cx));
+                seen.push(before(cx));
             }
             draw_settled(cx);
-            seen.push(after(cx));
+            seen.push(before(cx));
             assert!((seen[0] - from).abs() <= px(1.), "{chip}: jumped: {seen:?}");
             assert_eq!(*seen.last().unwrap(), to, "{chip}: {seen:?}");
             assert!(
