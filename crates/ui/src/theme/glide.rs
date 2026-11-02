@@ -7,7 +7,12 @@
 //! and draws the window again. What is not a colour — the mode, fonts,
 //! radii, the syntax palette — is the new mode's from the first frame.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use gpui::{App, Global, Hsla, Rgba, Window};
 use gpui_base::{
