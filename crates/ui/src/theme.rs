@@ -382,6 +382,14 @@ fn install(theme: Theme, cx: &mut App) {
             } else {
                 ScrollbarMode::Hover
             })
+            // gpui-base keeps a scrollbar's fade and width in a private
+            // `ScrollbarState` under its element path (`Window::use_state`),
+            // with no owner a view could hold instead, so a scrollbar its view
+            // draws under another parent (a page as the window turns compact
+            // or wide, a pane a zoom lifts) starts hidden there rather than
+            // carrying on its fade. Keeping it in the view means a Tcode
+            // `Scrollbar` in place of gpui-base's; until then this gap stands,
+            // and goes once gpui-base keys that state by an owner.
             .with_motion(
                 ScrollbarMotion::default()
                     .with_enter(crate::edge_back::SETTLE)

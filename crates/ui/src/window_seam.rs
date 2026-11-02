@@ -24,6 +24,10 @@ pub(crate) const COMPACT_BREAKPOINT: f32 = 900.;
 /// covers the home indicator does not need it counted a second time — that is
 /// what `WindowInsets::effective()` computes for the window. Backgrounds still
 /// paint edge to edge; only interactive content is constrained, and only once.
+///
+/// Each value is where the system's edges end up: GPUI gives no curve or
+/// duration for a software keyboard's slide, so what follows these insets
+/// moves at once while the keyboard animates (see `AppShell::within_seam`).
 pub(crate) fn content_insets(window: &Window) -> Edges<Pixels> {
     let viewport = window.viewport_size();
     let visible = window.fully_visible_bounds();
