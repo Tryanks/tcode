@@ -371,7 +371,7 @@ impl RowGlide {
                     }
                     _ => None,
                 },
-                |child, progress| child.opacity(progress),
+                |child, progress| child.opacity(opacity(progress)),
             )
             .child(child)
             .into_any_element();
@@ -399,6 +399,16 @@ impl RowGlide {
                 .child(super::shield()),
         )
     }
+}
+
+/// How opaque a row arriving or leaving at `progress` of its height is. Its
+/// content is clipped to that height, so a row whose fade kept pace with
+/// its height would show, late in a fold, as a faint sliver of its top; the
+/// fade runs ahead instead, and a leaving row is gone while its room is still
+/// closing, an arriving one shows once it has room to.
+fn opacity(progress: f32) -> f32 {
+    const UNSEEN: f32 = 0.3;
+    ((progress - UNSEEN) / (1. - UNSEEN)).clamp(0., 1.)
 }
 
 #[derive(Clone, Copy, Default)]
