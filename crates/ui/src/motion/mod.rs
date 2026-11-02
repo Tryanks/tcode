@@ -14,7 +14,10 @@ mod scene;
 
 pub(crate) mod drag_ghost;
 pub(crate) mod keyed;
+mod size_glide;
+
 pub(crate) use keyed::{keyed, keyed_across};
+pub(crate) use size_glide::{GlideAxes, GlideState, SizeGlide};
 #[cfg(any(
     test,
     all(preview_backend, any(target_os = "macos", target_os = "ios"))
@@ -52,6 +55,17 @@ pub(crate) fn lift(progress: f32) -> Pixels {
 /// The house transition: [`crate::edge_back::SETTLE`].
 pub(crate) fn settle() -> Transition {
     Transition::new(crate::edge_back::SETTLE)
+}
+
+/// How far [`settle`] has come `elapsed` after it started, from 0 to 1, for
+/// motion that keeps its own clock: its easing over its duration.
+pub(crate) fn settle_progress(elapsed: std::time::Duration) -> f32 {
+    gpui_base::motion::Timing::new(crate::edge_back::SETTLE)
+        .ease(gpui_base::motion::Easing::Custom(std::rc::Rc::new(
+            gpui_base::animation::ease_out_cubic,
+        )))
+        .sample(elapsed)
+        .directed_progress
 }
 
 /// The house spring, for a position that follows the pointer or a reorder
@@ -139,6 +153,7 @@ impl<T> Shown<T> {
             id: child_id(&self.id, "fold"),
             progress: self.progress,
             axis: Axis::Vertical,
+            gap: px(0.),
             child: self.frame(content).w_full().into_any_element(),
         }
         .into_any_element()
@@ -147,11 +162,20 @@ impl<T> Shown<T> {
     /// Beside other content in a row: grows to its width and fades in,
     /// shrinks and fades out, so what is beside it moves over as it does.
     pub(crate) fn fold_across(&self, content: impl IntoElement) -> AnyElement {
+        self.fold_across_gap(px(0.), content)
+    }
+
+    /// [`Self::fold_across`] in a row with a `gap` between its children: the
+    /// gap before it comes and goes with it, so nothing beside it jumps by
+    /// the gap as it starts or finishes. At rest it shrinks with the row as
+    /// its content would.
+    pub(crate) fn fold_across_gap(&self, gap: Pixels, content: impl IntoElement) -> AnyElement {
         Reveal {
             id: child_id(&self.id, "fold-across"),
             progress: self.progress,
             axis: Axis::Horizontal,
-            child: self.frame(content).flex_none().into_any_element(),
+            gap,
+            child: self.frame(content).min_w_0().into_any_element(),
         }
         .into_any_element()
     }
@@ -177,27 +201,30 @@ impl<T> Shown<T> {
     }
 }
 
-/// A fold's clipped, measured height.
+/// A fold's clipped, measured height, or width.
 ///
 /// gpui-base's `MotionReveal` lays a child it has not measured yet out at
 /// zero height, so a section open on the frame that first draws it (a
 /// message's actions, an open disclosure) comes in a frame late and moves
-/// what is below. This one lays its child out as itself while it is at rest
-/// or unmeasured, and clips it to its measurement scaled by the progress
-/// only while it folds. Its child keeps its place in the tree in both.
+/// what is below; and it folds only heights. This one lays its child out as
+/// itself while it is at rest or unmeasured, and clips it to its measurement
+/// scaled by the progress only while it folds. Its child keeps its place in
+/// the tree in both.
 struct Reveal {
     id: ElementId,
     progress: f32,
     /// The extent it folds: height in a column, width in a row.
     axis: Axis,
+    /// In a row, the gap before it that it brings and takes away.
+    gap: Pixels,
     child: AnyElement,
 }
 
-/// How a fold or a glide lays its content out this frame.
+/// How a fold lays its content out this frame.
 pub(crate) enum RevealLayout {
     /// The content is the element's layout.
     Plain,
-    /// The element is laid out at its own height; the content is laid out on
+    /// The element is laid out at its own size; the content is laid out on
     /// its own and clipped to it.
     Clipped,
 }
@@ -241,9 +268,12 @@ impl gpui::Element for Reveal {
                     style.size.height = (size.height * progress.clamp(0., 1.)).into();
                 }
                 Axis::Horizontal => {
-                    style.flex_shrink = 0.;
-                    style.size.width = (size.width * progress.clamp(0., 1.)).into();
+                    let progress = progress.clamp(0., 1.);
+                    // It shrinks with the row as its content would at rest.
+                    style.min_size.width = px(0.).into();
+                    style.size.width = (size.width * progress).into();
                     style.size.height = size.height.into();
+                    style.margin.left = (-self.gap * (1. - progress)).into();
                 }
             }
             style
@@ -573,175 +603,6 @@ impl CrossFade {
                     .child(content)
                     .when(leaving, |el| el.child(shield()))
             }))
-    }
-}
-
-/// Content whose layout height glides from the height it was painted at to
-/// its own new height, clipped to the glided height on the way.
-///
-/// Its owner keeps the clock and the heights: it starts a glide with
-/// [`GlideHeights::begin`] when the content changes, samples the progress
-/// from 0 to 1 on its own clock each frame, and passes both to
-/// [`GlideHeight::gliding`]. At rest, or before the content was ever
-/// painted, the element is the content's own layout. A glide that starts
-/// while another is under way starts where that one had got to.
-///
-/// gpui-base's `MotionReveal` scales one measurement by a progress, and its
-/// `transition` animates values; neither moves an element's layout from one
-/// height to its content's new one. The heights live with the owner rather
-/// than in element state, so content laid out in a measuring pass under
-/// other element ids (a virtualized document measuring its blocks) sizes as
-/// the painted pass does.
-pub(crate) struct GlideHeight {
-    progress: f32,
-    from: Option<Pixels>,
-    heights: GlideHeights,
-    child: AnyElement,
-}
-
-/// The heights a [`GlideHeight`] keeps with its owner, for as long as the
-/// content it glides lives.
-#[derive(Clone, Default)]
-pub(crate) struct GlideHeights {
-    /// The height the content was last painted at, mid-glide included.
-    painted: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
-    /// The content's own height, measured while it glides.
-    content: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
-}
-
-impl GlideHeights {
-    /// Where a glide that starts now starts: the height last painted, or
-    /// `None` before the content was painted, when there is nothing to glide
-    /// from.
-    pub(crate) fn begin(&self) -> Option<Pixels> {
-        self.content.set(None);
-        self.painted.get()
-    }
-
-    /// Whether the content has been painted, and so has a height a glide
-    /// could start from.
-    pub(crate) fn painted(&self) -> bool {
-        self.painted.get().is_some()
-    }
-}
-
-impl GlideHeight {
-    /// `child` at rest, at its own height.
-    pub(crate) fn new(heights: &GlideHeights, child: impl IntoElement) -> Self {
-        Self {
-            progress: 1.,
-            from: None,
-            heights: heights.clone(),
-            child: child.into_any_element(),
-        }
-    }
-
-    /// Glide from `from`, which [`GlideHeights::begin`] gave, to the
-    /// content's own height; `progress` runs from 0 to 1.
-    pub(crate) fn gliding(mut self, from: Option<Pixels>, progress: f32) -> Self {
-        self.from = from;
-        self.progress = progress;
-        self
-    }
-}
-
-impl IntoElement for GlideHeight {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl gpui::Element for GlideHeight {
-    type RequestLayoutState = RevealLayout;
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (gpui::LayoutId, RevealLayout) {
-        match self.from.filter(|_| self.progress < 1.) {
-            Some(from) => {
-                // The content's height is measured while it is painted, a
-                // frame behind; until then the glide holds where it starts.
-                let to = self.heights.content.get().unwrap_or(from);
-                let progress = self.progress.clamp(0., 1.);
-                let mut style = gpui::Style::default();
-                style.size.width = gpui::relative(1.).into();
-                style.size.height = (from + (to - from) * progress).into();
-                (
-                    window.request_layout(style, None, cx),
-                    RevealLayout::Clipped,
-                )
-            }
-            None => (self.child.request_layout(window, cx), RevealLayout::Plain),
-        }
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        bounds: gpui::Bounds<Pixels>,
-        layout: &mut RevealLayout,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.heights.painted.set(Some(bounds.size.height));
-        match layout {
-            RevealLayout::Plain => {
-                self.child.prepaint(window, cx);
-            }
-            RevealLayout::Clipped => {
-                let content = self
-                    .child
-                    .layout_as_root(
-                        gpui::size(
-                            gpui::AvailableSpace::Definite(bounds.size.width),
-                            gpui::AvailableSpace::MinContent,
-                        ),
-                        window,
-                        cx,
-                    )
-                    .height;
-                self.heights.content.set(Some(content));
-                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-                    self.child.prepaint_at(bounds.origin, window, cx);
-                });
-            }
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        bounds: gpui::Bounds<Pixels>,
-        layout: &mut RevealLayout,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        match layout {
-            RevealLayout::Plain => self.child.paint(window, cx),
-            RevealLayout::Clipped => {
-                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-                    self.child.paint(window, cx);
-                });
-            }
-        }
     }
 }
 

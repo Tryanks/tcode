@@ -41,10 +41,7 @@ use gpui::{
     StatefulInteractiveElement as _, Style, Styled, StyledImage as _, SvgRenderer, Task, Window,
     div, img, prelude::FluentBuilder as _, px, relative, rems, size,
 };
-use gpui_base::{
-    h_flex,
-    motion::{Easing, Timing},
-};
+use gpui_base::h_flex;
 use mermaid_rs_renderer::{
     LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict, render_svg,
 };
@@ -56,7 +53,7 @@ use super::{
 };
 use crate::{
     icon::IconName,
-    motion::{CrossFade, GlideHeight, GlideHeights},
+    motion::{CrossFade, GlideState, SizeGlide},
     theme::ActiveTheme as _,
     typography::TextRole as _,
     widgets::copy::{action_button, copy_button},
@@ -76,16 +73,6 @@ const REST: Duration = Duration::from_millis(150);
 /// streams in: one fade, then [`REST`].
 fn swap_interval() -> Duration {
     crate::edge_back::SETTLE + REST
-}
-
-/// How far a swap has come, from the picture it replaces to the new one.
-fn progress(elapsed: Duration) -> f32 {
-    Timing::new(crate::edge_back::SETTLE)
-        .ease(Easing::Custom(Rc::new(
-            gpui_base::animation::ease_out_cubic,
-        )))
-        .sample(elapsed)
-        .directed_progress
 }
 
 /// The most pixels a diagram is rasterized with, so a huge one does not
@@ -291,7 +278,7 @@ pub(super) enum Layer {
 struct Swap {
     at: Instant,
     /// The block's height where it was painted when the swap began.
-    from: Option<Pixels>,
+    from: Option<gpui::Size<Pixels>>,
     from_layer: Layer,
 }
 
@@ -338,7 +325,7 @@ pub(super) struct Slot {
     timer: Option<(Instant, Task<()>)>,
     /// The fence has been laid out before.
     built: bool,
-    glide: GlideHeights,
+    glide: GlideState,
 }
 
 impl Slot {
@@ -709,7 +696,9 @@ pub(super) fn block(
     let generation = slot.map_or(0, |slot| slot.generation);
     let glide = slot.map(|slot| slot.glide.clone()).unwrap_or_default();
     let now = cx.background_executor().now();
-    let progress = swap.map_or(1., |swap| progress(now.saturating_duration_since(swap.at)));
+    let progress = swap.map_or(1., |swap| {
+        crate::motion::settle_progress(now.saturating_duration_since(swap.at))
+    });
 
     let layer_fade = swap
         .filter(|swap| swap.from_layer != layer)
@@ -882,7 +871,7 @@ pub(super) fn block(
         .relative()
         .rounded(crate::material::radius_card(cx))
         .bg(cx.theme().tokens.colors.muted)
-        .child(GlideHeight::new(&glide, faces).gliding(swap.and_then(|swap| swap.from), progress))
+        .child(SizeGlide::new(&glide, faces).gliding(swap.and_then(|swap| swap.from), progress))
         .child(actions);
     #[cfg(test)]
     let card = {

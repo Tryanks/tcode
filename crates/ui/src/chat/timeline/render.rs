@@ -1085,9 +1085,11 @@ impl ChatView {
                 tools::window::Detail::None
             } else {
                 match tools::window::fold(&window_key, expanded, window, cx) {
-                    Some(shown) => {
-                        tools::window::Detail::Fold(shown, self.inline_diffs.render(&key, file, cx))
-                    }
+                    Some(shown) => tools::window::Detail::Fold(
+                        shown,
+                        self.inline_diffs.render(&key, file, cx),
+                        0,
+                    ),
                     None => tools::window::Detail::Shut,
                 }
             };
@@ -1161,8 +1163,9 @@ impl ChatView {
         } else {
             match tools::window::fold(&entry.id, expanded, window, cx) {
                 Some(shown) => {
+                    let shows = self.activity_body_key(entry, status);
                     let body = self.activity_body(entry, cwd, row.images_inline, cx);
-                    tools::window::Detail::Fold(shown, body)
+                    tools::window::Detail::Fold(shown, body, shows)
                 }
                 None => tools::window::Detail::Shut,
             }
@@ -1186,6 +1189,27 @@ impl ChatView {
             }),
             cx,
         )
+    }
+
+    /// What an open activity window's body shows, as far as its height goes:
+    /// whether the call is done, how much of its output this client holds,
+    /// and which of its parts the reader opened.
+    fn activity_body_key(&self, entry: &TimelineEntry, status: agent::ItemStatus) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        std::mem::discriminant(&status).hash(&mut hash);
+        self.full_outputs
+            .get(&entry.id)
+            .map(std::mem::discriminant)
+            .hash(&mut hash);
+        let mut open: Vec<_> = self
+            .expanded
+            .iter()
+            .filter(|key| key.contains(entry.id.as_str()))
+            .collect();
+        open.sort();
+        open.hash(&mut hash);
+        hash.finish()
     }
 
     /// The body of an open activity window.
