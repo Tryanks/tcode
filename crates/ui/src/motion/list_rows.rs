@@ -460,14 +460,18 @@ pub(crate) enum Glide {
     /// measured (a row drawn somewhere new as it leaves), it is laid out as
     /// tall as it is, so it folds from its whole height.
     Leave(f32),
-    /// The live end of a list the reader follows: each time its `content`
-    /// changes, its height glides to the new measurement. At rest it is laid
-    /// out as a plain child, so height that changes on its own (a fold
-    /// inside it, an image that loaded) moves once, by its own motion.
+    /// Each time its `content` changes, its height glides to the new
+    /// measurement: the live end of a list the reader follows, or a row
+    /// whose owner knows what changes its height (a diff row's wrapping).
+    /// At rest it is laid out as a plain child, so height that changes on
+    /// its own (a fold inside it, an image that loaded) moves once, by its
+    /// own motion, and a list of rows at rest costs what it would without.
     Tail { content: u64 },
     /// A row whose own height changes at rest — a card opened under it, an
-    /// editor in place of its text, its lines wrapping — glides to each new
-    /// measurement, a frame behind. A new `scope` (the list's viewport
+    /// editor in place of its text — glides to each new measurement, a frame
+    /// behind. It is measured apart from the list every frame, so it suits
+    /// a few rows (cards in a conversation, what is under a diff line), not
+    /// every row of a long list. A new `scope` (the list's viewport
     /// resized) takes the new height at once, so a resize does not trail.
     /// With motion reduced it is laid out as a plain child.
     Height { scope: u64 },
@@ -549,6 +553,10 @@ struct Measured {
     retarget: bool,
     /// The height is on its way to `target`.
     gliding: bool,
+    /// For [`Glide::Height`]: the scope last seen, and the glide under way,
+    /// from the height shown when the content changed, and when.
+    scope: Option<u64>,
+    run: Option<(Pixels, Instant)>,
 }
 
 pub(crate) enum GlideLayout {
@@ -591,20 +599,30 @@ impl Element for RowGlide {
             Glide::Rest => None,
             Glide::Height { .. } if cx.reduce_motion() => None,
             Glide::Height { scope } => {
-                let measured = window.with_element_state(global_id, |state, _| {
-                    let state: Measured = state.unwrap_or_default();
-                    (state.height, state)
+                // Its own clock in its element state, not a transition: a list
+                // draws many such rows at rest every frame.
+                let state = window.with_element_state(global_id, |state, _| {
+                    let mut state: Measured = state.unwrap_or_default();
+                    if state.scope != Some(scope) {
+                        state.run = None;
+                    }
+                    state.scope = Some(scope);
+                    (state, state)
                 });
-                measured.map(|height| {
-                    // Keyed by the scope, so a new one starts at its height.
-                    let glided = gpui_base::motion::transition(
-                        gpui::SharedString::from(format!("height-{scope}")),
-                        height,
-                        super::settle(),
-                        window,
-                        cx,
-                    );
-                    (glided, px(0.))
+                let now = cx.background_executor().now();
+                state.height.map(|height| {
+                    let shown = match state.run {
+                        Some((from, at)) => {
+                            let progress =
+                                super::settle_progress(now.saturating_duration_since(at));
+                            if progress < 1. {
+                                window.request_animation_frame();
+                            }
+                            from + (height - from) * progress.min(1.)
+                        }
+                        None => height,
+                    };
+                    (shown, px(0.))
                 })
             }
             Glide::Enter(progress) | Glide::Leave(progress) => {
@@ -711,10 +729,15 @@ impl Element for RowGlide {
                 cx,
             )
             .height;
+        let now = cx.background_executor().now();
+        let height_glide = matches!(self.glide, Glide::Height { .. });
         let moved =
             window.with_element_state(global_id.expect("RowGlide has an id"), |state, _| {
                 let mut state: Measured = state.unwrap_or_default();
                 let mut moved = state.height != Some(measured);
+                if height_glide && moved && state.height.is_some() {
+                    state.run = Some((bounds.size.height, now));
+                }
                 state.height = Some(measured);
                 if state.retarget {
                     moved |= state.target != Some(measured);
