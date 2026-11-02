@@ -4491,6 +4491,13 @@ impl AppShell {
     /// paint edge to edge — the surface below is the window's — and interactive
     /// content is inset exactly once, at both widths. A window the system does
     /// not occlude gets no wrapper at all.
+    ///
+    /// The insets jump to each new value (a software keyboard sliding up, a
+    /// rotation): GPUI reports only where the keyboard ends up, not the curve
+    /// and duration the platform moves it on, so a glide here would run on
+    /// its own clock beside the keyboard's instead of with it. That gap is
+    /// GPUI's (`content_insets`); once it hands over the keyboard's
+    /// animation, the insets transition on it here.
     fn within_seam(&self, body: AnyElement, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let seam = crate::window_seam::content_insets(window);
         if seam == gpui::Edges::default() {
