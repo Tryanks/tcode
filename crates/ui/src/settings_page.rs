@@ -1108,7 +1108,21 @@ impl SettingsPage {
 
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let spacing = cx.theme().tokens.spacing;
-        let mut tabs = v_flex().flex_1().min_h_0().px(spacing.sm).gap(spacing.xxs);
+        // One selection over the device, machine and advanced rails: its
+        // fill glides from a row of one to a row of another.
+        let mark = Rc::new(crate::widgets::tabs::Glide::new(
+            &"settings-rail".into(),
+            Some(crate::widgets::tabs::item_key(&self.section.id().into())),
+            window,
+            cx,
+        ));
+        let mut tabs = v_flex()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .px(spacing.sm)
+            .gap(spacing.xxs)
+            .child(mark.rail(cx));
         for (index, group) in [SectionGroup::Device, SectionGroup::Machine]
             .into_iter()
             .enumerate()
@@ -1138,6 +1152,7 @@ impl SettingsPage {
                     "settings-machine-tabs"
                 })
                 .rail()
+                .shared_mark(mark.clone())
                 .aria_label(crate::tr!("settings.title"))
                 .items(plain),
             );
@@ -1151,6 +1166,7 @@ impl SettingsPage {
                     .content(
                         TabBar::new("settings-advanced-tabs")
                             .rail()
+                            .shared_mark(mark.clone())
                             .aria_label(crate::tr!("settings.advanced"))
                             .items(
                                 sections
