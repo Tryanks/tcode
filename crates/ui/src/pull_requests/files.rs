@@ -822,7 +822,12 @@ impl PullRequestView {
         .into_owned()
     }
 
-    fn toolbar(&self, wide_column: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn toolbar(
+        &self,
+        wide_column: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let compact = self.compact(cx);
         let page = self.page();
         let files = page.and_then(|page| page.files.data.as_ref());
@@ -933,11 +938,26 @@ impl PullRequestView {
                 crate::tr!("diff.toggle_invisibles").into_owned(),
             ),
         ];
+        // The file jump widens in as the file column narrows away, and back, on the view's
+        // clock as the column's is; the bar's gap after it goes with it.
+        let gap = cx.theme().tokens.spacing.xs;
+        let file_jump = self
+            .motion
+            .shown(
+                "file-jump",
+                (!wide_column).then_some(count_label),
+                window,
+                cx,
+            )
+            .map(|shown| {
+                div()
+                    .flex_none()
+                    .mr(-gap * (1. - shown.progress()))
+                    .child(shown.fold_across(self.file_jump(shown.value.clone(), cx)))
+            });
         let mut toolbar = material::bar("pr-files-toolbar", material::Bar::Toolbar, compact, cx)
             .items_center()
-            .when(!wide_column, |toolbar| {
-                toolbar.child(self.file_jump(count_label, cx))
-            })
+            .children(file_jump)
             .children(viewed_counter)
             .children(self.review_entry(cx))
             .child(div().flex_1());
@@ -1448,7 +1468,7 @@ impl PullRequestView {
             .size_full()
             .min_h_0()
             .on_action(cx.listener(Self::on_option))
-            .child(self.toolbar(wide, cx))
+            .child(self.toolbar(wide, window, cx))
             .children(review_bar)
             .child(
                 h_flex()

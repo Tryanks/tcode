@@ -19,7 +19,6 @@ use gpui_base::{
 
 use crate::{
     icon::{Icon, IconName},
-    motion::PresencePhase,
     sizing::Sizable as _,
     theme::ActiveTheme as _,
     typography::TextRole as _,
@@ -81,6 +80,11 @@ pub struct Notification {
     content: Option<ContentBuilder>,
     action: Option<ActionBuilder>,
     transition_status: ToastTransitionStatus,
+    /// Its coming and going, kept here: the window draws a toast under
+    /// another parent as it turns compact or wide (the pill, or a card in
+    /// the stack), where a clock kept by its element path would bring it in
+    /// again.
+    motion: crate::motion::owned::Owned,
 }
 
 impl Notification {
@@ -102,6 +106,7 @@ impl Notification {
             content: None,
             action: None,
             transition_status: ToastTransitionStatus::Starting,
+            motion: Default::default(),
         }
     }
     pub fn info(message: impl Into<SharedString>) -> Self {
@@ -236,20 +241,14 @@ impl EventEmitter<DismissEvent> for Notification {}
 
 impl Render for Notification {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let presence = crate::motion::appear(
-            "toast-presence",
-            self.transition_status != ToastTransitionStatus::Ending,
-            window,
-            cx,
-        );
-        if !presence.should_render() {
+        let present = self.transition_status != ToastTransitionStatus::Ending;
+        let progress = self.motion.appear("presence", present, window, cx);
+        if !present && progress <= 0. {
             return div().into_any_element();
         }
         // gpui-base has no inert subtree: the cover takes the pointer from a
         // leaving toast, but a control already focused in it keeps focus.
-        let cover = (presence.phase == PresencePhase::Exiting)
-            .then(|| div().absolute().inset_0().occlude());
-        let progress = presence.progress;
+        let cover = (!present).then(|| div().absolute().inset_0().occlude());
         let lift = crate::motion::lift(progress);
         if crate::window_seam::window_is_compact(window, cx) {
             let action = self
@@ -444,7 +443,9 @@ impl NotificationList {
         let entity = match existing {
             Some(entity) => {
                 entity.update(cx, |current, cx| {
+                    let motion = current.motion.clone();
                     *current = note;
+                    current.motion = motion;
                     cx.notify();
                 });
                 entity
@@ -545,6 +546,11 @@ impl NotificationList {
         if changes.changed {
             cx.notify();
         }
+    }
+
+    /// Whether no notification is shown, leaving ones included.
+    pub(super) fn is_empty(&self) -> bool {
+        self.manager.is_empty()
     }
 
     /// Whether a notification of this type is shown and not already leaving.

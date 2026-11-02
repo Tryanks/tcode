@@ -83,6 +83,9 @@ pub(crate) struct Overlays {
     next_dialog_id: usize,
     sheets: Vec<gpui::WeakEntity<SheetBack>>,
     notifications: Entity<NotificationList>,
+    /// Where the toasts were drawn, so turning compact or wide glides them
+    /// from the corner to the bottom edge and back.
+    toast_place: crate::motion::reflow::ReflowState,
 }
 
 /// Register the overlays every window root mounts. Call before opening windows.
@@ -98,6 +101,7 @@ impl Overlays {
             next_dialog_id: 0,
             sheets: Vec::new(),
             notifications: cx.new(|cx| NotificationList::new(window, cx)),
+            toast_place: Default::default(),
         }
     }
 
@@ -218,7 +222,11 @@ impl Render for Overlays {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let seam = crate::window_seam::content_insets(window);
         let inset = px(crate::material::COMPACT_PAGE_INSET);
-        div()
+        // Each layout places the toasts against the window, and only a
+        // change of layout moves them: a resize within one keeps them where
+        // it anchors them.
+        let place = self.toast_place.scope(u64::from(compact)).in_window();
+        let root = div()
             .absolute()
             .inset_0()
             // The edit menu floats above what was selected, under any dialog.
@@ -251,8 +259,18 @@ impl Render for Overlays {
                             .mt(seam.top + inset)
                             .mr(seam.right + inset)
                     })
-                    .child(self.notifications.clone()),
-            )
+                    // Only toasts on screen glide: an empty list moving
+                    // between the layouts carries nothing a toast arriving
+                    // later should start from.
+                    .map(|position| {
+                        if self.notifications.read(cx).is_empty() {
+                            position.child(self.notifications.clone())
+                        } else {
+                            position.child(place.part("toasts", self.notifications.clone()))
+                        }
+                    }),
+            );
+        place.render(root)
     }
 }
 
@@ -836,6 +854,61 @@ mod tests {
         let position = cx.debug_bounds("notification-position").unwrap();
         assert_eq!(position.top(), px(16.));
         assert_eq!(position.right(), px(1184.));
+    }
+
+    /// A tablet turning compact draws the toast on screen as the bottom
+    /// pill, under another parent than the corner's stack: it glides from
+    /// the corner down to the bottom edge, shown all the way, rather than
+    /// jumping there and coming in again.
+    #[gpui::test]
+    fn a_shown_toast_glides_to_the_bottom_as_the_window_turns_compact(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(1024.), px(800.)));
+        cx.update(|window, cx| window.push_notification("Copied", cx));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        draw(cx);
+        let corner = cx
+            .debug_bounds("wide-toast")
+            .expect("the corner card")
+            .top();
+        // The pill and how opaque its fill is painted.
+        let pill = |cx: &mut VisualTestContext| {
+            let pill = cx.debug_bounds("compact-toast").expect("the pill");
+            let fill = cx.update(|window, _| {
+                let scaled = pill.scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|quad| quad.bounds == scaled)
+                    .filter_map(|quad| quad.background.as_solid().map(|fill| fill.a))
+                    .reduce(f32::max)
+                    .expect("the pill's fill")
+            });
+            (pill.top(), fill)
+        };
+
+        cx.simulate_resize(size(px(899.), px(800.)));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (gliding, shown) = pill(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        draw(cx);
+        let (bottom, rest) = pill(cx);
+        assert!(
+            corner < gliding && gliding < bottom,
+            "{gliding:?} between {corner:?} and {bottom:?}"
+        );
+        assert_eq!(
+            shown, rest,
+            "the pill is shown all the way, not coming in again"
+        );
     }
 
     #[gpui::test]
