@@ -261,6 +261,8 @@ pub(in crate::chat) struct WindowSpec {
     /// A file the call is about, which the menu offers to open, and the
     /// directory a relative one is under.
     pub(in crate::chat) path: Option<(String, std::path::PathBuf)>,
+    /// The timeline's hover, which the header's fill follows.
+    pub(in crate::chat) hover: crate::motion::ListHover,
 }
 
 /// How long an item took, when its start and its end were both seen.
@@ -294,6 +296,7 @@ pub(in crate::chat) fn tool_window(
         compact,
         copy,
         path,
+        hover,
     } = spec;
     let expandable = detail.expandable();
     let open = match &detail {
@@ -302,8 +305,11 @@ pub(in crate::chat) fn tool_window(
         Detail::None | Detail::Shut => false,
     };
     let label = header.label(status);
+    let radius = crate::material::radius_chip(cx);
+    let fill =
+        expandable.then(|| hover.layer(format!("activity-row-{key}"), cx.theme().accent, radius));
     let row = header_row(
-        &key, header, status, elapsed_ms, compact, expandable, open, cx,
+        &key, header, status, elapsed_ms, compact, expandable, open, fill, cx,
     );
     let row: AnyElement = if expandable {
         crate::material::accessible_clickable(
@@ -318,9 +324,8 @@ pub(in crate::chat) fn tool_window(
             move || format!("activity-row-{key}")
         })
         .aria_expanded(open)
-        .rounded(crate::material::radius_chip(cx))
+        .rounded(radius)
         .cursor_pointer()
-        .hover(|row| row.bg(cx.theme().accent))
         .on_click(on_toggle)
         .into_any_element()
     } else {
@@ -416,6 +421,7 @@ fn header_row(
     compact: bool,
     expandable: bool,
     open: bool,
+    fill: Option<crate::motion::Sampled>,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
@@ -454,6 +460,7 @@ fn header_row(
         .items_center()
         .when(!compact, |row| row.py_0p5())
         .text_body(false, cx)
+        .when_some(fill, |row, fill| row.relative().child(fill))
         .child(status_glyph(key, icon, status, cx))
         .child(
             h_flex()

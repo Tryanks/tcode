@@ -17,6 +17,14 @@ fn click() -> changed_files::ClickHandler {
     Box::new(|_, _, _| {})
 }
 
+/// The gallery's one list hover, which its rows' hover fills follow.
+fn hover() -> crate::motion::ListHover {
+    thread_local! {
+        static HOVER: crate::motion::ListHover = crate::motion::ListHover::new();
+    }
+    HOVER.with(Clone::clone)
+}
+
 pub fn section_label(label: &str) -> Div {
     crate::material::tracked_uppercase(label)
 }
@@ -59,7 +67,7 @@ pub fn user_bubble(
 }
 
 pub fn activity(entry: &TimelineEntry, expanded: bool, cx: &App) -> AnyElement {
-    crate::chat::tools::preview_window(entry, expanded, cx)
+    crate::chat::tools::preview_window(entry, expanded, hover(), cx)
 }
 
 pub fn work_log(
@@ -81,6 +89,7 @@ pub fn work_log(
             expanded: false,
             running: false,
             rows: Vec::new(),
+            hover: hover(),
         },
         |_, _, _| {},
         cx,
@@ -88,7 +97,7 @@ pub fn work_log(
 }
 
 pub fn subagent(entry: &TimelineEntry, cx: &App) -> AnyElement {
-    subagent::subagent_row(entry, None, false, cx)
+    subagent::subagent_row(entry, None, false, hover(), cx)
 }
 
 pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App) -> AnyElement {
@@ -194,5 +203,14 @@ pub fn callback(id: &str, callback: &OrchestrateCallback, expanded: bool, cx: &A
     let event = disclosure::callback_event_label(callback)
         .into_owned()
         .into();
-    disclosure::callback_row(id, event, callback, expanded, |_, _, _| {}, None, cx)
+    disclosure::callback_row(
+        id,
+        event,
+        callback,
+        expanded,
+        |_, _, _| {},
+        None,
+        hover(),
+        cx,
+    )
 }

@@ -216,7 +216,8 @@ pub struct ChatView {
     inline_diffs: InlineDiffCache,
     /// Whole tool outputs fetched for the open session, by item id.
     full_outputs: HashMap<String, FullOutput>,
-    /// The timeline row message the pointer is over, whose actions fade in.
+    /// The timeline item the pointer is over: a message whose actions fade
+    /// in, or a header, a row or a link whose hover fill or underline does.
     pub(super) hover: crate::motion::ListHover,
     /// The timeline's glide to a turn or to its end; the reader's own
     /// scroll stops it.

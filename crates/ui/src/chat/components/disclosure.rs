@@ -8,7 +8,7 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::{
     AnyElement, App, ClickEvent, Div, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{Link, h_flex, v_flex};
 
@@ -56,7 +56,10 @@ pub(crate) fn callback_event_label(callback: &OrchestrateCallback) -> Cow<'stati
 }
 
 /// `on_open` opens the child the callback reports on, while it still exists.
-/// `event` follows the child's title and does not fade with it.
+/// `event` follows the child's title and does not fade with it. The link to
+/// the child underlines under the pointer as `hover`, the timeline's,
+/// follows it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn callback_row(
     key: &str,
     event: SharedString,
@@ -64,6 +67,7 @@ pub(crate) fn callback_row(
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_open: Option<super::subagent::ClickHandler>,
+    hover: crate::motion::ListHover,
     cx: &App,
 ) -> AnyElement {
     let body = if callback.body.trim().is_empty() {
@@ -79,26 +83,39 @@ pub(crate) fn callback_row(
         body,
         expanded,
         on_toggle,
-        Some(on_open),
+        Some((on_open, hover)),
         cx,
     )
 }
 
-/// The link to a callback's child. Once the child has gone the link is
-/// leaving, and takes no activation.
-fn open_child_link(key: &str, on_open: Option<super::subagent::ClickHandler>, cx: &App) -> Link {
+/// The link to a callback's child, its underline fading in at the list's
+/// hover `reveal`. Once the child has gone the link is leaving, and takes no
+/// activation.
+fn open_child_link(
+    key: &str,
+    on_open: Option<super::subagent::ClickHandler>,
+    hover: &crate::motion::ListHover,
+    reveal: f32,
+    cx: &App,
+) -> Link {
     let ring = crate::material::focus_ring(cx);
-    let link = Link::new(SharedString::from(format!("callback-open-{key}")))
-        .accessibility_label(SharedString::from(crate::tr!("agents.open").into_owned()));
+    let id = SharedString::from(format!("callback-open-{key}"));
+    let primary = cx.theme().primary;
+    let link = Link::new(id.clone())
+        .accessibility_label(SharedString::from(crate::tr!("agents.open").into_owned()))
+        .on_hover(hover.on_hover(id))
+        .when(reveal > 0., |link| {
+            link.underline()
+                .text_decoration_color(primary.opacity(reveal))
+        });
     match on_open {
         Some(on_open) => link.on_activate(on_open),
         None => link,
     }
     .flex_none()
     .text_token(&cx.theme().tokens.typography.xs)
-    .text_color(cx.theme().primary)
+    .text_color(primary)
     .cursor_pointer()
-    .hover(|link| link.underline())
     .focus_visible(move |style| style.shadow(vec![ring]))
     .child(crate::tr!("agents.open_child"))
 }
@@ -127,8 +144,8 @@ pub(crate) fn disclosure(
     )
 }
 
-/// `open` is a callback's link to its child: `Some(None)` once the child
-/// has gone.
+/// `open` is a callback's link to its child, `None` in it once the child
+/// has gone, and the hover it follows.
 #[allow(clippy::too_many_arguments)]
 fn disclosure_with(
     key: &str,
@@ -137,7 +154,10 @@ fn disclosure_with(
     full_text: String,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    open: Option<Option<super::subagent::ClickHandler>>,
+    open: Option<(
+        Option<super::subagent::ClickHandler>,
+        crate::motion::ListHover,
+    )>,
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -185,14 +205,15 @@ fn disclosure_with(
                 let selector = format!("disclosure-{key}");
                 move || selector
             });
-        let open = open.and_then(|on_open| {
-            crate::motion::shown(
+        let open = open.and_then(|(on_open, hover)| {
+            let shown = crate::motion::shown(
                 SharedString::from(format!("callback-open-shown-{key}")),
                 on_open.is_some().then_some(()),
                 window,
                 cx,
-            )
-            .map(|shown| shown.fade(open_child_link(&key, on_open, cx)))
+            )?;
+            let reveal = hover.reveal(&format!("callback-open-{key}"), window, cx);
+            Some(shown.fade(open_child_link(&key, on_open, &hover, reveal, cx)))
         });
 
         let row = h_flex()

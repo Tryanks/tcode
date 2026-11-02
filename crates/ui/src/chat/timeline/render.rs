@@ -970,6 +970,7 @@ impl ChatView {
                 this.toggle_expanded(turn, &toggle_key, cx);
             }),
             on_open,
+            self.hover.clone(),
             cx,
         )
     }
@@ -1067,6 +1068,7 @@ impl ChatView {
                     expanded,
                     running,
                     rows,
+                    hover: self.hover.clone(),
                 },
                 cx.listener(move |this, _, _, cx| {
                     this.toggle_expanded(index, &toggle_section_key, cx);
@@ -1284,6 +1286,7 @@ impl ChatView {
                     compact: false,
                     copy: tools::diff::file_copy_items(file),
                     path: Some((file.row.path.clone(), cwd.to_path_buf())),
+                    hover: self.hover.clone(),
                 },
                 detail,
                 cx.listener(move |this, _, _, cx| {
@@ -1355,6 +1358,7 @@ impl ChatView {
                 compact: row.compact,
                 copy,
                 path: path.map(|path| (path, cwd.to_path_buf())),
+                hover: self.hover.clone(),
             },
             detail,
             cx.listener(move |this, _, _, cx| {
@@ -1554,7 +1558,7 @@ impl ChatView {
                 );
             }) as components::subagent::ClickHandler
         });
-        components::subagent::subagent_row(entry, on_open, shown, cx)
+        components::subagent::subagent_row(entry, on_open, shown, self.hover.clone(), cx)
     }
 
     /// Show the "Copied!" confirmation on `key` for 2s; a second copy re-arms the timer.
@@ -1727,6 +1731,106 @@ mod tests {
         }
         for bubble in ["steering-wake", "steering-results"] {
             assert!(cx.debug_bounds(bubble).is_none(), "{bubble} is a bubble");
+        }
+    }
+
+    /// A chat under a probe that reads, on each frame it draws, how far in
+    /// the hover fill of each of `keys` is.
+    struct HoverProbe {
+        chat: gpui::Entity<ChatView>,
+        keys: [&'static str; 2],
+        drawn: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<&'static str, f32>>>,
+    }
+
+    impl gpui::Render for HoverProbe {
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            let hover = self.chat.read(cx).hover.clone();
+            for key in self.keys {
+                let fill = hover.reveal(key, window, cx);
+                self.drawn.borrow_mut().insert(key, fill);
+            }
+            gpui::div().size_full().child(self.chat.clone())
+        }
+    }
+
+    /// A Work Log's header and a tool window's header fill in over several
+    /// frames as the pointer comes onto them and empty as it leaves, and the
+    /// window comes to rest; with motion reduced the fill comes and goes at
+    /// once.
+    #[gpui::test]
+    fn a_header_under_the_pointer_fades_its_fill_in_and_out(cx: &mut TestAppContext) {
+        use gpui::{AppContext as _, Modifiers, VisualTestContext, point, px, size};
+        use std::time::Duration;
+
+        let keys = ["worklog-header-0-command-0", "activity-row-command-0"];
+        for reduce in [false, true] {
+            let mut timeline = Timeline::default();
+            timeline.turns = vec![TurnMeta::default()];
+            timeline.entries.push(entry("user", user_item("go")));
+            for index in 0..3 {
+                timeline.entries.push(command(&format!("command-{index}")));
+            }
+            timeline
+                .entries
+                .push(entry("assistant", assistant("Done.")));
+            let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+            cx.update(|cx| cx.set_reduce_motion(reduce));
+            let drawn = std::rc::Rc::default();
+            let (_, cx) = cx.add_window_view(|window, cx| HoverProbe {
+                chat: cx.new(|cx| ChatView::new(workspace_store, window_state, window, cx)),
+                keys,
+                drawn: std::rc::Rc::clone(&drawn),
+            });
+            let cx: &mut VisualTestContext = cx;
+            cx.simulate_resize(size(px(1_024.), px(700.)));
+            draw_settled(cx);
+            let header = cx.debug_bounds(keys[0]).expect("collapsed work log");
+            cx.simulate_click(header.center(), Modifiers::default());
+            draw_settled(cx);
+
+            let away = point(px(1_000.), px(4.));
+            for key in keys {
+                // The fill drawn on each frame after the pointer moves.
+                let follow = |to, cx: &mut VisualTestContext| {
+                    cx.simulate_mouse_move(to, None, Modifiers::default());
+                    let mut seen = Vec::new();
+                    for _ in 0..20 {
+                        cx.executor().advance_clock(Duration::from_millis(16));
+                        cx.update(|window, cx| window.simulate_next_frame(cx));
+                        draw(cx);
+                        seen.push(drawn.borrow()[key]);
+                    }
+                    draw_settled(cx);
+                    seen
+                };
+                let fades = |seen: &[f32], up: bool| {
+                    seen.windows(2)
+                        .all(|pair| pair[1] == pair[0] || (pair[1] > pair[0]) == up)
+                        && seen
+                            .iter()
+                            .filter(|fill| **fill > 0. && **fill < 1.)
+                            .count()
+                            >= 3
+                };
+                follow(away, cx);
+                let bounds = cx.debug_bounds(key).unwrap_or_else(|| panic!("{key}"));
+                let entering = follow(bounds.center(), cx);
+                let leaving = follow(away, cx);
+                assert_eq!(*entering.last().unwrap(), 1., "{key}: {entering:?}");
+                assert_eq!(*leaving.last().unwrap(), 0., "{key}: {leaving:?}");
+                if reduce {
+                    assert_eq!((entering[0], leaving[0]), (1., 0.), "{key} faded");
+                } else {
+                    assert!(fades(&entering, true), "{key} popped in: {entering:?}");
+                    assert!(fades(&leaving, false), "{key} popped out: {leaving:?}");
+                }
+            }
+            cx.update(|_, cx| cx.set_reduce_motion(false));
         }
     }
 
