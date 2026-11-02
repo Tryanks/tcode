@@ -610,7 +610,7 @@ pub(in crate::chat) fn status_glyph(
     let background = cx.theme().background;
     let danger = cx.theme().danger;
     crate::motion::Sampled::new(move |window, cx| {
-        crate::motion::cross_fade(id, glyph, window, cx, move |glyph, _, _| match glyph {
+        crate::motion::cross_fade_part(id, glyph, window, cx, move |glyph, _, _| match glyph {
             Glyph::Running => Spinner::new().color(primary).into_any_element(),
             Glyph::Settled { failed } => {
                 let icon = Icon::empty()

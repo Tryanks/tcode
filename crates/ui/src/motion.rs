@@ -4,9 +4,7 @@ use gpui::{
     AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, Stateful, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::motion::{
-    MotionReveal, Presence, PresenceSample, Transition, TransitionId, transition,
-};
+use gpui_base::motion::{Presence, PresenceSample, Transition, TransitionId, transition};
 
 pub(crate) use gpui_base::motion::PresencePhase;
 
@@ -119,11 +117,11 @@ impl<T> Shown<T> {
 
     /// In a column: grows to its height and fades in, shrinks and fades out.
     pub(crate) fn fold(&self, content: impl IntoElement) -> AnyElement {
-        MotionReveal::new(
-            child_id(&self.id, "fold"),
-            self.progress,
-            self.frame(content).w_full().into_any_element(),
-        )
+        Reveal {
+            id: child_id(&self.id, "fold"),
+            progress: self.progress,
+            child: self.frame(content).w_full().into_any_element(),
+        }
         .into_any_element()
     }
 
@@ -148,6 +146,141 @@ impl<T> Shown<T> {
     }
 }
 
+/// A fold's clipped, measured height.
+///
+/// gpui-base's `MotionReveal` lays a child it has not measured yet out at
+/// zero height, so a section open on the frame that first draws it (a
+/// message's actions, an open disclosure) comes in a frame late and moves
+/// what is below. This one lays its child out as itself while it is at rest
+/// or unmeasured, and clips it to its measurement scaled by the progress
+/// only while it folds. Its child keeps its place in the tree in both.
+struct Reveal {
+    id: ElementId,
+    progress: f32,
+    child: AnyElement,
+}
+
+enum RevealLayout {
+    Plain,
+    Clipped,
+}
+
+impl IntoElement for Reveal {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for Reveal {
+    type RequestLayoutState = RevealLayout;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_id: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, RevealLayout) {
+        let global_id = global_id.expect("Reveal has an id");
+        let measured = window.with_element_state(global_id, |height: Option<Pixels>, _| {
+            (height, height.unwrap_or_default())
+        });
+        match measured {
+            Some(height) if self.progress < 1. => {
+                let mut style = gpui::Style::default();
+                style.size.width = gpui::relative(1.).into();
+                style.size.height = (height * self.progress.clamp(0., 1.)).into();
+                (
+                    window.request_layout(style, None, cx),
+                    RevealLayout::Clipped,
+                )
+            }
+            None if self.progress <= 0. => {
+                let mut style = gpui::Style::default();
+                style.size.width = gpui::relative(1.).into();
+                style.size.height = px(0.).into();
+                (
+                    window.request_layout(style, None, cx),
+                    RevealLayout::Clipped,
+                )
+            }
+            _ => (self.child.request_layout(window, cx), RevealLayout::Plain),
+        }
+    }
+
+    fn prepaint(
+        &mut self,
+        global_id: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        layout: &mut RevealLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let global_id = global_id.expect("Reveal has an id");
+        let height = match layout {
+            RevealLayout::Plain => {
+                self.child.prepaint(window, cx);
+                bounds.size.height
+            }
+            RevealLayout::Clipped => {
+                let height = self
+                    .child
+                    .layout_as_root(
+                        gpui::size(
+                            gpui::AvailableSpace::Definite(bounds.size.width),
+                            gpui::AvailableSpace::MinContent,
+                        ),
+                        window,
+                        cx,
+                    )
+                    .height;
+                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                    self.child.prepaint_at(bounds.origin, window, cx);
+                });
+                height
+            }
+        };
+        let changed = window.with_element_state(global_id, |measured: Option<Pixels>, _| {
+            (measured != Some(height), height)
+        });
+        if changed && matches!(layout, RevealLayout::Clipped) {
+            window.request_animation_frame();
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        layout: &mut RevealLayout,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        match layout {
+            RevealLayout::Plain => self.child.paint(window, cx),
+            RevealLayout::Clipped => {
+                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                    self.child.paint(window, cx);
+                });
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Swap<T> {
     current: T,
@@ -164,9 +297,32 @@ pub(crate) fn cross_fade<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
     value: T,
     window: &mut Window,
     cx: &mut C,
+    build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
+) -> AnyElement {
+    swap(id.into(), value, true, window, cx, build)
+}
+
+/// [`cross_fade`] for a part of a control — its glyph, its status — which
+/// takes no input of its own: what leaves covers nothing, so a press during
+/// the fade still reaches the control.
+pub(crate) fn cross_fade_part<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
+    id: impl Into<ElementId>,
+    value: T,
+    window: &mut Window,
+    cx: &mut C,
+    build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
+) -> AnyElement {
+    swap(id.into(), value, false, window, cx, build)
+}
+
+fn swap<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
+    id: ElementId,
+    value: T,
+    shield: bool,
+    window: &mut Window,
+    cx: &mut C,
     mut build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
 ) -> AnyElement {
-    let id = id.into();
     let app: &mut App = cx.borrow_mut();
     let state = window.use_keyed_state(child_id(&id, "cross-fade"), app, |_, _| Swap {
         current: value.clone(),
@@ -226,7 +382,9 @@ pub(crate) fn cross_fade<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
                     .min_w_full()
                     .opacity(1. - progress)
                     .child(previous)
-                    .child(div().absolute().inset_0().occlude()),
+                    .when(shield, |previous| {
+                        previous.child(div().absolute().inset_0().occlude())
+                    }),
             )
         })
         .into_any_element()
@@ -375,7 +533,7 @@ pub(crate) fn status_icon(
     use crate::icon::IconNamed as _;
     let id = id.into();
     let color = transition(child_id(&id, "color"), color, settle(), window, cx);
-    cross_fade(
+    cross_fade_part(
         child_id(&id, "glyph"),
         icon.path(),
         window,

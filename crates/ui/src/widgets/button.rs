@@ -390,23 +390,39 @@ impl RenderOnce for Button {
                     then(window, cx);
                 }
             });
-        let content = gpui_base::h_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .map(|this| match self.size {
-                Size::XSmall | Size::Small => this.gap_1(),
-                _ => this.gap_2(),
-            })
-            .when_some(self.icon, |this, icon| {
-                // The spinner cross-fades over the icon, which keeps its
-                // place so the label does not move.
-                this.child(
-                    div()
-                        .relative()
-                        .flex_none()
-                        .child(icon.with_size(icon_size).opacity(1. - spinning))
-                        .when(spinning > 0., |this| {
+        // A new glyph (Copy becoming its check) cross-fades over the one it
+        // replaces; the icon as given is the current one.
+        let icon = self.icon.map(|icon| {
+            let icon = icon.with_size(icon_size).opacity(1. - spinning);
+            let glyph = icon.glyph().clone();
+            let leaving = icon.clone();
+            let mut current = Some(icon);
+            crate::motion::cross_fade_part(
+                ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "icon".into()),
+                glyph.clone(),
+                window,
+                cx,
+                move |shown, _, _| match current.take().filter(|_| *shown == glyph) {
+                    Some(icon) => icon.into_any_element(),
+                    None => leaving.clone().path(shown.clone()).into_any_element(),
+                },
+            )
+        });
+        let content =
+            gpui_base::h_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .map(|this| match self.size {
+                    Size::XSmall | Size::Small => this.gap_1(),
+                    _ => this.gap_2(),
+                })
+                .when_some(icon, |this, icon| {
+                    // The spinner cross-fades over the icon, which keeps its
+                    // place so the label does not move.
+                    this.child(div().relative().flex_none().child(icon).when(
+                        spinning > 0.,
+                        |this| {
                             this.child(
                                 div()
                                     .absolute()
@@ -417,11 +433,11 @@ impl RenderOnce for Button {
                                     .opacity(spinning)
                                     .child(Spinner::new().with_size(icon_size)),
                             )
-                        }),
-                )
-            })
-            .when_some(self.label, |this, label| this.child(label))
-            .children(self.children);
+                        },
+                    ))
+                })
+                .when_some(self.label, |this, label| this.child(label))
+                .children(self.children);
         self.base
             .disabled(self.disabled || self.loading)
             .selected(self.selected)
