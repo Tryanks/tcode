@@ -27,7 +27,7 @@ use tcode_traverse::{DeviceInfo, HostConfig, HostMux, Invitation, TraverseHost};
 use super::access::AccessSection;
 use super::spaces::{SpacesObserver, this_machine};
 use crate::material::{group_row, group_row_stacked};
-use crate::settings_rows::{FIELD_WIDTH, ToggleRow, row_labels, settings_group};
+use crate::settings_rows::{ToggleRow, row_labels, settings_group};
 use crate::store::WorkspaceStore;
 use crate::widgets::input::{Input, InputEvent, InputState};
 
@@ -318,21 +318,24 @@ pub(super) fn field_row(compact: bool, cx: &App) -> gpui::Div {
     }
 }
 
-/// A [`field_row`] of `labels` and `field`: the field glides to where a wrap
-/// under the labels, or a window turning compact, puts it.
+/// A [`field_row`] of `labels` and the controls `field` builds: they glide
+/// to where a wrap under the labels, or a window turning compact, puts
+/// them, on clocks `motion` keeps.
 pub(super) fn reflowing_field_row(
-    id: impl Into<gpui::ElementId>,
+    id: impl Into<SharedString>,
     labels: impl IntoElement,
-    field: impl IntoElement,
+    field: impl FnOnce(&crate::settings_rows::FlipRow, &App) -> AnyElement,
     compact: bool,
+    motion: &crate::motion::owned::Owned,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let reflow = crate::motion::reflow(id, window, cx);
-    let row = field_row(compact, cx)
+    let row = crate::settings_rows::flip_row_in(motion, id, compact, window, cx);
+    let field = field(&row, cx);
+    let layout = field_row(compact, cx)
         .child(labels)
-        .child(reflow.part("field", field));
-    reflow.render(row)
+        .child(row.part("field", field));
+    row.render(layout)
 }
 
 /// The width a [`field_row`]'s label keeps before its field wraps under it.
@@ -408,6 +411,9 @@ pub struct HostingPanel {
     host_name_input: Entity<InputState>,
     access: Entity<AccessSection>,
     observer: SpacesObserver,
+    /// The panel's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     _subscription: gpui::Subscription,
 }
 
@@ -438,6 +444,7 @@ impl HostingPanel {
             host_name_input,
             access: cx.new(|_| AccessSection::new(store, this_machine, false)),
             observer: SpacesObserver::default(),
+            motion: Default::default(),
             _subscription: subscription,
         }
     }
@@ -541,17 +548,18 @@ impl HostingPanel {
             compact,
             cx,
         );
-        let field = div()
-            .when(compact, |field| field.w_full())
-            .when(!compact, |field| {
-                field.w(px(FIELD_WIDTH)).min_w_0().flex_shrink(1.)
-            })
-            .child(Input::new(&self.host_name_input));
+        let input = self.host_name_input.clone();
         rows.push(reflowing_field_row(
             "remote-host-name",
             labels,
-            field,
+            |row, cx| {
+                row.field(Input::new(&input), cx)
+                    .min_w_0()
+                    .flex_shrink(1.)
+                    .into_any_element()
+            },
             compact,
+            &self.motion,
             window,
             cx,
         ));

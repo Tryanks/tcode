@@ -16,6 +16,9 @@ pub(crate) struct HostPermissions {
     result: Option<Result<ComputerUsePermissions, String>>,
     request: Option<Task<()>>,
     connected: bool,
+    /// The panel's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     _connection: Subscription,
 }
 
@@ -41,6 +44,7 @@ impl HostPermissions {
             result: None,
             request: None,
             connected,
+            motion: Default::default(),
             _connection: connection,
         };
         panel.refresh(cx);
@@ -151,21 +155,20 @@ impl Render for HostPermissions {
                 body.into_any_element()
             },
         );
-        let mut button = Button::new("host-permissions-recheck")
+        let button = Button::new("host-permissions-recheck")
             .outline()
             .small()
             .label(crate::tr!("permissions.recheck"))
             .disabled(!self.connected || self.request.is_some())
-            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)));
-        if compact {
-            button = button.w_full();
-        }
-        crate::material::group(cx).child(
-            crate::material::group_row_stacked(cx)
-                .text_body(compact, cx)
-                .child(status)
-                .child(div().child(button)),
-        )
+            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)))
+            .w_full();
+        // A phone's button spans the row; turning, its width glides.
+        let flip = crate::settings_rows::flip_row(&self.motion, "host-permissions", compact);
+        let row = crate::material::group_row_stacked(cx)
+            .text_body(compact, cx)
+            .child(status)
+            .child(flip.stretch(button, cx));
+        crate::material::group(cx).child(flip.render(row))
     }
 }
 

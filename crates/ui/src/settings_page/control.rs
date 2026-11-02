@@ -156,7 +156,7 @@ impl SettingsPage {
                 automation_label(automation),
                 automation_options,
                 automation_reset,
-                self.window_state.read(cx).compact,
+                self.flip_row("settlement-automation-dropdown", cx),
                 {
                     let page = cx.entity();
                     move |value, _, cx| {
@@ -199,17 +199,18 @@ impl SettingsPage {
         let project_rows = self.control_project_rows(&control, projects, compact, window, cx);
         let thread_rows = self.control_thread_rows(compact, window, cx);
         let activity_rows = self.control_activity_rows(compact, window, cx);
-        let default_heading = vec![
-            crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-                .child(crate::settings_rows::row_labels(
-                    crate::control::grant_summary(&control.default_grant),
-                    Some(crate::tr!("control.settings.default_grant_description").into()),
-                    default_reset,
-                    self.window_state.read(cx).compact,
-                    cx,
-                ))
-                .into_any_element(),
-        ];
+        let heading = self.flip_row("control-default-grant", cx);
+        let heading_row = heading.frame(cx).child(heading.part(
+            "labels",
+            crate::settings_rows::row_labels(
+                crate::control::grant_summary(&control.default_grant),
+                Some(crate::tr!("control.settings.default_grant_description").into()),
+                default_reset,
+                compact,
+                cx,
+            ),
+        ));
+        let default_heading = vec![heading.render(heading_row)];
         v_flex()
             .gap(crate::material::section_gap(cx))
             .child(crate::settings_rows::settings_group(
@@ -251,17 +252,44 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        // The phone's accordion and the desktop's dropdown and list trade
+        // places when the window turns, cross-fading while the group's
+        // height glides.
+        let swap = self
+            .motion
+            .swap("control-projects-form", usize::from(compact), 2, window, cx);
+        let mut layers = Vec::new();
+        for (layer, compact) in [(0, false), (1, true)] {
+            if swap.shows(layer) {
+                let rows = if compact {
+                    self.control_project_accordion(control, &projects, window, cx)
+                } else {
+                    self.control_project_dropdown(control, &projects, window, cx)
+                };
+                layers.push((layer, v_flex().w_full().children(rows).into_any_element()));
+            }
+        }
+        vec![swap.render(layers)]
+    }
+
+    /// Phone: every project is a row that opens its grant in place; there
+    /// is no dropdown or dialog to pick one from.
+    fn control_project_accordion(
+        &mut self,
+        control: &tcode_core::control::ControlSettings,
+        projects: &[Project],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
-        if compact {
-            // Phone: every project is a row that opens its grant in place; there
-            // is no dropdown or dialog to pick one from.
+        {
             rows.push(
-                crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
+                crate::settings_rows::row_frame(true, cx)
                     .child(crate::settings_rows::row_labels(
                         crate::tr!("control.settings.overrides"),
                         Some(crate::tr!("control.settings.overrides_description").into()),
                         None,
-                        self.window_state.read(cx).compact,
+                        true,
                         cx,
                     ))
                     .into_any_element(),
@@ -350,7 +378,7 @@ impl SettingsPage {
                                         project.id
                                     )),
                                     &grant,
-                                    &projects,
+                                    projects,
                                     true,
                                     self.project_grant_change(project.id.clone(), cx),
                                     cx,
@@ -382,8 +410,20 @@ impl SettingsPage {
                 },
             );
             rows.push(list.render(v_flex().w_full()));
-            return rows;
         }
+        rows
+    }
+
+    /// Desktop: a dropdown adds a project's grant and the list below edits
+    /// them in a dialog.
+    fn control_project_dropdown(
+        &mut self,
+        control: &tcode_core::control::ControlSettings,
+        projects: &[Project],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows = Vec::new();
         let options = projects
             .iter()
             .filter(|project| !control.project_overrides.contains_key(&project.id))
@@ -411,7 +451,7 @@ impl SettingsPage {
                 .into(),
             options,
             None,
-            self.window_state.read(cx).compact,
+            crate::settings_rows::flip_row(&self.motion, "add-project-grant", false),
             {
                 let page = cx.entity();
                 move |project, window, cx| {
@@ -538,29 +578,34 @@ impl SettingsPage {
             .map(crate::control::grant_summary)
             .unwrap_or_default();
         let id = meta.id.clone();
-        crate::settings_rows::row_frame(compact, cx)
-            .child(crate::settings_rows::row_labels(
+        let row = crate::settings_rows::flip_row(
+            &self.motion,
+            format!("control-thread-{}", meta.id),
+            compact,
+        );
+        let layout = row.row(
+            crate::settings_rows::row_labels(
                 meta.title.clone(),
                 Some(summary.into()),
                 None,
                 compact,
                 cx,
-            ))
-            .child(
-                Button::new(SharedString::from(format!(
-                    "revoke-thread-grant-{}",
-                    meta.id
-                )))
-                .ghost()
-                .when(!compact, |button| button.xsmall())
-                .label(crate::tr!("control.settings.revoke"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let id = id.clone();
-                    this.store
-                        .update(cx, |store, _| store.clear_control_grant(id));
-                })),
-            )
-            .into_any_element()
+            ),
+            Button::new(SharedString::from(format!(
+                "revoke-thread-grant-{}",
+                meta.id
+            )))
+            .ghost()
+            .when(!compact, |button| button.xsmall())
+            .label(crate::tr!("control.settings.revoke"))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let id = id.clone();
+                this.store
+                    .update(cx, |store, _| store.clear_control_grant(id));
+            })),
+            cx,
+        );
+        row.render(layout)
     }
 
     /// The activity list, cross-fading between loading, failed, empty and
@@ -615,12 +660,17 @@ impl SettingsPage {
                 ];
             }
             ActivityState::Failed(error) => {
-                return vec![
-                    crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-                        .child(div().flex_1().text_secondary(compact, cx).child(error))
-                        .child(refresh)
-                        .into_any_element(),
-                ];
+                let row = crate::settings_rows::flip_row(
+                    &self.motion,
+                    "control-activity-failed",
+                    compact,
+                );
+                let layout = row.row(
+                    div().flex_1().text_secondary(compact, cx).child(error),
+                    refresh,
+                    cx,
+                );
+                return vec![row.render(layout)];
             }
             // Entries leaving for another state draw none: they are gone.
             ActivityState::Entries => match &self.control.activity {
@@ -673,7 +723,7 @@ impl SettingsPage {
             entries.collect::<Vec<_>>(),
             window,
             cx,
-            |_, entry, _, cx| {
+            |key, entry, _, cx| {
                 let target = if entry.target_title.is_empty() {
                     crate::tr!("control.settings.deleted_thread").into_owned()
                 } else {
@@ -689,21 +739,20 @@ impl SettingsPage {
                 if let Some(detail) = entry.action.detail.as_deref().filter(|d| !d.is_empty()) {
                     action.push_str(&format!(" ({detail})"));
                 }
-                crate::settings_rows::row_frame(compact, cx)
-                    .child(crate::settings_rows::row_labels(
-                        title,
-                        Some(action.into()),
-                        None,
-                        compact,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_secondary(compact, cx)
-                            .child(humanize_ago(now.saturating_sub(entry.at / 1000))),
-                    )
-                    .into_any_element()
+                let row = crate::settings_rows::flip_row(
+                    &self.motion,
+                    format!("control-activity-{key}"),
+                    compact,
+                );
+                let layout = row.row(
+                    crate::settings_rows::row_labels(title, Some(action.into()), None, compact, cx),
+                    div()
+                        .flex_none()
+                        .text_secondary(compact, cx)
+                        .child(humanize_ago(now.saturating_sub(entry.at / 1000))),
+                    cx,
+                );
+                row.render(layout)
             },
         );
         rows.push(entries.render(v_flex().w_full()));
@@ -789,7 +838,7 @@ impl Render for ProjectGrantEditor {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let store = self.store.clone();
         let project_id = self.project.id.clone();
-        crate::control::grant_editor(
+        let editor = crate::control::grant_editor(
             "project-grant-dialog",
             &grant,
             &projects,
@@ -802,6 +851,10 @@ impl Render for ProjectGrantEditor {
                 })
             }),
             cx,
-        )
+        );
+        // The window turning compact steps the editor's type and choices up
+        // to touch sizes; the dialog's height glides to the new layout's.
+        let height = crate::motion::GlideState::keyed("project-grant-dialog-height", window, cx);
+        crate::motion::SizeGlide::new(&height, editor).on_change(u64::from(compact))
     }
 }

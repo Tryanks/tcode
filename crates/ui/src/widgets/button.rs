@@ -157,6 +157,13 @@ impl Button {
         self.base = self.base.focusable(focusable);
         self
     }
+    /// Focus the button through the caller's `handle`, so the caller can
+    /// sample whether the keyboard has put focus on it: a control shown only
+    /// on hover shows while it holds keyboard focus too.
+    pub fn track_focus(mut self, handle: &gpui::FocusHandle) -> Self {
+        self.base = self.base.track_focus(handle);
+        self
+    }
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
         self

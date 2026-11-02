@@ -204,6 +204,9 @@ pub struct DiffPanel {
     render_loading_key: Option<RenderKey>,
     comment_input: Option<Entity<InputState>>,
     observed_review_comments: Vec<ReviewComment>,
+    /// The panel's size-class motion: the window draws the panel as a wide
+    /// tab or a compact page, under different parents.
+    motion: crate::motion::owned::Owned,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -246,6 +249,7 @@ impl DiffPanel {
             render_loading_key: None,
             comment_input: None,
             observed_review_comments: Vec::new(),
+            motion: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -917,7 +921,7 @@ impl DiffPanel {
         cx.notify();
     }
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_toolbar(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let active_state = self.workspace_store.read(cx).diff_active_state();
         let session = active_state
             .as_ref()
@@ -938,7 +942,6 @@ impl DiffPanel {
             None => crate::tr!("diff.no_changes").into_owned(),
         };
         let muted = cx.theme().muted_foreground;
-        let compact = self.compact(cx);
         let panel = cx.entity();
         let session_selector = session.clone();
 
@@ -1388,9 +1391,17 @@ impl DiffPanel {
         let mut content = v_flex()
             .size_full()
             .min_h_0()
-            .when(self.compact(cx), |body| {
-                body.px(px(material::COMPACT_PAGE_INSET))
-            })
+            .px(self.motion.transition(
+                "page-inset",
+                if self.compact(cx) {
+                    px(material::COMPACT_PAGE_INSET)
+                } else {
+                    px(0.)
+                },
+                &crate::motion::owned::Curve::settle(),
+                window,
+                cx,
+            ))
             .child(viewport);
 
         let preview = self
@@ -1703,15 +1714,21 @@ impl Render for DiffPanel {
         // expand / split / close cluster are wide-layout affordances, so the
         // whole strip stays unbuilt rather than being drawn and ignored.
         let compact = self.compact(cx);
+        // The strip folds away as the window turns compact and back as it
+        // turns wide.
+        let strip = self
+            .motion
+            .swap("tab-strip", usize::from(!compact), 2, window, cx);
+        let strip_layer = strip
+            .shows(1)
+            .then(|| (1, self.render_tab_strip(window, cx)));
         let root = v_flex()
             .size_full()
             .min_w_0()
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_view_option))
             .on_action(cx.listener(Self::on_selection_menu))
-            .when(!compact, |root| {
-                root.child(self.render_tab_strip(window, cx))
-            });
+            .child(div().flex_none().child(strip.render(strip_layer)));
         // Tab bodies cross-fade, each in its own layer, built only while it shows.
         let layer = match tab {
             RightTab::Diff | RightTab::Preview => 0,
@@ -1726,7 +1743,19 @@ impl Render for DiffPanel {
             layers.push((
                 0,
                 body()
-                    .child(self.render_toolbar(cx))
+                    .child({
+                        // The overflow menu and the four toggles trade places
+                        // as the window turns.
+                        let toolbar =
+                            self.motion
+                                .swap("toolbar", usize::from(compact), 2, window, cx);
+                        let layers = [(0, false), (1, true)]
+                            .into_iter()
+                            .filter(|(layer, _)| toolbar.shows(*layer))
+                            .map(|(layer, compact)| (layer, self.render_toolbar(compact, cx)))
+                            .collect::<Vec<_>>();
+                        toolbar.render(layers)
+                    })
                     .child(self.render_body(window, cx))
                     .into_any_element(),
             ));

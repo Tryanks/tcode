@@ -94,6 +94,9 @@ pub struct PluginsSettingsPanel {
     /// The switches the shown page last listed for; a provider switched on
     /// since is listed then.
     switches: PluginManagementSettings,
+    /// The page's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -138,6 +141,7 @@ impl PluginsSettingsPanel {
             challenge: None,
             answered: HashSet::new(),
             switches: PluginManagementSettings::default(),
+            motion: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -1606,13 +1610,20 @@ impl Render for PluginsSettingsPanel {
             .or(profiles.first())
             .cloned();
         let compact = self.window_state.read(cx).compact;
-        v_flex()
-            .w_full()
-            .gap(if compact {
+        let gap = self.motion.transition(
+            "page-gap",
+            if compact {
                 cx.theme().tokens.spacing.lg
             } else {
                 material::section_gap(cx)
-            })
+            },
+            &crate::motion::owned::Curve::settle(),
+            window,
+            cx,
+        );
+        v_flex()
+            .w_full()
+            .gap(gap)
             .child(material::group_caption(
                 crate::tr!("settings.plugins_section"),
                 cx,

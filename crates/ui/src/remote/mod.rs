@@ -309,6 +309,9 @@ pub struct RemotePanel {
     space_qr: Option<String>,
     #[cfg(feature = "remote-hosting")]
     spaces_observer: spaces::SpacesObserver,
+    /// The panel's size-class motion: the window draws its pages under
+    /// another parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -382,6 +385,7 @@ impl RemotePanel {
             space_qr: None,
             #[cfg(feature = "remote-hosting")]
             spaces_observer: spaces::SpacesObserver::default(),
+            motion: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -838,7 +842,7 @@ impl RemotePanel {
         if !self.fixed_machine {
             column = column.child(self.add_machine(compact, window, cx));
         }
-        self.page(column, &self.hosts_scroll, cx)
+        self.page(column, &self.hosts_scroll, window, cx)
     }
 
     /// What this machine offers other devices: the live invitation while
@@ -1217,7 +1221,9 @@ impl RemotePanel {
         // A window turning compact moves the field, the scan button and the
         // action into a page with the action pinned at its foot; each glides
         // there from where it was, and back.
-        let reflow = crate::motion::reflow("hosts-pair", window, cx);
+        let reflow = self
+            .motion
+            .reflow_in("hosts-pair", u64::from(compact), window, cx);
         if !compact {
             let form = group_row_stacked(cx)
                 .child(crate::settings_rows::row_labels(
@@ -1243,7 +1249,7 @@ impl RemotePanel {
                     .debug_selector(|| "hosts-pair-form".into())
                     .child(form),
             );
-            return reflow.render(self.page(page, &self.pair_scroll, cx));
+            return reflow.render(self.page(page, &self.pair_scroll, window, cx));
         }
         let body = v_flex()
             .gap(section_gap(cx))
@@ -1268,12 +1274,18 @@ impl RemotePanel {
             .children(self.address_prompt(false, compact, as_is, window, cx))
             .children(scan.map(|scan| reflow.part("scan", scan.w_full())));
         let action = reflow.part("action", action.w_full());
-        reflow.render(self.page_with_footer(body, action, cx))
+        reflow.render(self.page_with_footer(body, action, window, cx))
     }
 
     /// The scrolling page body: the settings content column, so the page's
     /// groups line up with Settings' at every width.
-    fn page(&self, body: gpui::Div, scroll: &ScrollHandle, cx: &mut Context<Self>) -> AnyElement {
+    fn page(
+        &self,
+        body: gpui::Div,
+        scroll: &ScrollHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
         crate::scroll::page_viewport(
             "hosts-scroll-bounce",
@@ -1288,7 +1300,13 @@ impl RemotePanel {
                 .track_scroll(scroll)
                 .on_action(cx.listener(Self::on_disconnect))
                 .on_action(cx.listener(Self::on_forget))
-                .child(crate::settings_rows::content_column(body, compact, cx)),
+                .child(crate::settings_rows::content_column(
+                    body,
+                    compact,
+                    &self.motion,
+                    window,
+                    cx,
+                )),
         )
         .into_any_element()
     }
@@ -1297,11 +1315,12 @@ impl RemotePanel {
         &self,
         body: gpui::Div,
         action: AnyElement,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         v_flex()
             .size_full()
-            .child(self.page(body, &self.pair_scroll, cx))
+            .child(self.page(body, &self.pair_scroll, window, cx))
             .child(
                 h_flex().flex_none().w_full().justify_center().child(
                     div()

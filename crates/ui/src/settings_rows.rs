@@ -2,16 +2,17 @@
 //! inside it compose their groups from these, so every form row reads and
 //! behaves the same.
 
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
     RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Toggled, Window,
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
 use crate::icon::{Icon, IconName};
+use crate::motion::{GlideState, SizeGlide, owned::Owned, reflow::Reflow};
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -25,14 +26,27 @@ pub const FIELD_WIDTH: f32 = 240.;
 pub const CONTENT_MAX_WIDTH: f32 = 768.;
 
 /// The centred column a settings-form page scrolls: `column` at
-/// [`CONTENT_MAX_WIDTH`] inside the page inset.
-pub fn content_column(column: gpui::Div, compact: bool, cx: &App) -> gpui::Div {
+/// [`CONTENT_MAX_WIDTH`] inside the page inset, which glides when the window
+/// turns compact or wide on a clock `motion` keeps.
+pub(crate) fn content_column(
+    column: gpui::Div,
+    compact: bool,
+    motion: &Owned,
+    window: &mut Window,
+    cx: &App,
+) -> gpui::Div {
     let spacing = &cx.theme().tokens.spacing;
-    let inset = if compact {
-        px(crate::material::COMPACT_PAGE_INSET)
-    } else {
-        spacing.xl
-    };
+    let inset = motion.transition(
+        "content-inset",
+        if compact {
+            px(crate::material::COMPACT_PAGE_INSET)
+        } else {
+            spacing.xl
+        },
+        &crate::motion::owned::Curve::settle(),
+        window,
+        cx,
+    );
     h_flex()
         .w_full()
         .justify_center()
@@ -206,11 +220,220 @@ impl RenderOnce for ResetAction {
 
 /// A row whose control can squeeze its label: stacked on a compact window.
 /// A row whose control is a fixed affordance (a switch) is a [`ToggleRow`].
+/// A row on a page the window can turn compact while it shows is a
+/// [`FlipRow`].
 pub fn row_frame(compact: bool, cx: &App) -> gpui::Div {
     if compact {
         crate::material::group_row_stacked(cx)
     } else {
         crate::material::group_row(cx)
+    }
+}
+
+/// A [`row_frame`] that moves rather than jumps when the window turns compact
+/// or wide: its parts glide from where the other layout drew them and its
+/// height glides to the new one's. The clocks are kept in the owner's
+/// [`Owned`] store, because the window draws a page under another parent
+/// when it turns, where element state would start over.
+pub(crate) struct FlipRow {
+    reflow: Reflow,
+    height: GlideState,
+    field: GlideState,
+    fill: Rc<Cell<Pixels>>,
+    /// A [`Self::stretch`]ed control's own width.
+    own: Rc<Cell<Pixels>>,
+    id: SharedString,
+    /// The frame's inset on both sides, which a field under the labels
+    /// does not fill.
+    inset: Pixels,
+    compact: bool,
+}
+
+/// The [`FlipRow`] `id` of the view whose clocks `motion` keeps.
+pub(crate) fn flip_row(motion: &Owned, id: impl Into<SharedString>, compact: bool) -> FlipRow {
+    let id = id.into();
+    let reflow = motion.reflow(id.clone(), u64::from(compact));
+    flip_row_with(motion, id, reflow, compact)
+}
+
+/// A [`flip_row`] whose parts also glide when the row narrowing wraps them
+/// (a field going under its label), while it stays where it is drawn.
+#[cfg(feature = "remote-hosting")]
+pub(crate) fn flip_row_in(
+    motion: &Owned,
+    id: impl Into<SharedString>,
+    compact: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> FlipRow {
+    let id = id.into();
+    let reflow = motion.reflow_in(id.clone(), u64::from(compact), window, cx);
+    flip_row_with(motion, id, reflow, compact)
+}
+
+fn flip_row_with(motion: &Owned, id: SharedString, reflow: Reflow, compact: bool) -> FlipRow {
+    FlipRow {
+        id: id.clone(),
+        reflow,
+        height: motion.glide_state(format!("{id}-height")),
+        field: motion.glide_state(format!("{id}-field")),
+        fill: motion.keep(format!("{id}-fill")),
+        own: motion.keep(format!("{id}-own")),
+        inset: px(crate::material::CARD_INSET) * 2.,
+        compact,
+    }
+}
+
+impl FlipRow {
+    pub(crate) fn compact(&self) -> bool {
+        self.compact
+    }
+
+    /// The row's frame, for [`Self::render`].
+    pub(crate) fn frame(&self, cx: &App) -> gpui::Div {
+        row_frame(self.compact, cx)
+    }
+
+    /// `child` as the part `key` of the row, which glides to where the other
+    /// layout puts it.
+    pub(crate) fn part(&self, key: &'static str, child: impl IntoElement) -> AnyElement {
+        self.reflow.part(key, child)
+    }
+
+    /// The common row: `labels` beside `control`, or over it.
+    pub(crate) fn row(
+        &self,
+        labels: impl IntoElement,
+        control: impl IntoElement,
+        cx: &App,
+    ) -> gpui::Div {
+        self.frame(cx)
+            .child(self.part("labels", labels))
+            .child(self.part("control", control))
+    }
+
+    /// A text field: [`FIELD_WIDTH`] beside the labels, the row's width
+    /// under them, its width gliding from one to the other. gpui has no
+    /// layout transition, so the width the row gives is measured here (as
+    /// the preview page's size is) and eased toward.
+    pub(crate) fn field(&self, field: impl IntoElement, cx: &App) -> gpui::Div {
+        self.glide_field(
+            field,
+            (self.fill.get(), |frame| frame.w_full()),
+            (px(FIELD_WIDTH), |frame| frame.w(px(FIELD_WIDTH))),
+            cx,
+        )
+    }
+
+    /// A text field that takes what `beside` (the width of what follows it
+    /// in the row, gap included) leaves of the row, or the whole row under
+    /// it, its width gliding from one to the other.
+    pub(crate) fn field_beside(
+        &self,
+        field: impl IntoElement,
+        beside: Pixels,
+        cx: &App,
+    ) -> gpui::Div {
+        self.glide_field(
+            field,
+            (self.fill.get(), |frame| frame.w_full()),
+            (self.fill.get() - beside, |frame| frame.flex_1()),
+            cx,
+        )
+    }
+
+    /// A text field in a row of controls that fills the row under the
+    /// labels: [`FIELD_WIDTH`] beside them, and what `beside` (the other
+    /// controls, gaps included) leaves of the row under them.
+    #[cfg(feature = "remote-hosting")]
+    pub(crate) fn field_among(
+        &self,
+        field: impl IntoElement,
+        beside: Pixels,
+        cx: &App,
+    ) -> gpui::Div {
+        self.glide_field(
+            field,
+            (self.fill.get() - beside, |frame| frame.flex_1()),
+            (px(FIELD_WIDTH), |frame| frame.w(px(FIELD_WIDTH))),
+            cx,
+        )
+    }
+
+    /// A control as wide as the row under the labels, and as wide as itself
+    /// beside them, its width gliding between the two. Its own width is the
+    /// one it last had at rest beside the labels; until it has been drawn
+    /// there it takes either width at once.
+    pub(crate) fn stretch(&self, control: impl IntoElement, cx: &App) -> gpui::Div {
+        let frame = self.glide_field(
+            control,
+            (self.fill.get(), |frame| frame.w_full()),
+            (self.own.get(), |frame| frame),
+            cx,
+        );
+        let compact = self.compact;
+        let (own, state) = (self.own.clone(), self.field.clone());
+        gpui_base::ElementExt::on_prepaint(frame, move |bounds, _, cx| {
+            if !compact && !state.moving(cx.background_executor().now()) {
+                own.set(bounds.size.width);
+            }
+        })
+    }
+
+    /// `field` at the width its layout gives it, `(target, style)` for each
+    /// layout, drawn gliding from the width it was drawn at when the layout
+    /// changes. A target not yet measured takes the new width at once.
+    fn glide_field(
+        &self,
+        field: impl IntoElement,
+        compact: (Pixels, fn(gpui::Div) -> gpui::Div),
+        inline: (Pixels, fn(gpui::Div) -> gpui::Div),
+        cx: &App,
+    ) -> gpui::Div {
+        let (target, at_rest) = if self.compact { compact } else { inline };
+        let width = self
+            .field
+            .toward(
+                u64::from(self.compact),
+                gpui::size(target, Pixels::ZERO),
+                cx,
+            )
+            .width;
+        let state = self.field.clone();
+        // The field is laid out at its layout's own width, so what is beside
+        // it never makes room for a width it is only passing through, and
+        // is drawn at the gliding one; at rest the two are the same.
+        let id = self.id.clone();
+        let drawn = div()
+            .debug_selector(move || format!("{id}-field"))
+            .when(width != target && target > Pixels::ZERO, |drawn| {
+                drawn.flex_none().w(width)
+            })
+            .child(field);
+        let drawn = gpui_base::ElementExt::on_prepaint(drawn, move |bounds, window, _| {
+            state.painted_at(bounds.size, window)
+        });
+        at_rest(div()).max_w_full().child(drawn)
+    }
+
+    /// The row's frame has no inset of its own: the width a field fills is
+    /// the whole row's.
+    pub(crate) fn bare(mut self) -> Self {
+        self.inset = Pixels::ZERO;
+        self
+    }
+
+    /// The row, laid out as `row`.
+    pub(crate) fn render(self, row: impl IntoElement) -> AnyElement {
+        let fill = self.fill.clone();
+        let inset = self.inset;
+        let row =
+            gpui_base::ElementExt::on_prepaint(div().w_full().child(row), move |bounds, _, _| {
+                fill.set(bounds.size.width - inset);
+            });
+        SizeGlide::new(&self.height, self.reflow.render(row))
+            .on_change(u64::from(self.compact))
+            .into_any_element()
     }
 }
 
@@ -398,7 +621,7 @@ pub struct SelectRowOption<T> {
 /// A settings row whose control picks one of `options` from a menu.
 /// `menu_width` is the menu's floor, so its longest option fits.
 #[allow(clippy::too_many_arguments)]
-pub fn select_row<T: Clone + 'static>(
+pub(crate) fn select_row<T: Clone + 'static>(
     trigger_id: &'static str,
     popover_id: &'static str,
     menu_id: &'static str,
@@ -408,10 +631,11 @@ pub fn select_row<T: Clone + 'static>(
     selected_label: SharedString,
     options: Vec<SelectRowOption<T>>,
     reset: impl Into<Option<AnyElement>>,
-    compact: bool,
+    row: FlipRow,
     on_select: impl Fn(T, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
+    let compact = row.compact();
     let trigger = dropdown_trigger(trigger_id, selected_label, cx);
     let on_select = Rc::new(on_select);
     let menu_label = title.clone();
@@ -467,8 +691,10 @@ pub fn select_row<T: Clone + 'static>(
                 }))
         });
 
-    row_frame(compact, cx)
-        .child(row_labels(title, Some(description), reset, compact, cx))
-        .child(dropdown)
-        .into_any_element()
+    let layout = row.row(
+        row_labels(title, Some(description), reset, compact, cx),
+        dropdown,
+        cx,
+    );
+    row.render(layout)
 }

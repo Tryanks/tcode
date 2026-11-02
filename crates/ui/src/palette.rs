@@ -150,6 +150,10 @@ pub struct CommandPalette {
     opened: bool,
     _search_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+    /// The card's move between the centred card and the bottom sheet when
+    /// the window turns compact or wide, which draws the palette under
+    /// another parent.
+    motion: crate::motion::owned::Owned,
 }
 
 impl CommandPalette {
@@ -194,6 +198,7 @@ impl CommandPalette {
             focus_handle: cx.focus_handle(),
             selected: 0,
             outside_dismissal: crate::overlay::OutsideDismissal::default(),
+            motion: Default::default(),
             content_hits: Vec::new(),
             search_generation: 0,
             results: None,
@@ -983,13 +988,25 @@ impl Render for CommandPalette {
             .into_any_element()
         };
 
-        let surface = v_flex().h(height).overflow_hidden();
+        // Turning compact or wide, the card glides from where and as large
+        // as the other form drew it to the sheet or the card.
+        let width = if compact {
+            viewport.width
+        } else {
+            crate::sizing::fit_viewport(640., viewport.width)
+        };
+        let glide = self.motion.glide_state("card-size");
+        let size = glide.toward(u64::from(compact), gpui::size(width, height), cx);
+        let reflow = self.motion.reflow("card-place", u64::from(compact));
+        // The card is laid out at exactly this size.
+        glide.painted_at(size, window);
+        let surface = v_flex().h(size.height).overflow_hidden();
         let card = if compact {
-            crate::material::sheet_contour(surface.w(viewport.width), cx)
+            crate::material::sheet_contour(surface.w(size.width), cx)
         } else {
             crate::material::overlay_contour(
                 surface
-                    .w(crate::sizing::fit_viewport(640., viewport.width))
+                    .w(size.width)
                     .rounded(crate::material::radius_overlay(cx)),
                 cx,
             )
@@ -1060,7 +1077,7 @@ impl Render for CommandPalette {
             } else {
                 progress.max(1. - presence.progress)
             };
-            return gpui_base::Sheet::new(cx)
+            let sheet = gpui_base::Sheet::new(cx)
                 .focus_handle(self.focus_handle.clone())
                 .request_close(move |_, cx| {
                     dismissal.dismissed();
@@ -1080,9 +1097,9 @@ impl Render for CommandPalette {
                             insets.bottom
                                 - crate::edge_back::BackProgress::offset(progress, height),
                         )
-                        .child(card),
-                )
-                .into_any_element();
+                        .child(reflow.part("card", card)),
+                );
+            return reflow.render(sheet);
         }
         // A leaving palette keeps the open one's element tree and is inert:
         // not topmost, no Escape, no backdrop press, and an occluding scrim
@@ -1100,7 +1117,7 @@ impl Render for CommandPalette {
                         .on_scroll(|_, _, cx| cx.stop_propagation()),
                 )
             });
-        gpui_base::Dialog::new(cx)
+        let dialog = gpui_base::Dialog::new(cx)
             .layer(0, !exiting)
             .close_on_escape(!exiting)
             .close_on_backdrop_press(!exiting)
@@ -1113,7 +1130,7 @@ impl Render for CommandPalette {
                     .when(exiting, |scrim| scrim.occlude())
                     .on_scroll(|_, _, cx| cx.stop_propagation()),
             )
-            .popup(card)
+            .popup(reflow.part("card", card))
             // Enter belongs to the query input, which runs the selected item.
             .on_ok(|_, _, _| false)
             .request_close(move |_, _, cx| {
@@ -1125,8 +1142,8 @@ impl Render for CommandPalette {
             .when(compact, |host| host.justify_end().pb(insets.bottom))
             .when(!compact, |host| {
                 host.justify_start().pt(insets.top + px(DESKTOP_TOP_OFFSET))
-            })
-            .into_any_element()
+            });
+        reflow.render(dialog)
     }
 }
 
@@ -1344,6 +1361,78 @@ mod tests {
                 query.presentation().placeholder().to_string()
             })
         });
+    }
+
+    /// A tablet turning compact while the palette is open moves the card
+    /// from where it hangs to the bottom sheet, growing to the window's
+    /// width on the way, and back when it turns wide.
+    #[gpui::test]
+    fn the_open_palette_glides_between_card_and_sheet(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = crate::store::tests::scratch_root("palette-flip-test");
+        let store = SessionStore::open_at(root.clone()).expect("open test store");
+        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let workspace_store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
+            workspace_store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        let palette_store = workspace_store.clone();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            PaletteHarness::new(palette_store.clone(), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(gpui::size(px(1024.), px(800.)));
+        let (palette, window_state) = cx.update(|_, cx| {
+            let harness = harness.read(cx);
+            (harness.palette.clone(), harness.window_state.clone())
+        });
+        cx.update(|window, cx| {
+            window_state.update(cx, |state, cx| state.open_palette(cx));
+            palette.update(cx, |palette, cx| palette.open(false, window, cx));
+        });
+        crate::test_frames::draw_settled(cx);
+        let card = |cx: &mut VisualTestContext| cx.debug_bounds("palette-card").expect("the card");
+        let hanging = card(cx);
+        assert!(hanging.size.width < px(1024.));
+
+        let turn = |compact: bool, cx: &mut VisualTestContext| {
+            window_state.update(cx, |state, cx| {
+                state.set_compact(compact, cx);
+            });
+            crate::test_frames::draw(cx);
+        };
+        turn(true, cx);
+        assert_eq!(card(cx), hanging, "the card starts where it hung");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        let gliding = card(cx);
+        crate::test_frames::draw_settled(cx);
+        let sheet = card(cx);
+        assert_eq!(sheet.size.width, px(1024.), "the sheet spans the window");
+        assert!(sheet.top() > hanging.top());
+        assert!(
+            gliding.size.width > hanging.size.width
+                && gliding.size.width < sheet.size.width
+                && gliding.top() > hanging.top()
+                && gliding.top() < sheet.top(),
+            "{gliding:?} between {hanging:?} and {sheet:?}"
+        );
+
+        turn(false, cx);
+        assert_eq!(card(cx), sheet, "and back from where it is");
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(card(cx), hanging);
+        driver.link.close();
     }
 
     #[gpui::test]

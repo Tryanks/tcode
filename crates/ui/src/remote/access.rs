@@ -111,6 +111,9 @@ pub(crate) struct AccessSection {
     observer: SpacesObserver,
     /// Repaints the invitation's countdown while there is one.
     ticker: Option<Task<()>>,
+    /// The section's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
 }
 
 impl AccessSection {
@@ -126,6 +129,7 @@ impl AccessSection {
             pairing_switch,
             observer: SpacesObserver::default(),
             ticker: None,
+            motion: Default::default(),
         }
     }
 
@@ -232,7 +236,9 @@ impl AccessSection {
                 .collect()
         };
         // On a compact window a device's controls go under its name.
-        let reflow = crate::motion::reflow("remote-devices", window, cx);
+        let reflow = self
+            .motion
+            .reflow_in("remote-devices", u64::from(compact), window, cx);
         let rows = crate::motion::keyed(
             "remote-devices",
             rows,
