@@ -334,9 +334,13 @@ pub(crate) fn changes(old: &[u64], new: &[u64]) -> Changes {
 pub(crate) enum Glide {
     /// Laid out as a plain child: no measurement, no clip, no frame.
     Rest,
-    /// Arriving, or leaving: its height is its measurement scaled by the
-    /// progress, and it fades and rises in, or sinks and fades out.
+    /// Arriving: its height is its measurement scaled by the progress, and
+    /// it fades and rises in. Not yet measured, it starts from nothing.
     Enter(f32),
+    /// Leaving: as [`Glide::Enter`] on its way back to nothing. Not yet
+    /// measured (a row drawn somewhere new as it leaves), it is laid out as
+    /// tall as it is, so it folds from its whole height.
+    Leave(f32),
     /// The live end of a list the reader follows: each time its `content`
     /// changes, its height glides to the new measurement. At rest it is laid
     /// out as a plain child, so height that changes on its own (a fold
@@ -362,7 +366,9 @@ impl RowGlide {
             .flex_col()
             .when_some(
                 match glide {
-                    Glide::Enter(progress) if progress < 1. => Some(progress),
+                    Glide::Enter(progress) | Glide::Leave(progress) if progress < 1. => {
+                        Some(progress)
+                    }
                     _ => None,
                 },
                 |child, progress| child.opacity(progress),
@@ -385,7 +391,7 @@ impl RowGlide {
     ) -> Self {
         Self::new(
             id,
-            Glide::Enter(progress),
+            Glide::Leave(progress),
             div()
                 .relative()
                 .w_full()
@@ -448,15 +454,18 @@ impl Element for RowGlide {
         let global_id = global_id.expect("RowGlide has an id");
         let height = match self.glide {
             Glide::Rest => None,
-            Glide::Enter(progress) => {
+            Glide::Enter(progress) | Glide::Leave(progress) => {
                 let measured = window.with_element_state(global_id, |state, _| {
                     let state: Measured = state.unwrap_or_default();
                     (state.height, state)
                 });
-                Some((
-                    measured.unwrap_or_default() * progress,
-                    super::lift(progress),
-                ))
+                match (measured, self.glide) {
+                    (None, Glide::Leave(_)) => None,
+                    (measured, _) => Some((
+                        measured.unwrap_or_default() * progress,
+                        super::lift(progress),
+                    )),
+                }
             }
             Glide::Tail { content } => {
                 let state = window.with_element_state(global_id, |state, _| {
@@ -519,7 +528,7 @@ impl Element for RowGlide {
         let lift = match layout {
             GlideLayout::Plain => {
                 self.child.prepaint(window, cx);
-                if matches!(self.glide, Glide::Tail { .. }) {
+                if matches!(self.glide, Glide::Tail { .. } | Glide::Leave(_)) {
                     let height = bounds.size.height;
                     window.with_element_state(
                         global_id.expect("RowGlide has an id"),
