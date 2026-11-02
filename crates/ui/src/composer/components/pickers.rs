@@ -510,6 +510,7 @@ impl Composer {
                     pct,
                     compact,
                     edit_window,
+                    window,
                     cx,
                 )
             })
@@ -771,92 +772,126 @@ fn render_model_pane(
         .overflow_y_scroll_area()
         .child(div().w_full().py_2().px_1p5().child(rail_col));
 
-    let list = div()
-        .id("model-picker-list")
-        .role(Role::ListBox)
-        .aria_label(crate::tr!("composer.model_results"))
-        .flex_1()
-        .min_h_0();
-    let list = if rows.is_empty() {
-        list.child(crate::material::empty_row(
-            if loading {
-                crate::tr!("composer.loading_models")
-            } else {
-                crate::tr!("composer.no_models")
-            },
-            cx,
-        ))
-        .into_any_element()
-    } else {
-        let count = rows.len();
-        // Opening the picker shows the current model; a search starts at the
-        // top of its results.
-        let current = model_search
-            .read(cx)
-            .value()
-            .is_empty()
-            .then(|| {
-                rows.iter()
-                    .position(|row| selected.as_deref() == Some(row.id.as_str()))
-            })
-            .flatten();
-        let keys: Rc<[u64]> = rows.iter().map(model_row_key).collect();
-        let leaving = {
-            let selected = selected.clone();
-            let store_entity = store_entity.clone();
-            let session_id = session_id.clone();
-            let popover = popover.clone();
-            move |key, _: &mut Window, cx: &mut App| {
-                let index = all_rows.iter().position(|row| model_row_key(row) == key)?;
-                Some(render_model_row(
-                    &all_rows[index],
-                    index,
-                    &selected,
-                    compact,
-                    &store_entity,
-                    session_id.clone(),
-                    &popover,
-                    cx,
-                ))
-            }
-        };
-        let rows = rows.clone();
+    // Opening the picker shows the current model; a search starts at the
+    // top of its results.
+    let current = model_search
+        .read(cx)
+        .value()
+        .is_empty()
+        .then(|| {
+            rows.iter()
+                .position(|row| selected.as_deref() == Some(row.id.as_str()))
+        })
+        .flatten();
+    let build_list = {
         let selected = selected.clone();
         let store_entity = store_entity.clone();
         let session_id = session_id.clone();
         let popover = popover.clone();
-        list.flex()
-            .flex_col()
-            .child(
-                crate::scroll::VirtualList::measured(
-                    "model-picker-rows",
-                    count,
-                    move |index, _, cx| {
-                        div()
-                            .when(index + 1 < count, |row| row.pb_0p5())
-                            .child(render_model_row(
-                                &rows[index],
-                                index,
-                                &selected,
-                                compact,
-                                &store_entity,
-                                session_id.clone(),
-                                &popover,
-                                cx,
-                            ))
-                    },
-                )
-                .reveal(current)
-                // A keystroke's results, and a favourite moving to the top,
-                // glide into place.
-                .keyed(keys, crate::motion::KEYSTROKE, leaving)
-                .flex_1()
-                .min_h_0()
-                .px_1()
-                .py_1(),
-            )
+        move |rows: Rc<[ModelRow]>, current: Option<usize>| {
+            let count = rows.len();
+            let keys: Rc<[u64]> = rows.iter().map(model_row_key).collect();
+            let leaving = {
+                let all_rows = all_rows.clone();
+                let selected = selected.clone();
+                let store_entity = store_entity.clone();
+                let session_id = session_id.clone();
+                let popover = popover.clone();
+                move |key, _: &mut Window, cx: &mut App| {
+                    let index = all_rows.iter().position(|row| model_row_key(row) == key)?;
+                    Some(render_model_row(
+                        &all_rows[index],
+                        index,
+                        &selected,
+                        compact,
+                        &store_entity,
+                        session_id.clone(),
+                        &popover,
+                        cx,
+                    ))
+                }
+            };
+            let selected = selected.clone();
+            let store_entity = store_entity.clone();
+            let session_id = session_id.clone();
+            let popover = popover.clone();
+            crate::scroll::VirtualList::measured("model-picker-rows", count, move |index, _, cx| {
+                div()
+                    .when(index + 1 < count, |row| row.pb_0p5())
+                    .child(render_model_row(
+                        &rows[index],
+                        index,
+                        &selected,
+                        compact,
+                        &store_entity,
+                        session_id.clone(),
+                        &popover,
+                        cx,
+                    ))
+            })
+            .reveal(current)
+            // A keystroke's results, and a favourite moving to the top,
+            // glide into place.
+            .keyed(keys, crate::motion::KEYSTROKE, leaving)
+            .flex_1()
+            .min_h_0()
+            .px_1()
+            .py_1()
             .into_any_element()
+        }
     };
+    // Loading, nothing found and the results each keep a layer, so one
+    // fades out under the next; the results leaving are the last ones there
+    // were.
+    let state = if !rows.is_empty() {
+        2
+    } else if loading {
+        0
+    } else {
+        1
+    };
+    let shown_rows = rows.clone();
+    let content = crate::motion::Sampled::new(move |window, cx| {
+        let last = window.use_keyed_state("model-picker-last-rows", cx, |_, _| shown_rows.clone());
+        if !shown_rows.is_empty() && !Rc::ptr_eq(last.read(cx), &shown_rows) {
+            last.update(cx, |last, _| *last = shown_rows.clone());
+        }
+        let last = last.read(cx).clone();
+        let fade = crate::motion::CrossFade::new("model-picker-states", state, 3, window, cx);
+        let layers: Vec<(usize, AnyElement)> = (0..3)
+            .filter(|layer| fade.shows(*layer))
+            .map(|layer| {
+                let content = match layer {
+                    0 => crate::material::empty_row(crate::tr!("composer.loading_models"), cx)
+                        .into_any_element(),
+                    1 => crate::material::empty_row(crate::tr!("composer.no_models"), cx)
+                        .into_any_element(),
+                    _ if state == 2 => build_list(shown_rows.clone(), current),
+                    _ => build_list(last.clone(), None),
+                };
+                (
+                    layer,
+                    v_flex().size_full().child(content).into_any_element(),
+                )
+            })
+            .collect();
+        fade.fill()
+            .render(layers)
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .into_any_element()
+    });
+    let list = div()
+        .id("model-picker-list")
+        .role(Role::ListBox)
+        .aria_label(crate::tr!("composer.model_results"))
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .child(content)
+        .into_any_element();
 
     let mut pane = v_flex()
         .flex_1()
@@ -876,17 +911,20 @@ fn render_model_pane(
                 ),
         )
         .child(list);
-    if pending_restart {
-        pane = pane.child(
+    pane = pane.child(folding_note(
+        "model-restart-note",
+        pending_restart,
+        move |cx| {
             div()
                 .px_3()
                 .py_1p5()
                 .border_t_1()
                 .border_color(cx.theme().border)
                 .text_secondary(compact, cx)
-                .child(crate::tr!("composer.restart_note")),
-        );
-    }
+                .child(crate::tr!("composer.restart_note"))
+                .into_any_element()
+        },
+    ));
 
     let key_rows: Vec<ModelRow> = rows.iter().take(9).cloned().collect();
     let store_key = store_entity.clone();
@@ -1559,11 +1597,31 @@ fn render_effort_slider(
         },
     );
     let shown = (state.read(cx).value().end().round() as usize).min(levels.len() - 1);
-    let accent = if shown == levels.len() - 1 {
-        cx.theme().max_effort_accent()
-    } else {
-        cx.theme().primary
-    };
+    // The accent glides to the max level's and back; the level's name
+    // cross-fades over the last one.
+    let accent = gpui_base::motion::transition(
+        gpui::SharedString::from(format!("effort-accent-{key}")),
+        if shown == levels.len() - 1 {
+            cx.theme().max_effort_accent()
+        } else {
+            cx.theme().primary
+        },
+        crate::motion::settle(),
+        window,
+        cx,
+    );
+    let level_label = crate::motion::cross_fade_part(
+        gpui::SharedString::from(format!("effort-label-{key}")),
+        levels[shown].label.clone(),
+        window,
+        cx,
+        move |label, _, _| {
+            div()
+                .text_color(accent)
+                .child(label.clone())
+                .into_any_element()
+        },
+    );
     Some(
         v_flex()
             .w_full()
@@ -1579,7 +1637,7 @@ fn render_effort_slider(
                             .text_color(cx.theme().muted_foreground)
                             .child(crate::tr!("composer.effort")),
                     )
-                    .child(div().text_color(accent).child(levels[shown].label.clone())),
+                    .child(level_label),
             )
             .child(
                 div()
@@ -1768,18 +1826,20 @@ fn render_traits_pane(
         }
     }
 
-    if pending_restart {
-        pane = pane.child(
+    pane = pane.child(div().flex_none().child(folding_note(
+        "traits-restart-note",
+        pending_restart,
+        move |cx| {
             div()
-                .flex_none()
                 .px_2()
                 .py_1p5()
                 .border_t_1()
                 .border_color(cx.theme().border)
                 .text_secondary(compact, cx)
-                .child(crate::tr!("composer.restart_note")),
-        );
-    }
+                .child(crate::tr!("composer.restart_note"))
+                .into_any_element()
+        },
+    )));
     div()
         .relative()
         .w_full()
@@ -1901,15 +1961,23 @@ fn render_context_meter_pane(
     compact: bool,
     // Present when the active model's context window can be changed here.
     edit_window: Option<(Entity<WorkspaceStore>, Option<String>)>,
+    window: &mut Window,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
-    let bar_color: Hsla = if overloaded {
-        rgb(METER_RED).into()
-    } else {
-        rgb(METER_BLUE).into()
-    };
+    let glide = |id: &str| gpui::SharedString::from(format!("context-pane-{id}"));
+    let bar_color: Hsla = gpui_base::motion::transition(
+        glide("bar-color"),
+        if overloaded {
+            rgb(METER_RED).into()
+        } else {
+            rgb(METER_BLUE).into()
+        },
+        crate::motion::settle(),
+        window,
+        cx,
+    );
     let mut pane = v_flex()
         .debug_selector(|| "context-pane".into())
         .w_full()
@@ -1977,21 +2045,31 @@ fn render_context_meter_pane(
             .child(stat),
     );
 
-    if let Some(pct) = pct {
-        let fraction = pct.clamp(0.0, 100.0) / 100.0;
+    // The bar folds in once the share is known; its fill glides to each
+    // new share.
+    let fraction = gpui_base::motion::transition(
+        glide("bar-fraction"),
+        pct.map_or(0., |pct| pct.clamp(0.0, 100.0) / 100.0),
+        crate::motion::settle(),
+        window,
+        cx,
+    );
+    if let Some(shown) = crate::motion::shown(glide("bar"), pct.map(|_| ()), window, cx) {
         pane = pane.child(
-            div()
-                .w_full()
-                .h(px(6.))
-                .rounded_full()
-                .bg(cx.theme().muted)
-                .child(
-                    div()
-                        .h_full()
-                        .rounded_full()
-                        .bg(bar_color)
-                        .w(gpui::relative(fraction)),
-                ),
+            shown.fold(
+                div()
+                    .w_full()
+                    .h(px(6.))
+                    .rounded_full()
+                    .bg(cx.theme().muted)
+                    .child(
+                        div()
+                            .h_full()
+                            .rounded_full()
+                            .bg(bar_color)
+                            .w(gpui::relative(fraction)),
+                    ),
+            ),
         );
     }
 
@@ -2009,16 +2087,24 @@ fn render_context_meter_pane(
 
     // "Total processed" — the session-cumulative token count, when the provider
     // reports it (a native running total or timeline accumulation).
-    if let Some(total) = usage.and_then(|u| u.total_processed_tokens) {
+    if let Some(shown) = crate::motion::shown(
+        glide("total"),
+        usage.and_then(|u| u.total_processed_tokens),
+        window,
+        cx,
+    ) {
+        let total = shown.value;
         pane = pane.child(
-            h_flex()
-                .w_full()
-                .justify_between()
-                .items_center()
-                .gap_3()
-                .text_secondary(compact, cx)
-                .child(crate::tr!("composer.total_processed"))
-                .child(context_meter::format_tokens(Some(total))),
+            shown.fold(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_center()
+                    .gap_3()
+                    .text_secondary(compact, cx)
+                    .child(crate::tr!("composer.total_processed"))
+                    .child(context_meter::format_tokens(Some(total))),
+            ),
         );
     }
 
@@ -2029,9 +2115,17 @@ fn render_context_meter_pane(
         )));
     }
 
-    // Show only the rate-limit windows reported by the provider.
-    if let Some(account) = account_usage.filter(|a| a.error.is_some() || !a.windows.is_empty()) {
-        pane = pane.child(crate::material::faded_hairline(cx));
+    // Show only the rate-limit windows reported by the provider; the
+    // section folds in once they are known, and away if they go.
+    if let Some(shown) = crate::motion::shown(
+        glide("account"),
+        account_usage.filter(|a| a.error.is_some() || !a.windows.is_empty()),
+        window,
+        cx,
+    ) {
+        let account = shown.value.clone();
+        let mut section = v_flex().w_full().gap_2();
+        section = section.child(crate::material::faded_hairline(cx));
         // 256px only affords one trailing fact: the plan when the provider
         // named it, otherwise how fresh the numbers are.
         let trailing = account
@@ -2044,7 +2138,7 @@ fn render_context_meter_pane(
                 );
                 crate::tr!("usage.updated", when = ago).into_owned()
             });
-        pane = pane.child(
+        section = section.child(
             h_flex()
                 .w_full()
                 .justify_between()
@@ -2056,17 +2150,39 @@ fn render_context_meter_pane(
         );
         // The raw provider error is Settings-only; at 256px this pane just
         // says the latest number is missing, above whatever was last fetched.
-        if account.error.is_some() {
-            pane = pane.child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!("usage.unavailable")),
+        if let Some(unavailable) = crate::motion::shown(
+            glide("unavailable"),
+            account.error.is_some().then_some(()),
+            window,
+            cx,
+        ) {
+            section = section.child(
+                unavailable.fold(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("usage.unavailable")),
+                ),
             );
         }
         let now = crate::time::now_secs();
-        for window in &account.windows {
-            let fill = crate::usage::bar_color(window.used_percent, cx);
-            pane = pane.child(
+        for (index, limit) in account.windows.iter().enumerate() {
+            let limit_id = |part: &str| glide(&format!("limit-{index}-{part}"));
+            let fill = gpui_base::motion::transition(
+                limit_id("fill"),
+                crate::usage::bar_color(limit.used_percent, cx),
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            let used = gpui_base::motion::transition(
+                limit_id("used"),
+                limit.used_percent.clamp(0.0, 100.0) / 100.0,
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            let window_usage = limit;
+            section = section.child(
                 v_flex()
                     .w_full()
                     .gap(cx.theme().tokens.spacing.xxs)
@@ -2080,13 +2196,13 @@ fn render_context_meter_pane(
                             .child(
                                 div()
                                     .text_color(muted)
-                                    .child(crate::usage::window_label(window)),
+                                    .child(crate::usage::window_label(window_usage)),
                             )
                             .child(
                                 div()
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .text_color(muted)
-                                    .child(crate::usage::percent_label(window.used_percent)),
+                                    .child(crate::usage::percent_label(window_usage.used_percent)),
                             ),
                     )
                     .child(
@@ -2095,23 +2211,42 @@ fn render_context_meter_pane(
                             .h(px(4.))
                             .rounded_full()
                             .bg(cx.theme().muted)
-                            .child(div().h_full().rounded_full().bg(fill).w(gpui::relative(
-                                window.used_percent.clamp(0.0, 100.0) / 100.0,
-                            ))),
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(fill)
+                                    .w(gpui::relative(used)),
+                            ),
                     )
                     .when_some(
-                        crate::usage::resets_label(window.resets_at, now),
+                        crate::usage::resets_label(window_usage.resets_at, now),
                         |col, label| col.child(div().text_secondary(compact, cx).child(label)),
                     ),
             );
         }
+        pane = pane.child(shown.fold(section));
     }
 
     pane.into_any_element()
 }
 
-/// A chip's label that cross-fades to a new text while the chip's width
-/// glides to fit it, so what is beside the chip moves over rather than jumps.
+/// A note under a pane (a restart notice) that folds in while `present` and
+/// away after.
+fn folding_note(
+    id: impl Into<gpui::ElementId>,
+    present: bool,
+    build: impl FnOnce(&mut App) -> AnyElement + 'static,
+) -> crate::motion::Sampled {
+    let id = id.into();
+    crate::motion::Sampled::new(move |window, cx| {
+        match crate::motion::shown(id, present.then_some(()), window, cx) {
+            Some(shown) => shown.fold(build(cx)),
+            None => gpui::Empty.into_any_element(),
+        }
+    })
+}
+
 /// What a model row is known by while the search and the favourites move it.
 fn model_row_key(row: &ModelRow) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
@@ -2137,6 +2272,8 @@ fn folding_suffix(
     })
 }
 
+/// A chip's label that cross-fades to a new text while the chip's width
+/// glides to fit it, so what is beside the chip moves over rather than jumps.
 fn glided_label(
     id: gpui::ElementId,
     glide: gpui::ElementId,
@@ -2186,9 +2323,11 @@ mod sheet_tests {
                             .label("Open")
                             .debug_selector(|| "picker-open".into()),
                     )
-                    .content(move |_, _, cx| {
+                    .content(move |_, window, cx| {
                         if context {
-                            render_context_meter_pane(None, None, None, None, compact, None, cx)
+                            render_context_meter_pane(
+                                None, None, None, None, compact, None, window, cx,
+                            )
                         } else {
                             let mut composer = store.read(cx).composer_state();
                             composer.provider = Some(ProviderKind::ClaudeCode);
