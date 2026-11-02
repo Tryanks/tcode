@@ -13045,8 +13045,9 @@ mod tests {
         let store = store_of(&shell, cx);
         // Narrower than the header at its narrowest.
         resize(cx, SIDEBAR_WIDTH + crate::chat::HEADER_OVERFLOW_MIN_WIDTH);
-        draw(cx);
-        draw(cx);
+        // The header glides into its overflow tier before a reader can
+        // reach it.
+        crate::test_frames::draw_settled(cx);
         let header = cx.debug_bounds("chat-header-scroll").unwrap();
         cx.simulate_event(gpui::ScrollEvent {
             position: header.center(),
@@ -13761,5 +13762,310 @@ mod tests {
                 ));
             }
         }
+    }
+
+    /// thread-1's timeline: a running turn holding a question, an agent
+    /// when `agent`, a first answer, and the command it runs now, which has
+    /// printed `lines` short lines so far: none long enough to wrap at any
+    /// width the tests draw, so only motion changes their heights.
+    fn reparented_timeline(lines: usize, agent: bool) -> tcode_core::session::Timeline {
+        use crate::chat::tests::{assistant, entry, user_item};
+        let mut timeline = tcode_core::session::Timeline::default();
+        timeline.turns = vec![tcode_core::session::TurnMeta {
+            running: true,
+            ..Default::default()
+        }];
+        timeline
+            .entries
+            .push(entry("user", user_item("Look at the build.")));
+        if agent {
+            timeline.entries.push(entry(
+                "agent-1",
+                tcode_core::session::EntryContent::Item(agent::ItemContent::Subagent {
+                    agent_type: "Explore".into(),
+                    description: "Survey the code".into(),
+                    status: agent::ItemStatus::InProgress,
+                    summary: None,
+                    model: None,
+                    effort: None,
+                }),
+            ));
+        }
+        timeline
+            .entries
+            .push(entry("reply", assistant("I will build it first.")));
+        let output: String = (0..lines).map(|line| format!("line {line}\n")).collect();
+        timeline.entries.push(entry(
+            "cmd",
+            tcode_core::session::EntryContent::Item(agent::ItemContent::CommandExecution {
+                command: "cargo build".into(),
+                output,
+                exit_code: None,
+                status: agent::ItemStatus::InProgress,
+            }),
+        ));
+        timeline
+    }
+
+    fn show_timeline(
+        store: &Entity<WorkspaceStore>,
+        timeline: tcode_core::session::Timeline,
+        cx: &mut VisualTestContext,
+    ) {
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test("thread-1".into(), timeline, cx)
+        });
+    }
+
+    /// One display frame: time passes and the window draws what it asked
+    /// for. A running turn's status never rests, so the window is stepped
+    /// frame by frame rather than until it is still.
+    fn display_frame(cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(cx);
+    }
+
+    fn settle_frames(cx: &mut VisualTestContext) {
+        for _ in 0..30 {
+            display_frame(cx);
+        }
+    }
+
+    /// From the command's header to the turn's working status: the
+    /// command's window, as tall as its motion draws it.
+    fn command_to_status(cx: &mut VisualTestContext) -> Pixels {
+        let header = cx
+            .debug_bounds("activity-row-cmd")
+            .expect("the command's header");
+        let status = cx
+            .debug_bounds("working-status-0")
+            .expect("the turn's status");
+        status.top() - header.top()
+    }
+
+    fn click_command(cx: &mut VisualTestContext) {
+        let header = cx
+            .debug_bounds("activity-row-cmd")
+            .expect("the command's header");
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+    }
+
+    /// A glide's start, its end at rest, and what was drawn part way when
+    /// the conversation was drawn under a new parent: strictly between the
+    /// two, where motion that restarted under its new parent draws its end.
+    fn assert_between(what: &str, start: Pixels, end: Pixels, seen: Pixels) {
+        let (low, high) = if start < end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        assert!(
+            low + px(0.5) < seen && seen < high - px(0.5),
+            "{what} restarted under its new parent: {seen:?}, not between {start:?} and {end:?}"
+        );
+    }
+
+    /// A zoom draws the pane over the column, under another parent than its
+    /// slot, from the frame it starts (`panes::Zoom`). What the
+    /// conversation had under way carries on from where it was: an opening
+    /// command, its output growing at the followed end, and the header's
+    /// Agents toggle widening in. Element-keyed clocks drew each at its end
+    /// in that frame.
+    #[gpui::test]
+    fn chat_motion_carries_on_when_its_pane_is_zoomed(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        show_timeline(&store, reparented_timeline(2, false), cx);
+        settle_frames(cx);
+        let _ = sent(&host);
+        // From the plan button to the diff button: the Agents toggle
+        // between them widens in with the thread's first agent. Measured
+        // between the two, since the split also brings the pane's close
+        // button in after them.
+        let plan = |cx: &mut VisualTestContext| {
+            let plan = cx.debug_bounds("plan-panel").expect("the plan button");
+            let diff = cx.debug_bounds("diff-panel").expect("the diff button");
+            diff.left() - plan.left()
+        };
+        // The latest command of a running turn opens by itself; shut, under
+        // two lines of output and with no agent, is where the glides start.
+        let open = command_to_status(cx);
+        click_command(cx);
+        settle_frames(cx);
+        let start = command_to_status(cx);
+        let without = plan(cx);
+        assert!(
+            start + px(10.) < open,
+            "the command shut: {open:?} -> {start:?}"
+        );
+        // Where they end: the command open, its output grown, an agent come.
+        click_command(cx);
+        show_timeline(&store, reparented_timeline(8, true), cx);
+        settle_frames(cx);
+        let end = command_to_status(cx);
+        let with = plan(cx);
+        assert!(end > open + px(40.), "the output grew: {open:?} -> {end:?}");
+        assert!(
+            with > without + px(10.),
+            "the toggle came: {without:?} -> {with:?}"
+        );
+        click_command(cx);
+        show_timeline(&store, reparented_timeline(2, false), cx);
+        settle_frames(cx);
+        assert_eq!((command_to_status(cx), plan(cx)), (start, without));
+
+        // Beside a second pane, all three at once, a quarter of the way in
+        // when the pane is zoomed: the zoom draws it over the column, under
+        // another parent than its slot, laid out at the column's size, the
+        // size the glides were measured at above.
+        cx.simulate_keystrokes("secondary-d");
+        settle_frames(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        settle_frames(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        click_command(cx);
+        show_timeline(&store, reparented_timeline(8, true), cx);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(cx);
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        assert!(
+            cx.debug_bounds("zoomed-pane").is_some(),
+            "drawn over the column"
+        );
+        display_frame(cx);
+        assert_between(
+            "the opening command and its growing output",
+            start,
+            end,
+            command_to_status(cx),
+        );
+        assert_between("the Agents toggle", without, with, plan(cx));
+        settle_frames(cx);
+        assert_eq!(
+            (command_to_status(cx), plan(cx)),
+            (end, with),
+            "the glides came to rest where they end"
+        );
+    }
+
+    /// A tablet turning compact draws the conversation on the compact
+    /// thread page, under another parent than the wide layout's pane: the
+    /// command opening and its output growing carry on from where they were.
+    #[gpui::test]
+    fn chat_motion_carries_on_when_the_window_turns_compact(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        as_mobile(cx);
+        resize(cx, 1024.);
+        shell.read_with(cx, |shell, cx| assert!(!shell.compact(cx)));
+        let store = store_of(&shell, cx);
+        show_timeline(&store, reparented_timeline(2, false), cx);
+        settle_frames(cx);
+        let _ = sent(&host);
+        let wide_open = command_to_status(cx);
+        click_command(cx);
+        settle_frames(cx);
+        let wide_shut = command_to_status(cx);
+        assert!(wide_shut + px(10.) < wide_open);
+
+        // A quarter of the way into opening the command and growing the
+        // output, the window turns compact.
+        click_command(cx);
+        show_timeline(&store, reparented_timeline(8, false), cx);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(cx);
+        cx.simulate_resize(size(px(899.), px(800.)));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
+        assert!(cx.debug_bounds("compact-thread-page").is_some());
+        display_frame(cx);
+        let partway = command_to_status(cx);
+        settle_frames(cx);
+        // Where both glides end on the compact page, and where they start.
+        let compact_end = command_to_status(cx);
+        display_frame(cx);
+        assert_eq!(
+            command_to_status(cx),
+            compact_end,
+            "the glides came to rest"
+        );
+        click_command(cx);
+        show_timeline(&store, reparented_timeline(2, false), cx);
+        settle_frames(cx);
+        let compact_start = command_to_status(cx);
+        assert_between(
+            "the opening command and its growing output",
+            compact_start,
+            compact_end,
+            partway,
+        );
+    }
+
+    /// As the window narrows past where the header's labels fit, its split
+    /// buttons and the way back to the parent drop their labels; past where
+    /// its toggles fit they give way to the overflow button. Each change
+    /// cross-fades while the controls' width glides, so the git button
+    /// moves over rather than jumping, and lands where the new tier puts it.
+    #[gpui::test]
+    fn the_chat_header_glides_between_its_tiers(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (_shell, _host, cx) = mount_crowded_thread(cx);
+        resize(cx, 1600.);
+        crate::test_frames::draw_settled(cx);
+        // What the header holds after its title: the git button, the tier's
+        // controls and what follows them. The title's stretch takes the rest.
+        let reach = |cx: &mut VisualTestContext| {
+            let header = cx.debug_bounds("chat-header-scroll").expect("the header");
+            let git = cx.debug_bounds("git-main").expect("the git button");
+            header.right() - git.left()
+        };
+        let mut changes = 0;
+        for width in [1300., 1100., 1000., 900., 820., 760.] {
+            let before = reach(cx);
+            resize(cx, width);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            draw(cx);
+            let partway = reach(cx);
+            crate::test_frames::draw_settled(cx);
+            let after = reach(cx);
+            if (after - before).abs() > px(1.) {
+                changes += 1;
+                assert!(
+                    after < before,
+                    "{width}pt: the header widened: {before:?} -> {after:?}"
+                );
+                assert_between(
+                    &format!("{width}pt: the header's tier"),
+                    before,
+                    after,
+                    partway,
+                );
+            }
+        }
+        assert!(
+            changes >= 2,
+            "the labels went, then the toggles: {changes} changes"
+        );
+        assert!(
+            cx.debug_bounds("header-overflow").is_some(),
+            "the overflow tier"
+        );
     }
 }
