@@ -14068,4 +14068,75 @@ mod tests {
             "the overflow tier"
         );
     }
+
+    /// A control the keyboard is on keeps it, and with it its fading ring,
+    /// which is kept by its focus handle, when its view is drawn under a new
+    /// parent: a command's header in the left of two panes, as the pane is
+    /// zoomed over the column, back, and as the tablet window turns compact.
+    #[gpui::test]
+    fn a_focused_control_keeps_the_keyboard_through_a_zoom_and_a_compact_flip(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        show_timeline(&store, reparented_timeline(2, false), cx);
+        settle_frames(cx);
+        // Shut, the command's header is the timeline's last control.
+        click_command(cx);
+        cx.simulate_keystrokes("secondary-d");
+        settle_frames(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        settle_frames(cx);
+        let _ = sent(&host);
+        // Back from the composer to the header, as Shift-Tab takes it.
+        cx.update(|window, cx| window.focus_prev(cx));
+        cx.simulate_keystrokes("shift");
+        settle_frames(cx);
+        let focused = cx
+            .update(|window, cx| window.focused(cx))
+            .expect("the header holds the keyboard");
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        // Enter presses the control the keyboard is on: the header opens or
+        // shuts its command.
+        let still = |what: &str, cx: &mut VisualTestContext| {
+            assert_eq!(
+                cx.update(|window, cx| window.focused(cx)).as_ref(),
+                Some(&focused),
+                "{what}: the header lost the keyboard"
+            );
+            let before = command_to_status(cx);
+            cx.simulate_keystrokes("enter");
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse("enter").expect("a keystroke"),
+            });
+            settle_frames(cx);
+            let after = command_to_status(cx);
+            assert!(
+                (after - before).abs() > px(10.),
+                "{what}: enter did not press the header: {before:?} -> {after:?}"
+            );
+        };
+        still("before", cx);
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_some());
+        still("zooming", cx);
+        settle_frames(cx);
+        still("zoomed", cx);
+        cx.simulate_keystrokes("secondary-shift-enter");
+        settle_frames(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_none());
+        still("back in its slot", cx);
+
+        // A tablet's window, at a width that turns compact.
+        as_mobile(cx);
+        cx.simulate_resize(size(px(899.), px(800.)));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
+        still("turning compact", cx);
+        settle_frames(cx);
+        still("compact", cx);
+    }
 }
