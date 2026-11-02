@@ -801,22 +801,40 @@ impl RemotePanel {
             column = column.children(self.space_links(compact, window, cx));
         }
 
-        let saved = if hosts.is_empty() {
-            vec![
-                crate::material::empty_row(crate::tr!("hosts.empty"), cx)
-                    .text_secondary(compact, cx)
-                    .into_any_element(),
-            ]
+        // The empty row is one more key, which leaves as the first machine
+        // arrives and comes back after the last one goes.
+        let saved: Vec<(SharedString, Option<(PairedHost, bool)>)> = if hosts.is_empty() {
+            vec![("hosts-empty".into(), None)]
         } else {
             hosts
-                .iter()
+                .into_iter()
                 .map(|host| {
                     let current = current_id.as_deref() == Some(host.host_id.as_str());
-                    self.host_row(host, current, compact, window, cx)
+                    (
+                        format!("host-{}", host.host_id).into(),
+                        Some((host, current)),
+                    )
                 })
                 .collect()
         };
-        column = column.child(settings_group(crate::tr!("hosts.saved"), saved, cx));
+        let saved =
+            crate::motion::keyed(
+                "hosts-saved",
+                saved,
+                window,
+                cx,
+                |_, row, window, cx| match row {
+                    Some((host, current)) => self.host_row(host, *current, compact, window, cx),
+                    None => crate::material::empty_row(crate::tr!("hosts.empty"), cx)
+                        .text_secondary(compact, cx)
+                        .into_any_element(),
+                },
+            );
+        column = column.child(settings_group(
+            crate::tr!("hosts.saved"),
+            vec![saved.render(v_flex().w_full())],
+            cx,
+        ));
         if !self.fixed_machine {
             column = column.child(self.add_machine(compact, window, cx));
         }
@@ -1611,6 +1629,134 @@ mod tests {
         assert!(
             cx.debug_bounds("hosts-add-machine").is_none(),
             "a browser has no way to add a machine"
+        );
+    }
+
+    /// Forgetting a saved machine: its row folds away where it was, taking no
+    /// press, and the machine below it slides up as it goes rather than
+    /// jumping into its place; a machine paired afterwards folds in.
+    #[gpui::test]
+    fn a_forgotten_machine_folds_away_and_the_next_moves_up(cx: &mut TestAppContext) {
+        use std::cell::{Cell, RefCell};
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        struct Phone(RefCell<Vec<PairedHost>>);
+        impl ClientHost for Phone {
+            fn device_name(&self) -> String {
+                "Phone".into()
+            }
+            fn device_id(&self) -> String {
+                "phone".into()
+            }
+            fn device_platform(&self) -> Option<String> {
+                None
+            }
+            fn load_hosts(&self) -> Vec<PairedHost> {
+                self.0.borrow().clone()
+            }
+            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
+                Default::default()
+            }
+            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
+            fn save_hosts(&self, hosts: &[PairedHost]) {
+                *self.0.borrow_mut() = hosts.to_vec();
+            }
+            fn last_host_id(&self) -> Option<String> {
+                None
+            }
+            fn set_last_host_id(&self, _: Option<&str>) {}
+            fn connect(&self, _: &PairedHost) -> tcode_client::host::Transport {
+                unreachable!("nothing connects")
+            }
+        }
+        let host = |id: &str, name: &str| PairedHost {
+            host_id: id.into(),
+            name: name.into(),
+            traverse: Vec::new(),
+            relay: None,
+            addrs: Vec::new(),
+            last_connected_unix: None,
+            group_id: None,
+            space_id: None,
+            space_name: None,
+        };
+        struct HostsProbe(Entity<RemotePanel>);
+        impl Render for HostsProbe {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                v_flex().size_full().child(
+                    self.0
+                        .update(cx, |panel, cx| panel.render_hosts(window, cx)),
+                )
+            }
+        }
+        let presses = Rc::new(Cell::new(0));
+        cx.update(crate::theme::init);
+        cx.update(|cx| {
+            let presses = presses.clone();
+            let phone = Phone(RefCell::new(vec![
+                host("studio", "Studio"),
+                host("laptop", "Laptop"),
+            ]));
+            cx.set_global(ClientAttachment::new(
+                Rc::new(phone),
+                false,
+                move |_, _, _| presses.set(presses.get() + 1),
+            ))
+        });
+        let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
+            let state = cx.new(|_| WindowState::new(false));
+            HostsProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+        });
+        let probe = window.root(cx).unwrap();
+        let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+        let settled = |cx: &mut gpui::VisualTestContext| crate::test_frames::draw_settled(cx);
+        settled(cx);
+        let studio = cx.debug_bounds("host-studio").expect("Studio is listed");
+        let laptop = cx.debug_bounds("host-laptop").expect("Laptop is listed");
+        assert!(laptop.top() > studio.top());
+
+        let change = |cx: &mut gpui::VisualTestContext, change: &dyn Fn(&ClientAttachment)| {
+            cx.update(|_, cx| change(cx.global::<ClientAttachment>()));
+            probe.update(cx, |probe, cx| probe.0.update(cx, |_, cx| cx.notify()));
+            crate::test_frames::draw(cx);
+        };
+        change(cx, &|hosts| hosts.remove_host("studio"));
+        let leaving = cx
+            .debug_bounds("host-studio")
+            .expect("a forgotten machine is drawn while it leaves");
+        cx.simulate_click(leaving.center(), Default::default());
+        assert_eq!(presses.get(), 0, "a leaving machine takes no press");
+
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        let moving = cx.debug_bounds("host-laptop").unwrap();
+        assert!(
+            moving.top() > studio.top() && moving.top() < laptop.top(),
+            "Laptop is on its way up, at {:?}",
+            moving.top()
+        );
+
+        settled(cx);
+        assert!(cx.debug_bounds("host-studio").is_none(), "gone once folded");
+        assert_eq!(cx.debug_bounds("host-laptop").unwrap().top(), studio.top());
+
+        let below = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("hosts-add-machine")
+                .expect("the way to add a machine")
+                .top()
+        };
+        let before = below(cx);
+        change(cx, &|hosts| hosts.save_host(host("studio", "Studio")));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        crate::test_frames::draw(cx);
+        assert!(
+            cx.debug_bounds("host-studio").is_some(),
+            "a paired machine arrives"
+        );
+        let opening = below(cx);
+        settled(cx);
+        assert!(
+            opening > before && opening < below(cx),
+            "it folds in, so what is below moves down as it opens"
         );
     }
 
