@@ -437,6 +437,13 @@ pub(crate) struct CodeBlock {
     pub(super) formula: super::math_layout::FormulaSelection,
     pub(crate) code: SharedString,
     pub(crate) lang: Option<SharedString>,
+    /// A fenced block's closing fence has arrived. A fence still streaming in
+    /// is open; so is one its source never closed, which runs to the end of
+    /// its container.
+    pub(crate) closed: bool,
+    /// The source stops inside the code's last line, which is still being
+    /// written; the code ends with a newline all the same.
+    pub(crate) open_line: bool,
     pub(super) line_states: Arc<Mutex<Vec<Arc<Mutex<InlineState>>>>>,
     pub(super) prepared: Arc<OnceLock<PreparedCode>>,
 }
@@ -460,7 +467,10 @@ impl PreparedCode {
 
 impl PartialEq for CodeBlock {
     fn eq(&self, other: &Self) -> bool {
-        self.code == other.code && self.lang == other.lang
+        self.code == other.code
+            && self.lang == other.lang
+            && self.closed == other.closed
+            && self.open_line == other.open_line
     }
 }
 
