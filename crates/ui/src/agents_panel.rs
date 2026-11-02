@@ -643,8 +643,31 @@ impl AgentsPanel {
         let elapsed = row.elapsed().filter(|_| !(inline_actions && coarse));
         // The actions fade in over the time as the pointer comes onto the
         // row, and the time fades out under them.
+        // Each action button tracks a handle kept here, so the actions also
+        // fade in while the keyboard holds focus on one of them.
+        let focus: Vec<gpui::FocusHandle> = (0..actions.len())
+            .map(|index| {
+                window
+                    .use_keyed_state(
+                        SharedString::from(format!("{group}-action-focus-{index}")),
+                        cx,
+                        |_, cx| cx.focus_handle(),
+                    )
+                    .read(cx)
+                    .clone()
+            })
+            .collect();
+        let keyboard = window.last_input_was_keyboard()
+            && focus.iter().any(|handle| handle.is_focused(window));
         let reveal = if inline_actions && !coarse {
-            self.hover.reveal(&row.key, window, cx)
+            let focused = gpui_base::motion::transition(
+                (group.clone(), "action-focus-reveal"),
+                if keyboard { 1f32 } else { 0. },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            self.hover.reveal(&row.key, window, cx).max(focused)
         } else {
             0.
         };
@@ -690,7 +713,7 @@ impl AgentsPanel {
                                     .icon(Icon::new(icon.clone()).text_color(muted))
                                     .aria_label(label.clone())
                                     .tooltip(label.clone())
-                                    .focus_visible(|button| button.opacity(1.))
+                                    .track_focus(&focus[index])
                                     .on_click(
                                         move |_, window, cx| {
                                             cx.stop_propagation();

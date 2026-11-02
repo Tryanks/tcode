@@ -40,6 +40,9 @@ pub struct OrchestrateSettingsPanel {
     child_model_picker: Entity<ProviderModelPicker>,
     _subscriptions: Vec<Subscription>,
     input_subscriptions: Vec<Subscription>,
+    /// The panel's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
 }
 
 impl OrchestrateSettingsPanel {
@@ -92,6 +95,7 @@ impl OrchestrateSettingsPanel {
             child_model_picker,
             _subscriptions: subscriptions,
             input_subscriptions: Vec::new(),
+            motion: Default::default(),
         };
         panel.rebuild_rows(window, cx);
         panel
@@ -639,29 +643,43 @@ impl OrchestrateSettingsPanel {
         cx: &Context<Self>,
     ) -> AnyElement {
         // A compact page has no room for the action beside the description,
-        // which would be squeezed to a word per line, so it goes underneath.
+        // which would be squeezed to a word per line, so it goes underneath;
+        // turning, both glide to their places.
+        let title = title.into();
+        let flip = crate::settings_rows::flip_row(
+            &self.motion,
+            format!("orchestrate-heading-{title}"),
+            compact,
+        )
+        .bare();
         let row = if compact {
             v_flex().items_start().gap_2()
         } else {
             h_flex().items_end().gap_3()
         };
-        row.w_full()
+        let layout = row
+            .w_full()
             .child(
-                v_flex()
-                    .when(compact, |text| text.w_full())
-                    .when(!compact, |text| text.flex_1())
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(div().text_title(cx).child(title.into()))
-                    .child(
-                        div()
-                            .debug_selector(|| "orchestrate-section-description".into())
-                            .text_secondary(compact, cx)
-                            .child(description.into()),
-                    ),
+                flip.part(
+                    "labels",
+                    v_flex()
+                        .when(compact, |text| text.w_full())
+                        .when(!compact, |text| text.flex_1())
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(div().text_title(cx).child(title))
+                        .child(
+                            div()
+                                .debug_selector(|| "orchestrate-section-description".into())
+                                .text_secondary(compact, cx)
+                                .child(description.into()),
+                        ),
+                ),
             )
-            .when_some(action, |this, action| this.child(action))
-            .into_any_element()
+            .when_some(action, |this, action| {
+                this.child(flip.part("action", action))
+            });
+        flip.render(layout)
     }
 
     fn render_children(

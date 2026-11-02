@@ -20,7 +20,7 @@ use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
 
-use gpui::{App, Window};
+use gpui::{App, SharedString, Window};
 use gpui_base::motion::{Easing, Interpolate, Timing};
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
@@ -54,7 +54,11 @@ impl Curve {
 pub(crate) struct Owned(Rc<RefCell<HashMap<Key, Box<dyn Any>>>>);
 
 /// A value's key and, for a cross-fade, its layer.
-type Key = (&'static str, usize);
+type Key = (SharedString, usize);
+
+/// The channel of a key [`Owned::keep`] holds a handle under, apart from
+/// every layer of a glide.
+const KEPT: usize = usize::MAX;
 
 struct Glide<T> {
     from: T,
@@ -72,7 +76,7 @@ impl Owned {
     /// value is when it changes.
     pub(crate) fn transition<T>(
         &self,
-        key: &'static str,
+        key: impl Into<SharedString>,
         target: T,
         curve: &Curve,
         window: &mut Window,
@@ -81,7 +85,7 @@ impl Owned {
     where
         T: Interpolate + PartialEq + 'static,
     {
-        self.sample((key, 0), target, curve, window, cx)
+        self.sample((key.into(), 0), target, curve, window, cx)
     }
 
     /// [`CrossFade`] with its layers' opacities kept here: layer `current`
@@ -89,17 +93,18 @@ impl Owned {
     /// is also the region's element id.
     pub(crate) fn cross_fade(
         &self,
-        key: &'static str,
+        key: impl Into<SharedString>,
         current: usize,
         count: usize,
         curve: &Curve,
         window: &mut Window,
         cx: &App,
     ) -> CrossFade {
+        let key = key.into();
         let opacity = (0..count)
             .map(|layer| {
                 let target = if layer == current { 1. } else { 0. };
-                self.sample((key, layer), target, curve, window, cx)
+                self.sample((key.clone(), layer), target, curve, window, cx)
             })
             .collect();
         CrossFade::sampled(key, current, opacity)
@@ -112,22 +117,23 @@ impl Owned {
     /// `key` is also its element id.
     pub(crate) fn shown<T: Clone + PartialEq + 'static>(
         &self,
-        key: &'static str,
+        key: impl Into<SharedString>,
         value: Option<T>,
         window: &mut Window,
         cx: &App,
     ) -> Option<super::Shown<T>> {
+        let key = key.into();
         let target = if value.is_some() { 1f32 } else { 0. };
-        let progress = self.sample((key, 0), target, &Curve::settle(), window, cx);
+        let progress = self.sample((key.clone(), 0), target, &Curve::settle(), window, cx);
         let mut values = self.0.borrow_mut();
         let measure = values
-            .entry((key, 2))
+            .entry((key.clone(), 2))
             .or_insert_with(|| Box::new(super::Measure::default()))
             .downcast_ref::<super::Measure>()
             .expect("a fold's measurement")
             .clone();
         let kept = values
-            .entry((key, 1))
+            .entry((key.clone(), 1))
             .or_insert_with(|| Box::new(None::<T>))
             .downcast_mut::<Option<T>>()
             .expect("a shown value of one type");
@@ -149,6 +155,74 @@ impl Owned {
             leaving,
             measure: Some(measure),
         })
+    }
+
+    /// The handle kept under `key`: made the first time it is asked for,
+    /// the same one every time after, for state a sampler shares through
+    /// clones (a [`super::GlideState`], a [`super::reflow::ReflowState`]).
+    pub(crate) fn keep<T: Clone + Default + 'static>(&self, key: impl Into<SharedString>) -> T {
+        let key = (key.into(), KEPT);
+        let mut values = self.0.borrow_mut();
+        if let Some(kept) = values.get(&key).and_then(|kept| kept.downcast_ref::<T>()) {
+            return kept.clone();
+        }
+        let kept = T::default();
+        values.insert(key, Box::new(kept.clone()));
+        kept
+    }
+
+    /// The reflow scope `key` for the layout `layout` names, kept here so a
+    /// layout the window draws under another parent when it changes (a page
+    /// re-parented as the window turns compact or wide) still glides its
+    /// parts from where the last one drew them.
+    pub(crate) fn reflow(
+        &self,
+        key: impl Into<SharedString>,
+        layout: u64,
+    ) -> super::reflow::Reflow {
+        self.keep::<super::reflow::ReflowState>(key).scope(layout)
+    }
+
+    /// [`Self::reflow`] whose width changing also makes a reflow, on frames
+    /// it was drawn the frame before where it is now; see
+    /// [`super::reflow::ReflowState::scope_in`].
+    pub(crate) fn reflow_in(
+        &self,
+        key: impl Into<SharedString>,
+        layout: u64,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> super::reflow::Reflow {
+        let key = key.into();
+        self.keep::<super::reflow::ReflowState>(key.clone())
+            .scope_in(key, layout, window, cx)
+    }
+
+    /// A [`super::SizeGlide`]'s state, kept here.
+    pub(crate) fn glide_state(&self, key: impl Into<SharedString>) -> super::GlideState {
+        self.keep(key)
+    }
+
+    /// Layer `current` of `count` coming in over the others, and the
+    /// region's height gliding to the new layer's, both on clocks kept
+    /// here: one layout swapped for another (an accordion for a dropdown,
+    /// a control that only one layout has) without a jump of what is below.
+    pub(crate) fn swap(
+        &self,
+        key: impl Into<SharedString>,
+        current: usize,
+        count: usize,
+        window: &mut Window,
+        cx: &App,
+    ) -> Swap {
+        let key = key.into();
+        Swap {
+            fade: self
+                .cross_fade(key.clone(), current, count, &Curve::settle(), window, cx)
+                .span(),
+            height: self.glide_state(key),
+            current,
+        }
     }
 
     fn sample<T>(&self, key: Key, target: T, curve: &Curve, window: &mut Window, cx: &App) -> T
@@ -208,5 +282,159 @@ impl Owned {
             }
         }
         value
+    }
+}
+
+/// One of several layouts cross-fading in a region whose height glides; see
+/// [`Owned::swap`].
+pub(crate) struct Swap {
+    fade: CrossFade,
+    height: super::GlideState,
+    current: usize,
+}
+
+impl Swap {
+    /// Whether `layer` is drawn this frame, so only those are built.
+    pub(crate) fn shows(&self, layer: usize) -> bool {
+        self.fade.shows(layer)
+    }
+
+    /// The region holding `layers`, each tagged with its index.
+    pub(crate) fn render(
+        self,
+        layers: impl IntoIterator<Item = (usize, gpui::AnyElement)>,
+    ) -> gpui::AnyElement {
+        use gpui::{IntoElement as _, Styled as _};
+        super::SizeGlide::new(&self.height, self.fade.render(layers).w_full())
+            .on_change(self.current as u64)
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, px, size,
+    };
+    use gpui_base::{h_flex, v_flex};
+
+    use super::Owned;
+    use crate::test_frames::{draw, draw_settled};
+
+    /// A row that a window turning compact draws under another parent, as
+    /// the shell draws a settings page: a label and a control beside it, or
+    /// the control under it, over a neighbour whose place follows the row's
+    /// height; the compact layout also swaps a short note for a tall one.
+    struct Page {
+        motion: Owned,
+        compact: bool,
+    }
+
+    impl Render for Page {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let compact = self.compact;
+            let reflow = self.motion.reflow("row", u64::from(compact));
+            let control = reflow.part(
+                "control",
+                div()
+                    .debug_selector(|| "control".into())
+                    .flex_none()
+                    .w(px(100.))
+                    .h(px(20.)),
+            );
+            let label = div().flex_none().w(px(100.)).h(px(20.));
+            let row = if compact {
+                v_flex().w_full().child(label).child(control)
+            } else {
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .child(label)
+                    .child(control)
+            };
+            let swap = self
+                .motion
+                .swap("note", usize::from(compact), 2, window, cx);
+            let layers = (0..2)
+                .filter(|layer| swap.shows(*layer))
+                .map(|layer| {
+                    (
+                        layer,
+                        div()
+                            .w_full()
+                            .h(px(20. + 60. * layer as f32))
+                            .into_any_element(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let column = v_flex()
+                .w(px(400.))
+                .child(
+                    div()
+                        .debug_selector(|| "row".into())
+                        .child(reflow.render(row)),
+                )
+                .child(swap.render(layers))
+                .child(div().debug_selector(|| "below".into()).h(px(10.)));
+            if compact {
+                div().id("phone").child(column).into_any_element()
+            } else {
+                div()
+                    .id("tablet")
+                    .child(div().id("split").child(column))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// Under its new parent the control starts where the other layout drew
+    /// it and glides to its place, and what is below the swapped note
+    /// glides with the note's height, rather than either starting over;
+    /// with motion reduced both are there at once.
+    #[gpui::test]
+    fn a_layout_drawn_under_a_new_parent_glides_from_the_last(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (page, cx) = cx.add_window_view(|_, _| Page {
+            motion: Owned::default(),
+            compact: false,
+        });
+        cx.simulate_resize(size(px(400.), px(400.)));
+        draw_settled(cx);
+        let at = |name: &'static str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds("row").expect("the row is drawn").origin;
+            cx.debug_bounds(name).expect("drawn").origin - row
+        };
+        let beside = at("control", cx);
+        let above = at("below", cx);
+        let turn = |compact: bool, cx: &mut VisualTestContext| {
+            page.update(cx, |page, cx| {
+                page.compact = compact;
+                cx.notify();
+            });
+            draw(cx);
+        };
+
+        turn(true, cx);
+        assert_eq!(at("control", cx), beside, "the control starts where it was");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (control, below) = (at("control", cx), at("below", cx));
+        draw_settled(cx);
+        let (under, lower) = (at("control", cx), at("below", cx));
+        assert!(under.y > beside.y && under.x < beside.x);
+        assert!(
+            control.x < beside.x && control.x > under.x && control.y > beside.y,
+            "the control glides: {control:?}"
+        );
+        assert!(
+            below.y > above.y && below.y < lower.y,
+            "what is below glides with the note: {below:?}"
+        );
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        turn(false, cx);
+        assert_eq!(at("control", cx), beside);
+        assert_eq!(at("below", cx), above);
     }
 }

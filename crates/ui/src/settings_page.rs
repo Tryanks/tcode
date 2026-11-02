@@ -36,7 +36,7 @@ use crate::window_state::WindowState;
 use tcode_core::project::SessionMeta;
 use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
 
-use crate::settings_rows::{FIELD_WIDTH, SelectRowOption, ToggleRow};
+use crate::settings_rows::{SelectRowOption, ToggleRow};
 
 const NAV_WIDTH: f32 = 255.;
 /// Archived rows rendered per page. Each row carries two buttons with click
@@ -498,6 +498,9 @@ pub struct SettingsPage {
     project_rules_editor: Option<Entity<thread_behavior::ProjectRulesEditor>>,
     project_rules_subscription: Option<Subscription>,
     control: control::ControlSection,
+    /// The page's size-class motion: the window draws the page under
+    /// another parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     remote_attachment_limit_input: SettingsInput,
     /// Zero-based page shown by the Archived Threads list.
     archived_page: usize,
@@ -519,6 +522,12 @@ pub struct SettingsPage {
 }
 
 impl SettingsPage {
+    /// The row `id` of this page, gliding when the window turns compact or
+    /// wide.
+    fn flip_row(&self, id: impl Into<SharedString>, cx: &App) -> crate::settings_rows::FlipRow {
+        crate::settings_rows::flip_row(&self.motion, id, self.window_state.read(cx).compact)
+    }
+
     fn section_applies(&self, section: &Section, cx: &App) -> bool {
         section.available(&self.capabilities, self.store.read(cx).scope().is_full())
     }
@@ -734,6 +743,7 @@ impl SettingsPage {
             project_rules_editor: None,
             project_rules_subscription: None,
             control: control::ControlSection::default(),
+            motion: Default::default(),
             remote_attachment_limit_input: SettingsInput {
                 state: remote_attachment_limit_input.clone(),
                 pushed: remote_attachment_limit,
@@ -1451,13 +1461,14 @@ impl SettingsPage {
         } else {
             &self.content_scroll
         };
-        self.render_content_column(column, scroll, cx)
+        self.render_content_column(column, scroll, window, cx)
     }
 
     fn render_content_column(
         &self,
         column: gpui::Div,
         scroll: &ScrollHandle,
+        window: &mut Window,
         cx: &App,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
@@ -1471,7 +1482,13 @@ impl SettingsPage {
                 .overflow_y_scroll()
                 .lock_scroll_axis()
                 .track_scroll(scroll)
-                .child(crate::settings_rows::content_column(column, compact, cx)),
+                .child(crate::settings_rows::content_column(
+                    column,
+                    compact,
+                    &self.motion,
+                    window,
+                    cx,
+                )),
         )
         .into_any_element()
     }
@@ -1564,25 +1581,26 @@ impl SettingsPage {
     /// The whole-settings escape hatch: the per-item buttons cover single
     /// settings, this one covers the rest and keeps its confirm dialog.
     fn restore_all_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .child(crate::settings_rows::row_labels(
+        let row = self.flip_row("restore-all", cx);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
                 crate::tr!("settings.reset_all"),
                 Some(crate::tr!("settings.restore_description").into()),
                 None,
-                self.window_state.read(cx).compact,
+                row.compact(),
                 cx,
-            ))
-            .child(
-                Button::new("restore-defaults")
-                    .danger()
-                    .outline()
-                    .small()
-                    .label(crate::tr!("settings.restore"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.confirm_restore(window, cx);
-                    })),
-            )
-            .into_any_element()
+            ),
+            Button::new("restore-defaults")
+                .danger()
+                .outline()
+                .small()
+                .label(crate::tr!("settings.restore"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.confirm_restore(window, cx);
+                })),
+            cx,
+        );
+        row.render(layout)
     }
 
     fn title_generation_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1605,16 +1623,19 @@ impl SettingsPage {
                 );
             }),
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .child(crate::settings_rows::row_labels(
+        let row = self.flip_row("title-generation", cx);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
                 crate::tr!("settings.title_generation.title"),
                 Some(crate::tr!("settings.title_generation.description").into()),
                 reset,
-                self.window_state.read(cx).compact,
+                row.compact(),
                 cx,
-            ))
-            .child(self.title_model_picker.clone())
-            .into_any_element()
+            ),
+            self.title_model_picker.clone(),
+            cx,
+        );
+        row.render(layout)
     }
 
     fn fallback_review_model_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1635,16 +1656,19 @@ impl SettingsPage {
                 );
             }),
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .child(crate::settings_rows::row_labels(
+        let row = self.flip_row("fallback-review-model", cx);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
                 crate::tr!("settings.fallback_review_model.title"),
                 Some(crate::tr!("settings.fallback_review_model.description").into()),
                 reset,
-                self.window_state.read(cx).compact,
+                row.compact(),
                 cx,
-            ))
-            .child(self.fallback_review_model_picker.clone())
-            .into_any_element()
+            ),
+            self.fallback_review_model_picker.clone(),
+            cx,
+        );
+        row.render(layout)
     }
 
     fn device_name_row(&self, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1658,25 +1682,25 @@ impl SettingsPage {
                 this.device_name_input.push(name, window, cx);
             }),
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .debug_selector(|| "settings-device-name-row".into())
-            .child(crate::settings_rows::row_labels(
-                crate::tr!("settings.device_name.title"),
-                Some(crate::tr!("settings.device_name.description").into()),
-                reset,
-                self.window_state.read(cx).compact,
+        let row = self.flip_row("device-name", cx);
+        let layout = row
+            .row(
+                crate::settings_rows::row_labels(
+                    crate::tr!("settings.device_name.title"),
+                    Some(crate::tr!("settings.device_name.description").into()),
+                    reset,
+                    compact,
+                    cx,
+                ),
+                row.field(
+                    Input::new(&self.device_name_input.state)
+                        .placeholder(crate::tr!("settings.device_name.placeholder")),
+                    cx,
+                ),
                 cx,
-            ))
-            .child(
-                div()
-                    .when(compact, |field| field.w_full())
-                    .when(!compact, |field| field.w(px(FIELD_WIDTH)))
-                    .child(
-                        Input::new(&self.device_name_input.state)
-                            .placeholder(crate::tr!("settings.device_name.placeholder")),
-                    ),
             )
-            .into_any_element()
+            .debug_selector(|| "settings-device-name-row".into());
+        row.render(layout)
     }
 
     fn remote_attachment_limit_row(&self, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1692,20 +1716,22 @@ impl SettingsPage {
                 this.remote_attachment_limit_input.push(limit, window, cx);
             }),
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .debug_selector(|| "settings-remote-attachment-limit-row".into())
-            .child(crate::settings_rows::row_labels(
-                crate::tr!("settings.remote_attachment_limit.title"),
-                Some(crate::tr!("settings.remote_attachment_limit.description").into()),
-                reset,
-                self.window_state.read(cx).compact,
-                cx,
-            ))
-            .child(
+        let row = self.flip_row("remote-attachment-limit", cx);
+        let layout = row
+            .row(
+                crate::settings_rows::row_labels(
+                    crate::tr!("settings.remote_attachment_limit.title"),
+                    Some(crate::tr!("settings.remote_attachment_limit.description").into()),
+                    reset,
+                    row.compact(),
+                    cx,
+                ),
                 crate::widgets::input::NumberInput::new(&self.remote_attachment_limit_input.state)
                     .accessibility_label(crate::tr!("settings.remote_attachment_limit.title")),
+                cx,
             )
-            .into_any_element()
+            .debug_selector(|| "settings-remote-attachment-limit-row".into());
+        row.render(layout)
     }
 
     fn render_tcode_update_popover(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2428,43 +2454,45 @@ impl SettingsPage {
         let id_unarchive = meta.id.clone();
         let id_delete = meta.id.clone();
         let title = meta.title.clone();
-        crate::settings_rows::row_frame(compact, cx)
-            .child(crate::settings_rows::row_labels(
+        let row =
+            crate::settings_rows::flip_row(&self.motion, format!("archived-{}", meta.id), compact);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
                 meta.title.clone(),
                 Some(desc.into()),
                 None,
                 compact,
                 cx,
-            ))
-            .child(
-                gpui_base::h_flex()
-                    .flex_none()
-                    .gap_2()
-                    .child(
-                        Button::new(SharedString::from(format!("unarchive-{}", meta.id)))
-                            .outline()
+            ),
+            gpui_base::h_flex()
+                .flex_none()
+                .gap_2()
+                .child(
+                    Button::new(SharedString::from(format!("unarchive-{}", meta.id)))
+                        .outline()
+                        .small()
+                        .label(crate::tr!("settings.unarchive"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let id = id_unarchive.clone();
+                            this.store.update(cx, |store, _cx| {
+                                store.unarchive_session(id);
+                            });
+                        })),
+                )
+                .when(full, |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("delete-perm-{}", meta.id)))
+                            .danger()
                             .small()
-                            .label(crate::tr!("settings.unarchive"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let id = id_unarchive.clone();
-                                this.store.update(cx, |store, _cx| {
-                                    store.unarchive_session(id);
-                                });
+                            .label(crate::tr!("settings.delete_permanently"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.confirm_delete_archived(&id_delete, &title, window, cx);
                             })),
                     )
-                    .when(full, |row| {
-                        row.child(
-                            Button::new(SharedString::from(format!("delete-perm-{}", meta.id)))
-                                .danger()
-                                .small()
-                                .label(crate::tr!("settings.delete_permanently"))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.confirm_delete_archived(&id_delete, &title, window, cx);
-                                })),
-                        )
-                    }),
-            )
-            .into_any_element()
+                }),
+            cx,
+        );
+        row.render(layout)
     }
 
     fn confirm_delete_archived(
@@ -2693,24 +2721,23 @@ impl SettingsPage {
                 this.home_url_input.push(String::new(), window, cx);
             }),
         );
-        crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-            .child(crate::settings_rows::row_labels(
+        let row = self.flip_row("browser-home-url", cx);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
                 crate::tr!("browser.home_url.title"),
                 Some(crate::tr!("browser.home_url.description").into()),
                 reset,
-                self.window_state.read(cx).compact,
+                compact,
                 cx,
-            ))
-            .child(
-                div()
-                    .when(compact, |field| field.w_full())
-                    .when(!compact, |field| field.w(px(FIELD_WIDTH)))
-                    .child(
-                        Input::new(&self.home_url_input.state)
-                            .placeholder(crate::tr!("browser.home_url.placeholder")),
-                    ),
-            )
-            .into_any_element()
+            ),
+            row.field(
+                Input::new(&self.home_url_input.state)
+                    .placeholder(crate::tr!("browser.home_url.placeholder")),
+                cx,
+            ),
+            cx,
+        );
+        row.render(layout)
     }
 
     fn image_mode_row(&self, mode: ImageMode, cx: &mut Context<Self>) -> AnyElement {
@@ -2766,7 +2793,7 @@ impl SettingsPage {
                 ),
             ],
             reset,
-            self.window_state.read(cx).compact,
+            self.flip_row("cu-image-mode-dropdown", cx),
             {
                 let page = cx.entity();
                 move |mode, _, cx| {
@@ -2903,7 +2930,7 @@ impl SettingsPage {
                 option(ThemeMode::Dark, "theme-option-dark", "settings.theme.dark"),
             ],
             reset,
-            self.window_state.read(cx).compact,
+            self.flip_row("theme-dropdown", cx),
             {
                 let page = cx.entity();
                 move |mode, window, cx| {
@@ -2965,7 +2992,7 @@ impl SettingsPage {
                 ),
             ],
             reset,
-            self.window_state.read(cx).compact,
+            self.flip_row("language-dropdown", cx),
             {
                 let page = cx.entity();
                 move |language, window, cx| {
@@ -2999,7 +3026,7 @@ impl SettingsPage {
                 == crate::window_state::Destination::SettingsThreadRules
         {
             let column = self.render_threads(window, cx);
-            return self.render_content_column(column, &self.content_scroll, cx);
+            return self.render_content_column(column, &self.content_scroll, window, cx);
         }
         if self.section == Section::ProjectThreadRules
             && self.window_state.read(cx).destination()

@@ -22,7 +22,7 @@ use super::hosting::{
 use crate::icon::{Icon, IconName};
 use crate::material::group_caption;
 use crate::overlay::{Notification, OverlayExt as _};
-use crate::settings_rows::{FIELD_WIDTH, ToggleRow, footnote};
+use crate::settings_rows::{ToggleRow, footnote};
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -50,6 +50,9 @@ pub struct TraversePanel {
     add_input: Entity<InputState>,
     /// Repaints the status while hosting.
     ticker: Option<Task<()>>,
+    /// The panel's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     _subscription: gpui::Subscription,
 }
 
@@ -87,6 +90,7 @@ impl TraversePanel {
             rows,
             add_input,
             ticker: None,
+            motion: Default::default(),
             _subscription: subscription,
         }
     }
@@ -251,13 +255,7 @@ impl TraversePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let field = |compact: bool| {
-            div()
-                .when(compact, |field| field.flex_1().min_w_0())
-                .when(!compact, |field| {
-                    field.w(px(FIELD_WIDTH)).min_w_0().flex_shrink(1.)
-                })
-        };
+        let motion = self.motion.clone();
         let urls = self.typed_urls(cx);
         let (hosting, statuses) = cx
             .try_global::<RemoteController>()
@@ -280,124 +278,132 @@ impl TraversePanel {
                 (key, (index, source.enabled, source.expanded, input, url))
             })
             .collect();
-        let sources =
-            crate::settings_rows::grouped_keyed(
-                "remote-traverse-sources",
-                sources,
-                window,
-                cx,
-                |key, (index, enabled, expanded, input, url), window, cx| {
-                    let (index, enabled, expanded) = (*index, *enabled, *expanded);
-                    // The status names a source as invitations do.
-                    let status_key = match &url {
-                        None => Some(tcode_client::pairing::TRAVERSE_OFFICIAL.to_owned()),
-                        Some(Ok(url)) => Some(url.to_string()),
-                        Some(Err(_)) => None,
-                    };
-                    let status = status_key.filter(|_| hosting).and_then(|status_key| {
-                        statuses.iter().find(|status| status.source == status_key)
-                    });
-                    let chip = crate::motion::shown(
-                        SharedString::from(format!("remote-traverse-chip-{key}")),
-                        enabled.then_some(()),
-                        window,
-                        cx,
-                    )
-                    .map(|shown| shown.fade(status_chip(index, key, status, expanded, window, cx)));
-                    let detail = status.filter(|_| enabled).map(|status| {
-                        div()
-                            .w_full()
-                            .px(px(crate::material::CARD_INSET))
-                            .pb(cx.theme().tokens.spacing.sm)
-                            .child(
-                                crate::widgets::Collapsible::new(
-                                    ("remote-traverse-detail", index),
-                                    expanded,
-                                )
-                                .w_full()
-                                .content(status_detail(key, status, window, cx)),
-                            )
-                    });
-                    let switch_id = SharedString::from(format!("remote-traverse-{index}"));
-                    let set_enabled = cx.listener(move |this, checked: &bool, window, cx| {
-                        this.set_enabled(index, *checked, window, cx);
-                    });
-                    let element =
-                        match (input, url) {
-                            (Some(input), Some(url)) => {
-                                let description = match url {
-                                    Ok(_) => crate::tr!("remote.traverse.url_description")
-                                        .into_owned()
-                                        .into(),
-                                    Err(error) => error.clone(),
-                                };
-                                let remove = Button::new(SharedString::from(format!(
-                                    "remote-traverse-remove-{index}"
-                                )))
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Close)
-                                .aria_label(crate::tr!("remote.traverse.remove"))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.remove(index, window, cx);
-                                }));
-                                let labels = field_labels(
-                                    crate::tr!("remote.traverse.custom").into_owned().into(),
-                                    Some(description),
-                                    compact,
-                                    cx,
-                                );
-                                let controls = h_flex()
-                                    .min_w_0()
-                                    .gap_3()
-                                    .items_center()
-                                    .when(compact, |controls| controls.w_full())
-                                    .child(field(compact).child(Input::new(input).placeholder(
-                                        crate::tr!("remote.traverse.url_placeholder"),
-                                    )))
-                                    .child(remove)
-                                    .children(chip)
-                                    // Beside a text field the row cannot be one
-                                    // control, so the switch is its own.
-                                    .child(
-                                        Switch::new(switch_id)
-                                            .checked(enabled)
-                                            .on_click(set_enabled),
-                                    );
-                                reflowing_field_row(
-                                    SharedString::from(format!("remote-traverse-field-{key}")),
-                                    labels,
-                                    controls,
-                                    compact,
-                                    window,
-                                    cx,
-                                )
-                            }
-                            _ => ToggleRow::new(
-                                switch_id,
-                                crate::tr!("remote.traverse.official"),
-                                enabled,
-                                compact,
-                                set_enabled,
-                            )
-                            .accessory(chip.map(|chip| {
-                                // The accessory takes the room the labels leave, so the
-                                // chip sits by the switch at the row's end.
-                                h_flex()
-                                    .flex_1()
-                                    .justify_end()
-                                    .child(chip)
-                                    .into_any_element()
-                            }))
-                            .into_any_element(),
-                        };
-                    v_flex()
+        let sources = crate::settings_rows::grouped_keyed(
+            "remote-traverse-sources",
+            sources,
+            window,
+            cx,
+            |key, (index, enabled, expanded, input, url), window, cx| {
+                let (index, enabled, expanded) = (*index, *enabled, *expanded);
+                // The status names a source as invitations do.
+                let status_key = match &url {
+                    None => Some(tcode_client::pairing::TRAVERSE_OFFICIAL.to_owned()),
+                    Some(Ok(url)) => Some(url.to_string()),
+                    Some(Err(_)) => None,
+                };
+                let status = status_key.filter(|_| hosting).and_then(|status_key| {
+                    statuses.iter().find(|status| status.source == status_key)
+                });
+                let chip = crate::motion::shown(
+                    SharedString::from(format!("remote-traverse-chip-{key}")),
+                    enabled.then_some(()),
+                    window,
+                    cx,
+                )
+                .map(|shown| shown.fade(status_chip(index, key, status, expanded, window, cx)));
+                let detail = status.filter(|_| enabled).map(|status| {
+                    div()
                         .w_full()
-                        .child(element)
-                        .children(detail)
-                        .into_any_element()
-                },
-            );
+                        .px(px(crate::material::CARD_INSET))
+                        .pb(cx.theme().tokens.spacing.sm)
+                        .child(
+                            crate::widgets::Collapsible::new(
+                                ("remote-traverse-detail", index),
+                                expanded,
+                            )
+                            .w_full()
+                            .content(status_detail(key, status, window, cx)),
+                        )
+                });
+                let switch_id = SharedString::from(format!("remote-traverse-{index}"));
+                let set_enabled = cx.listener(move |this, checked: &bool, window, cx| {
+                    this.set_enabled(index, *checked, window, cx);
+                });
+                let element = match (input, url) {
+                    (Some(input), Some(url)) => {
+                        let description = match url {
+                            Ok(_) => crate::tr!("remote.traverse.url_description")
+                                .into_owned()
+                                .into(),
+                            Err(error) => error.clone(),
+                        };
+                        let remove = Button::new(SharedString::from(format!(
+                            "remote-traverse-remove-{index}"
+                        )))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .aria_label(crate::tr!("remote.traverse.remove"))
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.remove(index, window, cx);
+                            },
+                        ));
+                        let labels = field_labels(
+                            crate::tr!("remote.traverse.custom").into_owned().into(),
+                            Some(description),
+                            compact,
+                            cx,
+                        );
+                        let id = SharedString::from(format!("remote-traverse-field-{key}"));
+                        // Beside a text field the row cannot be one
+                        // control, so the switch is its own.
+                        let rest = h_flex()
+                            .gap_3()
+                            .items_center()
+                            .child(remove)
+                            .children(chip)
+                            .child(
+                                Switch::new(switch_id)
+                                    .checked(enabled)
+                                    .on_click(set_enabled),
+                            );
+                        let input = input.clone();
+                        reflowing_field_row(
+                            id.clone(),
+                            labels,
+                            |row, cx| {
+                                url_controls(
+                                    row,
+                                    &motion,
+                                    &id,
+                                    Input::new(&input)
+                                        .placeholder(crate::tr!("remote.traverse.url_placeholder")),
+                                    rest,
+                                    cx,
+                                )
+                            },
+                            compact,
+                            &motion,
+                            window,
+                            cx,
+                        )
+                    }
+                    _ => ToggleRow::new(
+                        switch_id,
+                        crate::tr!("remote.traverse.official"),
+                        enabled,
+                        compact,
+                        set_enabled,
+                    )
+                    .accessory(chip.map(|chip| {
+                        // The accessory takes the room the labels leave, so the
+                        // chip sits by the switch at the row's end.
+                        h_flex()
+                            .flex_1()
+                            .justify_end()
+                            .child(chip)
+                            .into_any_element()
+                    }))
+                    .into_any_element(),
+                };
+                v_flex()
+                    .w_full()
+                    .child(element)
+                    .children(detail)
+                    .into_any_element()
+            },
+        );
         let mut rows = vec![sources];
         let addition = self.typed_addition(cx);
         let add_description = match &addition {
@@ -406,6 +412,16 @@ impl TraversePanel {
                 .into_owned()
                 .into(),
         };
+        let add = Button::new("remote-traverse-add")
+            .ghost()
+            .outline()
+            .compact()
+            .icon(IconName::Plus)
+            .label(crate::tr!("remote.traverse.add"))
+            .disabled(!matches!(addition, Some(Ok(_))))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.add(window, cx);
+            }));
         let labels = field_labels(
             crate::tr!("remote.traverse.add_title").into_owned().into(),
             Some(add_description),
@@ -416,30 +432,19 @@ impl TraversePanel {
             reflowing_field_row(
                 "remote-traverse-add-row",
                 labels,
-                h_flex()
-                    .min_w_0()
-                    .gap_3()
-                    .items_center()
-                    .when(compact, |controls| controls.w_full())
-                    .child(
-                        field(compact).child(
-                            Input::new(&self.add_input)
-                                .placeholder(crate::tr!("remote.traverse.url_placeholder")),
-                        ),
+                |row, cx| {
+                    url_controls(
+                        row,
+                        &self.motion,
+                        "remote-traverse-add-row",
+                        Input::new(&self.add_input)
+                            .placeholder(crate::tr!("remote.traverse.url_placeholder")),
+                        h_flex().items_center().child(add),
+                        cx,
                     )
-                    .child(
-                        Button::new("remote-traverse-add")
-                            .ghost()
-                            .outline()
-                            .compact()
-                            .icon(IconName::Plus)
-                            .label(crate::tr!("remote.traverse.add"))
-                            .disabled(!matches!(addition, Some(Ok(_))))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.add(window, cx);
-                            })),
-                    ),
+                },
                 compact,
+                &self.motion,
                 window,
                 cx,
             ),
@@ -447,6 +452,37 @@ impl TraversePanel {
         ));
         rows
     }
+}
+
+/// A URL field followed by `rest`, the row's other controls: [`FIELD_WIDTH`]
+/// beside the labels, and what `rest` leaves of the row under them, its
+/// width gliding between the two when the window turns.
+fn url_controls(
+    row: &crate::settings_rows::FlipRow,
+    motion: &crate::motion::owned::Owned,
+    id: &str,
+    field: impl IntoElement,
+    rest: gpui::Div,
+    cx: &App,
+) -> AnyElement {
+    let gap = cx.theme().tokens.spacing.md;
+    let rest_width =
+        motion.keep::<std::rc::Rc<std::cell::Cell<gpui::Pixels>>>(format!("{id}-rest"));
+    let field = row
+        .field_among(field, rest_width.get() + gap, cx)
+        .min_w_0()
+        .flex_shrink(1.);
+    let rest = gpui_base::ElementExt::on_prepaint(rest, move |bounds, _, _| {
+        rest_width.set(bounds.size.width)
+    });
+    h_flex()
+        .min_w_0()
+        .gap(gap)
+        .items_center()
+        .when(row.compact(), |controls| controls.w_full())
+        .child(field)
+        .child(rest)
+        .into_any_element()
 }
 
 /// The field holding a self-hosted instance's URL, which takes effect when it

@@ -785,6 +785,9 @@ pub struct PullRequestsPanel {
     agent_tools_open: bool,
     /// The agent tools section's height closed, which its share glides from.
     agent_tools_closed: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
+    /// The panel's motion that must carry on when the window draws the
+    /// panel under another parent: as it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     detail: Entity<PullRequestView>,
     /// The pull request the active thread had open when last drawn.
     shown: Option<PullRequestKey>,
@@ -828,6 +831,7 @@ impl PullRequestsPanel {
             hover: crate::motion::ListHover::new(),
             agent_tools_open: false,
             agent_tools_closed: Default::default(),
+            motion: Default::default(),
             detail,
             shown: None,
             _subscriptions: subscriptions,
@@ -1791,10 +1795,13 @@ impl PullRequestsPanel {
         // with the list above it, and back. gpui-base has no flex-share
         // glide and `SizeGlide` glides content sizes, so the basis and the
         // grow are interpolated here.
-        let share = gpui_base::motion::transition(
+        // The window turning compact moves the panel into a bottom sheet,
+        // where the list keeps its natural height; the share glides there
+        // under the new parent too.
+        let share = self.motion.transition(
             "pr-agent-tools-share",
             if fill { 1f32 } else { 0. },
-            crate::motion::settle(),
+            &crate::motion::owned::Curve::settle(),
             window,
             cx,
         );

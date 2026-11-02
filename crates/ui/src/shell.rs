@@ -11794,6 +11794,85 @@ mod tests {
         assert_eq!(left(cx), compact, "with motion reduced it is there at once");
     }
 
+    /// A tablet turning wide while it shows a settings page moves a row's
+    /// field from under its label to beside it: under the page's new parent
+    /// the field is drawn where the compact row had it and glides there,
+    /// narrowing from the row's width to its own; turning back it returns
+    /// the same way, and with motion reduced it is there at once.
+    #[gpui::test]
+    fn a_settings_field_glides_beside_its_label_across_the_breakpoint(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 899.);
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        window_state.update(cx, |state, cx| state.open_settings(cx));
+        draw(cx);
+        let general = cx
+            .debug_bounds("settings-nav-general")
+            .expect("General settings row");
+        cx.simulate_click(general.center(), gpui::Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+        // Where the field is in its row, and how wide.
+        let field = |cx: &mut VisualTestContext| {
+            let row = cx
+                .debug_bounds("settings-device-name-row")
+                .expect("the device name row is drawn");
+            let field = cx
+                .debug_bounds("device-name-field")
+                .expect("the device name field is drawn");
+            (field.origin - row.origin, field.size.width, row.size.width)
+        };
+        let (under, under_width, row_width) = field(cx);
+        assert_eq!(
+            under_width,
+            row_width - px(crate::material::CARD_INSET) * 2.,
+            "under the label it spans the row"
+        );
+
+        resize(cx, 1024.);
+        let (start, start_width, start_row) = field(cx);
+        assert_eq!(
+            start, under,
+            "the field starts where the compact row had it"
+        );
+        assert!(
+            start_width > px(crate::settings_rows::FIELD_WIDTH),
+            "as wide as the row lets it: {start_width:?} in {start_row:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (gliding, gliding_width, _) = field(cx);
+        crate::test_frames::draw_settled(cx);
+        let (beside, beside_width, _) = field(cx);
+        assert_eq!(beside_width, px(crate::settings_rows::FIELD_WIDTH));
+        assert!(
+            under.y > beside.y && under.x < beside.x,
+            "{under:?} to {beside:?}"
+        );
+        assert!(
+            gliding.y < under.y && gliding.y > beside.y && gliding.x > under.x,
+            "{gliding:?} between {under:?} and {beside:?}"
+        );
+        assert!(
+            gliding_width < under_width && gliding_width > beside_width,
+            "{gliding_width:?} between {under_width:?} and {beside_width:?}"
+        );
+
+        resize(cx, 899.);
+        assert_eq!(field(cx).0, beside, "and back from where it is");
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(field(cx).0, under);
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        resize(cx, 1024.);
+        assert_eq!(
+            field(cx).0,
+            beside,
+            "with motion reduced it is there at once"
+        );
+    }
+
     /// Settings replaces the whole window, unlike the Hosts route: the left
     /// column is the settings rail, so the workspace sidebar — and the feature
     /// area in it — is gone while the route is showing.

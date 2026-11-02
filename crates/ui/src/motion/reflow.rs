@@ -46,7 +46,51 @@ struct State {
     bounds: FlipBounds,
     /// The scope's width on the last frame it was laid out.
     width: Option<Pixels>,
+    /// The layout an owned scope was last drawn with.
+    layout: Option<u64>,
     glides: HashMap<SharedString, Glide>,
+}
+
+/// A reflow scope's state kept by its owner rather than in the element tree;
+/// see [`ReflowState::scope`].
+#[derive(Clone, Default)]
+pub(crate) struct ReflowState(Rc<RefCell<State>>);
+
+impl ReflowState {
+    /// The scope this state keeps, drawing the layout `layout` names. A
+    /// frame that draws another layout than the last one drawn is a
+    /// reflow, under whatever parent the scope is drawn: gpui keys element
+    /// state by its whole id path, and a page the window re-parents as it
+    /// turns compact or wide would otherwise start its glides over. The
+    /// width alone never makes a reflow here, since the scope may not have
+    /// been drawn while the window changed.
+    pub(crate) fn scope(&self, layout: u64) -> Reflow {
+        let frame = Frame::default();
+        frame.layout.set(Some(layout));
+        Reflow {
+            state: self.0.clone(),
+            frame: Rc::new(frame),
+        }
+    }
+
+    /// [`Self::scope`] whose width changing also makes a reflow (a field
+    /// wrapping under its label as the row narrows), on frames the scope
+    /// `id` was drawn on the frame before under the same parent.
+    pub(crate) fn scope_in(
+        &self,
+        id: impl Into<ElementId>,
+        layout: u64,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Reflow {
+        let fresh = Cell::new(false);
+        window.use_keyed_state(super::child_id(&id.into(), "reflow-drawn"), cx, |_, _| {
+            fresh.set(true)
+        });
+        let reflow = self.scope(layout);
+        reflow.frame.follows_width.set(!fresh.get());
+        reflow
+    }
 }
 
 /// One layout whose parts glide when it reflows: made each frame by
@@ -66,6 +110,12 @@ struct Frame {
     resized: Cell<Option<Pixels>>,
     /// Whether its owner changed the layout this frame.
     reflowed: Cell<bool>,
+    /// The layout an owned scope draws.
+    layout: Cell<Option<u64>>,
+    /// Whether a change of the scope's width alone can make a reflow: the
+    /// scope was drawn last frame where it is drawn now, so the width it
+    /// measured then is this layout's.
+    follows_width: Cell<bool>,
 }
 
 /// The reflow scope `id` of the view rendering it.
@@ -74,9 +124,11 @@ pub(crate) fn reflow(id: impl Into<ElementId>, window: &mut Window, cx: &mut App
     let state = window.use_keyed_state(super::child_id(&id, "reflow"), cx, |_, _| {
         Rc::new(RefCell::new(State::default()))
     });
+    let frame = Frame::default();
+    frame.follows_width.set(true);
     Reflow {
         state: state.read(cx).clone(),
-        frame: Rc::default(),
+        frame: Rc::new(frame),
     }
 }
 
@@ -157,16 +209,22 @@ impl gpui::Element for Scope {
     ) {
         let frame = &self.reflow.frame;
         frame.origin.set(bounds.origin);
-        let last = self
-            .reflow
-            .state
-            .borrow_mut()
-            .width
-            .replace(bounds.size.width);
-        frame.resized.set(
-            last.map(|last| bounds.size.width - last)
-                .filter(|change| *change != Pixels::ZERO),
-        );
+        let mut state = self.reflow.state.borrow_mut();
+        let last = state.width.replace(bounds.size.width);
+        if let Some(layout) = frame.layout.get() {
+            let changed = state
+                .layout
+                .replace(layout)
+                .is_some_and(|last| last != layout);
+            frame.reflowed.set(frame.reflowed.get() || changed);
+        }
+        if frame.follows_width.get() {
+            frame.resized.set(
+                last.map(|last| bounds.size.width - last)
+                    .filter(|change| *change != Pixels::ZERO),
+            );
+        }
+        drop(state);
         self.child.prepaint(window, cx);
     }
 

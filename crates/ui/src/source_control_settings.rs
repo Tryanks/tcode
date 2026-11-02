@@ -131,6 +131,9 @@ pub struct SourceControlPanel {
     /// Whether the token being typed is one sent with the email, for those hosts.
     with_email: BTreeMap<String, bool>,
     visible: bool,
+    /// The panel's size-class motion: the window draws it under another
+    /// parent when it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     _subscription: Subscription,
 }
 
@@ -152,6 +155,7 @@ impl SourceControlPanel {
             emails: BTreeMap::new(),
             with_email: BTreeMap::new(),
             visible: false,
+            motion: Default::default(),
             _subscription: subscription,
         }
     }
@@ -529,20 +533,31 @@ impl SourceControlPanel {
         let input = token.clone();
         let store = self.store.clone();
         let clear_store = self.store.clone();
-        let field =
-            div()
-                // The token field's floor before the buttons wrap; gpui-base has no field-width token.
-                .min_w(gpui::px(120.))
-                .map(|field| {
-                    if compact {
-                        field.w_full()
-                    } else {
-                        field.flex_1()
-                    }
-                })
-                .child(Input::new(&token).placeholder(placeholder).aria_label(
-                    crate::tr!("source_control.token_label", host = host).into_owned(),
-                ));
+        // A phone gives the field the row and puts the buttons under it, at
+        // the end; turning, the field's width glides and both glide to
+        // their places.
+        let flip = crate::settings_rows::flip_row(
+            &self.motion,
+            format!("source-control-token-{host}"),
+            compact,
+        )
+        .bare();
+        let buttons_width = self
+            .motion
+            .keep::<std::rc::Rc<std::cell::Cell<gpui::Pixels>>>(format!(
+                "source-control-token-buttons-{host}"
+            ));
+        let gap = cx.theme().tokens.spacing.sm;
+        let field = flip
+            .field_beside(
+                Input::new(&token)
+                    .placeholder(placeholder)
+                    .aria_label(crate::tr!("source_control.token_label", host = host).into_owned()),
+                buttons_width.get() + gap,
+                cx,
+            )
+            // The token field's floor before the buttons wrap; gpui-base has no field-width token.
+            .min_w(gpui::px(120.));
         let mut buttons = h_flex()
             .gap_2()
             .child(
@@ -595,16 +610,21 @@ impl SourceControlPanel {
                     }),
             );
         }
-        // A phone gives the field the row and puts the buttons under it, at the end.
+        let buttons = gpui_base::ElementExt::on_prepaint(buttons, move |bounds, _, _| {
+            buttons_width.set(bounds.size.width)
+        });
+        let field = flip.part("field", field);
+        let buttons = flip.part("buttons", buttons);
         let editor = if compact {
             v_flex()
                 .w_full()
-                .gap_2()
+                .gap(gap)
                 .child(field)
                 .child(h_flex().w_full().justify_end().child(buttons))
         } else {
-            h_flex().w_full().gap_2().child(field).child(buttons)
+            h_flex().w_full().gap(gap).child(field).child(buttons)
         };
+        let editor = flip.render(editor);
         let scopes = status
             .as_ref()
             .filter(|status| !status.token_scopes.is_empty())
@@ -927,7 +947,7 @@ impl Render for SourceControlPanel {
             .outline()
             .small()
             .icon(crate::icon::IconName::Plus)
-            .when(compact, |button| button.w_full())
+            .w_full()
             .label(crate::tr!("source_control.add_host_menu").into_owned())
             .on_click(move |_, window, cx| {
                 AddHostDialog::open(store.clone(), listed_hosts.clone(), window, cx)
@@ -960,16 +980,31 @@ impl Render for SourceControlPanel {
                     ))
                     .child(crate::material::group(cx).child(rows)),
             )
-            .child(if compact {
-                v_flex().gap_2().child(add).child(note)
-            } else {
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .items_center()
-                    .gap_3()
-                    .child(note.flex_1())
-                    .child(add)
+            .child({
+                // A phone puts the button, full width, over the note; each
+                // glides to its place when the window turns, and the
+                // button's width glides.
+                let flip = crate::settings_rows::flip_row(
+                    &self.motion,
+                    "source-control-add-host",
+                    compact,
+                )
+                .bare();
+                let layout = if compact {
+                    v_flex()
+                        .gap_2()
+                        .child(flip.part("add", flip.stretch(add, cx)))
+                        .child(flip.part("note", note))
+                } else {
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .items_center()
+                        .gap_3()
+                        .child(flip.part("note", note.flex_1()))
+                        .child(flip.part("add", flip.stretch(add, cx)))
+                };
+                flip.render(layout)
             })
     }
 }
