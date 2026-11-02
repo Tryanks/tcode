@@ -18,6 +18,7 @@ pub(crate) fn image_tiles(
     entries: &[&TimelineEntry],
     cwd: &Path,
     session_id: &str,
+    motion: &crate::motion::owned::Owned,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -67,6 +68,7 @@ pub(crate) fn image_tiles(
         )),
         tiles,
         session_id,
+        motion,
         window,
         cx,
     )
@@ -98,21 +100,28 @@ impl Tile {
     }
 }
 
-/// `tiles` in a row that wraps, keyed by image.
+/// `tiles` in a row that wraps, keyed by image, its motion kept by
+/// `motion`.
 pub(crate) fn tile_row(
     id: SharedString,
     tiles: Vec<(SharedString, Tile)>,
     session_id: &str,
+    motion: &crate::motion::owned::Owned,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let count = tiles.len() as u64;
     let session_id = session_id.to_owned();
-    let glide =
-        crate::motion::GlideState::keyed(SharedString::from(format!("{id}-glide")), window, cx);
-    let row = crate::motion::keyed_across(id, tiles, window, cx, |_, tile, _, cx| {
-        item_tile(tile.clone(), &session_id, cx)
-    })
+    let glide = motion.glide_state(format!("{id}-glide"));
+    let row = crate::motion::keyed::keyed_owned(
+        motion,
+        id,
+        crate::motion::keyed::Fold::Across(px(0.)),
+        tiles,
+        window,
+        cx,
+        |_, tile, _, cx| item_tile(tile.clone(), &session_id, motion, cx),
+    )
     .render(h_flex().w_full().gap_2().flex_wrap());
     crate::motion::SizeGlide::new(&glide, row)
         .on_change(count)
@@ -124,13 +133,22 @@ pub(crate) fn sampled_tile_row(
     id: SharedString,
     tiles: Vec<(SharedString, Tile)>,
     session_id: String,
+    motion: &crate::motion::owned::Owned,
 ) -> AnyElement {
-    crate::motion::Sampled::new(move |window, cx| tile_row(id, tiles, &session_id, window, cx))
-        .into_any_element()
+    let motion = motion.clone();
+    crate::motion::Sampled::new(move |window, cx| {
+        tile_row(id, tiles, &session_id, &motion, window, cx)
+    })
+    .into_any_element()
 }
 
 /// One image an item read, as a thumbnail that opens the image viewer.
-pub(crate) fn item_tile(tile: Tile, session_id: &str, cx: &App) -> AnyElement {
+pub(crate) fn item_tile(
+    tile: Tile,
+    session_id: &str,
+    motion: &crate::motion::owned::Owned,
+    cx: &App,
+) -> AnyElement {
     let Tile {
         entry_id,
         copy: copy_items,
@@ -159,9 +177,11 @@ pub(crate) fn item_tile(tile: Tile, session_id: &str, cx: &App) -> AnyElement {
             .child(crate::motion::Sampled::new({
                 let source = preview();
                 let id = SharedString::from(format!("image-read-{entry_id}-{index}"));
+                let motion = motion.clone();
                 // The picture fades in over the tile's fill once it decodes.
                 move |window, cx| {
-                    let arrived = crate::motion::image_arrival(id, &source, window, cx);
+                    let arrived =
+                        crate::motion::image_arrival_owned(&motion, id, &source, window, cx);
                     img(source)
                         .id("tool-image")
                         .w_full()

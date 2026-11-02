@@ -82,6 +82,25 @@ pub(crate) fn image_arrival(
     )
 }
 
+/// [`image_arrival`] with its clock kept by `motion` under `key`, so a
+/// picture fading in carries on when its view is drawn under a new parent.
+pub(crate) fn image_arrival_owned(
+    motion: &super::owned::Owned,
+    key: impl Into<gpui::SharedString>,
+    source: &ImageSource,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
+    let settled = image_load(source, window, cx).settled();
+    motion.transition(
+        format!("{}/image-arrival", key.into()),
+        if settled { 1f32 } else { 0. },
+        &super::owned::Curve::settle(),
+        window,
+        cx,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

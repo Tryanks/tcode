@@ -56,6 +56,7 @@ pub fn user_bubble(
             rewind: None,
             rewind_menu: None,
             hover: crate::motion::ListHover::new(),
+            motion: Default::default(),
         },
         bubble::BubbleHandlers {
             copy: click(),
@@ -90,6 +91,7 @@ pub fn work_log(
             running: false,
             rows: Vec::new(),
             hover: hover(),
+            motion: Default::default(),
         },
         |_, _, _| {},
         cx,
@@ -97,7 +99,7 @@ pub fn work_log(
 }
 
 pub fn subagent(entry: &TimelineEntry, cx: &App) -> AnyElement {
-    subagent::subagent_row(entry, None, false, hover(), cx)
+    subagent::subagent_row(entry, None, false, hover(), &Default::default(), cx)
 }
 
 pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App) -> AnyElement {
@@ -112,6 +114,7 @@ pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App)
             toggle_more: click(),
             open_files: changes.iter().map(|_| click()).collect(),
         },
+        &Default::default(),
         cx,
     )
 }
@@ -135,6 +138,7 @@ pub fn assistant(
             show_actions: true,
             copied: false,
             hover: crate::motion::ListHover::new(),
+            motion: Default::default(),
         },
         |_, _, _| {},
         cx,
@@ -211,6 +215,7 @@ pub fn callback(id: &str, callback: &OrchestrateCallback, expanded: bool, cx: &A
         |_, _, _| {},
         None,
         hover(),
+        &Default::default(),
         cx,
     )
 }

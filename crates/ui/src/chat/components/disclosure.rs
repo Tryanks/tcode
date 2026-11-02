@@ -68,6 +68,7 @@ pub(crate) fn callback_row(
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_open: Option<super::subagent::ClickHandler>,
     hover: crate::motion::ListHover,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let body = if callback.body.trim().is_empty() {
@@ -84,6 +85,7 @@ pub(crate) fn callback_row(
         expanded,
         on_toggle,
         Some((on_open, hover)),
+        motion,
         cx,
     )
 }
@@ -135,6 +137,7 @@ pub(crate) fn disclosure(
     full_text: &str,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     disclosure_with(
@@ -145,6 +148,7 @@ pub(crate) fn disclosure(
         expanded,
         on_toggle,
         None,
+        motion,
         cx,
     )
 }
@@ -163,10 +167,12 @@ fn disclosure_with(
         Option<super::subagent::ClickHandler>,
         crate::motion::ListHover,
     )>,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let key = key.to_owned();
+    let motion = motion.clone();
     crate::motion::Sampled::new(move |window, cx| {
         // The label is a child rather than `.label()`: the divider grammar keeps it
         // muted, and `Button` paints its label in the variant's foreground.
@@ -184,7 +190,8 @@ fn disclosure_with(
             .overflow_hidden()
             .text_token(&cx.theme().tokens.typography.xs)
             .icon(
-                crate::widgets::Chevron::icon(
+                crate::widgets::Chevron::owned_icon(
+                    &motion,
                     SharedString::from(format!("disclosure-chevron-{key}")),
                     expanded,
                     window,
@@ -211,8 +218,8 @@ fn disclosure_with(
                 move || selector
             });
         let open = open.and_then(|(on_open, hover)| {
-            let shown = crate::motion::shown(
-                SharedString::from(format!("callback-open-shown-{key}")),
+            let shown = motion.shown(
+                format!("callback-open-shown-{key}"),
                 on_open.is_some().then_some(()),
                 window,
                 cx,
@@ -231,13 +238,14 @@ fn disclosure_with(
             .children(open)
             .child(super::dividers::divider_stub(cx));
 
-        let body = crate::motion::shown(
-            SharedString::from(format!("disclosure-fold-{key}")),
-            expanded.then_some(()),
-            window,
-            cx,
-        )
-        .map(|fold| fold.fold(disclosure_body(&key, &full_text, cx)));
+        let body = motion
+            .shown(
+                format!("disclosure-fold-{key}"),
+                expanded.then_some(()),
+                window,
+                cx,
+            )
+            .map(|fold| fold.fold(disclosure_body(&key, &full_text, cx)));
         v_flex()
             .w_full()
             .gap_1()

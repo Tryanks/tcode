@@ -24,7 +24,7 @@ pub(crate) mod list_rows;
 mod list_scroll;
 mod size_glide;
 
-pub(crate) use image_fade::{image_arrival, image_load};
+pub(crate) use image_fade::{image_arrival, image_arrival_owned, image_load};
 pub(crate) use keyed::{keyed, keyed_across};
 pub(crate) use list_flip::ListFlip;
 pub(crate) use list_hover::ListHover;
@@ -517,14 +517,28 @@ fn swap<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
         .previous
         .filter(|_| progress < 1.)
         .map(|(value, generation)| (build(&value, window, cx), generation));
+    draw_change(id, (current, swap.generation), previous, progress, shield)
+}
+
+/// A [`cross_fade`]'s frame: the `current` state, of its generation, coming
+/// in at `progress` over the `previous` one, which is shielded when
+/// `shield`.
+fn draw_change(
+    id: ElementId,
+    (current, generation): (AnyElement, u64),
+    previous: Option<(AnyElement, u64)>,
+    progress: f32,
+    shield: bool,
+) -> AnyElement {
+    let slot = |generation: u64| {
+        ElementId::NamedChild(
+            std::sync::Arc::new(id.clone()),
+            generation.to_string().into(),
+        )
+    };
     div()
         .relative()
-        .child(
-            div()
-                .id(slot(swap.generation))
-                .opacity(progress)
-                .child(current),
-        )
+        .child(div().id(slot(generation)).opacity(progress).child(current))
         .when_some(previous, |frame, (previous, generation)| {
             frame.child(
                 div()

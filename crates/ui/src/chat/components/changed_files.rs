@@ -23,6 +23,7 @@ pub(crate) struct ChangedFilesHandlers {
 }
 
 /// Finished-turn file summary with diff counts and file actions.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn changed_files(
     index: usize,
     cwd: &Path,
@@ -30,6 +31,7 @@ pub(crate) fn changed_files(
     completeness: ChangeCompleteness,
     show_all: bool,
     handlers: ChangedFilesHandlers,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let ChangedFilesHandlers {
@@ -140,14 +142,13 @@ pub(crate) fn changed_files(
     handlers.insert(SharedString::from("more"), toggle_more);
     let count = chips.len() as u64;
     let cwd = cwd.to_path_buf();
+    let motion = motion.clone();
     let body = crate::motion::Sampled::new(move |window, cx| {
-        let glide = crate::motion::GlideState::keyed(
-            SharedString::from(format!("changed-files-glide-{index}")),
-            window,
-            cx,
-        );
-        let row = crate::motion::keyed_across(
-            ("changed-files", index),
+        let glide = motion.glide_state(format!("changed-files-glide-{index}"));
+        let row = crate::motion::keyed::keyed_owned(
+            &motion,
+            format!("changed-files-{index}"),
+            crate::motion::keyed::Fold::Across(px(0.)),
             chips,
             window,
             cx,

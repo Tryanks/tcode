@@ -104,6 +104,10 @@ pub struct MarkdownState {
     /// not in element state, because the document measures its blocks under
     /// other element ids than it paints them, and both must size alike.
     glides: RefCell<HashMap<String, crate::motion::GlideState>>,
+    /// The clocks of the document's other motion (a picture fading in over
+    /// its stand-in), by render path: kept with the document, not in element
+    /// state, so they carry on when its view is drawn under a new parent.
+    motion: crate::motion::owned::Owned,
     layout_revision: usize,
     /// The document this view's text is selected in, when it is selectable.
     pub(super) selection: Option<Membership>,
@@ -175,6 +179,7 @@ impl MarkdownState {
             items,
             image_sizes: HashMap::new(),
             glides: RefCell::default(),
+            motion: Default::default(),
             layout_revision: 0,
             selection: None,
             owns_selection: false,
@@ -404,6 +409,11 @@ impl MarkdownState {
             .entry(path.to_string())
             .or_default()
             .clone()
+    }
+
+    /// The clocks of the document's motion, kept with the document.
+    pub(super) fn motion(&self) -> crate::motion::owned::Owned {
+        self.motion.clone()
     }
 
     pub(super) fn image_layout(&self, path: &str) -> (usize, Option<Size<Pixels>>) {

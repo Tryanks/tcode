@@ -844,10 +844,10 @@ fn pending_images(
                         // the slot's height glides from one to the other.
                         let slot = format!("{path}/image/{ix}/slot");
                         let standing = pending.is_some();
-                        let arrived = gpui_base::motion::transition(
-                            SharedString::from(slot.clone()),
+                        let arrived = state.read(cx).motion().transition(
+                            slot.clone(),
                             if standing { 0f32 } else { 1. },
-                            crate::motion::settle(),
+                            &crate::motion::owned::Curve::settle(),
                             window,
                             cx,
                         );

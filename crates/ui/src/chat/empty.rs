@@ -127,8 +127,10 @@ impl ChatView {
         );
         // A project that comes or goes folds in or out where it stands, and
         // the others glide to their new places as its last activity moves it.
-        let rows = crate::motion::keyed(
+        let rows = crate::motion::keyed::keyed_owned(
+            &self.motion.clone(),
             "start-hub-projects",
+            crate::motion::keyed::Fold::Down,
             hub_projects
                 .into_iter()
                 .map(|row| (SharedString::from(row.0.id.clone()), row)),
@@ -204,7 +206,9 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let shown = crate::motion::shown("scroll-to-end-pill", shown.then_some(()), window, cx)?;
+        let shown = self
+            .motion
+            .shown("scroll-to-end-pill", shown.then_some(()), window, cx)?;
         // Absolute positioning ignores mx_auto without pinned horizontal
         // insets; span the region and center with flex instead.
         let pill = floating_backing(crate::material::radius_button(cx), cx).child(

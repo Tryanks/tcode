@@ -89,6 +89,23 @@ pub(crate) fn flip_offset(
     Point::new(x + jumps.x, y + jumps.y)
 }
 
+/// [`flip_offset`] on a clock `motion` keeps: the jumps add up as there,
+/// and the offset still to travel eases back to nothing over [`settle`].
+fn owned_flip_offset(
+    motion: &super::owned::Owned,
+    jump: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Point<Pixels> {
+    let jumps = motion.keep::<Rc<Cell<Point<Pixels>>>>("flip-jumps");
+    if jump != Point::default() {
+        jumps.set(jumps.get() + jump);
+    }
+    let jumps = jumps.get();
+    let back = motion.transition("flip", -jumps, &super::owned::Curve::settle(), window, cx);
+    back + jumps
+}
+
 struct ListState<T> {
     /// The keys drawn last frame, in order, those leaving included.
     drawn: Vec<SharedString>,
@@ -97,6 +114,26 @@ struct ListState<T> {
     bounds: FlipBounds,
     /// Whether the list has been drawn, so a key it opens with is at rest.
     started: bool,
+}
+
+/// A list's state, as its window or its owner keeps it.
+struct Kept<T>(Rc<RefCell<ListState<T>>>);
+
+impl<T> Clone for Kept<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T> Default for Kept<T> {
+    fn default() -> Self {
+        Self(Rc::new(RefCell::new(ListState {
+            drawn: Vec::new(),
+            values: HashMap::new(),
+            bounds: FlipBounds::default(),
+            started: false,
+        })))
+    }
 }
 
 /// Rows keyed by identity, for [`Keyed::render`] to lay out: a key the list
@@ -113,7 +150,7 @@ pub(crate) fn keyed<T: Clone + 'static, C: BorrowMut<App>>(
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> Keyed {
-    keyed_along(id.into(), Fold::Down, items, window, cx, build)
+    keyed_along(id.into(), None, Fold::Down, items, window, cx, build)
 }
 
 /// [`keyed`] for rows that sit side by side — chips, tabs, buttons in a row
@@ -126,7 +163,15 @@ pub(crate) fn keyed_across<T: Clone + 'static, C: BorrowMut<App>>(
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> Keyed {
-    keyed_along(id.into(), Fold::Across(px(0.)), items, window, cx, build)
+    keyed_along(
+        id.into(),
+        None,
+        Fold::Across(px(0.)),
+        items,
+        window,
+        cx,
+        build,
+    )
 }
 
 /// How the rows of [`keyed_in`] fold in and out.
@@ -151,11 +196,40 @@ pub(crate) fn keyed_in<T: Clone + 'static, C: BorrowMut<App>>(
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> Keyed {
-    keyed_along(id.into(), fold, items, window, cx, build)
+    keyed_along(id.into(), None, fold, items, window, cx, build)
+}
+
+/// [`keyed_in`] with every row's clock, value, fold and glide kept by
+/// `motion` under `key` rather than in element state, so rows coming,
+/// going or changing places carry on when the view is drawn under a new
+/// parent. `key` is also the list's element id. A row that changes places
+/// glides back over [`settle`] where an element-keyed one springs, since
+/// [`Owned`](super::owned::Owned) keeps no spring.
+pub(crate) fn keyed_owned<T: Clone + 'static, C: BorrowMut<App>>(
+    motion: &super::owned::Owned,
+    key: impl Into<SharedString>,
+    fold: Fold,
+    items: impl IntoIterator<Item = (SharedString, T)>,
+    window: &mut Window,
+    cx: &mut C,
+    build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
+) -> Keyed {
+    let key: SharedString = key.into();
+    let id = ElementId::from(key.clone());
+    keyed_along(
+        id,
+        Some(&motion.scope(&key)),
+        fold,
+        items,
+        window,
+        cx,
+        build,
+    )
 }
 
 fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
     id: ElementId,
+    motion: Option<&super::owned::Owned>,
     fold: Fold,
     items: impl IntoIterator<Item = (SharedString, T)>,
     window: &mut Window,
@@ -164,14 +238,18 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
 ) -> Keyed {
     let items: Vec<(SharedString, T)> = items.into_iter().collect();
     let app: &mut App = cx.borrow_mut();
-    let state = window.use_keyed_state(super::child_id(&id, "keyed"), app, |_, _| ListState {
-        drawn: Vec::new(),
-        values: HashMap::new(),
-        bounds: FlipBounds::default(),
-        started: false,
-    });
+    let state = match motion {
+        Some(motion) => motion.keep::<Kept<T>>("list").0,
+        None => window
+            .use_keyed_state(super::child_id(&id, "keyed"), app, |_, _| {
+                Kept::<T>::default()
+            })
+            .read(app)
+            .0
+            .clone(),
+    };
     let (drawn, started, bounds) = {
-        let state = state.read(app);
+        let state = state.borrow();
         (state.drawn.clone(), state.started, state.bounds.clone())
     };
     let present: HashSet<&SharedString> = items.iter().map(|(key, _)| key).collect();
@@ -194,30 +272,42 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
     let mut rows = Vec::with_capacity(order.len());
     for key in order {
         let here = present.contains(&key);
-        let presence = (row_id(&key), "presence");
-        if here && started && !drawn.contains(&key) {
-            // Seeded absent, so a key that arrives after the list opened comes
-            // in rather than starting at rest.
-            transition(presence.clone(), 0f32, settle(), window, app);
-        }
-        let sample = transition_with_status(
-            presence,
-            if here { 1f32 } else { 0. },
-            settle(),
-            window,
-            app,
-        );
-        let gone = !here
-            && sample.value <= 0.
-            && matches!(sample.status, MotionStatus::Finished | MotionStatus::Idle);
+        // Seeded absent, so a key that arrives after the list opened comes
+        // in rather than starting at rest.
+        let arrives = here && started && !drawn.contains(&key);
+        let target = if here { 1f32 } else { 0. };
+        let (progress, settled) = match motion {
+            Some(motion) => {
+                let presence = format!("{key}/presence");
+                let curve = super::owned::Curve::settle();
+                if arrives {
+                    motion.transition(presence.clone(), 0f32, &curve, window, app);
+                }
+                let progress = motion.transition(presence, target, &curve, window, app);
+                (progress, progress == target)
+            }
+            None => {
+                let presence = (row_id(&key), "presence");
+                if arrives {
+                    transition(presence.clone(), 0f32, settle(), window, app);
+                }
+                let sample = transition_with_status(presence, target, settle(), window, app);
+                (
+                    sample.value,
+                    matches!(sample.status, MotionStatus::Finished | MotionStatus::Idle),
+                )
+            }
+        };
+        let gone = !here && progress <= 0. && settled;
         if !gone {
-            rows.push((key, here, sample.value));
+            rows.push((key, here, progress));
         }
     }
 
     let now: Vec<SharedString> = rows.iter().map(|(key, ..)| key.clone()).collect();
     let jumped = now != drawn;
-    let leaving: Vec<(SharedString, T)> = state.update(app, |state, _| {
+    let leaving: Vec<(SharedString, T)> = {
+        let mut state = RefCell::borrow_mut(&state);
         for (key, value) in &items {
             state.values.insert(key.clone(), value.clone());
         }
@@ -228,7 +318,7 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
             .filter(|(_, here, _)| !here)
             .filter_map(|(key, ..)| Some((key.clone(), state.values.get(key)?.clone())))
             .collect()
-    });
+    };
     bounds.retain(|key| now.contains(key));
 
     let origin = Rc::new(Cell::new(Point::default()));
@@ -244,11 +334,12 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
                 value: (),
                 progress,
                 leaving: !here,
-                measure: None,
+                measure: motion.map(|motion| motion.keep(format!("{key}/measure"))),
             };
             Some(
                 FlipRow {
                     id,
+                    motion: motion.map(|motion| motion.scope(&key)),
                     key,
                     jumped,
                     wraps: matches!(fold, Fold::Across(_)),
@@ -358,6 +449,8 @@ impl gpui::Element for Scope {
 /// its layout, and so its neighbours', is never moved.
 struct FlipRow {
     id: ElementId,
+    /// The row's own part of its list's owner, which keeps its glide.
+    motion: Option<super::owned::Owned>,
     key: SharedString,
     /// Whether the list's rows changed this frame, so a move is a jump to
     /// glide rather than a fold pushing it along.
@@ -415,7 +508,10 @@ impl gpui::Element for FlipRow {
         } else {
             Point::default()
         };
-        let offset = flip_offset(self.id.clone(), jump, window, cx);
+        let offset = match &self.motion {
+            Some(motion) => owned_flip_offset(motion, jump, window, cx),
+            None => flip_offset(self.id.clone(), jump, window, cx),
+        };
         window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
     }
 

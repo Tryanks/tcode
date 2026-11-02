@@ -355,6 +355,7 @@ pub(crate) fn preview_window(
             copy,
             path: None,
             hover,
+            motion: Default::default(),
         },
         detail,
         |_, _, _| {},
@@ -610,7 +611,7 @@ pub(in crate::chat) fn full_text(
         Some(ElidedOutput::Loaded(full)) => full.to_string(),
         _ => output.to_owned(),
     };
-    let control = elided.and_then(|elided| elided_control(elided, &entry.id, ctx.app()));
+    let control = elided.and_then(|elided| elided_control(elided, &entry.id, &ctx.chat.motion));
     (text, control)
 }
 
@@ -674,7 +675,7 @@ pub(in crate::chat) fn output_section_with(
                 .text_color(cx.theme().danger)
         })
         .child(body);
-    let control = elided.and_then(|elided| elided_control(elided, call.id(), cx));
+    let control = elided.and_then(|elided| elided_control(elided, call.id(), &ctx.chat.motion));
     Some(
         window::section(
             &label,
@@ -707,7 +708,11 @@ enum Elision {
 /// "loading", then a failure with the offer again; each cross-fades into the
 /// next. It goes with the preview once the whole output is in, which grows
 /// the body in the same frame.
-fn elided_control(elided: ElidedOutput, id: &str, _: &App) -> Option<AnyElement> {
+fn elided_control(
+    elided: ElidedOutput,
+    id: &str,
+    motion: &crate::motion::owned::Owned,
+) -> Option<AnyElement> {
     let (current, on_load) = match elided {
         ElidedOutput::Preview {
             full_bytes,
@@ -718,12 +723,13 @@ fn elided_control(elided: ElidedOutput, id: &str, _: &App) -> Option<AnyElement>
         ElidedOutput::Failed { error, on_load } => (Elision::Failed(error), Some(on_load)),
     };
     let id = id.to_owned();
+    let motion = motion.clone();
     Some(
         crate::motion::Sampled::new(move |window, cx| {
             let control_id = SharedString::from(format!("load-output-{id}"));
             let mut on_load = on_load;
-            crate::motion::cross_fade(
-                SharedString::from(format!("load-output-state-{id}")),
+            motion.cross_fade_value(
+                format!("load-output-state-{id}"),
                 current.clone(),
                 window,
                 cx,
@@ -809,7 +815,10 @@ pub(in crate::chat) fn thumbnails_titled(
         .collect();
     let id = SharedString::from(format!("call-tiles-{}", call.id()));
     Some(super::components::images::sampled_tile_row(
-        id, tiles, session_id,
+        id,
+        tiles,
+        session_id,
+        &ctx.chat.motion,
     ))
 }
 

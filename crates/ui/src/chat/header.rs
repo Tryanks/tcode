@@ -151,12 +151,17 @@ fn agents_cue_dot(
 /// The agents' cue inside the phone's Agents pill, widening it as it comes
 /// and narrowing it as it goes; its colour glides between running and
 /// waiting.
-fn cue_in_pill(cue: Option<gpui::Hsla>, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-    let shown = crate::motion::shown("agents-pill-cue", cue, window, cx)?;
-    let color = gpui_base::motion::transition(
+fn cue_in_pill(
+    cue: Option<gpui::Hsla>,
+    motion: &crate::motion::owned::Owned,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let shown = motion.shown("agents-pill-cue", cue, window, cx)?;
+    let color = motion.transition(
         "agents-pill-cue-color",
         shown.value,
-        crate::motion::settle(),
+        &crate::motion::owned::Curve::settle(),
         window,
         cx,
     );
@@ -237,7 +242,7 @@ impl ChatView {
         let agents = agents
             .filter(|_| compact)
             .map(|agents| (agents.count(), agents.cue(cx)));
-        let strip = crate::motion::shown(
+        let strip = self.motion.shown(
             "phone-strip",
             (agents.is_some() || links.is_some()).then_some(()),
             window,
@@ -249,8 +254,10 @@ impl ChatView {
         let whole = strip.progress() < 1.;
         let gap = cx.theme().tokens.spacing.xs;
         let radius = crate::material::radius_chip(cx);
-        let agents =
-            crate::motion::shown("phone-agents-pill-fold", agents, window, cx).map(|pill| {
+        let agents = self
+            .motion
+            .shown("phone-agents-pill-fold", agents, window, cx)
+            .map(|pill| {
                 let (count, cue) = pill.value;
                 let chip = floating_backing(radius, cx)
                     .child(self.render_agents_pill(count, cue, window, cx));
@@ -260,8 +267,10 @@ impl ChatView {
                     pill.fold_across(chip)
                 }
             });
-        let pull_requests =
-            crate::motion::shown("phone-pr-pill-fold", links, window, cx).and_then(|pill| {
+        let pull_requests = self
+            .motion
+            .shown("phone-pr-pill-fold", links, window, cx)
+            .and_then(|pill| {
                 let chip = floating_backing(radius, cx)
                     .child(self.render_pull_request_pill(&pill.value, cx)?);
                 Some(if whole {
@@ -323,7 +332,7 @@ impl ChatView {
             .icon(IconName::Bot)
             .label(label)
             // The cue widens the pill as it comes, and its label moves aside.
-            .children(cue_in_pill(cue, window, cx));
+            .children(cue_in_pill(cue, &self.motion, window, cx));
         crate::widgets::Popover::new("agents-sheet")
             .bottom_sheet(crate::tr!("agents.title"))
             .on_open_change(move |open, _, cx| {
@@ -546,23 +555,20 @@ impl ChatView {
             };
         let overflow = width - compact_extra < HEADER_COMPACT_MIN_WIDTH;
         let traffic_lights = window_caption::traffic_light_inset(window);
-        // One cue for either tier, so a tier change leaves it as it was.
-        let motion = self.header_motion.clone();
-        let mut cue = agents_cue_dot(agents_cue.flatten(), &motion, window, cx);
+        let motion = self.motion.clone();
         // Controls that come and go with what the thread has widen into
-        // their rows, so the title and their neighbours move aside.
-        // Sampled in every tier and drawn only where the tier has room, so a
-        // change of tier is not a coming or going. Their clocks are the
+        // their rows, so the title and their neighbours move aside; the
+        // badge also narrows out as the header folds into its overflow
+        // tier, which has no room for it. The toggles are sampled in every
+        // tier and fade with the tier that draws them. Their clocks are the
         // view's, so a pane re-parented by the dock carries them on.
-        let badge = motion
-            .shown(
-                "header-pr-badge-fold",
-                self.active_pull_requests(cx)
-                    .filter(|links| !links.is_empty()),
-                window,
-                cx,
-            )
-            .filter(|_| !overflow);
+        let badge = motion.shown(
+            "header-pr-badge-fold",
+            self.active_pull_requests(cx)
+                .filter(|links| !links.is_empty() && !overflow),
+            window,
+            cx,
+        );
         let toggle_gap = gpui::rems(0.25).to_pixels(window.rem_size());
         let agents_toggle = motion.shown(
             "agents-toggle-fold",
@@ -578,7 +584,7 @@ impl ChatView {
         );
         // The clearance for the traffic lights glides in and out as the
         // sidebar collapses or a pane moves to or off the window's left edge.
-        let left_inset = self.header_motion.transition(
+        let left_inset = self.motion.transition(
             "traffic-light-inset",
             if under_traffic_lights && traffic_lights > px(0.) {
                 traffic_lights
@@ -623,7 +629,13 @@ impl ChatView {
             }));
 
         // An agent's header leads back to the thread it was reached from.
-        let parent_link = self.parent_link(labelled, cx);
+        let parent_link = self.labelled_swap(
+            "parent-link-labels",
+            labelled,
+            window,
+            cx,
+            |this, labelled, cx| this.parent_link(labelled, cx),
+        );
 
         // A draft shows a muted "New thread" label; an open thread its title;
         // nothing active shows "No active thread". The title stretch carries no
@@ -773,8 +785,27 @@ impl ChatView {
                         },
                     ),
             )
-            .when(show_actions && overflow, |this| {
-                this.children(self.render_git_button(false, cx)).child(
+            .when(show_actions, |this| {
+                this.children(self.labelled_swap(
+                    "git-labels",
+                    labelled && !overflow,
+                    window,
+                    cx,
+                    |this, labelled, cx| this.render_git_button(labelled, cx),
+                ))
+            });
+        // A change of tier cross-fades the controls after the git button:
+        // the panel toggles, the Open button and the pane menu give way to
+        // the overflow button and back, and the title's stretch narrows or
+        // widens with them.
+        let tier = show_actions.then(|| {
+            let swap = motion
+                .swap("header-tier", usize::from(overflow), 2, window, cx)
+                .across();
+            let mut layers = Vec::new();
+            if swap.shows(1) {
+                layers.push((
+                    1,
                     self.render_header_overflow(
                         HeaderPanels {
                             terminal: terminal_open,
@@ -791,123 +822,153 @@ impl ChatView {
                                 .and_then(|links| crate::pull_requests::badge_label(&links, cx))
                                 .map(|_| right_panel_open && right_tab == RightTab::PullRequests),
                         },
-                        cue.take(),
+                        agents_cue_dot(agents_cue.flatten(), &motion, window, cx),
                         cwd.clone(),
                         window,
                         cx,
                     ),
-                )
-            })
-            .when(show_actions && !overflow, |this| {
-                this.children(self.render_git_button(labelled, cx))
-                    .children(
-                        cwd.clone()
-                            .map(|cwd| self.render_open_button(cwd, labelled, cx)),
+                ));
+            }
+            if swap.shows(0) {
+                let mut cue = agents_cue_dot(agents_cue.flatten(), &motion, window, cx);
+                let open = cwd.clone().and_then(|cwd| {
+                    self.labelled_swap(
+                        "open-labels",
+                        labelled,
+                        window,
+                        cx,
+                        move |this, labelled, cx| {
+                            Some(this.render_open_button(cwd.clone(), labelled, cx))
+                        },
                     )
-                    .child(
-                        h_flex()
-                            .flex_none()
-                            .gap_1()
-                            .child(
-                                Button::new("panel-layout")
-                                    // These panel controls must not arm the header window drag region.
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .icon(IconName::PanelBottom)
-                                    .selected(terminal_open)
-                                    .tooltip(crate::tr!("chat.toggle_terminal"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.on_toggle_panel(&TogglePanel::Terminal, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("plan-panel")
-                                    .debug_selector(|| "plan-panel".into())
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .icon(IconName::Map)
-                                    .selected(plan_showing)
-                                    .tooltip(crate::tr!("chat.toggle_tasks"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.on_toggle_panel(&TogglePanel::Plan, window, cx)
-                                    })),
-                            )
-                            .children(agents_toggle.map(|toggle| {
-                                toggle.fold_across_gap(
-                                    toggle_gap,
-                                    div()
-                                        .relative()
-                                        .child(
-                                            Button::new("agents-panel")
-                                                .on_mouse_down(
-                                                    gpui::MouseButton::Left,
-                                                    |_, _, cx| cx.stop_propagation(),
-                                                )
-                                                .ghost()
-                                                .small()
-                                                .compact()
-                                                .icon(IconName::Bot)
-                                                .selected(agents_showing)
-                                                .tooltip(crate::tr!("agents.toggle"))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.on_toggle_panel(
-                                                        &TogglePanel::Agents,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                })),
-                                        )
-                                        .children(cue.take()),
-                                )
-                            }))
-                            .children(preview_toggle.map(|toggle| {
-                                toggle.fold_across_gap(
-                                    toggle_gap,
-                                    Button::new("preview-panel")
+                });
+                layers.push((
+                    0,
+                    h_flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(cx.theme().tokens.spacing.xs)
+                        .children(open)
+                        .child(
+                            h_flex()
+                                .flex_none()
+                                .gap_1()
+                                .child(
+                                    Button::new("panel-layout")
+                                        // These panel controls must not arm the header window drag region.
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
                                         })
                                         .ghost()
                                         .small()
                                         .compact()
-                                        .icon(IconName::Globe)
-                                        .selected(preview_showing)
-                                        .tooltip(crate::tr!("chat.toggle_preview"))
+                                        .icon(IconName::PanelBottom)
+                                        .selected(terminal_open)
+                                        .tooltip(crate::tr!("chat.toggle_terminal"))
                                         .on_click(cx.listener(|this, _, window, cx| {
-                                            this.on_toggle_panel(&TogglePanel::Preview, window, cx)
+                                            this.on_toggle_panel(&TogglePanel::Terminal, window, cx)
                                         })),
                                 )
-                            }))
-                            .child(
-                                Button::new("diff-panel")
-                                    .debug_selector(|| "diff-panel".into())
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .icon(IconName::PanelRight)
-                                    .selected(diff_showing)
-                                    .tooltip(crate::tr!("chat.toggle_diff"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.on_toggle_panel(&TogglePanel::Diff, window, cx)
-                                    })),
-                            )
-                            .children(
-                                crate::shell::pane_controls(self.session_id.as_deref(), window, cx)
+                                .child(
+                                    Button::new("plan-panel")
+                                        .debug_selector(|| "plan-panel".into())
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .ghost()
+                                        .small()
+                                        .compact()
+                                        .icon(IconName::Map)
+                                        .selected(plan_showing)
+                                        .tooltip(crate::tr!("chat.toggle_tasks"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.on_toggle_panel(&TogglePanel::Plan, window, cx)
+                                        })),
+                                )
+                                .children(agents_toggle.map(|toggle| {
+                                    toggle.fold_across_gap(
+                                        toggle_gap,
+                                        div()
+                                            .relative()
+                                            .child(
+                                                Button::new("agents-panel")
+                                                    .on_mouse_down(
+                                                        gpui::MouseButton::Left,
+                                                        |_, _, cx| cx.stop_propagation(),
+                                                    )
+                                                    .ghost()
+                                                    .small()
+                                                    .compact()
+                                                    .icon(IconName::Bot)
+                                                    .selected(agents_showing)
+                                                    .tooltip(crate::tr!("agents.toggle"))
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.on_toggle_panel(
+                                                                &TogglePanel::Agents,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        },
+                                                    )),
+                                            )
+                                            .children(cue.take()),
+                                    )
+                                }))
+                                .children(preview_toggle.map(|toggle| {
+                                    toggle.fold_across_gap(
+                                        toggle_gap,
+                                        Button::new("preview-panel")
+                                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation()
+                                            })
+                                            .ghost()
+                                            .small()
+                                            .compact()
+                                            .icon(IconName::Globe)
+                                            .selected(preview_showing)
+                                            .tooltip(crate::tr!("chat.toggle_preview"))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.on_toggle_panel(
+                                                    &TogglePanel::Preview,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
+                                }))
+                                .child(
+                                    Button::new("diff-panel")
+                                        .debug_selector(|| "diff-panel".into())
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .ghost()
+                                        .small()
+                                        .compact()
+                                        .icon(IconName::PanelRight)
+                                        .selected(diff_showing)
+                                        .tooltip(crate::tr!("chat.toggle_diff"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.on_toggle_panel(&TogglePanel::Diff, window, cx)
+                                        })),
+                                )
+                                .children(
+                                    crate::shell::pane_controls(
+                                        self.session_id.as_deref(),
+                                        window,
+                                        cx,
+                                    )
                                     .map(pane_menu),
-                            ),
-                    )
-            })
+                                ),
+                        )
+                        .into_any_element(),
+                ));
+            }
+            swap.render(layers)
+        });
+        let header = header
+            .children(tier)
             // After every tier's controls, so it keeps the right end however
             // the header folds.
             .children(self.pane_close.as_ref().map(|close| {
@@ -932,6 +993,30 @@ impl ChatView {
             .overflow_x_scroll_area()
             .track_scroll(&self.header_scroll)
             .into_any_element()
+    }
+
+    /// A header control that drops its label when the header narrows past
+    /// [`HEADER_LABELS_MIN_WIDTH`], built by `build` with or without it:
+    /// the one cross-fades into the other on the view's clock while its
+    /// width glides, so the title and its neighbours move aside rather than
+    /// jump.
+    fn labelled_swap(
+        &self,
+        key: &'static str,
+        labelled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        build: impl Fn(&Self, bool, &mut Context<Self>) -> Option<AnyElement>,
+    ) -> Option<AnyElement> {
+        let swap = self
+            .motion
+            .swap(key, usize::from(labelled), 2, window, cx)
+            .across();
+        let layers = (0..2)
+            .filter(|layer| swap.shows(*layer))
+            .map(|layer| Some((layer, build(self, layer == 1, cx)?)))
+            .collect::<Option<Vec<_>>>()?;
+        Some(swap.render(layers))
     }
 
     pub(super) fn on_toggle_panel(

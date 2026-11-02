@@ -136,9 +136,13 @@ pub struct ChatView {
     /// panes' layout changes (see `panes::ThreadPanes`), which would scroll
     /// an element-keyed header back to its start.
     header_scroll: gpui::ScrollHandle,
-    /// The header's motion, kept by the view: a pane's chat is drawn under
-    /// a new parent whenever the panes around it change.
-    header_motion: crate::motion::owned::Owned,
+    /// The motion of everything the view draws, kept by the view: the
+    /// window draws the conversation under a new parent as it turns compact
+    /// or wide, a zoom as it starts and lands, and the dock when it builds
+    /// the panes' tree anew, which would start element-keyed motion over at
+    /// its end. Swept as the view renders, so what is drawn again after
+    /// a frame without it starts at rest.
+    pub(super) motion: crate::motion::owned::Owned,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -374,7 +378,7 @@ impl ChatView {
             edges: WindowEdges::BOTH,
             pane_close: None,
             header_scroll: gpui::ScrollHandle::default(),
-            header_motion: Default::default(),
+            motion: Default::default(),
             window_state,
             composer,
             terminal_drawer,
@@ -498,6 +502,7 @@ fn floating_backing(radius: gpui::Pixels, cx: &App) -> gpui::Div {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.sweep();
         if self.timeline_stale {
             self.sync_markdown_states(cx);
         }
@@ -628,7 +633,17 @@ impl Render for ChatView {
             (None, false) => 1,
             (Some(_), false) => 2,
         };
-        let fade = crate::motion::CrossFade::new("chat-surface", surface, 3, window, cx).fill();
+        let fade = self
+            .motion
+            .cross_fade(
+                "chat-surface",
+                surface,
+                3,
+                &crate::motion::owned::Curve::settle(),
+                window,
+                cx,
+            )
+            .fill();
         let mut layers = Vec::new();
         if fade.shows(0) {
             layers.push((
@@ -755,14 +770,15 @@ impl ChatView {
             let discard_store = self.workspace_store.clone();
             // The text brightens once the host has it; the line under it
             // says how the send stands, and folds away once it is through.
-            let text_color = gpui_base::motion::transition(
-                SharedString::from(format!("delivery-text-{key}")),
+            let motion = self.motion.scope(format!("delivery-{key}"));
+            let text_color = motion.transition(
+                "text",
                 if acknowledged {
                     cx.theme().foreground
                 } else {
                     cx.theme().muted_foreground
                 },
-                crate::motion::settle(),
+                &crate::motion::owned::Curve::settle(),
                 window,
                 cx,
             );
@@ -777,16 +793,10 @@ impl ChatView {
                 });
                 (line, failure.is_some())
             });
-            let status = crate::motion::shown(
-                SharedString::from(format!("delivery-status-{key}")),
-                status,
-                window,
-                cx,
-            )
-            .map(|status| {
+            let status = motion.shown("status", status, window, cx).map(|status| {
                 let (danger, muted) = (cx.theme().danger, cx.theme().muted_foreground);
-                let line = crate::motion::cross_fade(
-                    SharedString::from(format!("delivery-status-line-{key}")),
+                let line = motion.cross_fade_value(
+                    "status-line",
                     status.value.clone(),
                     window,
                     cx,
@@ -800,42 +810,39 @@ impl ChatView {
                 );
                 status.fold(h_flex().pt_1().justify_end().child(line))
             });
-            let actions = crate::motion::shown(
-                SharedString::from(format!("delivery-actions-{key}")),
-                failure.is_some().then_some(()),
-                window,
-                cx,
-            )
-            .map(|actions| {
-                actions.fold(
-                    h_flex()
-                        .pt_1()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new(SharedString::from(format!("retry-{key}")))
-                                .ghost()
-                                .small()
-                                .debug_selector(|| "retry-delivery".into())
-                                .label(crate::tr!("chat.retry_delivery"))
-                                .on_click(move |_, _, cx| {
-                                    retry_store
-                                        .update(cx, |store, _| store.retry_delivery(&retry_key))
-                                }),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("discard-{key}")))
-                                .ghost()
-                                .small()
-                                .debug_selector(|| "discard-delivery".into())
-                                .label(crate::tr!("chat.discard_delivery"))
-                                .on_click(move |_, _, cx| {
-                                    discard_store
-                                        .update(cx, |store, _| store.discard_delivery(&discard_key))
-                                }),
-                        ),
-                )
-            });
+            let actions = motion
+                .shown("actions", failure.is_some().then_some(()), window, cx)
+                .map(|actions| {
+                    actions.fold(
+                        h_flex()
+                            .pt_1()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new(SharedString::from(format!("retry-{key}")))
+                                    .ghost()
+                                    .small()
+                                    .debug_selector(|| "retry-delivery".into())
+                                    .label(crate::tr!("chat.retry_delivery"))
+                                    .on_click(move |_, _, cx| {
+                                        retry_store
+                                            .update(cx, |store, _| store.retry_delivery(&retry_key))
+                                    }),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("discard-{key}")))
+                                    .ghost()
+                                    .small()
+                                    .debug_selector(|| "discard-delivery".into())
+                                    .label(crate::tr!("chat.discard_delivery"))
+                                    .on_click(move |_, _, cx| {
+                                        discard_store.update(cx, |store, _| {
+                                            store.discard_delivery(&discard_key)
+                                        })
+                                    }),
+                            ),
+                    )
+                });
             delivery_rows.push(
                 v_flex()
                     .id(SharedString::from(format!("delivery-{key}")))
@@ -1014,7 +1021,7 @@ impl ChatView {
 }
 
 #[cfg(test)]
-pub(in crate::chat) mod tests {
+pub(crate) mod tests {
     use super::ChatView;
     use crate::store::WorkspaceStore;
     use crate::test_frames::draw_settled;
@@ -1389,7 +1396,7 @@ pub(in crate::chat) mod tests {
         }
     }
 
-    pub(in crate::chat) fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {
+    pub(crate) fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {
         Arc::new(TimelineEntry {
             id: id.to_string(),
             content,
@@ -1399,7 +1406,7 @@ pub(in crate::chat) mod tests {
         })
     }
 
-    pub(in crate::chat) fn user_item(text: &str) -> EntryContent {
+    pub(crate) fn user_item(text: &str) -> EntryContent {
         EntryContent::Item(ItemContent::UserMessage {
             text: text.into(),
             context_len: None,
@@ -1407,7 +1414,7 @@ pub(in crate::chat) mod tests {
         })
     }
 
-    pub(in crate::chat) fn assistant(text: &str) -> EntryContent {
+    pub(crate) fn assistant(text: &str) -> EntryContent {
         EntryContent::Item(ItemContent::AssistantMessage {
             text: text.into(),
             summarized: false,
@@ -1430,7 +1437,7 @@ pub(in crate::chat) mod tests {
         )
     }
 
-    pub(in crate::chat) fn command_with_output(id: &str) -> Arc<TimelineEntry> {
+    pub(crate) fn command_with_output(id: &str) -> Arc<TimelineEntry> {
         entry(
             id,
             EntryContent::Item(ItemContent::CommandExecution {

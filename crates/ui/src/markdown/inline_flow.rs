@@ -166,6 +166,7 @@ impl InlineFlow {
     #[allow(clippy::too_many_arguments)]
     fn image_element(
         ix: usize,
+        path: &str,
         view: Entity<MarkdownState>,
         url: &SharedUri,
         link: &Option<LinkMark>,
@@ -176,8 +177,9 @@ impl InlineFlow {
     ) -> AnyElement {
         let source = view.read(cx).image_source(url);
         // The picture fades in over the line once it decodes.
-        let arrived = crate::motion::image_arrival(
-            SharedString::from(format!("inline-image-{ix}")),
+        let arrived = crate::motion::image_arrival_owned(
+            &view.read(cx).motion(),
+            path.to_owned(),
             &source,
             window,
             cx,
@@ -450,6 +452,7 @@ impl Element for InlineFlow {
                                 .painted_at(fragment_size, window);
                             Self::image_element(
                                 elements.len(),
+                                &format!("{}/image/{item_ix}", self.id),
                                 self.view.clone(),
                                 url,
                                 link,

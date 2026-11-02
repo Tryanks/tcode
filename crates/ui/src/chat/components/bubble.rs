@@ -52,6 +52,9 @@ pub(crate) struct BubbleData<'a> {
     pub(crate) rewind_menu: Option<RewindMenu>,
     /// The timeline's hover, which reveals the message's actions.
     pub(crate) hover: crate::motion::ListHover,
+    /// The chat's motion, which keeps the rewind's fold and the pictures'
+    /// fades.
+    pub(crate) motion: crate::motion::owned::Owned,
 }
 
 #[derive(Clone, PartialEq)]
@@ -202,6 +205,7 @@ pub(crate) fn user_bubble(
         rewind,
         rewind_menu,
         hover,
+        motion,
     } = data;
     let BubbleHandlers { copy, images } = handlers;
     let menu_items = bubble_menu_items(Arc::from(visible), rewind_menu.clone());
@@ -235,22 +239,25 @@ pub(crate) fn user_bubble(
     let rewind_id = SharedString::from(format!("rewind-fold-{entry_id}"));
     let offered = rewind_menu.clone().filter(|_| rewind.is_some());
     let mut rewind = rewind;
-    let actions = crate::motion::Sampled::new(move |window, cx| {
-        let gap = px(2.);
-        let rewind = crate::motion::shown(rewind_id, offered, window, cx).map(|shown| {
-            let button = match rewind.take() {
-                Some(button) if !shown.leaving() => button,
-                _ => native_rewind_button(shown.value.clone(), compact, Vec::new(), cx),
-            };
-            shown.fold_across_gap(gap, button)
-        });
-        h_flex()
-            .gap(gap)
-            .items_center()
-            .justify_end()
-            .children(copy)
-            .children(rewind)
-            .into_any_element()
+    let actions = crate::motion::Sampled::new({
+        let motion = motion.clone();
+        move |window, cx| {
+            let gap = px(2.);
+            let rewind = motion.shown(rewind_id, offered, window, cx).map(|shown| {
+                let button = match rewind.take() {
+                    Some(button) if !shown.leaving() => button,
+                    _ => native_rewind_button(shown.value.clone(), compact, Vec::new(), cx),
+                };
+                shown.fold_across_gap(gap, button)
+            });
+            h_flex()
+                .gap(gap)
+                .items_center()
+                .justify_end()
+                .children(copy)
+                .children(rewind)
+                .into_any_element()
+        }
     });
 
     let thumbnails = (!attachments.is_empty()).then(|| {
@@ -279,10 +286,13 @@ pub(crate) fn user_bubble(
                     .child(crate::motion::Sampled::new({
                         let source = crate::store::image_preview(path, 120., true);
                         let id = SharedString::from(format!("user-image-{entry_id}-{image_index}"));
+                        let motion = motion.clone();
                         // The picture fades in over the tile's fill once it
                         // decodes.
                         move |window, cx| {
-                            let arrived = crate::motion::image_arrival(id, &source, window, cx);
+                            let arrived = crate::motion::image_arrival_owned(
+                                &motion, id, &source, window, cx,
+                            );
                             img(source)
                                 .id("attachment-image")
                                 .size(px(120.))
