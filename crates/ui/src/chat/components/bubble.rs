@@ -47,6 +47,8 @@ pub(crate) struct BubbleData<'a> {
     pub(crate) rewind: Option<AnyElement>,
     /// The rewind the context menu offers, when the harness has one.
     pub(crate) rewind_menu: Option<RewindMenu>,
+    /// The timeline's hover, which reveals the message's actions.
+    pub(crate) hover: crate::motion::ListHover,
 }
 
 #[derive(Clone, PartialEq)]
@@ -193,6 +195,7 @@ pub(crate) fn user_bubble(
         markdown,
         rewind,
         rewind_menu,
+        hover,
     } = data;
     let BubbleHandlers { copy, images } = handlers;
     let menu_items = bubble_menu_items(Arc::from(visible), rewind_menu.clone());
@@ -210,7 +213,8 @@ pub(crate) fn user_bubble(
         )
     });
 
-    let group_key = SharedString::from(format!("user-{entry_id}"));
+    let hover_key = SharedString::from(format!("user-{entry_id}"));
+    let reveal = hover.reveal(&hover_key, window, cx);
     let copy = (!visible.trim().is_empty())
         .then(|| copy_button(&format!("user:{entry_id}"), copied, compact, copy, cx));
     // The rewind comes into the row beside Copy once the harness offers it,
@@ -296,7 +300,8 @@ pub(crate) fn user_bubble(
     );
     let bubble_selector = format!("user-bubble-{entry_id}");
     v_flex()
-        .group(group_key.clone())
+        .id(hover_key.clone())
+        .on_hover(hover.on_hover(hover_key))
         .debug_selector(move || bubble_selector)
         .w_full()
         .items_end()
@@ -340,7 +345,7 @@ pub(crate) fn user_bubble(
             })
         })
         .child(assistant::reserve_action_row(
-            actions, group_key, pinned, compact,
+            actions, reveal, pinned, compact,
         ))
         .context_menu(move |menu, window, cx| menu_items(menu, window, cx))
         .into_any_element()

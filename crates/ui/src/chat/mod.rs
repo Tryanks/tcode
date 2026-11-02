@@ -208,6 +208,8 @@ pub struct ChatView {
     inline_diffs: InlineDiffCache,
     /// Whole tool outputs fetched for the open session, by item id.
     full_outputs: HashMap<String, FullOutput>,
+    /// The timeline row message the pointer is over, whose actions fade in.
+    pub(super) hover: crate::motion::ListHover,
     session_key: Option<String>,
     /// The turn the reader jumped to (a palette hit, a thread anchor), by
     /// its turn number in the whole thread: a history page moves the held
@@ -391,6 +393,7 @@ impl ChatView {
             command_panels: RefCell::new(CommandPanelCache::new()),
             inline_diffs: InlineDiffCache::new(),
             full_outputs: HashMap::new(),
+            hover: crate::motion::ListHover::new(cx.entity_id()),
             session_key: None,
             highlighted_turn: None,
             _limit_tick: None,

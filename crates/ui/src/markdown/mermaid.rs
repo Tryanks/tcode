@@ -787,7 +787,9 @@ pub(super) fn block(
     .render(layers);
 
     let compact = crate::window_seam::window_is_compact(window, cx);
-    let group = SharedString::from(format!("markdown-mermaid-group-{path}"));
+    let hover = view.read(cx).hover.clone();
+    let hover_key = SharedString::from(format!("markdown-mermaid-group-{path}"));
+    let reveal = hover.reveal(&hover_key, window, cx);
     let drawing = (layer == Layer::Source && shown.is_none() && failed.is_none() && streaming)
         .then(|| {
             let label = div()
@@ -848,6 +850,10 @@ pub(super) fn block(
     // Revealed on hover over a diagram, as a formula's actions are, and pinned
     // over code, where there is no hover, and while the diagram is building.
     let actions = h_flex()
+        .id(SharedString::from(format!(
+            "markdown-mermaid-actions-{path}"
+        )))
+        .on_hover(hover.on_hover(hover_key.clone()))
         .absolute()
         .top_1()
         .right_1()
@@ -859,10 +865,7 @@ pub(super) fn block(
         .children(toggle)
         .child(copy)
         .when(layer == Layer::Diagram && !compact, |actions| {
-            actions
-                .opacity(0.)
-                .group_hover(group.clone(), |style| style.opacity(1.))
-                .hover(|style| style.opacity(1.))
+            actions.opacity(reveal)
         });
     // The surface takes the glided height, so what a swap clips is clipped
     // at its edge rather than painted past it.
@@ -881,7 +884,7 @@ pub(super) fn block(
     let context_view = view.clone();
     let block = div()
         .id(SharedString::from(path.to_string()))
-        .group(group)
+        .on_hover(hover.on_hover(hover_key))
         .w_full()
         .when(!is_last, |block| block.pb(rems(1.)))
         .on_mouse_down(MouseButton::Right, move |_, _, cx| {

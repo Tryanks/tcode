@@ -15,10 +15,12 @@ mod scene;
 pub(crate) mod drag_ghost;
 mod image_fade;
 pub(crate) mod keyed;
+mod list_hover;
 mod size_glide;
 
 pub(crate) use image_fade::{image_arrival, image_load};
 pub(crate) use keyed::{keyed, keyed_across};
+pub(crate) use list_hover::ListHover;
 pub(crate) use size_glide::{GlideAxes, GlideState, SizeGlide, size_key};
 #[cfg(any(
     test,
