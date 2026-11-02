@@ -48,8 +48,14 @@ const WHEEL_LINE: Pixels = px(20.);
 /// Pointer travel before a press is a drag rather than the click it began as.
 const DRAG_SLOP: Pixels = px(4.);
 const STAGE_MARGIN: Pixels = px(16.);
-/// How long keys, buttons and double-clicks take to reach their placement.
-const GLIDE: Duration = Duration::from_millis(200);
+
+/// What the stage shows while it has no image to show.
+#[derive(Clone, PartialEq)]
+enum Placeholder {
+    Message(SharedString),
+    Loading,
+    Glyph,
+}
 
 #[derive(Clone)]
 pub(crate) enum ViewerSource {
@@ -83,6 +89,7 @@ impl ViewerSource {
     }
 }
 
+#[derive(Clone, PartialEq)]
 enum OriginalState {
     Loading { received: u64, total: Option<u64> },
     Cancelled,
@@ -643,7 +650,11 @@ impl Render for ImageViewer {
         );
         self.decode(window, cx);
         self.placement = self.clamped(self.placement);
-        let policy = Transition::new(if self.animate { GLIDE } else { Duration::ZERO });
+        let policy = if self.animate {
+            crate::motion::settle()
+        } else {
+            Transition::new(Duration::ZERO)
+        };
         let shown = transition("image-viewer-placement", self.placement, policy, window, cx);
         let image = self.image_bounds(shown);
         let zoomed = self.placement.zoom > 1.;
@@ -653,10 +664,42 @@ impl Render for ImageViewer {
         let pannable = self.pannable();
         let muted = cx.theme().muted_foreground;
 
+        // The image fades in once it has decoded, over what stood in for it.
+        let arrived = transition(
+            "image-viewer-arrived",
+            if image.is_some() { 1. } else { 0. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        let placeholder = image.is_none().then(|| {
+            if self.failed
+                || matches!(
+                    self.original_state,
+                    Some(OriginalState::Failed(_) | OriginalState::Cancelled)
+                )
+            {
+                Placeholder::Message(match &self.original_state {
+                    Some(OriginalState::Failed(message)) => message.clone(),
+                    Some(OriginalState::Cancelled) => {
+                        crate::tr!("image_viewer.cancelled").into_owned().into()
+                    }
+                    _ => crate::tr!("image_viewer.load_failed").into_owned().into(),
+                })
+            } else if self.target.is_none() || self.remote_progress {
+                Placeholder::Loading
+            } else {
+                Placeholder::Glyph
+            }
+        });
+        let placeholder = crate::motion::shown("image-viewer-placeholder", placeholder, window, cx);
         let stage = div()
             .id("image-viewer-stage")
             .absolute()
             .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
             .occlude()
             .when(pannable, |el| el.cursor_grab())
             .on_mouse_down(
@@ -676,36 +719,30 @@ impl Render for ImageViewer {
                         .left(bounds.origin.x)
                         .top(bounds.origin.y)
                         .w(bounds.size.width)
-                        .h(bounds.size.height),
+                        .h(bounds.size.height)
+                        .opacity(arrived),
                 )
             })
-            .when(image.is_none(), |el| {
-                el.flex().items_center().justify_center().map(|el| {
-                    if self.failed
-                        || matches!(
-                            self.original_state,
-                            Some(OriginalState::Failed(_) | OriginalState::Cancelled)
-                        )
-                    {
-                        el.child(
-                            div()
-                                .text_token(&cx.theme().tokens.typography.sm)
-                                .text_color(muted)
-                                .child(match &self.original_state {
-                                    Some(OriginalState::Failed(message)) => message.clone(),
-                                    Some(OriginalState::Cancelled) => {
-                                        crate::tr!("image_viewer.cancelled").into_owned().into()
-                                    }
-                                    _ => crate::tr!("image_viewer.load_failed").into_owned().into(),
-                                }),
-                        )
-                    } else if self.target.is_none() || self.remote_progress {
-                        el.child(crate::widgets::Spinner::new())
-                    } else {
-                        el.child(crate::icon::Icon::default().path("icons/image.svg"))
-                    }
-                })
-            });
+            .children(placeholder.map(|placeholder| {
+                let state = placeholder.value.clone();
+                placeholder.fade(crate::motion::cross_fade(
+                    "image-viewer-placeholder-state",
+                    state,
+                    window,
+                    cx,
+                    move |state, _, cx| match state {
+                        Placeholder::Message(message) => div()
+                            .text_token(&cx.theme().tokens.typography.sm)
+                            .text_color(muted)
+                            .child(message.clone())
+                            .into_any_element(),
+                        Placeholder::Loading => crate::widgets::Spinner::new().into_any_element(),
+                        Placeholder::Glyph => crate::icon::Icon::default()
+                            .path("icons/image.svg")
+                            .into_any_element(),
+                    },
+                ))
+            }));
 
         let fit_or_actual = if zoomed {
             crate::material::toolbar_icon_button(
@@ -738,48 +775,61 @@ impl Render for ImageViewer {
                         | OriginalState::Failed(_)
                 )
             );
-        let transfer_controls = crate::material::overlay_contour(div(), cx)
-            .absolute()
-            .bottom(insets.bottom + STAGE_MARGIN)
-            .left(insets.left + STAGE_MARGIN)
-            .right(insets.right + STAGE_MARGIN)
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(cx.theme().tokens.spacing.sm)
-            .p(cx.theme().tokens.spacing.sm)
-            .rounded(crate::material::radius_overlay(cx))
-            .text_color(cx.theme().foreground)
-            .occlude()
-            .when_some(self.original_state.as_ref(), |panel, state| match state {
-                OriginalState::Loading { received, total } => panel
-                    .child(
-                        div().text_secondary(false, cx).child(match total {
-                            Some(total) => crate::tr!(
-                                "image_viewer.progress",
-                                received = received.to_string(),
-                                total = total.to_string()
-                            )
-                            .into_owned(),
-                            None => crate::tr!("image_viewer.connecting").into_owned(),
-                        }),
-                    )
-                    .child(
-                        Button::new("image-viewer-cancel")
+        let transfer = crate::motion::shown(
+            "image-viewer-transfer",
+            show_transfer.then(|| self.original_state.clone()).flatten(),
+            window,
+            cx,
+        );
+        let transfer_controls = transfer.map(|transfer| {
+            let panel = crate::material::overlay_contour(div(), cx)
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(cx.theme().tokens.spacing.sm)
+                .p(cx.theme().tokens.spacing.sm)
+                .rounded(crate::material::radius_overlay(cx))
+                .text_color(cx.theme().foreground)
+                .occlude()
+                .map(|panel| match &transfer.value {
+                    OriginalState::Loading { received, total } => panel
+                        .child(
+                            div().text_secondary(false, cx).child(match total {
+                                Some(total) => crate::tr!(
+                                    "image_viewer.progress",
+                                    received = received.to_string(),
+                                    total = total.to_string()
+                                )
+                                .into_owned(),
+                                None => crate::tr!("image_viewer.connecting").into_owned(),
+                            }),
+                        )
+                        .child(
+                            Button::new("image-viewer-cancel")
+                                .secondary()
+                                .small()
+                                .label(crate::tr!("image_viewer.cancel"))
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_original(cx))),
+                        ),
+                    OriginalState::Cancelled | OriginalState::Failed(_) => panel.child(
+                        Button::new("image-viewer-retry")
                             .secondary()
                             .small()
-                            .label(crate::tr!("image_viewer.cancel"))
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_original(cx))),
+                            .label(crate::tr!("image_viewer.retry"))
+                            .on_click(cx.listener(|this, _, _, cx| this.start_original(cx))),
                     ),
-                OriginalState::Cancelled | OriginalState::Failed(_) => panel.child(
-                    Button::new("image-viewer-retry")
-                        .secondary()
-                        .small()
-                        .label(crate::tr!("image_viewer.retry"))
-                        .on_click(cx.listener(|this, _, _, cx| this.start_original(cx))),
-                ),
-                OriginalState::Complete => panel,
-            });
+                    OriginalState::Complete => panel,
+                });
+            div()
+                .absolute()
+                .bottom(insets.bottom + STAGE_MARGIN)
+                .left(insets.left + STAGE_MARGIN)
+                .right(insets.right + STAGE_MARGIN)
+                .flex()
+                .flex_col()
+                .child(transfer.fade(panel))
+        });
 
         let traffic_lights = crate::window_caption::traffic_light_inset(window);
         let bar = crate::material::bar_divider_below(
@@ -861,7 +911,7 @@ impl Render for ImageViewer {
             }))
             .child(stage)
             .child(toolbar)
-            .when(show_transfer, |view| view.child(transfer_controls))
+            .children(transfer_controls)
     }
 }
 
@@ -1219,7 +1269,7 @@ mod tests {
         draw(cx);
         assert_eq!(image(cx), fitted, "the glide starts from the fit");
         // The frame after the key press began the glide; the next ends it.
-        cx.executor().advance_clock(GLIDE);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert_eq!(
             image(cx),
@@ -1228,7 +1278,7 @@ mod tests {
 
         cx.simulate_keystrokes("0");
         draw(cx);
-        cx.executor().advance_clock(GLIDE);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert_eq!(image(cx), fitted);
 
