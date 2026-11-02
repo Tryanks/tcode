@@ -840,8 +840,9 @@ impl PullRequestView {
         let open_id = id.clone();
         // In the head row a pointer that can hover finds it on hover; a keyboard on focus.
         let reveal = head && !compact && !crate::window_seam::is_mobile(cx);
+        let chip_id = SharedString::from(format!("pr-reaction-add-{id}-{head}"));
         let chip = reaction_chip(
-            SharedString::from(format!("pr-reaction-add-{id}-{head}")),
+            chip_id.clone(),
             crate::tr!("pull_requests.reactions.add").into_owned(),
             false,
             cx,
@@ -869,10 +870,10 @@ impl PullRequestView {
                 // The chip fades in as the pointer comes onto its comment's head, and out as it
                 // leaves; while it holds focus it stays shown.
                 Some(hover) => crate::motion::Sampled::new(move |window, cx| {
-                    let shown = hover.reveal(&head_key, window, cx);
-                    chip.opacity(shown)
-                        .focus(|chip| chip.opacity(1.))
-                        .into_any_element()
+                    let (focus, focused) =
+                        crate::motion::focus_ring::focus_reveal(&chip_id.into(), false, window, cx);
+                    let shown = hover.reveal(&head_key, window, cx).max(focused);
+                    chip.track_focus(&focus).opacity(shown).into_any_element()
                 })
                 .into_any_element(),
                 None => chip.into_any_element(),

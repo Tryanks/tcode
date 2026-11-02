@@ -2471,7 +2471,14 @@ impl SessionsSidebar {
             crate::tr!("sidebar.create_thread")
         }
         .into();
-        let hover = self.hover_progress(&group_key, window, cx);
+        // The "+" fades in under the pointer, and as the keyboard comes onto
+        // it.
+        let plus_id = gpui::ElementId::from(SharedString::from(format!("new-thread-{project_id}")));
+        let (plus_focus, plus_focused) =
+            crate::motion::focus_ring::focus_reveal(&plus_id, true, window, cx);
+        let hover = self
+            .hover_progress(&group_key, window, cx)
+            .max(plus_focused);
         // The dot shows while unread or fading out, and gives its slot to
         // the "+" under the pointer.
         let unread_dot = crate::motion::shown(
@@ -2529,7 +2536,8 @@ impl SessionsSidebar {
         // Unread dot when any child thread is unread.
         .children(unread_dot)
         .child(
-            Button::new(gpui::SharedString::from(format!("new-thread-{project_id}")))
+            Button::new(plus_id)
+                .track_focus(&plus_focus)
                 .ghost()
                 .xsmall()
                 .icon(Icon::new(IconName::Plus).text_color(cx.theme().muted_foreground))
@@ -2537,7 +2545,6 @@ impl SessionsSidebar {
                 .tooltip(new_thread_label)
                 // Opacity keeps the button a tab stop, as the settle button does.
                 .opacity(hover)
-                .focus_visible(|button| button.opacity(1.))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     let cwd = plus_cwd.clone();
@@ -2991,7 +2998,10 @@ impl SessionsSidebar {
         }
         let id = meta.id.clone();
         let label = crate::tr!("sidebar.unpin_tooltip");
-        let hover = self.hover_progress(row_key, window, cx);
+        let button_id = gpui::ElementId::from(SharedString::from(format!("unpin-thread-{id}")));
+        let (focus, focused) =
+            crate::motion::focus_ring::focus_reveal(&button_id, true, window, cx);
+        let hover = self.hover_progress(row_key, window, cx).max(focused);
         Some(
             div()
                 .relative()
@@ -3006,7 +3016,8 @@ impl SessionsSidebar {
                         .child(Icon::new(IconName::Pin).text_color(cx.theme().muted_foreground)),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("unpin-thread-{id}")))
+                    Button::new(button_id)
+                        .track_focus(&focus)
                         .ghost()
                         .xsmall()
                         .icon(Icon::new(IconName::PinOff).text_color(cx.theme().muted_foreground))
@@ -3017,7 +3028,6 @@ impl SessionsSidebar {
                         .left_0()
                         // Opacity keeps the button a tab stop, as the settle button does.
                         .opacity(hover)
-                        .focus_visible(|button| button.opacity(1.))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.unpin_thread(&id, window, cx);
@@ -3433,8 +3443,13 @@ impl SessionsSidebar {
         } else {
             crate::tr!("sidebar.settle_tooltip")
         };
+        let button_id = gpui::ElementId::from(SharedString::from(format!(
+            "settle-flat-thread-{session_id}"
+        )));
+        let (focus, focused) =
+            crate::motion::focus_ring::focus_reveal(&button_id, true, window, cx);
         let hover = if action_on_hover {
-            self.hover_progress(row_key, window, cx)
+            self.hover_progress(row_key, window, cx).max(focused)
         } else {
             0.
         };
@@ -3454,37 +3469,39 @@ impl SessionsSidebar {
             )
             .when(action_on_hover, |slot| {
                 slot.child(
-                    Button::new(SharedString::from(format!(
-                        "settle-flat-thread-{session_id}"
-                    )))
-                    .ghost()
-                    .xsmall()
-                    .icon(
-                        Icon::new(if settled {
-                            IconName::Undo2
-                        } else {
-                            IconName::CircleCheck
-                        })
-                        .text_color(cx.theme().muted_foreground),
-                    )
-                    .aria_label(label.clone())
-                    .tooltip(label)
-                    .absolute()
-                    .right_0()
-                    .top_0()
-                    // Opacity, not visibility, keeps the button a tab stop so
-                    // keyboard focus can reveal it; a click's focus must not
-                    // keep it over the time once the row moves.
-                    .opacity(hover)
-                    .focus_visible(|button| button.opacity(1.))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        if settled {
-                            this.on_make_active(&ThreadMakeActive(action_id.clone()), window, cx);
-                        } else {
-                            this.on_settle(&ThreadSettle(action_id.clone()), window, cx);
-                        }
-                    })),
+                    Button::new(button_id)
+                        .track_focus(&focus)
+                        .ghost()
+                        .xsmall()
+                        .icon(
+                            Icon::new(if settled {
+                                IconName::Undo2
+                            } else {
+                                IconName::CircleCheck
+                            })
+                            .text_color(cx.theme().muted_foreground),
+                        )
+                        .aria_label(label.clone())
+                        .tooltip(label)
+                        .absolute()
+                        .right_0()
+                        .top_0()
+                        // Opacity, not visibility, keeps the button a tab stop so
+                        // keyboard focus can reveal it; a click's focus must not
+                        // keep it over the time once the row moves.
+                        .opacity(hover)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            if settled {
+                                this.on_make_active(
+                                    &ThreadMakeActive(action_id.clone()),
+                                    window,
+                                    cx,
+                                );
+                            } else {
+                                this.on_settle(&ThreadSettle(action_id.clone()), window, cx);
+                            }
+                        })),
                 )
             })
     }

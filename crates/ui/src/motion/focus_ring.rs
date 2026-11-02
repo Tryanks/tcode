@@ -149,6 +149,33 @@ pub(crate) fn handle(id: &ElementId, window: &mut Window, cx: &mut App) -> Focus
     slot.read(cx).clone().tab_index(0).tab_stop(true)
 }
 
+/// [`handle`] for a control shown only on hover, with how far focus on it
+/// reveals it, from 0 to 1: it fades in as focus comes onto it, as it does
+/// under the pointer, rather than showing at once. The control focuses
+/// through the handle (`Button::track_focus`). `keyboard` counts only focus
+/// the keyboard gave, as GPUI's `focus_visible` does, and moves with the
+/// control's ring; otherwise a click's focus counts too.
+pub(crate) fn focus_reveal(
+    id: &ElementId,
+    keyboard: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> (FocusHandle, f32) {
+    let handle = handle(id, window, cx);
+    let revealed = if keyboard {
+        reveal(&handle, window, cx)
+    } else {
+        gpui_base::motion::transition(
+            super::child_id(id, "focus-reveal"),
+            if handle.is_focused(window) { 1f32 } else { 0. },
+            super::settle(),
+            window,
+            cx,
+        )
+    };
+    (handle, revealed)
+}
+
 /// Where each view's controls keep their focus handles, by the view and the
 /// control's id. Not a GPUI global: a view that reads a global while it is
 /// built is built again whenever the global changes, and this one changes
