@@ -176,6 +176,9 @@ pub struct ChatView {
     /// collapsed live Work Log to draw between its header and its live
     /// window, where they stood; whatever it leaves goes below the row.
     row_folds: Vec<AnyElement>,
+    /// Where the timeline's shared elements (a steer, a turn's status) were
+    /// drawn, so one that moves to another row travels there.
+    shared: crate::motion::shared::SharedMoves,
     /// The store's fold count for the thread at the last sync: a different
     /// one means the rows came from a fold, not from a live record.
     timeline_folds: u64,
@@ -386,6 +389,7 @@ impl ChatView {
             rows: Vec::new(),
             rows_motion: Default::default(),
             row_folds: Vec::new(),
+            shared: Default::default(),
             timeline_folds: 0,
             rows_regrouped: false,
             shown_deliveries: Vec::new(),
@@ -495,6 +499,8 @@ impl Render for ChatView {
             }
         }
         self.painted_rows.set(None);
+        self.shared
+            .begin_frame(self.list_state.viewport_bounds(), cx);
         if self.carried_anchor {
             self.carried_anchor = !settle_carried_anchor(&self.list_state);
             if self.carried_anchor {

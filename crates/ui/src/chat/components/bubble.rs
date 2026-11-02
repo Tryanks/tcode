@@ -36,6 +36,9 @@ pub(crate) type UserMessageArgs<'a> = (
 
 pub(crate) struct BubbleData<'a> {
     pub(crate) entry_id: &'a str,
+    /// A steer the agent just took, on its way from the turn's trailer: how
+    /// far it has come. Its chip and border change from pending as it goes.
+    pub(crate) taken: Option<f32>,
     pub(crate) visible: &'a str,
     pub(crate) cwd: &'a Path,
     pub(crate) attachments: &'a [String],
@@ -185,6 +188,7 @@ pub(crate) fn user_bubble(
 ) -> AnyElement {
     let BubbleData {
         entry_id,
+        taken,
         visible,
         cwd,
         attachments,
@@ -315,23 +319,45 @@ pub(crate) fn user_bubble(
         .gap(px(2.))
         .when_some(steering, |column, steering| {
             let selector = format!("steering-{entry_id}");
-            column.child(
+            let chip = |label| {
                 crate::material::semantic_chip(
-                    match steering {
-                        SteeringStatus::Pending => crate::tr!("chat.steering"),
-                        SteeringStatus::Accepted => crate::tr!("chat.steered"),
-                    },
+                    label,
                     cx.theme().muted,
                     cx.theme().muted_foreground,
                     cx,
                 )
-                .debug_selector(move || selector),
+            };
+            let label = match steering {
+                SteeringStatus::Pending => crate::tr!("chat.steering"),
+                SteeringStatus::Accepted => crate::tr!("chat.steered"),
+            };
+            // A steer just taken cross-fades from its pending chip.
+            column.child(
+                div()
+                    .relative()
+                    .debug_selector(move || selector)
+                    .child(chip(label).when_some(taken, |chip, taken| chip.opacity(taken)))
+                    .when_some(taken.filter(|taken| *taken < 1.), |frame, taken| {
+                        frame.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .opacity(1. - taken)
+                                .child(chip(crate::tr!("chat.steering"))),
+                        )
+                    }),
             )
         })
         .children(thumbnails)
         .when(!visible.trim().is_empty(), |column| {
             column.child({
-                let pending = steering == Some(SteeringStatus::Pending);
+                // The pending border fades as a taken steer travels.
+                let pending = match (steering, taken) {
+                    (Some(SteeringStatus::Pending), _) => Some(1.),
+                    (Some(SteeringStatus::Accepted), Some(taken)) if taken < 1. => Some(1. - taken),
+                    _ => None,
+                };
                 div()
                     .w((text_width + spacing.md * 2.).ceil() + px(3.))
                     .flex_none()
@@ -340,11 +366,11 @@ pub(crate) fn user_bubble(
                     .py(spacing.xs)
                     .rounded(crate::material::radius_composer(cx))
                     .bg(cx.theme().foreground.opacity(0.08))
-                    .when(pending, |bubble| {
+                    .when_some(pending, |bubble, pending| {
                         bubble
                             .border_1()
                             .border_dashed()
-                            .border_color(cx.theme().border)
+                            .border_color(cx.theme().border.opacity(pending))
                     })
                     .text_color(cx.theme().foreground)
                     .text_token(&prose)

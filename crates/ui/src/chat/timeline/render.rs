@@ -143,7 +143,7 @@ impl ChatView {
                             &entry.content,
                             EntryContent::Item(ItemContent::ToolCall { .. })
                         ) {
-                            column = column.child(self.compose_activity_row(
+                            let row = self.compose_activity_row(
                                 (entry, cwd),
                                 ActivityRow {
                                     compact: true,
@@ -154,7 +154,8 @@ impl ChatView {
                                 },
                                 window,
                                 cx,
-                            ));
+                            );
+                            column = column.child(self.shared_call(entry, "images", row, cx));
                         }
                     }
                 }
@@ -417,6 +418,7 @@ impl ChatView {
         // reach it, so collapsing the last disclosure never hides that we work.
         // It cross-fades into the finished turn's time row as the turn ends.
         let finished_at = turn.end_ts.or(entries.last().and_then(|e| e.ts));
+        let mut status = None;
         if turn.running || finished_at.is_some() {
             let requested_model = self
                 .workspace_store
@@ -427,29 +429,42 @@ impl ChatView {
                     .map(str::to_owned);
             let turn = turn.clone();
             trailing = true;
-            column = column.child(crate::motion::cross_fade(
-                SharedString::from(format!("turn-status-{index}")),
-                turn.running,
-                window,
+            // The status moves with the trailer when the turn gains a last
+            // row, as a steer landing after everything does.
+            let status_key = SharedString::from(format!("turn-status-{index}"));
+            self.shared.arrive(
+                &status_key,
+                &SharedString::from(row.identity.to_string()),
                 cx,
-                move |running, _, cx| match (*running, finished_at) {
-                    (false, Some(ts)) => components::indicator::finished_turn_time(
-                        ts,
-                        &turn,
-                        requested_model.as_deref(),
-                        cx,
-                    ),
-                    _ => div()
-                        .id(("working-status", index))
-                        .debug_selector(move || format!("working-status-{index}"))
-                        .child(components::indicator::turn_working_indicator(
-                            index,
-                            turn.start_ts,
-                            served_model.clone(),
-                            cx,
-                        ))
-                        .into_any_element(),
-                },
+            );
+            status = Some(self.shared.element(
+                status_key,
+                crate::motion::cross_fade(
+                    SharedString::from(format!("turn-status-{index}")),
+                    turn.running,
+                    window,
+                    cx,
+                    move |running, _, cx| {
+                        match (*running, finished_at) {
+                            (false, Some(ts)) => components::indicator::finished_turn_time(
+                                ts,
+                                &turn,
+                                requested_model.as_deref(),
+                                cx,
+                            ),
+                            _ => div()
+                                .id(("working-status", index))
+                                .debug_selector(move || format!("working-status-{index}"))
+                                .child(components::indicator::turn_working_indicator(
+                                    index,
+                                    turn.start_ts,
+                                    served_model.clone(),
+                                    cx,
+                                ))
+                                .into_any_element(),
+                        }
+                    },
+                ),
             ));
         }
 
@@ -457,14 +472,65 @@ impl ChatView {
         // They are read from the whole turn, not this row's segment, so FIFO
         // order holds without making their request-time position look
         // model-visible.
-        for entry in segment_entries(entries, turn.running).pending_steers {
-            trailing = true;
-            column = column.child(self.compose_user_entry(
-                (index, entry, cwd, pinned.0 == Some(entry.id.as_str())),
-                window,
-                cx,
-            ));
-        }
+        // A steer the agent takes leaves them: its place folds away, and the
+        // message travels to where it now stands in the turn.
+        let pending: Vec<_> = segment_entries(entries, turn.running)
+            .pending_steers
+            .into_iter()
+            .map(|entry| (SharedString::from(entry.id.clone()), entry.id.clone()))
+            .collect();
+        trailing |= !pending.is_empty();
+        let gap = px(SEGMENT_GAP);
+        let steers = crate::motion::keyed(
+            SharedString::from(format!("pending-steers-{index}")),
+            pending,
+            window,
+            cx,
+            |key, id, window, cx| {
+                let Some(entry) = entries.iter().find(|entry| entry.id == *id) else {
+                    return div().into_any_element();
+                };
+                let steering = matches!(
+                    entry.content,
+                    EntryContent::Steer {
+                        status: SteeringStatus::Pending,
+                        ..
+                    }
+                );
+                let message = if steering {
+                    self.compose_user_entry(
+                        (index, entry, cwd, pinned.0 == Some(entry.id.as_str())),
+                        window,
+                        cx,
+                    )
+                } else if self
+                    .shared
+                    .departed(&format!("steer-{key}").into(), &"trailer".into())
+                {
+                    // It is on its way to its place in the turn.
+                    div().into_any_element()
+                } else {
+                    // Its place in the turn is not drawn: it fades here.
+                    let shared = std::mem::take(&mut self.shared);
+                    let message = self.compose_user_entry(
+                        (index, entry, cwd, pinned.0 == Some(entry.id.as_str())),
+                        window,
+                        cx,
+                    );
+                    self.shared = shared;
+                    message
+                };
+                div().w_full().pt(gap).child(message).into_any_element()
+            },
+        );
+        // Each steer brings the gap above it, so none stays behind when the
+        // last has gone.
+        column = column.child(
+            v_flex()
+                .w_full()
+                .children(status)
+                .child(steers.render(v_flex().w_full())),
+        );
 
         RenderedRow {
             content,
@@ -593,9 +659,26 @@ impl ChatView {
                 })) as components::bubble::ClickHandler
             })
             .collect();
+        // A steer is one message from the moment it is sent: pending in the
+        // turn's trailer, then taken where the agent took it.
+        let steer = steering.map(|steering| {
+            let key = SharedString::from(format!("steer-{entry_id}"));
+            let site = SharedString::new_static(match steering {
+                SteeringStatus::Pending => "trailer",
+                SteeringStatus::Accepted => "flow",
+            });
+            let transit = self.shared.arrive(&key, &site, cx);
+            (key, transit)
+        });
+        let taken = steer
+            .as_ref()
+            .and_then(|(_, transit)| transit.as_ref())
+            .filter(|transit| transit.from == "trailer")
+            .map(|transit| transit.progress);
         let bubble = components::bubble::user_bubble(
             components::bubble::BubbleData {
                 entry_id,
+                taken,
                 visible,
                 cwd,
                 attachments,
@@ -618,6 +701,10 @@ impl ChatView {
             window,
             cx,
         );
+        let bubble = match steer {
+            Some((key, _)) => self.shared.element(key, bubble).into_any_element(),
+            None => bubble,
+        };
 
         let bubble = if let Some(author) = self
             .workspace_store
@@ -1110,7 +1197,7 @@ impl ChatView {
         if let Some(edit) = tools::diff::edit(entry, cwd) {
             return self.compose_edit_rows(entry, cwd, &edit, auto_expand, recency, window, cx);
         }
-        vec![self.compose_activity_row(
+        let row = self.compose_activity_row(
             (entry, cwd),
             ActivityRow {
                 compact: false,
@@ -1121,7 +1208,29 @@ impl ChatView {
             },
             window,
             cx,
-        )]
+        );
+        vec![self.shared_call(entry, "run", row, cx)]
+    }
+
+    /// A tool call's window, which leaves its run for the turn's images
+    /// once the call completes with the pictures it read, and travels there.
+    fn shared_call(
+        &self,
+        entry: &TimelineEntry,
+        site: &'static str,
+        row: AnyElement,
+        cx: &App,
+    ) -> AnyElement {
+        if !matches!(
+            entry.content,
+            EntryContent::Item(ItemContent::ToolCall { .. })
+        ) {
+            return row;
+        }
+        let key = SharedString::from(format!("activity-{}", entry.id));
+        self.shared
+            .arrive(&key, &SharedString::new_static(site), cx);
+        self.shared.element(key, row).into_any_element()
     }
 
     /// An edit's windows, one per file it touched. A harness's own diff

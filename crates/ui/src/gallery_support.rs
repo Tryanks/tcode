@@ -36,6 +36,7 @@ pub fn user_bubble(
     bubble::user_bubble(
         bubble::BubbleData {
             entry_id: id,
+            taken: None,
             visible: text,
             cwd,
             attachments: &[],

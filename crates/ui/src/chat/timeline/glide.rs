@@ -52,13 +52,17 @@ impl ChatView {
                     .filter_map(|(index, arrival)| {
                         let row = rows.get(index)?;
                         // A message this window sent was on screen as its
-                        // delivery bubble, and a steer as its turn's pending
-                        // steer: the row is that message moving into place.
+                        // delivery bubble, and a steer taken after everything
+                        // in its turn as its pending steer in the trailer just
+                        // above: the row is that message moving into place. A
+                        // steer taken before what followed it opens its place
+                        // as its pending one folds away and it travels there.
                         let on_screen = (!row.entry_range.is_empty())
                             .then(|| timeline.entries.get(row.entry_range.start))
                             .flatten()
                             .is_some_and(|entry| {
                                 matches!(entry.content, EntryContent::Steer { .. })
+                                    && arrival == Arrival::Appended
                                     || shown
                                         .iter()
                                         .any(|key| entry.id == format!("local-user-{key}"))
@@ -583,6 +587,194 @@ mod tests {
                 image_reads: Vec::new(),
             },
         })
+    }
+
+    /// A steer the agent takes leaves the turn's trailer for its place in the
+    /// turn: the message travels there from where it was drawn, frame by
+    /// frame, and the turn's working status, which it now stands above,
+    /// travels below it; neither jumps. With motion reduced both are there at
+    /// once.
+    #[gpui::test]
+    fn a_taken_steer_travels_to_its_place_in_the_turn(cx: &mut TestAppContext) {
+        for reduce in [false, true] {
+            let mut events = earlier_turns_and_a_running_one(4);
+            events.push(command("first"));
+            let mut thread = ScriptedThread::new(cx, events, 0, true);
+            cx.update(|cx| cx.set_reduce_motion(reduce));
+            let (_chat, cx) = thread.open(cx);
+            thread.deliver(cx);
+            thread.live(agent::AgentEvent::SteerRequested {
+                request_id: "steer".into(),
+                text: "Also check the docs.".into(),
+                attachments: Vec::new(),
+            });
+            thread.deliver(cx);
+            for _ in 0..40 {
+                frame(cx);
+            }
+            let places = |cx: &mut VisualTestContext| {
+                let bubble = cx
+                    .debug_bounds("user-bubble-steer")
+                    .expect("the steer is on screen");
+                let status = cx
+                    .debug_bounds("working-status-4")
+                    .expect("the turn's working status");
+                (bubble.top(), status.top())
+            };
+            let pending = places(cx);
+            assert!(pending.0 > pending.1, "a pending steer is below the status");
+
+            thread.live(agent::AgentEvent::SteerAccepted {
+                request_id: "steer".into(),
+            });
+            thread.deliver(cx);
+            draw(cx);
+            let mut seen = vec![places(cx)];
+            for _ in 0..20 {
+                frame(cx);
+                seen.push(places(cx));
+            }
+            let taken = *seen.last().unwrap();
+            assert!(
+                taken.0 < taken.1,
+                "a taken steer is above the status: {seen:?}"
+            );
+            if reduce {
+                assert_eq!(seen[0], taken, "{seen:?}");
+            } else {
+                assert!(
+                    (seen[0].0 - pending.0).abs() <= px(1.),
+                    "the steer jumped from where it was: {pending:?} -> {seen:?}"
+                );
+                for (part, name) in [(0, "steer"), (1, "status")] {
+                    let at = |place: &(gpui::Pixels, gpui::Pixels)| {
+                        if part == 0 { place.0 } else { place.1 }
+                    };
+                    let total = (at(&taken) - at(&seen[0])).abs();
+                    assert!(total > px(10.), "the {name} moved: {seen:?}");
+                    assert!(
+                        seen.windows(2)
+                            .all(|pair| (at(&pair[1]) - at(&pair[0])).abs() < total / 2.),
+                        "the {name} jumped: {seen:?}"
+                    );
+                    assert!(
+                        seen.windows(2)
+                            .filter(|pair| (at(&pair[1]) - at(&pair[0])).abs() > px(0.5))
+                            .count()
+                            >= 6,
+                        "the {name} travelled in too few frames: {seen:?}"
+                    );
+                }
+            }
+            cx.update(|_, cx| cx.set_reduce_motion(false));
+        }
+    }
+
+    /// A tool call that completes with the pictures it read leaves its run
+    /// for the turn's images, below their tiles: its window travels there
+    /// from where it stood in the run, frame by frame, never jumping and never
+    /// fading with the tiles. While the reader follows the tail, where it
+    /// stood is where it ends, and it holds still as the tiles open above it.
+    #[gpui::test]
+    fn an_image_read_travels_from_its_run_to_the_images(cx: &mut TestAppContext) {
+        let call = |status, image_reads| {
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "shot".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::ToolCall {
+                    name: "screenshot".into(),
+                    input: serde_json::json!({}),
+                    output: Some("captured".into()),
+                    status,
+                    image_reads,
+                },
+            })
+        };
+        for following in [true, false] {
+            let mut events = earlier_turns_and_a_running_one(6);
+            events.extend([
+                command("first"),
+                call(agent::ItemStatus::InProgress, Vec::new()),
+            ]);
+            let mut thread = ScriptedThread::new(cx, events, 0, true);
+            let (chat, cx) = thread.open_at(gpui::size(px(1_024.), px(1_000.)), cx);
+            thread.deliver(cx);
+            for _ in 0..40 {
+                frame(cx);
+            }
+            let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+            if !following {
+                // Just up from the end: the window is still on screen, the
+                // turn's status below it.
+                cx.simulate_event(gpui::ScrollEvent {
+                    position: list.viewport_bounds().center(),
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(30.))),
+                    touch_phase: gpui::TouchPhase::Moved,
+                    ..Default::default()
+                });
+                for _ in 0..20 {
+                    frame(cx);
+                }
+            }
+            assert_eq!(list.is_following_tail(), following);
+            let top = |cx: &mut VisualTestContext| {
+                cx.debug_bounds("activity-row-shot")
+                    .expect("the call's window is on screen")
+                    .top()
+            };
+            let before = top(cx);
+
+            thread.live(call(
+                agent::ItemStatus::Completed,
+                vec![agent::Attachment {
+                    media_type: "image/png".into(),
+                    data_base64: String::new(),
+                    source_path: Some("/tmp/tcode-missing-shot.png".into()),
+                }],
+            ));
+            thread.deliver(cx);
+            draw(cx);
+            let mut tops = vec![top(cx)];
+            for _ in 0..20 {
+                frame(cx);
+                tops.push(top(cx));
+            }
+            let tile = cx
+                .debug_bounds("image-read-shot-0")
+                .expect("the picture is a tile");
+            assert!(
+                tile.bottom() <= *tops.last().unwrap(),
+                "the window is below the tiles"
+            );
+            assert!(
+                (tops[0] - before).abs() <= px(1.),
+                "the window jumped from its run: {before:?} -> {tops:?}"
+            );
+            if following {
+                assert!(
+                    tops.iter().all(|top| (*top - before).abs() <= px(1.)),
+                    "the window moved: {tops:?}"
+                );
+                continue;
+            }
+            let total = (*tops.last().unwrap() - tops[0]).abs();
+            assert!(
+                total > px(20.),
+                "the window moved below the tiles: {tops:?}"
+            );
+            assert!(
+                tops.windows(2)
+                    .all(|pair| (pair[1] - pair[0]).abs() < total / 2.),
+                "the window jumped: {tops:?}"
+            );
+            assert!(
+                tops.windows(2)
+                    .filter(|pair| (pair[1] - pair[0]).abs() > px(0.5))
+                    .count()
+                    >= 6,
+                "the window travelled in too few frames: {tops:?}"
+            );
+        }
     }
 
     /// While a turn runs, its Work Log shows its newest activities; when
