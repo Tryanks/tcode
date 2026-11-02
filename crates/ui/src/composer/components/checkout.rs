@@ -65,7 +65,7 @@ impl Composer {
                         });
                     }
                 })
-                .content(move |_state, _window, cx| {
+                .content(move |_state, window, cx| {
                     let spacing = &cx.theme().tokens.spacing;
                     let mut col = v_flex()
                         .w(px(220.))
@@ -89,59 +89,77 @@ impl Composer {
                                 .child(crate::tr!("composer.worktree_base")),
                         );
                     }
+                    // "Loading…" gives way to the branches, fading out under
+                    // them.
+                    let fade = crate::motion::CrossFade::new(
+                        "branch-states",
+                        usize::from(!branches.is_empty()),
+                        2,
+                        window,
+                        cx,
+                    );
+                    let loading = fade.shows(0).then(|| {
+                        (
+                            0,
+                            crate::material::empty_row(crate::tr!("composer.loading"), cx)
+                                .flex_none()
+                                .into_any_element(),
+                        )
+                    });
                     if branches.is_empty() {
                         return col
-                            .child(
-                                crate::material::empty_row(crate::tr!("composer.loading"), cx)
-                                    .flex_none(),
-                            )
+                            .child(fade.column().span().render(loading))
                             .into_any_element();
                     }
                     let branches = branches.clone();
                     let current = current.clone();
                     let store = store_content.clone();
                     let popover = cx.entity();
+                    let list = crate::scroll::VirtualList::uniform(
+                        "branch-list",
+                        branches.len(),
+                        move |range, _, cx| {
+                            range
+                                .map(|index| {
+                                    let store = store.clone();
+                                    let session_id = session_id.clone();
+                                    let popover = popover.clone();
+                                    branch_row(
+                                        index,
+                                        &branches[index],
+                                        branches[index] == *current,
+                                        compact,
+                                        move |branch_name, window, cx| {
+                                            store.update(cx, |store, _cx| {
+                                                if worktree_mode {
+                                                    store.set_draft_workspace_for(
+                                                        session_id.clone().unwrap_or_default(),
+                                                        WorkspaceMode::NewWorktree {
+                                                            base: branch_name,
+                                                        },
+                                                    );
+                                                } else {
+                                                    store.checkout_branch_for(
+                                                        session_id.clone().unwrap_or_default(),
+                                                        branch_name,
+                                                    );
+                                                }
+                                            });
+                                            popover.update(cx, |st, cx| st.dismiss(window, cx));
+                                        },
+                                        cx,
+                                    )
+                                })
+                                .collect()
+                        },
+                    )
+                    .w_full()
+                    .min_h_0()
+                    .into_any_element();
                     col.child(
-                        crate::scroll::VirtualList::uniform(
-                            "branch-list",
-                            branches.len(),
-                            move |range, _, cx| {
-                                range
-                                    .map(|index| {
-                                        let store = store.clone();
-                                        let session_id = session_id.clone();
-                                        let popover = popover.clone();
-                                        branch_row(
-                                            index,
-                                            &branches[index],
-                                            branches[index] == *current,
-                                            compact,
-                                            move |branch_name, window, cx| {
-                                                store.update(cx, |store, _cx| {
-                                                    if worktree_mode {
-                                                        store.set_draft_workspace_for(
-                                                            session_id.clone().unwrap_or_default(),
-                                                            WorkspaceMode::NewWorktree {
-                                                                base: branch_name,
-                                                            },
-                                                        );
-                                                    } else {
-                                                        store.checkout_branch_for(
-                                                            session_id.clone().unwrap_or_default(),
-                                                            branch_name,
-                                                        );
-                                                    }
-                                                });
-                                                popover.update(cx, |st, cx| st.dismiss(window, cx));
-                                            },
-                                            cx,
-                                        )
-                                    })
-                                    .collect()
-                            },
-                        )
-                        .w_full()
-                        .min_h_0(),
+                        fade.column()
+                            .span()
+                            .render(loading.into_iter().chain([(1, list)])),
                     )
                     .into_any_element()
                 })

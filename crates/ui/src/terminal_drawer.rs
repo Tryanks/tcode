@@ -1355,17 +1355,29 @@ impl TerminalDrawer {
         let mut grid = v_flex().child(self.render_grid(terminal_id, &model, register_input, cx));
         drop(model);
         terminal.model_mut().clear_damage();
-        if exited {
-            let status = exit_code
+        // The exit line folds in under the grid.
+        let status = exited.then(|| {
+            exit_code
                 .map(|code| crate::tr!("terminal.exited_code", code = code).into_owned())
-                .unwrap_or_else(|| crate::tr!("terminal.exited").into_owned());
-            grid = grid.child(
-                div()
-                    .h(px(self.cell_height))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(status),
-            );
-        }
+                .unwrap_or_else(|| crate::tr!("terminal.exited").into_owned())
+        });
+        let (cell_height, muted) = (self.cell_height, cx.theme().muted_foreground);
+        grid = grid.child(crate::motion::Sampled::new(
+            move |window, cx| match crate::motion::shown(
+                ("terminal-exited", terminal_id),
+                status,
+                window,
+                cx,
+            ) {
+                Some(shown) => shown.fold(
+                    div()
+                        .h(px(cell_height))
+                        .text_color(muted)
+                        .child(shown.value.clone()),
+                ),
+                None => gpui::Empty.into_any_element(),
+            },
+        ));
 
         // The add-to-context button is a pure overlay: it must never affect the
         // grid's geometry. Reserving space for it while a selection exists
@@ -1944,13 +1956,38 @@ impl Render for TerminalDrawer {
                 .child(pane)
                 .into_any_element()
         };
-        let first = match first {
-            Some(id) => self.render_terminal(id, cx),
-            None => div()
-                .p(cx.theme().tokens.spacing.md)
-                .child(crate::tr!("terminal.starting"))
-                .into_any_element(),
-        };
+        // "Starting…" fades out under the terminal once it has one.
+        let starting = crate::motion::CrossFade::new(
+            "terminal-starting",
+            usize::from(first.is_some()),
+            2,
+            window,
+            cx,
+        );
+        let mut layers = Vec::new();
+        if starting.shows(0) {
+            layers.push((
+                0,
+                div()
+                    .p(cx.theme().tokens.spacing.md)
+                    .child(crate::tr!("terminal.starting"))
+                    .into_any_element(),
+            ));
+        }
+        if let Some(id) = first {
+            layers.push((
+                1,
+                div()
+                    .size_full()
+                    .child(self.render_terminal(id, cx))
+                    .into_any_element(),
+            ));
+        }
+        let first = starting
+            .fill()
+            .render(layers)
+            .size_full()
+            .into_any_element();
         let first = resizable_panel()
             .size_range(frame.range(0, gpui_base::PANEL_MIN_SIZE..Pixels::MAX))
             .child(frame.hold(0, gutter(first, true)));

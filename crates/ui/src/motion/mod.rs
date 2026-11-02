@@ -585,6 +585,7 @@ pub(crate) struct CrossFade {
     opacity: Vec<f32>,
     fill: bool,
     span: bool,
+    column: bool,
 }
 
 impl CrossFade {
@@ -613,6 +614,7 @@ impl CrossFade {
             opacity,
             fill: false,
             span: false,
+            column: false,
         }
     }
 
@@ -626,6 +628,7 @@ impl CrossFade {
             opacity,
             fill: false,
             span: false,
+            column: false,
         }
     }
 
@@ -638,6 +641,14 @@ impl CrossFade {
     /// itself to the width it is given stays as it was while it leaves.
     pub(crate) fn span(mut self) -> Self {
         self.span = true;
+        self
+    }
+
+    /// The region is a column its owner bounds (a popover's capped height)
+    /// and the current layer shrinks to it, so a list in it scrolls within
+    /// the room rather than overflowing it.
+    pub(crate) fn column(mut self) -> Self {
+        self.column = true;
         self
     }
 
@@ -658,10 +669,11 @@ impl CrossFade {
             .collect();
         // The current layer is drawn last, over the leaving ones' shields.
         layers.sort_by_key(|(layer, _)| *layer == self.current);
-        let (fill, span) = (self.fill, self.span);
+        let (fill, span, column) = (self.fill, self.span, self.column);
         div()
             .id(self.id.clone())
             .relative()
+            .when(column, |region| region.flex().flex_col().min_h_0())
             .children(layers.into_iter().map(|(layer, content)| {
                 let leaving = layer != self.current;
                 div()
@@ -672,6 +684,8 @@ impl CrossFade {
                             el.absolute().inset_0()
                         } else if leaving {
                             el.absolute().top_0().left_0().when(span, |el| el.right_0())
+                        } else if column {
+                            el.flex().flex_col().flex_1().min_h_0()
                         } else {
                             el
                         }
