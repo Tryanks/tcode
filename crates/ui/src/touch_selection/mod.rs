@@ -128,10 +128,9 @@ impl TouchSelectionOverlay {
             elements.push(SelectionHandles::new(self.source, on_drag).into_any_element());
         }
 
-        if let Some(mut anchor) = snapshot
-            .bounds()
-            .filter(|_| snapshot.menu_open && !self.items.is_empty())
-        {
+        // The menu stays mounted while there is a selection, so it fades in
+        // as it opens and out as it closes (a pan sets it aside).
+        if let Some(mut anchor) = snapshot.bounds().filter(|_| !self.items.is_empty()) {
             // Leave the knobs uncovered: the menu anchors to the selection
             // plus the room its handles take above and below.
             if !snapshot.is_empty() {
@@ -140,6 +139,7 @@ impl TouchSelectionOverlay {
             }
             elements.push(
                 EditMenu::new(self.id, anchor)
+                    .open(snapshot.menu_open)
                     .items(self.items)
                     .into_any_element(),
             );
@@ -203,6 +203,9 @@ mod tests {
                 .new(|cx| TextareaState::new(window, cx).default_value("quick select value")),
             multiline,
         });
+        // Each step is drawn once and checked at once, so the menu's motion
+        // is reduced and each is drawn at rest.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.run_until_parked();
         draw(cx);
         (probe, cx)
