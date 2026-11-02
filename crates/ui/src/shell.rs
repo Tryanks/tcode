@@ -14394,6 +14394,118 @@ mod tests {
         assert_eq!(stretch(cx), rest, "the edge came home");
     }
 
+    /// How far in the list hover fill painted over `row` is, from 0 to 1.
+    fn hover_fill(row: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> f32 {
+        cx.update(|window, cx| {
+            let hover = cx.theme().list_hover;
+            let row = row.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| {
+                    (quad.bounds.origin.x - row.origin.x).0.abs() < 1.
+                        && (quad.bounds.origin.y - row.origin.y).0.abs() < 1.
+                        && (quad.bounds.size.width - row.size.width).0.abs() < 1.
+                })
+                .filter_map(|quad| quad.background.as_solid())
+                .filter(|fill| (fill.h - hover.h).abs() < 0.01 && (fill.l - hover.l).abs() < 0.01)
+                .map(|fill| fill.a / hover.a)
+                .fold(0., f32::max)
+        })
+    }
+
+    /// The pane beside an empty one closes: the empty pane shows the start
+    /// hub as the closing pane glides away, and is drawn under a new parent
+    /// once the closed pane leaves the dock's tree. The fill coming in under
+    /// the project the pointer is on carries on from where it was then,
+    /// rather than starting over at rest; with motion reduced it comes and
+    /// goes at once.
+    #[gpui::test]
+    fn a_start_hub_rows_fill_carries_on_when_the_pane_beside_it_closes(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let (topic, mut index) = panes_index(&[]);
+        if let ServerEvent::IndexSnapshot(snapshot) = &mut index {
+            snapshot.projects = vec![tcode_core::project::Project {
+                id: "project".into(),
+                name: "Project".into(),
+                root: PANES_CWD.into(),
+                quick_chat: false,
+                icon_path: None,
+                permission_defaults: Default::default(),
+                created_at: 0,
+            }];
+        }
+        send_events(&host, vec![(topic, index)]);
+        await_restore_update(&shell, cx, |store| !store.projects().is_empty());
+        cx.simulate_keystrokes("secondary-d");
+        settle_frames(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        settle_frames(cx);
+        let _ = sent(&host);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        let row = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("start-hub-project-project")
+                .expect("the empty pane's project")
+        };
+
+        // The thread's pane closes; once the hub has glided over, the
+        // pointer comes onto its project.
+        cx.simulate_keystrokes("secondary-shift-w");
+        display_frame(cx);
+        let mut last = row(cx);
+        loop {
+            display_frame(cx);
+            let now = row(cx);
+            if now == last {
+                break;
+            }
+            last = now;
+        }
+        assert_eq!(
+            pane_threads(&shell, cx).len(),
+            2,
+            "the pane is still closing"
+        );
+        cx.simulate_mouse_move(last.center(), None, gpui::Modifiers::none());
+        draw(cx);
+        let mut before = 0.;
+        while pane_threads(&shell, cx).len() == 2 {
+            before = hover_fill(row(cx), cx);
+            display_frame(cx);
+        }
+        assert_eq!(pane_threads(&shell, cx), [None]);
+        let lifted = hover_fill(row(cx), cx);
+        assert!(
+            before > 0.05 && before < 0.95,
+            "the fill was coming in: {before}"
+        );
+        assert!(
+            lifted >= before,
+            "the fill restarted under its new parent: {before} -> {lifted}"
+        );
+        settle_frames(cx);
+        assert_eq!(hover_fill(row(cx), cx), 1., "the fill came in");
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let at = row(cx);
+        cx.simulate_mouse_move(
+            at.center() + gpui::point(px(0.), px(200.)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        draw(cx);
+        assert_eq!(
+            hover_fill(at, cx),
+            0.,
+            "reduced motion takes the fill away at once"
+        );
+        cx.simulate_mouse_move(at.center(), None, gpui::Modifiers::none());
+        draw(cx);
+        assert_eq!(hover_fill(at, cx), 1., "reduced motion fills at once");
+    }
+
     /// A control the keyboard is on keeps it, and with it its fading ring,
     /// which is kept by its focus handle, when its view is drawn under a new
     /// parent: a command's header in the left of two panes, as the pane is

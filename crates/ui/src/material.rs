@@ -504,6 +504,31 @@ where
         .when(selected, |row| row.bg(cx.theme().list_active))
 }
 
+/// A [`selectable_row`] whose hover fill's clock is kept by `motion` under
+/// `key`, so a fade under way carries on when the view is drawn under
+/// another parent.
+pub(crate) fn selectable_row_owned<E>(
+    el: E,
+    motion: &crate::motion::owned::Owned,
+    key: impl Into<SharedString>,
+    selected: bool,
+    compact: bool,
+    cx: &App,
+) -> E
+where
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
+{
+    selectable_surface_with(
+        el,
+        selectable_row_height(compact),
+        selected,
+        compact,
+        Some((motion, key.into())),
+        cx,
+    )
+    .when(selected, |row| row.bg(cx.theme().list_active))
+}
+
 /// A [`selectable_row`] whose selected fill is a mark its list draws under
 /// it and glides between rows (a [`TabBar`](crate::widgets::tabs::TabBar)
 /// rail).

@@ -125,6 +125,7 @@ impl ChatView {
                     crate::tr!("chat.start_hub_title").as_ref(),
                 )),
         );
+        let fills = self.motion.scope("start-hub-fill");
         // A project that comes or goes folds in or out where it stands, and
         // the others glide to their new places as its last activity moves it.
         let rows = crate::motion::keyed::keyed_owned(
@@ -142,7 +143,14 @@ impl ChatView {
                 let row_label =
                     crate::tr!("sidebar.project", name = project.name.clone()).into_owned();
                 crate::material::accessible_clickable(
-                    crate::material::selectable_row(h_flex(), false, false, cx),
+                    crate::material::selectable_row_owned(
+                        h_flex(),
+                        &fills,
+                        project.id.clone(),
+                        false,
+                        false,
+                        cx,
+                    ),
                     SharedString::from(format!("start-hub-project-{}", project.id)),
                     Role::Button,
                     row_label,
