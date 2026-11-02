@@ -783,6 +783,8 @@ pub struct PullRequestsPanel {
     /// The row the pointer is over, whose menu button shows in place of its time.
     hover: crate::motion::ListHover,
     agent_tools_open: bool,
+    /// The agent tools section's height closed, which its share glides from.
+    agent_tools_closed: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
     detail: Entity<PullRequestView>,
     /// The pull request the active thread had open when last drawn.
     shown: Option<PullRequestKey>,
@@ -825,6 +827,7 @@ impl PullRequestsPanel {
             eye_hovered: None,
             hover: crate::motion::ListHover::new(),
             agent_tools_open: false,
+            agent_tools_closed: Default::default(),
             detail,
             shown: None,
             _subscriptions: subscriptions,
@@ -1614,22 +1617,59 @@ pub(crate) fn agent_sees_body(
     } else {
         body = body.children(tools.tools.iter().map(tool));
     }
-    body.when(!tools.attached, |body| {
-        body.child(caption(
-            crate::tr!("pull_requests.agent_not_attached").into_owned(),
-        ))
-    })
-    .when(!tools.instructions.is_empty(), |body| {
-        body.child(caption(
-            crate::tr!("pull_requests.agent_instructions").into_owned(),
-        ))
-    })
-    .children(
-        tools
-            .instructions
-            .iter()
-            .enumerate()
-            .map(|(index, injected)| {
+    // What the host reports changes while it is read: the not-attached note
+    // and the instructions fold in and out where they are, by channel.
+    let attached = tools.attached;
+    let instructions = tools.instructions.clone();
+    let id = id.to_owned();
+    body.child(crate::motion::Sampled::new(move |window, cx| {
+        let caption = |text: String, cx: &App| div().text_caption(cx).child(text);
+        let not_attached = crate::motion::shown(
+            SharedString::from(format!("{id}-not-attached")),
+            (!attached).then_some(()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold(caption(
+                crate::tr!("pull_requests.agent_not_attached").into_owned(),
+                cx,
+            ))
+        });
+        let heading = crate::motion::shown(
+            SharedString::from(format!("{id}-instructions-caption")),
+            (!instructions.is_empty()).then_some(()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold(caption(
+                crate::tr!("pull_requests.agent_instructions").into_owned(),
+                cx,
+            ))
+        });
+        let mut seen = std::collections::HashMap::<String, usize>::new();
+        let items: Vec<(SharedString, (usize, tcode_protocol::InjectedInstructions))> =
+            instructions
+                .iter()
+                .enumerate()
+                .map(|(index, injected)| {
+                    let channel = format!("{:?}", injected.channel);
+                    let count = seen.entry(channel.clone()).or_default();
+                    *count += 1;
+                    (
+                        SharedString::from(format!("{channel}-{count}")),
+                        (index, injected.clone()),
+                    )
+                })
+                .collect();
+        let id = id.clone();
+        let rows = crate::motion::keyed(
+            SharedString::from(format!("{id}-instructions")),
+            items,
+            window,
+            cx,
+            move |_, (index, injected), _, cx| {
                 use agent::InstructionChannel;
                 use tcode_protocol::InjectedChannel;
                 let channel = match &injected.channel {
@@ -1657,8 +1697,17 @@ pub(crate) fn agent_sees_body(
                         &injected.text,
                         cx,
                     ))
-            }),
-    )
+                    .into_any_element()
+            },
+        )
+        .render(v_flex().gap(cx.theme().tokens.spacing.sm));
+        v_flex()
+            .gap(cx.theme().tokens.spacing.sm)
+            .children(not_attached)
+            .children(heading)
+            .child(rows)
+            .into_any_element()
+    }))
 }
 
 /// The active thread's [`agent_sees_body`] in a dialog, for a thread with no
@@ -1709,6 +1758,7 @@ impl PullRequestsPanel {
     fn agent_tools(
         &self,
         tools: &tcode_protocol::InjectedTools,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.agent_tools_open;
@@ -1736,12 +1786,36 @@ impl PullRequestsPanel {
         // its content height it would push the panel past its bounds. The bottom sheet
         // scrolls its own content, so there the list keeps its natural height.
         let fill = open && !self.window_state.read(cx).compact;
+        // The share glides: from the section's closed height (its header
+        // and inset, measured each frame) to an even share of the column
+        // with the list above it, and back. gpui-base has no flex-share
+        // glide and `SizeGlide` glides content sizes, so the basis and the
+        // grow are interpolated here.
+        let share = gpui_base::motion::transition(
+            "pr-agent-tools-share",
+            if fill { 1f32 } else { 0. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        let closed = self.agent_tools_closed.get();
+        let inset = cx.theme().tokens.spacing.sm * 2.;
+        let measured = self.agent_tools_closed.clone();
+        let header = gpui_base::ElementExt::on_prepaint(header, move |bounds, _, _| {
+            measured.set(bounds.size.height + inset);
+        });
         v_flex()
             .map(|section| {
-                if fill {
+                if share >= 1. {
                     section.flex_1().min_h_0()
-                } else {
+                } else if share <= 0. {
                     section.flex_none()
+                } else {
+                    section
+                        .flex_basis(closed * (1. - share))
+                        .flex_grow(share)
+                        .flex_shrink(share)
+                        .min_h_0()
                 }
             })
             .px(px(crate::material::CARD_INSET))
@@ -1750,7 +1824,7 @@ impl PullRequestsPanel {
             .child(
                 div()
                     .id("pr-agent-tools-scroll")
-                    .when(fill, |list| list.flex_1().min_h_0())
+                    .when(share > 0., |list| list.flex_1().min_h_0())
                     .child(
                         crate::widgets::Collapsible::new("pr-agent-tools-body", open).content(body),
                     )
@@ -2025,7 +2099,7 @@ impl PullRequestsPanel {
             .w_full()
             .min_w_0()
             .child(entries.render(v_flex().w_full().min_w_0().mt(gpui::rems(-0.25))));
-        let agent_tools = agent_tools.map(|tools| self.agent_tools(&tools, cx));
+        let agent_tools = agent_tools.map(|tools| self.agent_tools(&tools, window, cx));
         let count = links.iter().filter(|link| link.visible()).count();
         // Monitoring pauses and resumes for the whole thread, beside the watches it governs.
         let monitoring = crate::motion::shown(
