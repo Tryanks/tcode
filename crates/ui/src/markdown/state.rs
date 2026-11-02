@@ -782,6 +782,9 @@ impl Render for MarkdownState {
             &root,
             &mermaid::Env {
                 streaming: self.streaming,
+                // The mode a glide is heading for, from its first frame, so
+                // the new picture is drawn while the palette still glides
+                // and cross-fades in as it does.
                 dark: cx.theme().mode.is_dark(),
                 now: cx.background_executor().now(),
                 still: first_draw || cx.reduce_motion(),
