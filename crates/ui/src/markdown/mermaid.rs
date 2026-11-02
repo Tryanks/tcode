@@ -488,13 +488,14 @@ impl Slot {
             self.finish_swap();
         }
         let from_layer = self.layer(showing_source);
-        let animate = !env.still
-            && !ready.snap
-            && self.glide.painted()
-            && self
-                .shown
-                .as_ref()
-                .is_none_or(|shown| shown.dark == ready.attempt.dark);
+        // A diagram drawn for the other theme cross-fades into this one's as
+        // the palette around it glides (`theme::glide_mode`): a picture's
+        // colours cannot be mixed as a token's are.
+        let retheme = self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| shown.dark != ready.attempt.dark);
+        let animate = !env.still && (!ready.snap || retheme) && self.glide.painted();
         match ready.drawn {
             Ok(picture) => {
                 let replaced = self.shown.replace(Shown {
@@ -1475,6 +1476,56 @@ mod tests {
             first,
             "nothing moves after the first frame"
         );
+    }
+
+    /// A theme switch glides a diagram with the palette around it: the
+    /// picture drawn for the old theme fades out over the new theme's, and
+    /// both are never there with motion reduced.
+    #[gpui::test]
+    fn a_theme_switch_cross_fades_a_diagram(cx: &mut TestAppContext) {
+        for reduce in [false, true] {
+            let (_, cx) = open(&format!("```mermaid\n{FLOWCHART}```\n"), false, cx);
+            cx.update(|_, cx| cx.set_reduce_motion(reduce));
+            draw_settled(cx);
+            let pictures = |cx: &mut VisualTestContext| {
+                (0..4)
+                    .filter(|generation| {
+                        cx.debug_bounds(
+                            format!("markdown-mermaid-picture-root-0-{generation}").leak(),
+                        )
+                        .is_some()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let before = pictures(cx);
+            assert_eq!(before.len(), 1);
+            cx.update(|window, cx| {
+                crate::theme::glide_mode(crate::theme::ThemeMode::Dark, window, cx)
+            });
+            let mut both = 0;
+            for _ in 0..30 {
+                cx.update(|window, cx| window.simulate_next_frame(cx));
+                frame(cx);
+                both += usize::from(pictures(cx).len() == 2);
+            }
+            draw_settled(cx);
+            let after = pictures(cx);
+            assert_eq!(after.len(), 1);
+            assert_ne!(
+                after, before,
+                "the diagram was drawn again for the dark theme"
+            );
+            if reduce {
+                assert_eq!(both, 0, "with motion reduced the diagram snapped");
+            } else {
+                assert!(both >= 3, "the diagrams cross-faded over {both} frames");
+            }
+            cx.update(|window, cx| {
+                cx.set_reduce_motion(false);
+                crate::theme::glide_mode(crate::theme::ThemeMode::Light, window, cx)
+            });
+            draw_settled(cx);
+        }
     }
 
     #[gpui::test]
