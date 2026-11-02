@@ -46,7 +46,7 @@ pub fn user_bubble(
             markdown: None,
             rewind: None,
             rewind_menu: None,
-            hover: crate::motion::ListHover::detached(),
+            hover: crate::motion::ListHover::new(),
         },
         bubble::BubbleHandlers {
             copy: click(),
@@ -124,7 +124,7 @@ pub fn assistant(
             pinned: true,
             show_actions: true,
             copied: false,
-            hover: crate::motion::ListHover::detached(),
+            hover: crate::motion::ListHover::new(),
         },
         |_, _, _| {},
         cx,

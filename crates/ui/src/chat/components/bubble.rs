@@ -214,7 +214,14 @@ pub(crate) fn user_bubble(
     });
 
     let hover_key = SharedString::from(format!("user-{entry_id}"));
-    let reveal = hover.reveal(&hover_key, window, cx);
+    // Only a row that reveals something on hover takes the timeline's hover,
+    // so a row moving under a still pointer redraws nothing it need not.
+    let reveals = !pinned && !compact;
+    let reveal = if reveals {
+        hover.reveal(&hover_key, window, cx)
+    } else {
+        1.
+    };
     let copy = (!visible.trim().is_empty())
         .then(|| copy_button(&format!("user:{entry_id}"), copied, compact, copy, cx));
     // The rewind comes into the row beside Copy once the harness offers it,
@@ -301,7 +308,7 @@ pub(crate) fn user_bubble(
     let bubble_selector = format!("user-bubble-{entry_id}");
     v_flex()
         .id(hover_key.clone())
-        .on_hover(hover.on_hover(hover_key))
+        .when(reveals, |column| column.on_hover(hover.on_hover(hover_key)))
         .debug_selector(move || bubble_selector)
         .w_full()
         .items_end()

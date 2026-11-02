@@ -148,12 +148,15 @@ pub(crate) fn assistant(
     let hover_key = SharedString::from(format!("assistant-{id}"));
     let fold_id = SharedString::from(format!("assistant-actions-{id}"));
     let key = format!("assistant:{id}");
+    // Only a message whose action row shows takes the timeline's hover, so
+    // a row moving under a still pointer redraws nothing it need not.
+    let reveals = show_actions && !pinned && !compact;
     let on_hover = hover.on_hover(hover_key.clone());
     v_flex()
         .id(hover_key.clone())
         .w_full()
         .items_start()
-        .on_hover(on_hover)
+        .when(reveals, |message| message.on_hover(on_hover))
         .child(message)
         .child(crate::motion::Sampled::new(
             move |window, cx| match crate::motion::shown(

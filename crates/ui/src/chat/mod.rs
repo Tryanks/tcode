@@ -399,7 +399,7 @@ impl ChatView {
             command_panels: RefCell::new(CommandPanelCache::new()),
             inline_diffs: InlineDiffCache::new(),
             full_outputs: HashMap::new(),
-            hover: crate::motion::ListHover::new(cx.entity_id()),
+            hover: crate::motion::ListHover::new(),
             list_scroll,
             session_key: None,
             highlighted_turn: None,
