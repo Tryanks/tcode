@@ -211,7 +211,14 @@ pub(super) fn fit(intrinsic: Size<Pixels>, available_width: Option<Pixels>) -> S
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
+    use std::{
+        rc::Rc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
     use gpui::{
         AppContext as _, Context, Entity, ImageSource, IntoElement, ListAlignment, ListState,
@@ -244,7 +251,7 @@ mod tests {
     }
 
     fn reply(
-        ready: Rc<Cell<bool>>,
+        ready: Arc<AtomicBool>,
         cx: &mut TestAppContext,
     ) -> (Entity<Reply>, &mut VisualTestContext) {
         cx.update(crate::theme::init);
@@ -253,7 +260,7 @@ mod tests {
             image::ImageBuffer::from_pixel(300, 150, image::Rgba([0, 0, 255, 255])),
         )]));
         let source = ImageSource::Custom(Arc::new(move |_, _| {
-            ready.get().then(|| Ok(picture.clone()))
+            ready.load(Ordering::Relaxed).then(|| Ok(picture.clone()))
         }));
         cx.add_window_view(move |_, cx| {
             let markdown = cx.new(|cx| {
@@ -288,7 +295,7 @@ mod tests {
     #[gpui::test]
     fn a_picture_that_decodes_moves_the_text_after_it_down_smoothly(cx: &mut TestAppContext) {
         let decoded_first = {
-            let (_, cx) = reply(Rc::new(Cell::new(true)), cx);
+            let (_, cx) = reply(Arc::new(AtomicBool::new(true)), cx);
             draw(cx);
             let first = after(cx);
             draw_settled(cx);
@@ -301,12 +308,12 @@ mod tests {
         };
         for reduce in [false, true] {
             cx.update(|cx| cx.set_reduce_motion(reduce));
-            let ready = Rc::new(Cell::new(false));
+            let ready = Arc::new(AtomicBool::new(false));
             let (root, cx) = reply(ready.clone(), cx);
             draw_settled(cx);
             let tile = after(cx);
             assert!(tile < decoded_first, "the tile is smaller than the picture");
-            ready.set(true);
+            ready.store(true, Ordering::Relaxed);
             let markdown = root.read_with(cx, |root, _| root.markdown.clone());
             markdown.update(cx, |_, cx| cx.notify());
             draw(cx);
