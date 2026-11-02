@@ -538,15 +538,22 @@ impl CrossFade {
     }
 }
 
-/// A column's content whose height glides from `from` to the content's own
-/// height as `progress` runs from 0 to 1.
+/// Content whose layout height glides from the height it was painted at to
+/// its own new height, clipped to the glided height on the way.
+///
+/// Its owner keeps the clock and the heights: it starts a glide with
+/// [`GlideHeights::begin`] when the content changes, samples the progress
+/// from 0 to 1 on its own clock each frame, and passes both to
+/// [`GlideHeight::gliding`]. At rest, or before the content was ever
+/// painted, the element is the content's own layout. A glide that starts
+/// while another is under way starts where that one had got to.
 ///
 /// gpui-base's `MotionReveal` scales one measurement by a progress, and its
-/// `transition` animates values; neither moves an element's layout from
-/// one height to its content's new one. The progress and both heights live
-/// with the owner rather than in element state, so a document that lays the
-/// content out in a measuring pass of its own, under other element ids,
-/// sizes it as the painted pass does.
+/// `transition` animates values; neither moves an element's layout from one
+/// height to its content's new one. The heights live with the owner rather
+/// than in element state, so content laid out in a measuring pass under
+/// other element ids (a virtualized document measuring its blocks) sizes as
+/// the painted pass does.
 pub(crate) struct GlideHeight {
     progress: f32,
     from: Option<Pixels>,
@@ -554,29 +561,49 @@ pub(crate) struct GlideHeight {
     child: AnyElement,
 }
 
-/// The heights a [`GlideHeight`] keeps with its owner.
+/// The heights a [`GlideHeight`] keeps with its owner, for as long as the
+/// content it glides lives.
 #[derive(Clone, Default)]
 pub(crate) struct GlideHeights {
-    /// The height the content had where it was last painted, which a new
-    /// glide starts from.
-    pub(crate) painted: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
+    /// The height the content was last painted at, mid-glide included.
+    painted: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
     /// The content's own height, measured while it glides.
-    pub(crate) content: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
+    content: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
+}
+
+impl GlideHeights {
+    /// Where a glide that starts now starts: the height last painted, or
+    /// `None` before the content was painted, when there is nothing to glide
+    /// from.
+    pub(crate) fn begin(&self) -> Option<Pixels> {
+        self.content.set(None);
+        self.painted.get()
+    }
+
+    /// Whether the content has been painted, and so has a height a glide
+    /// could start from.
+    pub(crate) fn painted(&self) -> bool {
+        self.painted.get().is_some()
+    }
 }
 
 impl GlideHeight {
-    pub(crate) fn new(
-        progress: f32,
-        from: Option<Pixels>,
-        heights: GlideHeights,
-        child: impl IntoElement,
-    ) -> Self {
+    /// `child` at rest, at its own height.
+    pub(crate) fn new(heights: &GlideHeights, child: impl IntoElement) -> Self {
         Self {
-            progress,
-            from,
-            heights,
+            progress: 1.,
+            from: None,
+            heights: heights.clone(),
             child: child.into_any_element(),
         }
+    }
+
+    /// Glide from `from`, which [`GlideHeights::begin`] gave, to the
+    /// content's own height; `progress` runs from 0 to 1.
+    pub(crate) fn gliding(mut self, from: Option<Pixels>, progress: f32) -> Self {
+        self.from = from;
+        self.progress = progress;
+        self
     }
 }
 

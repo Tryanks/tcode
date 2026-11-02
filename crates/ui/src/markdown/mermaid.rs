@@ -484,7 +484,7 @@ impl Slot {
                 .shown
                 .as_ref()
                 .is_some_and(|shown| shown.dark != ready.attempt.dark);
-            if env.now >= due || theme_changed || self.glide.painted.get().is_none() {
+            if env.now >= due || theme_changed || !self.glide.painted() {
                 self.promote(path, showing_source, env, frame);
             } else if self.timer.as_ref().is_none_or(|(at, _)| *at < due) {
                 self.timer = Some((due, wake(due - env.now, cx)));
@@ -501,10 +501,9 @@ impl Slot {
             self.finish_swap();
         }
         let from_layer = self.layer(showing_source);
-        let from = self.glide.painted.get();
         let animate = !env.still
             && !ready.snap
-            && from.is_some()
+            && self.glide.painted()
             && self
                 .shown
                 .as_ref()
@@ -530,10 +529,9 @@ impl Slot {
         if animate {
             self.swap = Some(Swap {
                 at: env.now,
-                from,
+                from: self.glide.begin(),
                 from_layer,
             });
-            self.glide.content.set(None);
             frame.moving = true;
         } else {
             self.finish_swap();
@@ -673,14 +671,12 @@ impl Diagrams {
         };
         let from_layer = slot.layer(showing_source);
         slot.finish_swap();
-        let from = slot.glide.painted.get();
-        if !still && from.is_some() {
+        if !still && slot.glide.painted() {
             slot.swap = Some(Swap {
                 at: now,
-                from,
+                from: slot.glide.begin(),
                 from_layer,
             });
-            slot.glide.content.set(None);
         }
     }
 }
@@ -886,12 +882,7 @@ pub(super) fn block(
         .relative()
         .rounded(crate::material::radius_card(cx))
         .bg(cx.theme().tokens.colors.muted)
-        .child(GlideHeight::new(
-            progress,
-            swap.and_then(|swap| swap.from),
-            glide,
-            faces,
-        ))
+        .child(GlideHeight::new(&glide, faces).gliding(swap.and_then(|swap| swap.from), progress))
         .child(actions);
     #[cfg(test)]
     let card = {
