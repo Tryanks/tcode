@@ -376,7 +376,7 @@ impl ChatView {
                     Vec::new()
                 };
                 let left = old_rows
-                    .map(|old| self.rows_leaving(&old, &splices, &carried, cx))
+                    .map(|old| self.rows_leaving(&old, cx))
                     .unwrap_or_default();
                 for (range, count) in splices.into_iter().rev() {
                     // The row above a splice changes its padding (the former
