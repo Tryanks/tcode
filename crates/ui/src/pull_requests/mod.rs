@@ -171,45 +171,77 @@ pub fn badge(links: &[ThreadPullRequestLink], _size: f32, cx: &App) -> Option<An
 }
 /// Every visible linked pull request's number in link order, each in its own state's glyph and
 /// color: the thread's header and the phone's row show them all, where the sidebar's rows can
-/// afford only [`badge`].
+/// afford only [`badge`]. A number linked or unlinked widens in or narrows away.
 pub fn numbers(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> {
     let label = badge_label(links, cx)?;
     let spacing = &cx.theme().tokens.spacing;
+    let (gap, inner) = (spacing.xs, spacing.xxs);
+    let typography = cx.theme().tokens.typography.xs;
+    let chips: Vec<(SharedString, (u64, IconName, Hsla))> = links
+        .iter()
+        .filter(|link| link.visible())
+        .map(|link| {
+            let (glyph, color, _) =
+                appearance(PullRequestBadgeState::of(link.snapshot.as_ref()), cx);
+            let number = link.key.number;
+            (
+                SharedString::from(format!(
+                    "{}/{}#{number}",
+                    link.key.host, link.key.repository
+                )),
+                (number, glyph, color),
+            )
+        })
+        .collect();
     Some(
-        h_flex()
-            .id("pull-request-numbers")
-            .aria_label(label)
-            .flex_none()
-            .items_center()
-            .gap(spacing.xs)
-            .text_token(&cx.theme().tokens.typography.xs)
-            .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
-                "tnum".into(),
-                1,
-            )])))
-            .children(links.iter().filter(|link| link.visible()).map(|link| {
-                let (glyph, color, _) =
-                    appearance(PullRequestBadgeState::of(link.snapshot.as_ref()), cx);
-                let (number, gap) = (link.key.number, spacing.xxs);
-                crate::motion::Sampled::new(move |window, cx| {
+        crate::motion::Sampled::new(move |window, cx| {
+            // Each number carries the gap before it, so the gap goes with it; the row starts a
+            // gap early so the first one sits at its start.
+            let chips = crate::motion::keyed_across(
+                "pull-request-numbers",
+                chips,
+                window,
+                cx,
+                |_, (number, glyph, color), window, cx| {
+                    let number = *number;
                     let color = gpui_base::motion::transition(
                         SharedString::from(format!("pull-request-number-{number}")),
-                        color,
+                        *color,
                         crate::motion::settle(),
                         window,
                         cx,
                     );
                     h_flex()
                         .flex_none()
+                        .pl(gap)
                         .items_center()
-                        .gap(gap)
+                        .gap(inner)
                         .text_color(color)
-                        .child(Icon::new(glyph))
+                        .debug_selector(move || format!("pull-request-number-{number}"))
+                        .child(Icon::new(glyph.clone()))
                         .child(format!("#{number}"))
                         .into_any_element()
-                })
-            }))
-            .into_any_element(),
+                },
+            );
+            div()
+                .id("pull-request-numbers")
+                .aria_label(label)
+                .flex_none()
+                .child(
+                    chips.render(
+                        h_flex()
+                            .ml(-gap)
+                            .items_center()
+                            .text_token(&typography)
+                            .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+                                "tnum".into(),
+                                1,
+                            )]))),
+                    ),
+                )
+                .into_any_element()
+        })
+        .into_any_element(),
     )
 }
 pub fn sidebar_badge(
@@ -242,8 +274,9 @@ pub fn sidebar_badge(
             .anchor(Anchor::TopLeft)
             .trigger_with(move |_, _, _, _| trigger.into_any_element())
             .p(cx.theme().tokens.spacing.sm)
-            .content(move |_, _, cx| {
-                let spacing = &cx.theme().tokens.spacing;
+            .content(move |_, window, cx| {
+                let list_hover = cx.theme().list_hover;
+                let spacing = cx.theme().tokens.spacing;
                 let mut rows = v_flex()
                     .id("pr-mini-list")
                     .w(px(320.))
@@ -291,6 +324,13 @@ pub fn sidebar_badge(
                 for (index, (depth, key, snapshot, caption)) in ordered.iter().take(8).enumerate() {
                     let (glyph, color, _) = appearance(row_state(*snapshot, None), cx);
                     let (store, id, open) = (hover_store.clone(), hover_id.clone(), (*key).clone());
+                    // The pointer over a row fills it gradually.
+                    let (fill, on_hover) = crate::motion::hover_fill(
+                        SharedString::from(format!("pr-mini-row-{index}")),
+                        list_hover,
+                        window,
+                        cx,
+                    );
                     // A hover-card miniature is denser than any list owner's row, and
                     // no row owner carries a tree indent.
                     rows =
@@ -302,7 +342,8 @@ pub fn sidebar_badge(
                                 .gap(spacing.sm)
                                 .items_center()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(cx.theme().list_hover))
+                                .bg(fill)
+                                .on_hover(on_hover)
                                 .on_click(move |_, _, cx| {
                                     store.update(cx, |store, cx| {
                                         store.select_session(id.clone(), cx);
@@ -695,6 +736,33 @@ fn open_pull_request(
     }
 }
 
+/// One entry of the pull request list, kept as what it shows so one that leaves is drawn as
+/// it was.
+#[derive(Clone)]
+enum ListEntry {
+    /// Why a host's pull requests cannot sync.
+    Notice {
+        host: String,
+        text: String,
+        credential: bool,
+    },
+    /// A stack's caption above its layers.
+    Caption {
+        stack: pull_request::PullRequestStack,
+        operation: Option<pull_request::PullRequestStackOperation>,
+        links: std::rc::Rc<[ThreadPullRequestLink]>,
+    },
+    Row {
+        key: PullRequestKey,
+        url: String,
+        link: Option<Box<ThreadPullRequestLink>>,
+        branch: Option<String>,
+        state: Option<PullRequestState>,
+        position: Option<(usize, usize)>,
+        depth: usize,
+    },
+}
+
 struct PullRequestRow<'a> {
     key: PullRequestKey,
     url: String,
@@ -712,6 +780,8 @@ pub struct PullRequestsPanel {
     scroll: ScrollHandle,
     /// The watched row whose eye the pointer is over, which then shows what a click does.
     eye_hovered: Option<PullRequestKey>,
+    /// The row the pointer is over, whose menu button shows in place of its time.
+    hover: crate::motion::ListHover,
     agent_tools_open: bool,
     detail: Entity<PullRequestView>,
     /// The pull request the active thread had open when last drawn.
@@ -753,6 +823,7 @@ impl PullRequestsPanel {
             window_state,
             scroll: ScrollHandle::new(),
             eye_hovered: None,
+            hover: crate::motion::ListHover::new(),
             agent_tools_open: false,
             detail,
             shown: None,
@@ -1058,7 +1129,9 @@ impl PullRequestsPanel {
             watchable,
             self.offer(&key),
         );
-        let mut signals = h_flex().gap_1().flex_none().items_center();
+        // Each signal carries the gap before it, so one that comes or goes widens in or narrows
+        // away with its gap and the title gives or takes the room as it does.
+        let mut signals = h_flex().flex_none().ml(gpui::rems(-0.25)).items_center();
         // The eye leads while the pull request is open or not yet read; the host ends the watch
         // once it merges or closes.
         let eye = crate::motion::shown(
@@ -1091,7 +1164,7 @@ impl PullRequestsPanel {
                 window,
                 cx,
             );
-            signals = signals.child(eye.fade(if compact {
+            signals = signals.child(eye.fold_across(div().pl_1().child(if compact {
                 // A glyph is below touch size: the more menu stops the watch on a phone.
                 Icon::new(IconName::Eye)
                     .text_color(cx.theme().muted_foreground)
@@ -1137,7 +1210,7 @@ impl PullRequestsPanel {
                     window.dispatch_action(Box::new(stop.clone()), cx);
                 })
                 .into_any_element()
-            }));
+            })));
         }
         let open_snapshot = snapshot.filter(|s| s.state == PullRequestState::Open);
         if let Some(check) = crate::motion::shown(
@@ -1164,19 +1237,23 @@ impl PullRequestsPanel {
                 ),
             };
             signals = signals.child(
-                check.fade(
-                    div()
-                        .id("pr-signal-checks")
-                        .child(crate::motion::status_icon(
-                            (row_key.clone(), "checks-icon"),
-                            icon,
-                            color,
-                            window,
-                            cx,
-                        ))
-                        .with_tooltip(move |_, _| {
-                            crate::widgets::tooltip::Tooltip::new(crate::tr!(label).into_owned())
-                        }),
+                check.fold_across(
+                    div().pl_1().child(
+                        div()
+                            .id("pr-signal-checks")
+                            .child(crate::motion::status_icon(
+                                (row_key.clone(), "checks-icon"),
+                                icon,
+                                color,
+                                window,
+                                cx,
+                            ))
+                            .with_tooltip(move |_, _| {
+                                crate::widgets::tooltip::Tooltip::new(
+                                    crate::tr!(label).into_owned(),
+                                )
+                            }),
+                    ),
                 ),
             );
         }
@@ -1204,19 +1281,23 @@ impl PullRequestsPanel {
                 ),
             };
             signals = signals.child(
-                review.fade(
-                    div()
-                        .id("pr-signal-review")
-                        .child(crate::motion::status_icon(
-                            (row_key.clone(), "review-icon"),
-                            icon,
-                            color,
-                            window,
-                            cx,
-                        ))
-                        .with_tooltip(move |_, _| {
-                            crate::widgets::tooltip::Tooltip::new(crate::tr!(label).into_owned())
-                        }),
+                review.fold_across(
+                    div().pl_1().child(
+                        div()
+                            .id("pr-signal-review")
+                            .child(crate::motion::status_icon(
+                                (row_key.clone(), "review-icon"),
+                                icon,
+                                color,
+                                window,
+                                cx,
+                            ))
+                            .with_tooltip(move |_, _| {
+                                crate::widgets::tooltip::Tooltip::new(
+                                    crate::tr!(label).into_owned(),
+                                )
+                            }),
+                    ),
                 ),
             );
         }
@@ -1230,16 +1311,21 @@ impl PullRequestsPanel {
         ) {
             let base = conflict.value.clone();
             signals = signals.child(
-                conflict.fade(
-                    div()
-                        .id("pr-conflict")
-                        .child(Icon::new(IconName::GitMergeConflict).text_color(cx.theme().warning))
-                        .with_tooltip(move |_, _| {
-                            crate::widgets::tooltip::Tooltip::new(
-                                crate::tr!("pull_requests.conflict", base = base.clone())
-                                    .into_owned(),
+                conflict.fold_across(
+                    div().pl_1().child(
+                        div()
+                            .id("pr-conflict")
+                            .child(
+                                Icon::new(IconName::GitMergeConflict)
+                                    .text_color(cx.theme().warning),
                             )
-                        }),
+                            .with_tooltip(move |_, _| {
+                                crate::widgets::tooltip::Tooltip::new(
+                                    crate::tr!("pull_requests.conflict", base = base.clone())
+                                        .into_owned(),
+                                )
+                            }),
+                    ),
                 ),
             );
         }
@@ -1264,13 +1350,17 @@ impl PullRequestsPanel {
         {
             let blocker = kept.value.clone();
             signals = signals.child(
-                kept.fade(
-                    div()
-                        .id("pr-signal-blocked")
-                        .child(Icon::new(IconName::Lock).text_color(cx.theme().muted_foreground))
-                        .with_tooltip(move |_, _| {
-                            crate::widgets::tooltip::Tooltip::new(blocker.clone())
-                        }),
+                kept.fold_across(
+                    div().pl_1().child(
+                        div()
+                            .id("pr-signal-blocked")
+                            .child(
+                                Icon::new(IconName::Lock).text_color(cx.theme().muted_foreground),
+                            )
+                            .with_tooltip(move |_, _| {
+                                crate::widgets::tooltip::Tooltip::new(blocker.clone())
+                            }),
+                    ),
                 ),
             );
         }
@@ -1304,19 +1394,19 @@ impl PullRequestsPanel {
                     }),
             ),
         });
+        // The pointer over the row fades the menu button in over the trailing signal.
+        let menu_shown = (!compact).then(|| self.hover.reveal(&row_id, window, cx));
         let trailing = trailing.map(|trailing| {
-            let group = row_id.clone();
             crate::motion::cross_fade(
                 (row_key.clone(), "trailing"),
                 trailing,
                 window,
                 cx,
-                move |(running, updated), _, cx| match running {
+                |(running, updated), _, cx| match running {
                     Some((icon, color, tooltip)) => {
                         let tooltip = tooltip.clone();
                         div()
                             .id("pr-signal-operation")
-                            .group_hover(group.clone(), |signal| signal.invisible())
                             .child(Icon::empty().path(icon.clone()).text_color(*color))
                             .with_tooltip(move |_, _| {
                                 crate::widgets::tooltip::Tooltip::new(tooltip.clone())
@@ -1325,7 +1415,6 @@ impl PullRequestsPanel {
                     }
                     None => div()
                         .text_secondary(false, cx)
-                        .group_hover(group.clone(), |time| time.invisible())
                         .children(updated.clone())
                         .into_any_element(),
                 },
@@ -1339,7 +1428,7 @@ impl PullRequestsPanel {
             px(crate::material::CARD_INSET)
         };
         let row = crate::material::panel_row(row_id.clone(), label, compact, cx)
-            .group(row_id.clone())
+            .on_hover(self.hover.on_hover(row_id.clone()))
             .min_w_0()
             // `panel_row` has no tree indent: a stacked layer steps in one level per depth.
             .pl(inset + spacing.lg * depth.min(3) as f32)
@@ -1401,7 +1490,8 @@ impl PullRequestsPanel {
                             )
                             .when_some(draft, |row, draft| {
                                 row.child(
-                                    draft.fade(
+                                    draft.fold_across_gap(
+                                        spacing.sm,
                                         div()
                                             .text_secondary(false, cx)
                                             .child(crate::tr!("pull_requests.draft")),
@@ -1429,7 +1519,11 @@ impl PullRequestsPanel {
                     // The desktop slot holds the relative time under the hover-revealed menu
                     // button; no owner sizes that overlay.
                     .when(!compact, |slot| slot.min_w(px(36.)).min_h(spacing.xl))
-                    .children(trailing)
+                    .children(trailing.map(|trailing| {
+                        div()
+                            .opacity(1. - menu_shown.unwrap_or_default())
+                            .child(trailing)
+                    }))
                     .child(
                         Button::new(SharedString::from(format!(
                             "pr-menu-{}-{}-{}",
@@ -1453,13 +1547,12 @@ impl PullRequestsPanel {
                             )
                             .into_owned(),
                         )
-                        .when(!compact, |button| {
+                        .when_some(menu_shown, |button, shown| {
                             button
                                 .absolute()
                                 .right_0()
                                 .top_0()
-                                .opacity(0.)
-                                .group_hover(row_id.clone(), |button| button.opacity(1.))
+                                .opacity(shown)
                                 .focus(|button| button.opacity(1.))
                         })
                         .dropdown_menu({
@@ -1754,7 +1847,7 @@ impl PullRequestsPanel {
             .session_status()
             .and_then(|status| status.injected_tools.clone());
         let compact = self.window_state.read(cx).compact;
-        let mut rows = v_flex().id("pull-request-rows").w_full().min_w_0().gap_1();
+        let mut entries: Vec<(SharedString, ListEntry)> = Vec::new();
         // One notice per host whose pull requests cannot sync, in the order the links name them.
         let mut hosts = Vec::new();
         for link in &links {
@@ -1784,23 +1877,100 @@ impl PullRequestsPanel {
                         )
                     })
                 });
-            let Some(notice) = crate::motion::shown(
-                SharedString::from(format!("pr-host-notice-{host}")),
-                notice,
-                window,
-                cx,
-            ) else {
-                continue;
-            };
-            let (text, credential) = notice.value.clone();
-            rows = rows.child(
-                notice.fold(
-                    crate::material::card(cx)
+            if let Some((text, credential)) = notice {
+                entries.push((
+                    SharedString::from(format!("notice-{host}")),
+                    ListEntry::Notice {
+                        host,
+                        text,
+                        credential,
+                    },
+                ));
+            }
+        }
+        let shared: std::rc::Rc<[ThreadPullRequestLink]> = links.clone().into();
+        let row_key = |key: &PullRequestKey| {
+            SharedString::from(format!(
+                "row-{}/{}#{}",
+                key.host, key.repository, key.number
+            ))
+        };
+        for group in pull_request::groups(&links) {
+            if let Some(stack) = group.stack {
+                let anchor = group.links[0];
+                let operation =
+                    tcode_core::pull_request::stack_operation(&operations, &links, &anchor.key)
+                        .cloned();
+                entries.push((
+                    SharedString::from(format!(
+                        "stack-{}/{}#{}",
+                        anchor.key.host, anchor.key.repository, anchor.key.number
+                    )),
+                    ListEntry::Caption {
+                        stack: stack.clone(),
+                        operation,
+                        links: shared.clone(),
+                    },
+                ));
+                for (index, layer) in stack.layers.iter().enumerate() {
+                    let key =
+                        PullRequestKey::new(&anchor.key.host, &anchor.key.repository, layer.number);
+                    let link = links
+                        .iter()
+                        .find(|link| link.key == key)
+                        .map(|link| Box::new(link.clone()));
+                    entries.push((
+                        row_key(&key),
+                        ListEntry::Row {
+                            key,
+                            url: layer.url.clone(),
+                            link,
+                            branch: Some(layer.head_branch.clone()),
+                            state: Some(layer.state),
+                            position: Some((index + 1, stack.layers.len())),
+                            depth: index,
+                        },
+                    ));
+                }
+            } else {
+                for (index, link) in group.links.iter().enumerate() {
+                    entries.push((
+                        row_key(&link.key),
+                        ListEntry::Row {
+                            key: link.key.clone(),
+                            url: link.url.clone(),
+                            link: Some(Box::new((*link).clone())),
+                            branch: None,
+                            state: None,
+                            position: None,
+                            depth: index,
+                        },
+                    ));
+                }
+            }
+        }
+        // A row, caption or notice that comes or goes folds in or away carrying the gap above
+        // it, and one whose place changes (a reorder, a pull request joining a stack) glides
+        // there; the list starts a gap early so the first one sits at its top.
+        let this = &*self;
+        let entries = crate::motion::keyed(
+            "pull-request-entries",
+            entries,
+            window,
+            cx,
+            |key, entry, window, cx| {
+                let selector = format!("pr-entry-{key}");
+                let entry = match entry {
+                    ListEntry::Notice {
+                        host,
+                        text,
+                        credential,
+                    } => crate::material::card(cx)
                         .flex_row()
                         .items_center()
                         .text_token(&cx.theme().tokens.typography.xs)
-                        .child(div().flex_1().child(text))
-                        .when(credential, |notice| {
+                        .child(div().flex_1().child(text.clone()))
+                        .when(*credential, |notice| {
                             notice.child(
                                 Button::new(SharedString::from(format!("pr-settings-{host}")))
                                     .ghost()
@@ -1810,56 +1980,51 @@ impl PullRequestsPanel {
                                         window.dispatch_action(Box::new(OpenSourceControl), cx)
                                     }),
                             )
-                        }),
-                ),
-            );
-        }
-        for group in pull_request::groups(&links) {
-            if let Some(stack) = group.stack {
-                let anchor = group.links[0];
-                let operation =
-                    tcode_core::pull_request::stack_operation(&operations, &links, &anchor.key);
-                rows = rows.child(stack::caption(stack, operation, &links, compact, cx));
-                for (index, layer) in stack.layers.iter().enumerate() {
-                    let key =
-                        PullRequestKey::new(&anchor.key.host, &anchor.key.repository, layer.number);
-                    let link = links.iter().find(|link| link.key == key);
-                    rows = rows.child(self.row(
+                        })
+                        .into_any_element(),
+                    ListEntry::Caption {
+                        stack,
+                        operation,
+                        links,
+                    } => stack::caption(stack, operation.as_ref(), links, compact, cx),
+                    ListEntry::Row {
+                        key,
+                        url,
+                        link,
+                        branch,
+                        state,
+                        position,
+                        depth,
+                    } => this.row(
                         PullRequestRow {
-                            key,
-                            url: layer.url.clone(),
-                            link,
-                            branch: Some(&layer.head_branch),
-                            state: Some(layer.state),
-                            position: Some((index + 1, stack.layers.len())),
-                            depth: index,
+                            key: key.clone(),
+                            url: url.clone(),
+                            link: link.as_deref(),
+                            branch: branch.as_deref(),
+                            state: *state,
+                            position: *position,
+                            depth: *depth,
                             watchable,
                         },
                         compact,
                         window,
                         cx,
-                    ));
-                }
-            } else {
-                for (index, link) in group.links.iter().enumerate() {
-                    rows = rows.child(self.row(
-                        PullRequestRow {
-                            key: link.key.clone(),
-                            url: link.url.clone(),
-                            link: Some(link),
-                            branch: None,
-                            state: None,
-                            position: None,
-                            depth: index,
-                            watchable,
-                        },
-                        compact,
-                        window,
-                        cx,
-                    ));
-                }
-            }
-        }
+                    ),
+                };
+                div()
+                    .debug_selector(move || selector)
+                    .w_full()
+                    .min_w_0()
+                    .pt_1()
+                    .child(entry)
+                    .into_any_element()
+            },
+        );
+        let rows = div()
+            .id("pull-request-rows")
+            .w_full()
+            .min_w_0()
+            .child(entries.render(v_flex().w_full().min_w_0().mt(gpui::rems(-0.25))));
         let agent_tools = agent_tools.map(|tools| self.agent_tools(&tools, cx));
         let count = links.iter().filter(|link| link.visible()).count();
         // Monitoring pauses and resumes for the whole thread, beside the watches it governs.

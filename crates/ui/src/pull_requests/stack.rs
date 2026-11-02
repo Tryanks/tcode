@@ -1573,6 +1573,9 @@ fn line(icon: IconName, color: Hsla, text: String) -> AnyElement {
         .into_any_element()
 }
 
+/// A note of the merge confirmation: its glyph and colour, if it has one, and its words.
+type MergeNote = (Option<(IconName, Hsla)>, String);
+
 /// The text role of a confirmation's notes.
 fn notes(cx: &App) -> gpui::Div {
     v_flex()
@@ -2109,23 +2112,33 @@ impl Render for MergeStackDialog {
                             })),
                     );
                 }
-                let mut notes = vec![line(
-                    IconName::GitMerge,
-                    theme.info,
-                    tr_with(
-                        "note_merge",
-                        &[
-                            ("count", scope.len().to_string()),
-                            ("base", state.base.clone()),
-                        ],
+                // Keyed by what each note is about, so a note the store or a read adds or takes
+                // away folds in or out and the others move over.
+                let mut notes: Vec<(SharedString, MergeNote)> = vec![(
+                    "merge".into(),
+                    (
+                        Some((IconName::GitMerge, theme.info)),
+                        tr_with(
+                            "note_merge",
+                            &[
+                                ("count", scope.len().to_string()),
+                                ("base", state.base.clone()),
+                            ],
+                        ),
                     ),
                 )];
                 if state.merge_queue {
-                    notes.push(line(IconName::ListOrdered, theme.info, tr("note_queue")));
+                    notes.push((
+                        "queue".into(),
+                        (Some((IconName::ListOrdered, theme.info)), tr("note_queue")),
+                    ));
                 }
                 let blockers = self.blockers(state);
                 for blocker in &blockers {
-                    notes.push(line(IconName::Lock, theme.danger, blocker.clone()));
+                    notes.push((
+                        SharedString::from(format!("blocker-{blocker}")),
+                        (Some((IconName::Lock, theme.danger)), blocker.clone()),
+                    ));
                 }
                 let links = target.store.read(cx).pull_requests(&target.session);
                 let snapshot = |number: u64| {
@@ -2148,30 +2161,36 @@ impl Render for MergeStackDialog {
                     })
                     .collect();
                 for number in failing.iter().take(3) {
-                    notes.push(line(
-                        IconName::CircleX,
-                        theme.danger,
-                        tr_with("note_checks", &[("number", number.to_string())]),
+                    notes.push((
+                        SharedString::from(format!("checks-{number}")),
+                        (
+                            Some((IconName::CircleX, theme.danger)),
+                            tr_with("note_checks", &[("number", number.to_string())]),
+                        ),
                     ));
                 }
                 if failing.len() > 3 {
-                    notes.push(
-                        div()
-                            .child(tr_with(
+                    notes.push((
+                        "checks-more".into(),
+                        (
+                            None,
+                            tr_with(
                                 "summary_more",
                                 &[("count", (failing.len() - 3).to_string())],
-                            ))
-                            .into_any_element(),
-                    );
+                            ),
+                        ),
+                    ));
                 }
                 for number in &numbers {
                     if snapshot(*number).is_some_and(|snapshot| {
                         snapshot.review_decision == Some(core_pr::ReviewDecision::ChangesRequested)
                     }) {
-                        notes.push(line(
-                            IconName::MessageSquareWarning,
-                            theme.danger,
-                            tr_with("note_changes", &[("number", number.to_string())]),
+                        notes.push((
+                            SharedString::from(format!("changes-{number}")),
+                            (
+                                Some((IconName::MessageSquareWarning, theme.danger)),
+                                tr_with("note_changes", &[("number", number.to_string())]),
+                            ),
                         ));
                     }
                 }
@@ -2185,16 +2204,34 @@ impl Render for MergeStackDialog {
                     .as_ref()
                     .and_then(|offer| offer.operation.as_ref())
                 {
-                    notes.push(line(
-                        IconName::CircleQuestionMark,
-                        theme.warning,
-                        tr_with(
-                            "previous_unconfirmed",
-                            &[("ago", super::detail::ago(*started_at))],
+                    notes.push((
+                        "unconfirmed".into(),
+                        (
+                            Some((IconName::CircleQuestionMark, theme.warning)),
+                            tr_with(
+                                "previous_unconfirmed",
+                                &[("ago", super::detail::ago(*started_at))],
+                            ),
                         ),
                     ));
                 }
-                body = body.child(self::notes(cx).children(notes));
+                // Each note carries the gap above it, so the gap goes with it.
+                let notes = crate::motion::keyed(
+                    "pr-stack-merge-notes",
+                    notes,
+                    window,
+                    cx,
+                    |_, (icon, text), _, _| {
+                        div()
+                            .pt_1()
+                            .child(match icon {
+                                Some((icon, color)) => line(icon.clone(), *color, text.clone()),
+                                None => div().child(text.clone()).into_any_element(),
+                            })
+                            .into_any_element()
+                    },
+                );
+                body = body.child(notes.render(self::notes(cx).gap_0().mt(gpui::rems(-0.25))));
                 let changed = self.notice.clone();
                 let again = cx.listener(|this, _, _, cx| this.load(cx));
                 if let Some(shown) =
@@ -2228,7 +2265,9 @@ impl Render for MergeStackDialog {
         } else {
             tr_with("merge_confirm", &[("count", count.to_string())])
         };
-        outer.child(body).child(
+        // The dialog's height glides as what it read takes the place of what it showed meanwhile.
+        let glide = crate::motion::GlideState::keyed("pr-stack-merge-height", window, cx);
+        let content = outer.child(body).child(
             h_flex()
                 .gap_2()
                 .justify_end()
@@ -2249,7 +2288,8 @@ impl Render for MergeStackDialog {
                         .label(confirm_label)
                         .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                 ),
-        )
+        );
+        crate::motion::SizeGlide::new(&glide, content).on_change(phase)
     }
 }
 
@@ -2694,7 +2734,16 @@ impl Render for RebaseStackDialog {
         } else {
             self.confirm_view(window, cx)
         };
-        div().opacity(shown).child(view)
+        // The dialog's height glides as what it read, or the progress, takes the place of what
+        // it showed before.
+        let shows = match (self.started, &self.state) {
+            (true, _) => 3,
+            (false, None) => 0,
+            (false, Some(Ok(_))) => 1,
+            (false, Some(Err(_))) => 2,
+        };
+        let glide = crate::motion::GlideState::keyed("pr-stack-rebase-height", window, cx);
+        crate::motion::SizeGlide::new(&glide, div().opacity(shown).child(view)).on_change(shows)
     }
 }
 
