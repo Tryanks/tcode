@@ -13,6 +13,7 @@ mod scene;
 
 pub(crate) mod keyed;
 pub(crate) use keyed::keyed;
+pub(crate) mod resize_glide;
 
 pub(crate) mod owned;
 

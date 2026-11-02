@@ -140,6 +140,12 @@ pub struct ChatView {
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
     terminal_drawer: Entity<TerminalDrawer>,
+    /// The conversation and terminal drawer's split, and the drawer gliding
+    /// in and out of it.
+    terminal_split: Entity<gpui_base::ResizableState>,
+    terminal_glide: crate::motion::resize_glide::ResizeGlide,
+    /// Whether the last frame was compact, which has no drawer.
+    terminal_glide_compact: bool,
     /// The Agents sheet's content on phone.
     agents: Entity<crate::agents_panel::AgentsPanel>,
     terminal_was_open: bool,
@@ -352,6 +358,12 @@ impl ChatView {
             terminal_drawer,
             agents,
             terminal_was_open,
+            terminal_split: cx.new(|_| gpui_base::ResizableState::default()),
+            terminal_glide: crate::motion::resize_glide::ResizeGlide::new(
+                "chat-terminal-panels",
+                gpui::Axis::Vertical,
+            ),
+            terminal_glide_compact: false,
             list_state,
             timeline_stale: false,
             history_placeholder_height: px(0.),
@@ -900,37 +912,62 @@ impl ChatView {
                     .child(composer),
             );
 
-        let body: AnyElement = if terminal_open {
+        // Opening and closing the drawer glide; entering or leaving the
+        // compact layout, which has no drawer, does not.
+        let compact = self.window_state.read(cx).compact;
+        let animate = compact == self.terminal_glide_compact;
+        self.terminal_glide_compact = compact;
+        let glide = self.terminal_glide.sample(
+            &[
+                crate::motion::resize_glide::Panel::flex(true).reflowing(),
+                crate::motion::resize_glide::Panel::sized(px(terminal_height), terminal_open),
+            ],
+            animate,
+            &self.terminal_split,
+            window,
+            cx,
+        );
+        let drawer = glide.mounted(1).then(|| {
             let drawer = self.terminal_drawer.clone();
-            let drawer_resize = self.terminal_drawer.clone();
             let width = f32::from(window.bounds().size.width);
             if !drawer.read(cx).is_size(width, terminal_height) {
                 drawer.update(cx, |drawer, cx| drawer.resize(width, terminal_height, cx));
             }
-            gpui_base::v_resizable("chat-terminal-panels")
-                .on_resize(move |state, _, cx| {
-                    let height = state.read(cx).sizes().get(1).copied();
-                    if let Some(height) = height {
-                        drawer_resize
-                            .update(cx, |drawer, cx| drawer.resize(width, f32::from(height), cx));
-                    }
-                })
-                .child(gpui_base::resizable_panel().child(main))
-                .child(
-                    gpui_base::resizable_panel()
-                        .flex_none()
-                        .size(px(terminal_height))
-                        .size_range(px(120.)..px(600.))
-                        .child(self.terminal_drawer.clone()),
-                )
-                .into_any_element()
-        } else {
-            main.into_any_element()
-        };
+            // `fixed`: the drawer keeps its height as the window's changes,
+            // as it did before the glide gave it one in the group's state.
+            gpui_base::resizable_panel()
+                .flex_none()
+                .fixed()
+                .size(px(terminal_height))
+                .size_range(glide.range(1, px(120.)..px(600.)))
+                .child(glide.hold(1, drawer))
+        });
+        let drawer_resize = self.terminal_drawer.clone();
+        let width = f32::from(window.bounds().size.width);
+        // One group whether or not the drawer is open, so the conversation
+        // keeps its place in the tree as the drawer comes and goes.
+        let body = gpui_base::v_resizable("chat-terminal-panels")
+            .with_state(&self.terminal_split)
+            .on_resize(move |state, _, cx| {
+                let height = state.read(cx).sizes().get(1).copied();
+                if let Some(height) = height {
+                    drawer_resize
+                        .update(cx, |drawer, cx| drawer.resize(width, f32::from(height), cx));
+                }
+            })
+            .child(
+                gpui_base::resizable_panel()
+                    .size_range(glide.range(0, gpui_base::PANEL_MIN_SIZE..gpui::Pixels::MAX))
+                    .child(glide.hold(0, main)),
+            )
+            // Not `children`: the group's replaces the panels added before.
+            .when_some(drawer, |group, drawer| group.child(drawer));
         v_flex()
             .size_full()
             .when(!self.window_state.read(cx).compact, |el| el.child(header))
-            .child(body)
+            // The group is as tall as what holds it; under the header, that
+            // is what the header leaves.
+            .child(div().flex_1().min_h_0().w_full().child(body))
             .into_any_element()
     }
 }

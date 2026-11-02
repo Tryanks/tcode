@@ -207,7 +207,11 @@ struct ShellAttachment {
     /// appears mid-session, is that minimum. Left alone, the diff panel opens
     /// pinned to its 320px floor.
     split: Entity<ResizableState>,
-    collapsed_split: Entity<ResizableState>,
+    /// The workspace split's panels gliding as they open, close, expand and
+    /// collapse.
+    panel_glide: crate::motion::resize_glide::ResizeGlide,
+    /// Whether the right panel floated last frame.
+    right_floated: bool,
     /// The width the right panel opens at: the default until the user drags the
     /// panel's own handle, then whatever they chose (for this run). A sidebar
     /// drag never changes it, even when it squeezes the panel.
@@ -1177,7 +1181,11 @@ impl AppShell {
             preview,
             sidebar,
             split: cx.new(|_| ResizableState::default()),
-            collapsed_split: cx.new(|_| ResizableState::default()),
+            panel_glide: crate::motion::resize_glide::ResizeGlide::new(
+                "workspace-panels",
+                gpui::Axis::Horizontal,
+            ),
+            right_floated: false,
             right_width: Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH))),
             floating_split: cx.new(|_| ResizableState::default()),
             floating_focus: cx.new(|cx| {
@@ -4314,6 +4322,10 @@ impl AppShell {
 
         let scene = attachment.routes.sample("routes", route, window, cx);
         let scenes: Vec<Route> = scene.scenes().copied().collect();
+        // The workspace comes back as it is, not gliding from how it was.
+        if !scenes.contains(&Route::Chat) {
+            attachment.panel_glide.reset();
+        }
         // The sidebar both workspace routes keep is drawn once, by the lowest
         // of them: that one is opaque, so the sidebar holds still while the
         // routes change around it.
@@ -4470,16 +4482,12 @@ impl AppShell {
         // timeline and the composer mid-word. A flat group makes the chat a real
         // flex sibling of the right panel, so it reflows instead of clipping.
         let chat_visible = !(diff_open && diff_expanded);
-        // The right panel is the last of three panels (sidebar · chat · right),
-        // and the sidebar is only a panel when it is expanded.
-        let right_ix = if collapsed { 1 } else { 2 };
-        // Panel state is indexed by position; the two group shapes need their
-        // own state so the chat's size never becomes the sidebar's size.
-        let split = if collapsed {
-            attachment.collapsed_split.clone()
-        } else {
-            attachment.split.clone()
-        };
+        // The right panel is the last of three panels (sidebar · chat · right).
+        // A collapsed sidebar keeps its place in the group, out of sight, so
+        // panel state indexed by position means the same panel either way and
+        // the sidebar can glide in and out beside the chat.
+        let right_ix = 2;
+        let split = attachment.split.clone();
 
         let viewport_width = window.viewport_size().width;
         let layout_changed = self.last_split_layout != Some((viewport_width, collapsed));
@@ -4532,18 +4540,20 @@ impl AppShell {
             (Some(right_panel), None)
         };
 
-        // Give the docked right panel its width, as much of it as leaves the
-        // chat its minimum, once the group knows about the panel (its count is
-        // synced while the group renders, so this lands on the frame after it
-        // docks — the group notifies, so that frame comes).
+        // The docked right panel's width: the one the user chose, as much of
+        // it as leaves the chat its minimum.
+        let docked_width = attachment
+            .right_width
+            .get()
+            .min(beside_sidebar - chat_min)
+            .max(px(RIGHT_PANEL_MIN_WIDTH));
+        // Give the docked right panel its width once the group knows about the
+        // panel (its count is synced while the group renders, so this lands on
+        // the frame after it docks — the group notifies, so that frame comes).
         if !(right_docked && chat_visible) {
             attachment.right_restore_pending = true;
         } else if attachment.right_restore_pending {
-            let width = attachment
-                .right_width
-                .get()
-                .min(beside_sidebar - chat_min)
-                .max(px(RIGHT_PANEL_MIN_WIDTH));
+            let width = docked_width;
             let restored = split.update(cx, |state, cx| match state.sizes().get(right_ix) {
                 Some(size) if (f32::from(*size) - f32::from(width)).abs() > 0.5 => {
                     state.resize_panel(right_ix, width, window, cx);
@@ -4559,39 +4569,76 @@ impl AppShell {
             }
         }
 
+        // Opening, closing, expanding and restoring the right panel, and
+        // collapsing the sidebar, glide; floating or docking with the window's
+        // width does not, as the window's edge moved and the layout follows it.
+        let animate = right_floats == attachment.right_floated;
+        attachment.right_floated = right_floats;
+        let glide = attachment.panel_glide.sample(
+            &[
+                crate::motion::resize_glide::Panel::sized(
+                    attachment.sidebar_width.get(),
+                    !collapsed,
+                )
+                .kept(),
+                crate::motion::resize_glide::Panel::flex(chat_visible),
+                crate::motion::resize_glide::Panel::sized(
+                    if chat_visible {
+                        docked_width
+                    } else {
+                        beside_sidebar
+                    },
+                    right_docked,
+                ),
+            ],
+            animate,
+            &split,
+            window,
+            cx,
+        );
+
         // Chat and right-panel reading surfaces sit above the translucent canvas.
         let chat_panel = resizable_panel()
-            .visible(chat_visible)
-            .when(right_docked, |panel| {
-                panel.size_range(chat_min..Pixels::MAX)
-            })
-            .child(self.render_chat_column(cx));
+            .visible(glide.mounted(1))
+            .size_range(glide.range(
+                1,
+                if right_docked {
+                    chat_min..Pixels::MAX
+                } else {
+                    gpui_base::PANEL_MIN_SIZE..Pixels::MAX
+                },
+            ))
+            .child(glide.hold(1, self.render_chat_column(cx)));
         let attachment = self.attachment.as_ref().expect("attachment checked above");
         // Beside the chat, `flex_none`: whatever the group's sizes leave over or
         // lack goes to the chat, so the panel is exactly the width restored
         // above. Expanded, there is no chat, so the panel grows into it all.
         let right = resizable_panel()
             .when(chat_visible, |panel| panel.flex_none())
-            .visible(right_docked)
             .size(px(RIGHT_PANEL_WIDTH))
-            .size_range(
+            .size_range(glide.range(
+                2,
                 px(RIGHT_PANEL_MIN_WIDTH)..if chat_visible { px(1400.) } else { Pixels::MAX },
-            )
+            ))
             .child(
-                div()
-                    .debug_selector(|| "right-panel".into())
-                    .size_full()
-                    .bg(crate::material::content_surface(cx))
-                    .shadow_sm()
-                    .children(docked_panel),
+                glide.hold(
+                    2,
+                    div()
+                        .debug_selector(|| "right-panel".into())
+                        .size_full()
+                        .bg(crate::material::content_surface(cx))
+                        .shadow_sm()
+                        .children(docked_panel),
+                ),
             );
+        let sidebar_drawn = glide.size(0).unwrap_or(sidebar_layout_width);
         // gpui-base has no API to disable one handle in a group; cover the
         // expanded panel's handle so dragging it cannot change its restored width.
         let handle_cover = (!chat_visible).then(|| {
             div()
                 .absolute()
                 .top_0()
-                .left(sidebar_layout_width - px(5.))
+                .left(sidebar_drawn - px(5.))
                 .w(px(10.))
                 .h_full()
                 .occlude()
@@ -4654,63 +4701,75 @@ impl AppShell {
         let overlay_width = attachment.sidebar_width.get();
         let overlay_visible = attachment.sidebar_overlay_visible;
         let palette = attachment.palette.clone();
-        let group = move |id: &'static str| {
-            h_resizable(id)
-                .with_state(&split)
-                .on_resize(move |state, _, cx| {
-                    // The group does not say which handle was dragged. A drag
-                    // that moved the sidebar was the sidebar's, and whatever it
-                    // squeezed the panel to is not a width the user chose.
-                    let sizes = state.read(cx).sizes();
-                    let sidebar = (!collapsed).then(|| sizes.first()).flatten();
-                    match sidebar {
-                        Some(size) if (f32::from(*size - remembered_sidebar.get())).abs() > 0.5 => {
-                            remembered_sidebar.set(*size);
-                        }
-                        _ => {
-                            if let Some(size) = sizes.get(right_ix) {
-                                remembered_right.set(*size);
-                            }
+        let group = h_resizable("workspace-panels")
+            .with_state(&split)
+            .on_resize(move |state, _, cx| {
+                // The group does not say which handle was dragged. A drag
+                // that moved the sidebar was the sidebar's, and whatever it
+                // squeezed the panel to is not a width the user chose.
+                let sizes = state.read(cx).sizes();
+                let sidebar = (!collapsed).then(|| sizes.first()).flatten();
+                match sidebar {
+                    Some(size) if (f32::from(*size - remembered_sidebar.get())).abs() > 0.5 => {
+                        remembered_sidebar.set(*size);
+                    }
+                    _ => {
+                        if let Some(size) = sizes.get(right_ix) {
+                            remembered_right.set(*size);
                         }
                     }
-                })
-        };
-
-        let workspace: AnyElement = if collapsed {
-            // Zero layout width: the chat/right group owns the whole workspace
-            // and runs to the window's left edge. The trigger and overlay are
-            // independent absolute siblings, so neither reflows the columns.
-            //
-            // A popover keeps the overlay alive through its occluded-hover
-            // false transition (see next_sidebar_overlay_visibility). When the
-            // popover dismisses with the pointer already outside the overlay,
-            // no hover event follows — reap the stale overlay here instead
-            // (dismissal refreshes the window, so this pass always runs).
-            let overlay_visible = if overlay_visible
-                && !gpui_base::GlobalState::is_in_deferred_context(cx)
-                && window.mouse_position().x > overlay_width
-            {
-                if let Some(attachment) = &mut self.attachment {
-                    attachment.sidebar_overlay_visible = false;
                 }
-                false
-            } else {
-                overlay_visible
-            };
-            div()
-                .relative()
-                .size_full()
-                .child(
-                    group("chat-diff-panels")
-                        .child(chat_panel)
-                        .when(right_docked, |group| group.child(right)),
-                )
-                .children(handle_cover)
-                .children(floating_right)
-                // This fixed transparent strip only opens the overlay. Its
-                // inevitable false transition when the overlay occludes it is
-                // deliberately ignored by the state machine.
-                .child(
+            });
+        // The sidebar is drawn once a frame: in its panel while that shows
+        // it, gliding out included, and in the overlay only after.
+        let sidebar_docked = glide.shows(0);
+        // A popover keeps the overlay alive through its occluded-hover false
+        // transition (see next_sidebar_overlay_visibility). When the popover
+        // dismisses with the pointer already outside the overlay, no hover
+        // event follows — reap the stale overlay here instead (dismissal
+        // refreshes the window, so this pass always runs).
+        let overlay_visible = if collapsed
+            && overlay_visible
+            && !gpui_base::GlobalState::is_in_deferred_context(cx)
+            && window.mouse_position().x > overlay_width
+        {
+            if let Some(attachment) = &mut self.attachment {
+                attachment.sidebar_overlay_visible = false;
+            }
+            false
+        } else {
+            overlay_visible && !sidebar_docked
+        };
+        let (docked_sidebar, overlay_sidebar) = match sidebar_docked {
+            true => (Some(sidebar), None),
+            false => (None, Some(sidebar)),
+        };
+        let workspace = div()
+            .relative()
+            .size_full()
+            .child(
+                group
+                    .child(
+                        resizable_panel()
+                            .fixed()
+                            .size(overlay_width)
+                            .size_range(glide.range(0, px(220.)..px(380.)))
+                            .when_some(docked_sidebar, |panel, sidebar| {
+                                panel.child(glide.hold(0, sidebar))
+                            }),
+                    )
+                    .child(chat_panel)
+                    .when(glide.mounted(2), |group| group.child(right)),
+            )
+            .children(handle_cover)
+            .children(floating_right)
+            // Collapsed, the group runs to the window's left edge. This fixed
+            // transparent strip only opens the overlay, an independent
+            // absolute sibling, so neither reflows the columns. Its inevitable
+            // false transition when the overlay occludes it is deliberately
+            // ignored by the state machine.
+            .when(collapsed, |this| {
+                this.child(
                     div()
                         .id("sidebar-hover-trigger")
                         .absolute()
@@ -4726,7 +4785,10 @@ impl AppShell {
                             );
                         })),
                 )
-                .when(overlay_visible, |this| {
+            })
+            .when_some(
+                overlay_sidebar.filter(|_| overlay_visible),
+                |this, sidebar| {
                     this.child(
                         crate::material::floating_panel(
                             div().id("sidebar-hover-overlay"),
@@ -4738,8 +4800,8 @@ impl AppShell {
                         .top_0()
                         .h_full()
                         .w(overlay_width)
-                        // The blocker and hover listener share this hitbox:
-                        // the overlay owns its full visible lifetime.
+                        // The blocker and hover listener share this hitbox: the
+                        // overlay owns its full visible lifetime.
                         .occlude()
                         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                             this.update_sidebar_overlay(
@@ -4749,28 +4811,9 @@ impl AppShell {
                         }))
                         .child(sidebar),
                     )
-                })
-                .into_any_element()
-        } else {
-            div()
-                .relative()
-                .size_full()
-                .child(
-                    group("workspace-panels")
-                        .child(
-                            resizable_panel()
-                                .fixed()
-                                .size(overlay_width)
-                                .size_range(px(220.)..px(380.))
-                                .child(sidebar),
-                        )
-                        .child(chat_panel)
-                        .when(right_docked, |group| group.child(right)),
-                )
-                .children(handle_cover)
-                .children(floating_right)
-                .into_any_element()
-        };
+                },
+            )
+            .into_any_element();
 
         // No separate titlebar: the sidebar and chat columns run to the window
         // top (the native traffic lights overlay the sidebar's top-left).
@@ -11511,7 +11554,7 @@ mod tests {
             for &width in widths {
                 resize(cx, width);
                 draw_until(&shell, cx, &host, "diff-body", None);
-                draw(cx);
+                crate::test_frames::draw_settled(cx);
                 let (sidebar, collapsed) = shell.read_with(cx, |shell, cx| {
                     let attachment = shell.attachment.as_ref().expect("attached");
                     let collapsed = shell.window_state.read(cx).sidebar_collapsed;
@@ -11643,7 +11686,7 @@ mod tests {
         for width in [1600., 2000.] {
             resize(cx, width);
             draw_until(&shell, cx, &host, "diff-body", None);
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             let sidebar = shell.read_with(cx, |shell, _| {
                 shell
                     .attachment
@@ -11769,6 +11812,106 @@ mod tests {
         assert!(cx.debug_bounds("right-panel-overlay").is_none());
     }
 
+    /// The docked right panel glides in beside the chat as it opens and out
+    /// as it closes, and the sidebar glides out as it collapses and back in,
+    /// the chat taking what they leave; each lands on the width it has at
+    /// rest.
+    #[gpui::test]
+    fn workspace_panels_glide_as_they_open_and_close(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let store = store_of(&shell, cx);
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        resize(cx, 1600.);
+        crate::test_frames::draw_settled(cx);
+        let partway = |cx: &mut VisualTestContext, selector: &'static str| {
+            draw(cx);
+            cx.executor().advance_clock(Duration::from_millis(100));
+            draw(cx);
+            cx.debug_bounds(selector).map(|bounds| bounds.left())
+        };
+        let at_rest = |cx: &mut VisualTestContext, selector: &'static str| {
+            draw_until(&shell, cx, &host, "chat-composer", None);
+            crate::test_frames::draw_settled(cx);
+            cx.debug_bounds(selector).map(|bounds| bounds.left())
+        };
+
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        let opening = partway(cx, "right-panel").expect("the opening panel");
+        let open = at_rest(cx, "right-panel").expect("the open panel");
+        assert!(
+            open < opening && opening < px(1600.),
+            "the panel is partway in: {opening:?}, at rest {open:?}"
+        );
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        let closing = partway(cx, "right-panel").expect("the closing panel stays");
+        assert!(
+            open < closing && closing < px(1600.),
+            "the panel is partway out: {closing:?}"
+        );
+        assert_eq!(at_rest(cx, "right-panel"), None, "the closed panel is gone");
+
+        let expanded = at_rest(cx, "chat-composer").expect("the composer");
+        window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        let collapsing = partway(cx, "chat-composer").expect("the composer");
+        let collapsed = at_rest(cx, "chat-composer").expect("the composer");
+        assert!(
+            collapsed < collapsing && collapsing < expanded,
+            "the chat follows the sidebar out: {collapsing:?} between {collapsed:?} and {expanded:?}"
+        );
+        window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        let returning = partway(cx, "chat-composer").expect("the composer");
+        assert!(
+            collapsed < returning && returning < expanded,
+            "the chat follows the sidebar back: {returning:?}"
+        );
+        assert_eq!(at_rest(cx, "chat-composer"), Some(expanded));
+    }
+
+    /// The terminal drawer glides up under the conversation as it opens, to
+    /// the height it was given, and back down as it closes.
+    #[gpui::test]
+    fn the_terminal_drawer_glides_open_and_closed(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let store = store_of(&shell, cx);
+        resize(cx, 1600.);
+        let composer_bottom = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("chat-composer")
+                .expect("the composer")
+                .bottom()
+        };
+        let partway = |cx: &mut VisualTestContext| {
+            draw(cx);
+            cx.executor().advance_clock(Duration::from_millis(100));
+            draw(cx);
+            composer_bottom(cx)
+        };
+        let at_rest = |cx: &mut VisualTestContext| {
+            draw_until(&shell, cx, &host, "chat-composer", None);
+            crate::test_frames::draw_settled(cx);
+            composer_bottom(cx)
+        };
+        let closed = at_rest(cx);
+
+        store.update(cx, |store, cx| store.toggle_terminal_panel(cx));
+        let opening = partway(cx);
+        let open = at_rest(cx);
+        let height = store.read_with(cx, |store, _| store.panel_state().terminal_height);
+        assert_eq!(closed - open, px(height), "the drawer rests at its height");
+        assert!(
+            open < opening && opening < closed,
+            "the drawer is partway up: {opening:?} between {open:?} and {closed:?}"
+        );
+        store.update(cx, |store, cx| store.toggle_terminal_panel(cx));
+        let closing = partway(cx);
+        assert!(
+            open < closing && closing < closed,
+            "the drawer is partway down: {closing:?}"
+        );
+        assert_eq!(at_rest(cx), closed);
+    }
+
     /// Expand and Restore lay the right panel out again without remounting it:
     /// what its elements keep by their place in the tree — the focus a press
     /// gives the Expand button, the scroll of a list — is still theirs after.
@@ -11784,8 +11927,7 @@ mod tests {
         let press_expand = |cx: &mut VisualTestContext| {
             let expand = cx.debug_bounds("diff-expand").expect("the expand button");
             cx.simulate_click(expand.center(), gpui::Modifiers::default());
-            draw(cx);
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             cx.update(|window, cx| window.focused(cx))
         };
         let expanded = press_expand(cx);
