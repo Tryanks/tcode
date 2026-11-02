@@ -186,15 +186,7 @@ impl PullRequestView {
             })
             .collect();
         page.files_view.rendering = true;
-        let theme = cx.theme().highlight_theme.clone();
-        let colors = DiffColors {
-            added_word_bg: cx.theme().success.opacity(0.30),
-            removed_word_bg: cx.theme().danger.opacity(0.28),
-        };
-        let whitespace = HighlightStyle {
-            color: Some(cx.theme().muted_foreground),
-            ..Default::default()
-        };
+        let (theme, colors, whitespace) = baked_colours(cx);
         let current = self.current.clone();
         cx.spawn(async move |this, cx| {
             let rendered = cx
@@ -317,15 +309,7 @@ impl PullRequestView {
 
     /// Redraws a file once its text arrived, then applies the expansion that asked for it.
     fn apply_text(&mut self, cx: &mut Context<Self>) {
-        let dark_theme = cx.theme().highlight_theme.clone();
-        let colors = DiffColors {
-            added_word_bg: cx.theme().success.opacity(0.30),
-            removed_word_bg: cx.theme().danger.opacity(0.28),
-        };
-        let whitespace = HighlightStyle {
-            color: Some(cx.theme().muted_foreground),
-            ..Default::default()
-        };
+        let (theme, colors, whitespace) = baked_colours(cx);
         let (ignore_ws, show_invisibles) = (self.ignore_ws, self.show_invisibles);
         let Some(page) = self.page_mut() else { return };
         let Some((path, start, direction)) = page.files_view.pending_expand.clone() else {
@@ -348,7 +332,7 @@ impl PullRequestView {
             Some(&(old.clone(), new.clone())),
             ignore_ws,
             show_invisibles,
-            &dark_theme,
+            &theme,
             &colors,
             &whitespace,
         );
@@ -1757,6 +1741,30 @@ impl DiffListHost for PullRequestView {
     fn notice(&self, file: usize, cx: &mut Context<Self>) -> AnyElement {
         self.file_notice(file, cx)
     }
+}
+
+/// The colours a rendered file bakes into its text, from the shown mode's
+/// palette at rest: the file is kept until the mode changes again, so
+/// colours sampled while the theme glides would stay.
+fn baked_colours(
+    cx: &App,
+) -> (
+    std::sync::Arc<crate::highlight::HighlightTheme>,
+    DiffColors,
+    HighlightStyle,
+) {
+    let theme = crate::theme::palette(cx.theme().mode, cx);
+    (
+        theme.highlight_theme.clone(),
+        DiffColors {
+            added_word_bg: theme.success.opacity(0.30),
+            removed_word_bg: theme.danger.opacity(0.28),
+        },
+        HighlightStyle {
+            color: Some(theme.muted_foreground),
+            ..Default::default()
+        },
+    )
 }
 
 /// One file of the pull request through the diff renderer: the hunks alone until its text at

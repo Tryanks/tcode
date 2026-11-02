@@ -73,8 +73,11 @@ pub fn opaque_canvas(cx: &App) -> Hsla {
 /// full-page routes paint over the vibrancy canvas. Warm paper in light mode,
 /// blue-carbon in dark.
 pub fn content_surface(cx: &App) -> Hsla {
-    cx.theme()
-        .by_mode(rgba(0xFD, 0xFD, 0xFB, 0xF2), rgba(0x1B, 0x1E, 0x24, 0xF0))
+    paper(cx.theme())
+}
+
+fn paper(theme: &crate::theme::Theme) -> Hsla {
+    theme.by_mode(rgba(0xFD, 0xFD, 0xFB, 0xF2), rgba(0x1B, 0x1E, 0x24, 0xF0))
 }
 
 /// Popovers, menus, dialogs, toasts: the theme's large-element radius.
@@ -750,7 +753,23 @@ pub(crate) fn focus_ring(cx: &App) -> BoxShadow {
 /// differ. With themes/tcode.json the slots are, in light, 322° 158° 60°
 /// 258° 110° 203° (at least 45° apart and 22° from the theme's hues), and in
 /// dark 292° 110° 182° 61° 340° 245° (47° apart, 23° from the theme's).
+///
+/// The slots are found for each mode's palette at rest, so while the theme
+/// glides an outline goes from its light colour to its dark one with
+/// everything else.
 pub(crate) fn pane_colour(slot: usize, cx: &App) -> Hsla {
+    use crate::theme::{ThemeMode, palette};
+    let theme = cx.theme();
+    if theme.darkness <= 0. || theme.darkness >= 1. {
+        return slot_colour(slot, palette(theme.mode, cx));
+    }
+    theme.by_mode(
+        slot_colour(slot, palette(ThemeMode::Light, cx)),
+        slot_colour(slot, palette(ThemeMode::Dark, cx)),
+    )
+}
+
+fn slot_colour(slot: usize, theme: &crate::theme::Theme) -> Hsla {
     const SATURATION: f32 = 0.75;
     fn luminance(colour: Hsla) -> f32 {
         let Rgba { r, g, b, .. } = colour.to_rgb();
@@ -767,7 +786,6 @@ pub(crate) fn pane_colour(slot: usize, cx: &App) -> Hsla {
         let turn = (a - b).rem_euclid(1.);
         turn.min(1. - turn)
     }
-    let theme = cx.theme();
     let dark = theme.mode.is_dark();
     let mut taken = [
         theme.ring,
@@ -817,7 +835,7 @@ pub(crate) fn pane_colour(slot: usize, cx: &App) -> Hsla {
         hues.swap(next, farthest);
     }
     let hue = hues[slot];
-    let surface = luminance(content_surface(cx));
+    let surface = luminance(paper(theme));
     let target = if dark {
         7. * (surface + 0.05) - 0.05
     } else {
@@ -867,4 +885,62 @@ pub fn loading_skeleton(cx: &gpui::App) -> gpui::AnyElement {
                 )
         }))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{IntoElement, Render, TestAppContext, Window};
+    use tcode_core::settings::ThemeMode as Setting;
+
+    use super::*;
+    use crate::settings_page::apply_theme;
+    use crate::theme::{ThemeMode, palette};
+
+    struct Blank;
+
+    impl Render for Blank {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::Empty
+        }
+    }
+
+    /// A pane's outline goes from its light colour straight to its dark one
+    /// while the theme glides, rather than through colours found for a
+    /// palette half way between.
+    #[gpui::test]
+    fn a_pane_colour_glides_between_its_two_modes(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| Blank);
+        let at_rest = |mode, cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| slot_colour(0, palette(mode, cx)).to_rgb())
+        };
+        let (light, dark) = (at_rest(ThemeMode::Light, cx), at_rest(ThemeMode::Dark, cx));
+        assert_eq!(cx.update(|_, cx| pane_colour(0, cx).to_rgb()), light);
+
+        cx.update(|window, cx| apply_theme(Setting::Dark, window, cx));
+        let mut previous = light;
+        for _ in 0..4 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(60));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            let now = cx.update(|_, cx| pane_colour(0, cx).to_rgb());
+            assert_ne!(now, dark, "the glide has not ended yet");
+            for (from, to, previous, now) in [
+                (light.r, dark.r, previous.r, now.r),
+                (light.g, dark.g, previous.g, now.g),
+                (light.b, dark.b, previous.b, now.b),
+            ] {
+                let toward = |x: f32| (x - from) * (to - from).signum();
+                assert!(
+                    toward(previous) <= toward(now) + 1e-4 && toward(now) <= toward(to) + 1e-4,
+                    "{previous:?} -> {now:?} on the way from {light:?} to {dark:?}"
+                );
+            }
+            previous = now;
+        }
+        assert_ne!(previous, light, "the outline has left its light colour");
+
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(cx.update(|_, cx| pane_colour(0, cx).to_rgb()), dark);
+    }
 }

@@ -12029,6 +12029,51 @@ mod tests {
         );
     }
 
+    /// A changed word in the diff wears the tint of the mode the window ends
+    /// on, not of the frame a theme change began on.
+    #[gpui::test]
+    fn a_diffs_changed_words_take_the_new_modes_tint(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        open_working_tree_panel(&shell, &host, cx);
+        let changed = tcode_protocol::GitDiffResult {
+            changes: vec![agent::FileChange {
+                path: "README.md".into(),
+                kind: agent::FileChangeKind::Modify,
+                diff: Some("@@ -1 +1 @@\n-# acme-api\n+# acme-web\n".into()),
+            }],
+            texts: vec![tcode_protocol::GitFileText {
+                old: Some("# acme-api\n".into()),
+                new: Some("# acme-web\n".into()),
+            }],
+            ..Default::default()
+        };
+        draw_until(&shell, cx, &host, "diff-body", Some(&changed));
+        crate::test_frames::draw_settled(cx);
+        let tint = |mode, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| crate::theme::palette(mode, cx).success.opacity(0.30))
+        };
+        let painted = |tint, cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| quad.background.as_solid() == Some(tint))
+            })
+        };
+        let light = tint(crate::theme::ThemeMode::Light, cx);
+        assert!(painted(light, cx), "the added word wears the light tint");
+
+        cx.update(|window, cx| {
+            crate::settings_page::apply_theme(tcode_core::settings::ThemeMode::Dark, window, cx)
+        });
+        crate::test_frames::draw_settled(cx);
+        crate::test_frames::draw_settled(cx);
+        let dark = tint(crate::theme::ThemeMode::Dark, cx);
+        assert!(painted(dark, cx), "the added word wears the dark tint");
+        assert!(!painted(light, cx));
+    }
+
     /// A thread whose turn is running, with the diff panel open on its working tree.
     fn open_working_tree_panel(
         shell: &Entity<AppShell>,
