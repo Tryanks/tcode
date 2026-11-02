@@ -2324,14 +2324,20 @@ impl SessionsSidebar {
             )
     }
 
-    fn render_flat_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_flat_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let projects = self.store.read(cx).projects();
         let active_filter = self.project_filter.clone();
-        let filter_icon_color = if active_filter.is_some() {
-            cx.theme().primary
-        } else {
-            cx.theme().muted_foreground
-        };
+        let filter_icon_color = gpui_base::motion::transition(
+            "sidebar-filter-icon",
+            if active_filter.is_some() {
+                cx.theme().primary
+            } else {
+                cx.theme().muted_foreground
+            },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
         let filter_projects = projects.clone();
         let filter_for_menu = active_filter.clone();
         let filter_button = Button::new("filter-sidebar-project")
@@ -2951,6 +2957,32 @@ impl SessionsSidebar {
         )
     }
 
+    /// A thread's PR badge, widening in beside what precedes it (across
+    /// `gap`) when a PR is linked and narrowing away when the last goes or
+    /// the title is renamed over it.
+    fn pr_badge(
+        &self,
+        meta: &SessionMeta,
+        show: bool,
+        gap: gpui::Pixels,
+        slot: &'static str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<gpui::AnyElement> {
+        let links = show
+            .then(|| meta.pull_requests.clone())
+            .filter(|links| crate::pull_requests::badge_label(links, cx).is_some());
+        let shown = crate::motion::shown(
+            SharedString::from(format!("{slot}-{}", meta.id)),
+            links,
+            window,
+            cx,
+        )?;
+        let badge =
+            crate::pull_requests::sidebar_badge(&shown.value, &meta.id, self.store.clone(), cx)?;
+        Some(shown.fold_across_gap(gap, badge))
+    }
+
     fn pin_glyph(
         &self,
         meta: &SessionMeta,
@@ -3348,19 +3380,14 @@ impl SessionsSidebar {
                 .child(self.thread_title_or_input(meta, &state, false, window, cx))
                 .children(Self::follow_up_glyph(meta, window, cx))
                 .children(self.pin_glyph(meta, &row_key, window, cx))
-                .when_some(
-                    (state.renaming.is_none())
-                        .then(|| {
-                            crate::pull_requests::sidebar_badge(
-                                &meta.pull_requests,
-                                &meta.id,
-                                self.store.clone(),
-                                cx,
-                            )
-                        })
-                        .flatten(),
-                    |row, badge| row.child(badge),
-                )
+                .children(self.pr_badge(
+                    meta,
+                    state.renaming.is_none(),
+                    ROW_GAP,
+                    "pr-badge-row",
+                    window,
+                    cx,
+                ))
                 // The time narrows away while the thread works, giving the
                 // title its width gradually, and widens back after.
                 .when_some(
@@ -3612,19 +3639,14 @@ impl SessionsSidebar {
                             .text_color(cx.theme().muted_foreground),
                     )
                 });
-            let line_two = line_two.when_some(
-                (!renaming)
-                    .then(|| {
-                        crate::pull_requests::sidebar_badge(
-                            &meta.pull_requests,
-                            &meta.id,
-                            self.store.clone(),
-                            cx,
-                        )
-                    })
-                    .flatten(),
-                |line, badge| line.child(badge),
-            );
+            let line_two = line_two.children(self.pr_badge(
+                meta,
+                !renaming,
+                px(4.),
+                "pr-badge-line",
+                window,
+                cx,
+            ));
             row.child(line_one).child(line_two)
         };
 
@@ -4658,13 +4680,22 @@ impl SessionsSidebar {
                                     })
                                     .into_any_element()
                             })
-                            .when(meta.pinned_at.is_some() && !meta.is_settled(), |row| {
-                                row.child(
-                                    Icon::new(IconName::Pin)
-                                        .flex_none()
-                                        .text_color(cx.theme().muted_foreground),
+                            .children(
+                                crate::motion::shown(
+                                    SharedString::from(format!("compact-pin-{session_id}")),
+                                    (meta.pinned_at.is_some() && !meta.is_settled()).then_some(()),
+                                    window,
+                                    cx,
                                 )
-                            })
+                                .map(|shown| {
+                                    shown.fold_across_gap(
+                                        px(6.),
+                                        Icon::new(IconName::Pin)
+                                            .flex_none()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                }),
+                            )
                             .when_some(
                                 Self::fading_spinner(
                                     format!("title-spinner-{}", state.row_key),
@@ -5115,7 +5146,7 @@ impl SessionsSidebar {
         .min_h_0()
         .into_any_element();
         (
-            self.render_flat_header(cx).into_any_element(),
+            self.render_flat_header(window, cx).into_any_element(),
             v_flex()
                 .id("flat-thread-list")
                 .flex_1()

@@ -191,6 +191,14 @@ struct ShellAttachment {
     /// The wide routes on screen: one at rest, two or more while the
     /// window changes route.
     routes: crate::motion::Scene<Route>,
+    /// The compact thread page's body on screen: the skeleton while a
+    /// thread is restored, then a chat, named by the change that brought it
+    /// in place ([`Self::thread_generation`]).
+    thread_body: crate::motion::Scene<ThreadBody>,
+    thread_generation: u64,
+    /// A thread the compact page left in place (Back from an agent to its
+    /// lead), drawn beneath while the lead rises over it.
+    thread_left: Option<ThreadLeft>,
     /// Set by the panes' renderer in a frame that draws a split's handle
     /// held by the pointer: the handle's axis and where the pointer was.
     split_handle_held: crate::panes::HandleHeld,
@@ -335,6 +343,21 @@ impl ShellAttachment {
     fn chat(&self, cx: &App) -> Entity<ChatView> {
         self.focused_pane.read(cx).chat()
     }
+}
+
+/// What the compact thread page's body shows.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ThreadBody {
+    Skeleton,
+    Chat(u64),
+}
+
+/// A conversation the compact thread page swapped out in place, still bound
+/// to its thread, whose timeline it leases until it has faded.
+struct ThreadLeft {
+    generation: u64,
+    chat: Entity<ChatView>,
+    session_id: Option<String>,
 }
 
 /// The right panel docking or floating as the room beside the chat changes:
@@ -1288,6 +1311,9 @@ impl AppShell {
             zoom: Default::default(),
             scene: Default::default(),
             routes: Default::default(),
+            thread_body: Default::default(),
+            thread_generation: 0,
+            thread_left: None,
             split_handle_held,
             drop_landing,
             held_split: None,
@@ -2776,7 +2802,7 @@ impl AppShell {
             && self.destination(cx) == Destination::Thread
             && let Some((store, parent)) = self.agent_lead(cx)
         {
-            store.update(cx, |store, cx| store.select_session(parent, cx));
+            self.swap_thread_in_place(&store, parent, window, cx);
             return true;
         }
         // Everything below is one history: settings detail, settings root, a
@@ -3451,6 +3477,101 @@ fn compact_label(key: &str) -> String {
 }
 
 impl AppShell {
+    /// Show `session_id` on the compact thread page in place of the thread
+    /// it shows: a new conversation for it rises over the one it replaces,
+    /// which keeps drawing its thread, and the thread's timeline, until it
+    /// is covered. The thread left closes, as selecting another would.
+    fn swap_thread_in_place(
+        &mut self,
+        store: &Entity<WorkspaceStore>,
+        session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let window_state = self.window_state.clone();
+        let Some(attachment) = &mut self.attachment else {
+            return;
+        };
+        let chat = cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx));
+        chat.update(cx, |chat, cx| {
+            chat.set_session(Some(session_id.clone()), cx)
+        });
+        let pane = attachment.focused_pane.clone();
+        let left = pane.update(cx, |pane, cx| pane.replace_chat(chat, None, cx));
+        let left_session = left.read(cx).session_id().map(str::to_owned);
+        if let Some(left_session) = &left_session {
+            store.update(cx, |store, _| store.lease_timeline(left_session));
+        }
+        if let Some(earlier) = attachment.thread_left.replace(ThreadLeft {
+            generation: attachment.thread_generation,
+            chat: left,
+            session_id: left_session.clone(),
+        }) {
+            Self::release_left(store, earlier, cx);
+        }
+        attachment.thread_generation += 1;
+        store.update(cx, |store, cx| {
+            store.select_session(session_id, cx);
+            if let Some(left_session) = &left_session
+                && store.is_thread_open(left_session)
+            {
+                store.close_thread(left_session, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn release_left(store: &Entity<WorkspaceStore>, left: ThreadLeft, cx: &mut App) {
+        if let Some(session_id) = &left.session_id {
+            store.update(cx, |store, cx| store.release_timeline(session_id, cx));
+        }
+    }
+
+    /// The compact thread page's body: the skeleton while the thread is
+    /// restored, then its chat rising over it; a thread swapped in place
+    /// rises over the one it replaced.
+    fn compact_thread_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let pending = self.pending_navigation_restore.is_some();
+        let Some(attachment) = &mut self.attachment else {
+            return div().into_any_element();
+        };
+        let current = if pending {
+            ThreadBody::Skeleton
+        } else {
+            ThreadBody::Chat(attachment.thread_generation)
+        };
+        let frame = attachment
+            .thread_body
+            .sample("compact-thread-body", current, window, cx);
+        let keys: Vec<ThreadBody> = frame.scenes().copied().collect();
+        if attachment
+            .thread_left
+            .as_ref()
+            .is_some_and(|left| !keys.contains(&ThreadBody::Chat(left.generation)))
+            && let Some(left) = attachment.thread_left.take()
+        {
+            Self::release_left(&attachment.link.store.clone(), left, cx);
+        }
+        let layers: Vec<AnyElement> = keys
+            .into_iter()
+            .map(|key| match key {
+                ThreadBody::Skeleton => crate::material::loading_skeleton(cx),
+                ThreadBody::Chat(generation) if generation == attachment.thread_generation => {
+                    attachment.chat(cx).into_any_element()
+                }
+                ThreadBody::Chat(generation) => attachment
+                    .thread_left
+                    .as_ref()
+                    .filter(|left| left.generation == generation)
+                    .map_or_else(
+                        || gpui::Empty.into_any_element(),
+                        |left| left.chat.clone().into_any_element(),
+                    ),
+            })
+            .collect();
+        frame.render(layers).into_any_element()
+    }
+
     /// The lead thread of the open agent, when one is open.
     fn agent_lead(&self, cx: &App) -> Option<(Entity<WorkspaceStore>, String)> {
         let store = self.attachment.as_ref()?.link.store.clone();
@@ -3714,6 +3835,7 @@ impl AppShell {
 
     fn render_thread_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
+        let body = self.compact_thread_body(window, cx);
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
         };
@@ -3756,11 +3878,6 @@ impl AppShell {
                     "new_thread"
                 })
             });
-        let body = if self.pending_navigation_restore.is_some() {
-            crate::material::loading_skeleton(cx)
-        } else {
-            attachment.chat(cx).into_any_element()
-        };
         v_flex()
             .debug_selector(|| "compact-thread-page".into())
             .size_full()
@@ -3882,19 +3999,35 @@ impl AppShell {
             .compact(true)
             .items(segments);
 
-        let body: AnyElement = if self.pending_navigation_restore.is_some() {
-            crate::material::loading_skeleton(cx)
+        // Each body keeps its own layer, so the one left fades out under the
+        // one chosen; a page leaving the Preview fades natively as it is let go.
+        let current = if self.pending_navigation_restore.is_some() {
+            0
         } else if terminal {
-            attachment
-                .chat(cx)
-                .read(cx)
-                .terminal_drawer()
-                .into_any_element()
+            1
         } else if panel.right_tab == RightTab::Preview {
-            attachment.preview.clone().into_any_element()
+            2
         } else {
-            attachment.diff.clone().into_any_element()
+            3
         };
+        let fade = crate::motion::CrossFade::new("compact-panel-body", current, 4, window, cx);
+        let layers: Vec<(usize, AnyElement)> = (0..4)
+            .filter(|layer| fade.shows(*layer))
+            .map(|layer| {
+                let body = match layer {
+                    0 => crate::material::loading_skeleton(cx),
+                    1 => attachment
+                        .chat(cx)
+                        .read(cx)
+                        .terminal_drawer()
+                        .into_any_element(),
+                    2 => attachment.preview.clone().into_any_element(),
+                    _ => attachment.diff.clone().into_any_element(),
+                };
+                (layer, body)
+            })
+            .collect();
+        let body = fade.fill().render(layers).size_full();
         // The drawer sizes its grid from the space it is actually given.
         if terminal {
             let size = window.viewport_size();
@@ -4730,10 +4863,24 @@ impl AppShell {
 
         // Which entity fills the right panel: the Preview tab shows the embedded
         // browser; Diff/Plan share the DiffPanel container.
-        let right_panel: AnyElement = if right_tab == RightTab::Preview {
-            attachment.preview.clone().into_any_element()
-        } else {
-            attachment.diff.clone().into_any_element()
+        // Each keeps its own layer, so the one left fades out under the one
+        // chosen; a page leaving the Preview fades natively as it is let go.
+        let fade = crate::motion::CrossFade::new(
+            "right-panel-body",
+            usize::from(right_tab == RightTab::Preview),
+            2,
+            window,
+            cx,
+        );
+        let right_panel: AnyElement = {
+            let layers: Vec<(usize, AnyElement)> = [
+                (0, attachment.diff.clone().into_any_element()),
+                (1, attachment.preview.clone().into_any_element()),
+            ]
+            .into_iter()
+            .filter(|(layer, _)| fade.shows(*layer))
+            .collect();
+            fade.fill().render(layers).size_full().into_any_element()
         };
         let sidebar_layout_width = if collapsed {
             px(0.)
