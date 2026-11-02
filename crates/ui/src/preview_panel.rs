@@ -579,7 +579,14 @@ mod portable {
 
         pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
 
-        pub(crate) fn native_fade(&self, _cx: &gpui::App) -> Option<AnyElement> {
+        pub(crate) fn native_fade(&self) -> Option<AnyElement> {
+            None
+        }
+
+        pub(crate) fn observe_native_fade<T: 'static>(
+            _panel: &gpui::Entity<Self>,
+            _cx: &mut Context<T>,
+        ) -> Option<gpui::Subscription> {
             None
         }
 

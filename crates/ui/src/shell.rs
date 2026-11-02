@@ -1152,6 +1152,7 @@ impl AppShell {
             area.set_center(DockLayout::tabs().panel(thread_panel.clone()), window, cx);
             area
         });
+        subscriptions.extend(PreviewPanel::observe_native_fade(&preview, cx));
         subscriptions.push(cx.subscribe_in(
             &thread_panes,
             window,
@@ -4944,7 +4945,7 @@ impl Render for AppShell {
             .children(
                 self.attachment
                     .as_ref()
-                    .and_then(|attachment| attachment.preview.read(cx).native_fade(cx)),
+                    .and_then(|attachment| attachment.preview.read(cx).native_fade()),
             )
     }
 }

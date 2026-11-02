@@ -131,7 +131,7 @@ pub struct BrowserLifecycle {
     warm: HashSet<String>,
     active_identity: Option<(String, String)>,
     /// The key the panel last showed. Any other page still on screen is
-    /// leaving: it fades out through [`Self::native_fade`] and hides when
+    /// leaving: it fades out (`PreviewPanel::native_fade`) and hides when
     /// that lands.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     wanted: Option<String>,
@@ -324,7 +324,7 @@ impl BrowserLifecycle {
     /// Call this only after the selected WebView element has been laid out in
     /// the current frame. Pass `None` to let every child go.
     ///
-    /// On macOS and iOS a page fades in and out ([`Self::native_fade`]).
+    /// On macOS and iOS a page fades in and out (`PreviewPanel::native_fade`).
     /// Gap: on Windows, Linux and Android it shows and hides at once.
     /// gpui-webview 0.8.1 has no opacity, and their child surfaces (a
     /// WebView2 controller, an X11 child window, an Android view) are not
@@ -332,9 +332,7 @@ impl BrowserLifecycle {
     /// alternative.
     pub fn set_visible(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
-        {
-            self.wanted = key.map(str::to_owned);
-        }
+        let mut fading = self.set_wanted(key);
         for (candidate, slot) in &self.slots {
             let Some(view) = slot.ready() else {
                 continue;
@@ -345,6 +343,7 @@ impl BrowserLifecycle {
                     #[cfg(any(target_os = "macos", target_os = "ios"))]
                     if !view.visible() {
                         fade::set_alpha(view.raw(), 0.);
+                        fading = true;
                     }
                     set_webview_visible(view, true);
                 });
@@ -359,6 +358,21 @@ impl BrowserLifecycle {
                 }
             }
         }
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if fading {
+            cx.notify();
+        }
+    }
+
+    /// Record the page the panel wants on screen; whether that changed, so
+    /// a fade starts.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn set_wanted(&mut self, key: Option<&str>) -> bool {
+        if self.wanted.as_deref() == key {
+            return false;
+        }
+        self.wanted = key.map(str::to_owned);
+        true
     }
 
     /// Give a hidden browser the viewport it would have on screen: `canvas`
@@ -401,8 +415,8 @@ impl BrowserLifecycle {
     /// selected child before its GPUI owner has current bounds.
     pub(super) fn hide_except(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
-        if self.wanted.as_deref() != key {
-            self.wanted = None;
+        if self.wanted.as_deref() != key && self.set_wanted(None) {
+            cx.notify();
         }
         for (candidate, slot) in &self.slots {
             if Some(candidate.as_str()) == key {
@@ -415,24 +429,36 @@ impl BrowserLifecycle {
         }
     }
 
-    /// Every ready page and whether the panel wants it on screen, for the
-    /// window to draw once per frame whether or not the panel is mounted: a
-    /// page outlives its panel and fades out where it was.
+    /// Hide every page now, with no fade, for a pointer that must not reach
+    /// one before the next frame.
+    pub(super) fn hide_now(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            self.wanted = None;
+        }
+        for view in self.slots.values().filter_map(WebViewSlot::ready) {
+            view.update(cx, |view, _| set_webview_visible(view, false));
+        }
+    }
+
+    /// Every ready page and whether the panel wants it on screen.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    pub(super) fn native_fade(&self) -> crate::motion::native_fade::NativeFade<Entity<WebView>> {
-        self.slots.iter().fold(
-            crate::motion::native_fade::NativeFade::new("preview-pages"),
-            // Keyed by the browser, which keeps its fade when a draft's key
-            // migrates to the stored thread's.
-            |fade, (key, slot)| match slot.ready() {
-                Some(view) => fade.view(
-                    view.entity_id().to_string(),
+    pub(super) fn native_pages(
+        &self,
+    ) -> Vec<crate::motion::native_fade::NativeEntry<Entity<WebView>>> {
+        self.slots
+            .iter()
+            .filter_map(|(key, slot)| {
+                let view = slot.ready()?;
+                // Keyed by the browser, which keeps its fade when a draft's
+                // key migrates to the stored thread's.
+                Some((
+                    view.entity_id().to_string().into(),
                     view.clone(),
                     self.wanted.as_deref() == Some(key.as_str()),
-                ),
-                None => fade,
-            },
-        )
+                ))
+            })
+            .collect()
     }
 
     /// Reconcile the physical session with its stable cache key. Draft -> stored
@@ -744,7 +770,7 @@ impl BrowserLifecycle {
 }
 
 /// A page the panel no longer wants on screen. On macOS and iOS it stays
-/// until [`BrowserLifecycle::native_fade`] has faded it out.
+/// until `PreviewPanel::native_fade` has faded it out.
 fn leave(view: &Entity<WebView>, cx: &mut App) {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let _ = (view, cx);

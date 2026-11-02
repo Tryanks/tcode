@@ -141,18 +141,37 @@ impl PreviewPanel {
     /// The pages' fades, which the window draws every frame whether or not
     /// this panel is mounted: a page outlives the panel and leaves where it
     /// was.
-    pub(crate) fn native_fade(&self, cx: &App) -> Option<AnyElement> {
+    pub(crate) fn native_fade(&self) -> Option<AnyElement> {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
-        return Some(
-            self.backend
-                .lifecycle
-                .read(cx)
-                .native_fade()
+        {
+            let lifecycle = self.backend.lifecycle.clone();
+            Some(
+                crate::motion::native_fade::NativeFade::new("preview-pages", move |cx| {
+                    lifecycle.read(cx).native_pages()
+                })
                 .into_any_element(),
-        );
+            )
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        None
+    }
+
+    /// Redraw the window that draws [`Self::native_fade`] whenever a fade
+    /// starts: a page shown again by this panel alone, as when a resize
+    /// handle is released, would otherwise wait at transparent for something
+    /// else to redraw it.
+    pub(crate) fn observe_native_fade<T: 'static>(
+        panel: &gpui::Entity<Self>,
+        cx: &mut Context<T>,
+    ) -> Option<gpui::Subscription> {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            let lifecycle = panel.read(cx).backend.lifecycle.clone();
+            Some(cx.observe(&lifecycle, |_, _, cx| cx.notify()))
+        }
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
-            let _ = cx;
+            let _ = (panel, cx);
             None
         }
     }
@@ -240,6 +259,7 @@ impl PreviewPanel {
     }
 
     fn update_visibility(&mut self, allow_show: bool, cx: &mut Context<Self>) {
+        let yielding = self.backend.seam_pressed || resize_drag_active(cx);
         let active = self.active_key(cx);
         let window_state = self.window_state.read(cx);
         let visible = visible_preview_key(
@@ -252,11 +272,9 @@ impl PreviewPanel {
                 // view under the pointer (`send_window_event` hit-tests
                 // whenever no native view owns the press) and GPUI's own view
                 // then drops the event, so a resize handle stops following
-                // the pointer over the page. The page steps aside: covered at
-                // once and fading out, then hidden, which is not hit-tested
-                // (`yield_to_resize_handles`).
-                && !self.backend.seam_pressed
-                && !resize_drag_active(cx)
+                // the pointer over the page. A hidden view is not hit-tested,
+                // so the page hides at once (`yield_to_resize_handles`).
+                && !yielding
                 && (!window_state.compact
                     || (!self.compact_overflow_open
                         && self.backend.compact_panel_selected
@@ -264,7 +282,9 @@ impl PreviewPanel {
         )
         .map(str::to_string);
         self.lifecycle_entity().update(cx, |lifecycle, cx| {
-            if allow_show {
+            if yielding {
+                lifecycle.hide_now(cx);
+            } else if allow_show {
                 lifecycle.set_visible(visible.as_deref(), cx);
             } else {
                 lifecycle.hide_except(visible.as_deref(), cx);
@@ -276,8 +296,13 @@ impl PreviewPanel {
     /// let it go when a handle beside it is pressed or a resize drag is seen,
     /// and show it again, at the size the drag left, when the button is
     /// released. Window listeners, so this holds whether or not anything
-    /// re-renders this panel in between. The page fades out and back in
-    /// where the platform allows it ([`BrowserLifecycle::set_visible`]).
+    /// re-renders this panel in between.
+    ///
+    /// The page does not fade out here: a cover would come a frame after the
+    /// press, and an inward drag's first motion would land on the native view
+    /// in that frame, GPUI would never see it, and the divider would not
+    /// move. It hides inside the press, and fades back in where the platform
+    /// allows it ([`BrowserLifecycle::set_visible`]).
     #[cfg(not(target_os = "android"))]
     pub(super) fn yield_to_resize_handles(
         &self,
