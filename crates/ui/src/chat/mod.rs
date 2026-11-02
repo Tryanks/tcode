@@ -48,7 +48,7 @@ use serde::Deserialize;
 
 use tcode_core::git::GitAction;
 use tcode_core::notice::{HostNotice, OrchestrateCallback};
-use tcode_core::session::{EntryContent, SteeringStatus, Timeline, TimelineEntry};
+use tcode_core::session::{EntryContent, SteeringStatus, Timeline, TimelineEntry, TurnMeta};
 use tcode_core::ui::RightTab;
 
 use crate::commit_dialog::CommitDialog;
@@ -65,9 +65,9 @@ use crate::window_state::{NavigationPanel, OpenPanel, WindowState};
 use self::components::assistant::MdState;
 pub use self::timeline::CaptureScroll;
 use self::timeline::{
-    AutoActivityExpansions, CaptureSession, FullOutput, PendingMarkdownBuild,
-    ReservationScrollBack, RowArrival, history_screens_covered, jump_to_latest_visible,
-    settle_carried_anchor, timeline_inset, transcript_selection,
+    AutoActivityExpansions, CaptureSession, FullOutput, LeftRow, PendingMarkdownBuild,
+    ReservationScrollBack, history_screens_covered, jump_to_latest_visible, settle_carried_anchor,
+    timeline_inset, transcript_selection,
 };
 
 /// A message's context-menu rewind, which the chat applies as the bubble's
@@ -169,8 +169,13 @@ pub struct ChatView {
     carried_anchor: bool,
     rows: Vec<TimelineRow>,
     turn_index_cache: TurnIndexCache,
-    /// Rows that arrived live, by identity, until they have risen in.
-    arrivals: HashMap<u64, RowArrival>,
+    /// Rows that arrived or left while the reader looked, by identity,
+    /// until they have risen in or folded away.
+    rows_motion: crate::motion::list_rows::ListRows<bool, LeftRow>,
+    /// The folds of the rows that left below the row being drawn, for a
+    /// collapsed live Work Log to draw between its header and its live
+    /// window, where they stood; whatever it leaves goes below the row.
+    row_folds: Vec<AnyElement>,
     /// The store's fold count for the thread at the last sync: a different
     /// one means the rows came from a fold, not from a live record.
     timeline_folds: u64,
@@ -379,7 +384,8 @@ impl ChatView {
             reservation_scroll_back: None,
             carried_anchor: false,
             rows: Vec::new(),
-            arrivals: HashMap::new(),
+            rows_motion: Default::default(),
+            row_folds: Vec::new(),
             timeline_folds: 0,
             rows_regrouped: false,
             shown_deliveries: Vec::new(),
@@ -483,7 +489,11 @@ impl Render for ChatView {
         }
         self.inline_diffs.sweep();
         let now = cx.background_executor().now();
-        self.arrivals.retain(|_, arrival| !arrival.settled(now));
+        for key in self.rows_motion.settle(now) {
+            if let Some(row) = self.rows.iter().position(|row| row.identity == key) {
+                self.list_state.remeasure_items(row..row + 1);
+            }
+        }
         self.painted_rows.set(None);
         if self.carried_anchor {
             self.carried_anchor = !settle_carried_anchor(&self.list_state);
