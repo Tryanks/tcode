@@ -7,6 +7,9 @@ use gpui::{
 use gpui_base::motion::{Presence, PresenceSample, Transition, TransitionId, transition};
 
 pub(crate) use gpui_base::motion::PresencePhase;
+pub(crate) use scene::Scene;
+
+mod scene;
 
 pub(crate) mod keyed;
 pub(crate) use keyed::keyed;

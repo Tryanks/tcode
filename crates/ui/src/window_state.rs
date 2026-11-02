@@ -416,7 +416,7 @@ impl WindowState {
 
 /// The top-level window surface: the chat workspace, the hosts list or
 /// settings. Derived from [`WindowState::destination`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Route {
     #[default]
     Chat,
