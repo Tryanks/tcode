@@ -191,6 +191,10 @@ struct ShellAttachment {
     /// Set by the panes' renderer in a frame that draws a split's handle
     /// held by the pointer: the handle's axis and where the pointer was.
     split_handle_held: crate::panes::HandleHeld,
+    /// Where the drop's placeholder last showed a dragged thread landing, for
+    /// its ghost to go into: the dock has cleared its drop by the time the
+    /// drop arrives.
+    drop_landing: Rc<Cell<Option<gpui::Bounds<Pixels>>>>,
     /// The split whose handle the pointer holds, found as the hold began.
     held_split: Option<gpui_base::dock::NodeId>,
     /// The pane showing the store's focused thread, or waiting for it; the
@@ -1142,8 +1146,15 @@ impl AppShell {
         let observed_session_id = store.read(cx).active_session_id();
         let thread_panel = self.new_pane(&store, window, cx);
         let shell = cx.entity().downgrade();
-        let drop_target: crate::panes::DropTarget =
-            Rc::new(move |window, cx| shell.upgrade()?.read(cx).drop_target(window, cx));
+        let drop_landing = Rc::new(Cell::new(None));
+        let drop_target: crate::panes::DropTarget = Rc::new({
+            let drop_landing = drop_landing.clone();
+            move |window, cx| {
+                let target = shell.upgrade()?.read(cx).drop_target(window, cx);
+                drop_landing.set(target);
+                target
+            }
+        });
         let split_handle_held = crate::panes::HandleHeld::default();
         let thread_panes = cx.new(|cx| {
             let mut area = DockArea::new("thread-panes", None, window, cx).with_renderer(Rc::new(
@@ -1171,6 +1182,7 @@ impl AppShell {
             scene: Default::default(),
             routes: Default::default(),
             split_handle_held,
+            drop_landing,
             held_split: None,
             focused_pane: thread_panel,
             diff: cx.new(|cx| DiffPanel::new(store.clone(), self.window_state.clone(), cx)),
@@ -1542,29 +1554,9 @@ impl AppShell {
         }) else {
             return;
         };
-        // The thread's ghost settles into the pane, or the half of it a split
-        // opens in.
-        let into = {
-            let bounds = pane.read(cx).bounds();
-            let half = gpui::size(bounds.size.width / 2., bounds.size.height / 2.);
-            match target.placement() {
-                None => bounds,
-                Some(gpui_base::Placement::Top) => {
-                    gpui::Bounds::new(bounds.origin, gpui::size(bounds.size.width, half.height))
-                }
-                Some(gpui_base::Placement::Bottom) => gpui::Bounds::new(
-                    bounds.origin + gpui::point(px(0.), half.height),
-                    gpui::size(bounds.size.width, half.height),
-                ),
-                Some(gpui_base::Placement::Left) => {
-                    gpui::Bounds::new(bounds.origin, gpui::size(half.width, bounds.size.height))
-                }
-                Some(gpui_base::Placement::Right) => gpui::Bounds::new(
-                    bounds.origin + gpui::point(half.width, px(0.)),
-                    gpui::size(half.width, bounds.size.height),
-                ),
-            }
-        };
+        // The thread's ghost goes into the drop's placeholder, which shows
+        // where the thread opens.
+        let into = attachment.drop_landing.take();
         match target.placement() {
             Some(placement) => {
                 if !self.open_in_new_pane(session_id, &pane, &[placement], window, cx) {
@@ -1578,7 +1570,9 @@ impl AppShell {
                 store.update(cx, |store, cx| store.select_session(session_id, cx));
             }
         }
-        crate::motion::drag_ghost::land_in(into, window, cx);
+        if let Some(into) = into {
+            crate::motion::drag_ghost::land_in(into, window, cx);
+        }
         self.open_thread(window, cx);
     }
 
@@ -6953,15 +6947,29 @@ mod tests {
             .expect("the pane the drop would open");
         assert!(indicator.left() >= pane.center().x && indicator.right() <= pane.right());
 
+        let ghost = |cx: &mut VisualTestContext| cx.debug_bounds("drag-ghost-thread-thread-2");
+        let carried = ghost(cx).expect("the row is carried");
         cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
-        // The placeholder leaves where the drop landed, fading out.
+        // The placeholder leaves where the drop landed, fading out, and the
+        // row's ghost travels into it rather than back to the list.
         assert_eq!(cx.debug_bounds("pane-drop-indicator"), Some(indicator));
+        assert_eq!(ghost(cx), Some(carried));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let landing = ghost(cx).expect("the ghost, on its way in");
+        let off = |ghost: gpui::Bounds<Pixels>| (ghost.center().x - indicator.center().x).abs();
+        assert!(
+            off(landing) < off(carried),
+            "{carried:?} -> {landing:?} into {indicator:?}"
+        );
         serve_thread(&host, "thread-2");
         await_restore_update(&shell, cx, |store| !store.chat_loading());
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert!(cx.debug_bounds("pane-drop-indicator").is_none());
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(ghost(cx), None, "the ghost has gone into the pane");
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("thread-2".into())]
