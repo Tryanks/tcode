@@ -185,6 +185,9 @@ struct ShellAttachment {
     zoom: crate::panes::Zoom,
     /// A layout being put in while the column fades.
     scene: crate::panes::Scene,
+    /// The wide routes on screen: one at rest, two or more while the
+    /// window changes route.
+    routes: crate::motion::Scene<Route>,
     /// Set by the panes' renderer in a frame that draws a split's handle
     /// held by the pointer: the handle's axis and where the pointer was.
     split_handle_held: crate::panes::HandleHeld,
@@ -1164,6 +1167,7 @@ impl AppShell {
             glides: Default::default(),
             zoom: Default::default(),
             scene: Default::default(),
+            routes: Default::default(),
             split_handle_held,
             held_split: None,
             focused_pane: thread_panel,
@@ -4253,7 +4257,6 @@ impl AppShell {
 
     fn render_wide(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let route = self.window_state.read(cx).route();
-        let palette_open = self.window_state.read(cx).palette_mounted();
         let fullscreen = window.is_fullscreen();
         if self.attachment.is_none() {
             // No host: the hosts page is the whole window, and the only page
@@ -4287,95 +4290,152 @@ impl AppShell {
         if !collapsed || route != Route::Chat {
             attachment.sidebar_overlay_visible = false;
         }
-        let panel = attachment.link.store.read(cx).panel_state();
-        let diff_open = panel.right_panel_open;
-        let right_tab = panel.right_tab;
-        let diff_expanded = panel.right_panel_expanded;
-        // "Expanded" (full-width) is a diff-only affordance; the preview tab
-        // always shares the split so the webview keeps a stable size.
-        let diff_expanded = diff_expanded && right_tab != RightTab::Preview;
 
         // A native WebView is not composited into GPUI and survives removal of
-        // its layout node. Synchronize it before the settings early-return or a
+        // its layout node. Synchronize it before a route change or a
         // right-panel tab/close transition can unmount PreviewPanel.
         attachment
             .preview
             .update(cx, |preview, cx| preview.sync_visibility(cx));
 
+        let scene = attachment.routes.sample("routes", route, window, cx);
+        let scenes: Vec<Route> = scene.scenes().copied().collect();
+        // The sidebar both workspace routes keep is drawn once, by the lowest
+        // of them: that one is opaque, so the sidebar holds still while the
+        // routes change around it.
+        let sidebar_scene = scenes
+            .iter()
+            .copied()
+            .find(|shown| !collapsed && *shown != Route::Settings);
+        let layers: Vec<AnyElement> = scenes
+            .into_iter()
+            .map(|shown| {
+                let sidebar = collapsed || sidebar_scene == Some(shown);
+                match shown {
+                    Route::Settings => self.render_settings_route(fullscreen, cx),
+                    Route::Hosts => self.render_hosts_route(sidebar, fullscreen, window, cx),
+                    Route::Chat => self.render_chat_route(sidebar, window, cx),
+                }
+            })
+            .collect();
+        scene.render(layers).into_any_element()
+    }
+
+    fn render_settings_route(&mut self, fullscreen: bool, cx: &mut Context<Self>) -> AnyElement {
+        let attachment = self
+            .attachment
+            .as_ref()
+            .expect("a workspace route has an attachment");
         // Settings is a window of its own: opening it switches the whole
         // window, so the settings rail — not the workspace sidebar — is the
         // left column. Root owns the translucent canvas across both routes;
         // Settings paints its own rail and content surfaces over it.
-        if route == Route::Settings {
-            return div()
-                .id("app-shell")
-                .size_full()
-                // Fullscreen flattens the canvas under the paper (see the
-                // workspace root below).
-                .when(fullscreen, |this| {
-                    this.bg(crate::material::opaque_canvas(cx))
-                })
-                .text_color(cx.theme().foreground)
-                .on_action(cx.listener(Self::on_toggle_palette))
-                .on_action(cx.listener(Self::on_open_source_control))
-                .key_context("TcodeShell")
-                .on_action(cx.listener(Self::on_thread_undo))
-                .on_action(cx.listener(Self::on_open_thread_anchor))
-                .child(
-                    div()
-                        .id("workspace")
-                        .flex_1()
-                        .size_full()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .debug_selector(|| "settings-route".into())
-                        .child(attachment.settings_page.clone()),
-                )
-                .into_any_element();
-        }
+        div()
+            .id("app-shell")
+            .size_full()
+            // Fullscreen flattens the canvas under the paper (see the
+            // workspace root below).
+            .when(fullscreen, |this| {
+                this.bg(crate::material::opaque_canvas(cx))
+            })
+            .text_color(cx.theme().foreground)
+            .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_open_source_control))
+            .key_context("TcodeShell")
+            .on_action(cx.listener(Self::on_thread_undo))
+            .on_action(cx.listener(Self::on_open_thread_anchor))
+            .child(
+                div()
+                    .id("workspace")
+                    .flex_1()
+                    .size_full()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .debug_selector(|| "settings-route".into())
+                    .child(attachment.settings_page.clone()),
+            )
+            .into_any_element()
+    }
 
+    /// The Hosts route; `sidebar`, whether it draws the sidebar or leaves its
+    /// place empty for the route beneath it to show.
+    fn render_hosts_route(
+        &mut self,
+        sidebar: bool,
+        fullscreen: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let collapsed = self.window_state.read(cx).sidebar_collapsed;
+        let attachment = self
+            .attachment
+            .as_ref()
+            .expect("a workspace route has an attachment");
+        let sidebar_width = attachment.sidebar_width.get();
+        let sidebar = if sidebar {
+            attachment.sidebar.clone().into_any_element()
+        } else {
+            div().into_any_element()
+        };
         // Hosts is a product surface, not a settings page: the sidebar stays,
         // because the feature area that leads here is meant to be persistent.
-        if route == Route::Hosts {
-            let sidebar = attachment.sidebar.clone();
-            let sidebar_width = attachment.sidebar_width.get();
-            let body = self.hosts_body(window, cx);
-            let header = self.render_hosts_header(window, cx);
-            return div()
-                .id("app-shell")
-                .size_full()
-                .when(fullscreen, |this| {
-                    this.bg(crate::material::opaque_canvas(cx))
-                })
-                .text_color(cx.theme().foreground)
-                .on_action(cx.listener(Self::on_toggle_palette))
-                .on_action(cx.listener(Self::on_open_source_control))
-                .key_context("TcodeShell")
-                .on_action(cx.listener(Self::on_thread_undo))
-                .on_action(cx.listener(Self::on_open_thread_anchor))
-                .child(
-                    h_flex()
-                        .id("workspace")
-                        .size_full()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .when(!collapsed, |row| {
-                            row.child(div().flex_none().w(sidebar_width).h_full().child(sidebar))
-                        })
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .debug_selector(|| "hosts-route".into())
-                                .bg(crate::material::content_surface(cx))
-                                .shadow_sm()
-                                .child(header)
-                                .child(body),
-                        ),
-                )
-                .into_any_element();
-        }
+        let body = self.hosts_body(window, cx);
+        let header = self.render_hosts_header(window, cx);
+        div()
+            .id("app-shell")
+            .size_full()
+            .when(fullscreen, |this| {
+                this.bg(crate::material::opaque_canvas(cx))
+            })
+            .text_color(cx.theme().foreground)
+            .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_open_source_control))
+            .key_context("TcodeShell")
+            .on_action(cx.listener(Self::on_thread_undo))
+            .on_action(cx.listener(Self::on_open_thread_anchor))
+            .child(
+                h_flex()
+                    .id("workspace")
+                    .size_full()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .when(!collapsed, |row| {
+                        row.child(div().flex_none().w(sidebar_width).h_full().child(sidebar))
+                    })
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .debug_selector(|| "hosts-route".into())
+                            .bg(crate::material::content_surface(cx))
+                            .shadow_sm()
+                            .child(header)
+                            .child(body),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The Chat route; `sidebar` as for [`Self::render_hosts_route`].
+    fn render_chat_route(
+        &mut self,
+        draw_sidebar: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette_open = self.window_state.read(cx).palette_mounted();
+        let fullscreen = window.is_fullscreen();
+        let collapsed = self.window_state.read(cx).sidebar_collapsed;
+        let Some(attachment) = &mut self.attachment else {
+            unreachable!("a workspace route has an attachment");
+        };
+        let panel = attachment.link.store.read(cx).panel_state();
+        let diff_open = panel.right_panel_open;
+        let right_tab = panel.right_tab;
+        // "Expanded" (full-width) is a diff-only affordance; the preview tab
+        // always shares the split so the webview keeps a stable size.
+        let diff_expanded = panel.right_panel_expanded && right_tab != RightTab::Preview;
 
         // Which entity fills the right panel: the Preview tab shows the embedded
         // browser; Diff/Plan share the DiffPanel container.
@@ -4572,7 +4632,11 @@ impl AppShell {
 
         let remembered_right = attachment.right_width.clone();
         let remembered_sidebar = attachment.sidebar_width.clone();
-        let sidebar = attachment.sidebar.clone();
+        let sidebar = if draw_sidebar {
+            attachment.sidebar.clone().into_any_element()
+        } else {
+            div().into_any_element()
+        };
         let overlay_width = attachment.sidebar_width.get();
         let overlay_visible = attachment.sidebar_overlay_visible;
         let palette = attachment.palette.clone();
@@ -4719,6 +4783,7 @@ impl AppShell {
                     .size_full()
                     .min_h_0()
                     .overflow_hidden()
+                    .debug_selector(|| "chat-route".into())
                     .child(workspace),
             )
             .when(palette_open, |this| this.child(palette))
@@ -10578,7 +10643,7 @@ mod tests {
             store.update(cx, |store, cx| {
                 store.select_session(thread.into(), cx);
             });
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
 
             shell.read_with(cx, |shell, cx| {
                 assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
@@ -10600,7 +10665,7 @@ mod tests {
         state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
         draw(cx);
         assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(state.read_with(cx, |state, _| state.route()), Route::Chat);
         assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
 
@@ -10611,7 +10676,7 @@ mod tests {
                 .debug_bounds("sidebar-feature-hosts")
                 .expect("the Machines control is visible");
             cx.simulate_click(control.center(), gpui::Modifiers::default());
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
         };
         for pairing in [false, true] {
             click_control(cx);
@@ -10630,6 +10695,51 @@ mod tests {
         }
     }
 
+    /// A wide route change is a change of scene: the route left stays
+    /// beneath the one arriving while it rises, and then goes. The sidebar
+    /// the workspace routes share holds still throughout, drawn once.
+    #[gpui::test]
+    fn a_wide_route_rises_over_the_route_it_leaves(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        crate::test_frames::draw_settled(cx);
+        let sidebar = cx
+            .debug_bounds("sidebar-feature-hosts")
+            .expect("the workspace sidebar");
+        assert!(cx.debug_bounds("chat-route").is_some());
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        let half_way = |cx: &mut VisualTestContext| {
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            draw(cx);
+        };
+
+        state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        half_way(cx);
+        assert!(cx.debug_bounds("hosts-route").is_some());
+        assert!(
+            cx.debug_bounds("chat-route").is_some(),
+            "the chat is still beneath Machines"
+        );
+        assert_eq!(cx.debug_bounds("sidebar-feature-hosts"), Some(sidebar));
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("chat-route").is_none());
+        assert_eq!(cx.debug_bounds("sidebar-feature-hosts"), Some(sidebar));
+
+        state.update(cx, |state, cx| state.open_settings(cx));
+        half_way(cx);
+        assert!(cx.debug_bounds("settings-route").is_some());
+        assert!(
+            cx.debug_bounds("hosts-route").is_some()
+                && cx.debug_bounds("sidebar-feature-hosts").is_some(),
+            "Machines and its sidebar are still beneath Settings"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("hosts-route").is_none());
+        assert!(cx.debug_bounds("sidebar-feature-hosts").is_none());
+    }
+
     /// Settings replaces the whole window, unlike the Hosts route: the left
     /// column is the settings rail, so the workspace sidebar — and the feature
     /// area in it — is gone while the route is showing.
@@ -10640,8 +10750,7 @@ mod tests {
         resize(cx, 1024.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         window_state.update(cx, |state, cx| state.open_settings(cx));
-        draw(cx);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.window_state.read(cx).route(), Route::Settings);
         });
