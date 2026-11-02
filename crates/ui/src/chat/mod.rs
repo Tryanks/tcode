@@ -136,6 +136,9 @@ pub struct ChatView {
     /// panes' layout changes (see `panes::ThreadPanes`), which would scroll
     /// an element-keyed header back to its start.
     header_scroll: gpui::ScrollHandle,
+    /// The header's motion, kept by the view: a pane's chat is drawn under
+    /// a new parent whenever the panes around it change.
+    header_motion: crate::motion::owned::Owned,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -370,6 +373,7 @@ impl ChatView {
             edges: WindowEdges::BOTH,
             pane_close: None,
             header_scroll: gpui::ScrollHandle::default(),
+            header_motion: Default::default(),
             window_state,
             composer,
             terminal_drawer,
