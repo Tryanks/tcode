@@ -515,11 +515,14 @@ where
 }
 
 /// A [`selectable_row`] whose selected fill glides in and out as the
-/// selection moves (a selection that follows the scroll): `id` names the
-/// fill, which the row holds as a layer under its content.
+/// selection moves (a selection that follows the scroll), the row holding
+/// it as a layer under its content. Its fills' clocks are kept by `motion`
+/// under `key`, so they carry on when the view is drawn under another
+/// parent.
 pub(crate) fn selectable_row_gliding<E>(
     el: E,
-    id: impl Into<ElementId>,
+    motion: &crate::motion::owned::Owned,
+    key: impl Into<SharedString>,
     selected: bool,
     compact: bool,
     cx: &App,
@@ -527,25 +530,33 @@ pub(crate) fn selectable_row_gliding<E>(
 where
     E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
-    let id = id.into();
+    let key = key.into();
     let (active, radius) = (cx.theme().list_active, cx.theme().tokens.radius.md);
-    selectable_surface(el, selectable_row_height(compact), selected, compact, cx).child(
-        crate::motion::Sampled::new(move |window, cx| {
-            let fill = gpui_base::motion::transition(
-                id,
-                if selected { active } else { active.opacity(0.) },
-                crate::motion::settle(),
-                window,
-                cx,
-            );
-            div()
-                .absolute()
-                .inset_0()
-                .rounded(radius)
-                .bg(fill)
-                .into_any_element()
-        }),
+    let fill_motion = motion.clone();
+    let fill_key = format!("{key}/selected-fill");
+    selectable_surface_with(
+        el,
+        selectable_row_height(compact),
+        selected,
+        compact,
+        Some((motion, key)),
+        cx,
     )
+    .child(crate::motion::Sampled::new(move |window, cx| {
+        let fill = fill_motion.transition(
+            fill_key,
+            if selected { active } else { active.opacity(0.) },
+            &crate::motion::owned::Curve::settle(),
+            window,
+            cx,
+        );
+        div()
+            .absolute()
+            .inset_0()
+            .rounded(radius)
+            .bg(fill)
+            .into_any_element()
+    }))
 }
 
 /// The height of a [`selectable_row_two_line`].
@@ -579,6 +590,22 @@ fn selectable_surface<E>(el: E, height: f32, selected: bool, compact: bool, cx: 
 where
     E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
+    selectable_surface_with(el, height, selected, compact, None, cx)
+}
+
+/// [`selectable_surface`] whose hover fill's clock is kept by the owner and
+/// key `owned` names, when one does.
+fn selectable_surface_with<E>(
+    el: E,
+    height: f32,
+    selected: bool,
+    compact: bool,
+    owned: Option<(&crate::motion::owned::Owned, SharedString)>,
+    cx: &App,
+) -> E
+where
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
+{
     let theme = cx.theme();
     let hover = theme.list_hover;
     let gap = if compact {
@@ -596,11 +623,18 @@ where
         .px(inset)
         .rounded(radius)
         // A row the pointer selects lets its hover fill go as it is selected.
-        .child(crate::motion::hover_layer(
-            hover.opacity(0.),
-            if selected { hover.opacity(0.) } else { hover },
-            radius,
-        ))
+        .child({
+            let (rest, hover) = (
+                hover.opacity(0.),
+                if selected { hover.opacity(0.) } else { hover },
+            );
+            match owned {
+                Some((motion, key)) => {
+                    crate::motion::hover_layer_owned(motion, key, rest, hover, radius)
+                }
+                None => crate::motion::hover_layer(rest, hover, radius),
+            }
+        })
 }
 
 /// The caption above one section of a navigable content list: at the page
