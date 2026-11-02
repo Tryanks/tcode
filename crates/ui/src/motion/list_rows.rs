@@ -465,6 +465,12 @@ pub(crate) enum Glide {
     /// out as a plain child, so height that changes on its own (a fold
     /// inside it, an image that loaded) moves once, by its own motion.
     Tail { content: u64 },
+    /// A row whose own height changes at rest — a card opened under it, an
+    /// editor in place of its text, its lines wrapping — glides to each new
+    /// measurement, a frame behind. A new `scope` (the list's viewport
+    /// resized) takes the new height at once, so a resize does not trail.
+    /// With motion reduced it is laid out as a plain child.
+    Height { scope: u64 },
 }
 
 /// A list row's content, gliding its layout height.
@@ -549,8 +555,8 @@ pub(crate) enum GlideLayout {
     /// The child is this element's layout.
     Plain,
     /// This element is laid out at the glided height; the child is laid out
-    /// on its own and clipped to it, `lift` below its top.
-    Clipped { lift: Pixels },
+    /// on its own, `lift` below its top, and clipped to it where `clip`.
+    Clipped { lift: Pixels, clip: bool },
 }
 
 impl IntoElement for RowGlide {
@@ -583,6 +589,24 @@ impl Element for RowGlide {
         let global_id = global_id.expect("RowGlide has an id");
         let height = match self.glide {
             Glide::Rest => None,
+            Glide::Height { .. } if cx.reduce_motion() => None,
+            Glide::Height { scope } => {
+                let measured = window.with_element_state(global_id, |state, _| {
+                    let state: Measured = state.unwrap_or_default();
+                    (state.height, state)
+                });
+                measured.map(|height| {
+                    // Keyed by the scope, so a new one starts at its height.
+                    let glided = gpui_base::motion::transition(
+                        gpui::SharedString::from(format!("height-{scope}")),
+                        height,
+                        super::settle(),
+                        window,
+                        cx,
+                    );
+                    (glided, px(0.))
+                })
+            }
             Glide::Enter(progress) | Glide::Leave(progress) => {
                 let measured = window.with_element_state(global_id, |state, _| {
                     let state: Measured = state.unwrap_or_default();
@@ -639,7 +663,7 @@ impl Element for RowGlide {
                 style.size.height = height.into();
                 (
                     window.request_layout(style, None, cx),
-                    GlideLayout::Clipped { lift },
+                    GlideLayout::Clipped { lift, clip: true },
                 )
             }
         }
@@ -657,21 +681,24 @@ impl Element for RowGlide {
         let lift = match layout {
             GlideLayout::Plain => {
                 self.child.prepaint(window, cx);
-                if matches!(self.glide, Glide::Tail { .. } | Glide::Leave(_)) {
-                    let height = bounds.size.height;
+                if matches!(
+                    self.glide,
+                    Glide::Tail { .. } | Glide::Leave(_) | Glide::Height { .. }
+                ) {
+                    let size = bounds.size;
                     window.with_element_state(
                         global_id.expect("RowGlide has an id"),
                         |state, _| {
                             let mut state: Measured = state.unwrap_or_default();
-                            state.height = Some(height);
-                            state.target = Some(height);
+                            state.height = Some(size.height);
+                            state.target = Some(size.height);
                             ((), state)
                         },
                     );
                 }
                 return;
             }
-            GlideLayout::Clipped { lift } => *lift,
+            GlideLayout::Clipped { lift, .. } => *lift,
         };
         let measured = self
             .child
@@ -700,7 +727,15 @@ impl Element for RowGlide {
         if moved {
             window.request_animation_frame();
         }
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        // A row gliding its height at rest is clipped only while its room is
+        // short of its content, so what reaches past it (a card's shadow) is
+        // cut off no longer than it has to be.
+        let clip =
+            !matches!(self.glide, Glide::Height { .. }) || bounds.size.height + px(0.5) < measured;
+        if let GlideLayout::Clipped { clip: clipped, .. } = layout {
+            *clipped = clip;
+        }
+        window.with_content_mask(clip.then_some(ContentMask { bounds }), |window| {
             self.child
                 .prepaint_at(bounds.origin + point(px(0.), lift), window, cx);
         });
@@ -718,8 +753,8 @@ impl Element for RowGlide {
     ) {
         match layout {
             GlideLayout::Plain => self.child.paint(window, cx),
-            GlideLayout::Clipped { .. } => {
-                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            GlideLayout::Clipped { clip, .. } => {
+                window.with_content_mask(clip.then_some(ContentMask { bounds }), |window| {
                     self.child.paint(window, cx);
                 });
             }
