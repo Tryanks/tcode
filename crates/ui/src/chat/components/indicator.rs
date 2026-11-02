@@ -1,3 +1,4 @@
+use crate::widgets::TooltipTrigger as _;
 use std::borrow::Cow;
 use std::time::Duration;
 
@@ -7,8 +8,7 @@ use crate::widgets::tooltip::Tooltip;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, ElementId, Entity,
     Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Task, Window, div,
-    prelude::FluentBuilder as _, px,
+    SharedString, Styled as _, StyledText, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::h_flex;
 
@@ -199,9 +199,7 @@ pub(crate) fn turn_working_indicator(
                             .text_color(warning)
                             .child(crate::icon::Icon::new(crate::icon::IconName::TriangleAlert))
                             .child(served.value.clone())
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(tooltip.clone()).build(window, cx)
-                            }),
+                            .with_tooltip(move |_, _| Tooltip::new(tooltip.clone())),
                     )
                 }
                 None => div().into_any_element(),
@@ -227,7 +225,7 @@ pub(crate) fn turn_time_footer(
         .text_meta_mono(false, cx)
         .debug_selector(|| "turn-time-row".into())
         .when_some(breakdown, |row, breakdown| {
-            row.tooltip(move |window, cx| Tooltip::new(breakdown.clone()).build(window, cx))
+            row.with_tooltip(move |_, _| Tooltip::new(breakdown.clone()))
         })
         .child(
             h_flex()

@@ -10,6 +10,7 @@ use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::remote::spaces::{self, ShareTarget, SpacesObserver};
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
+use crate::widgets::TooltipTrigger as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _};
@@ -2189,7 +2190,7 @@ impl SessionsSidebar {
             )
             // `Button::tooltip` takes text; this one has two lines.
             .map(|control| {
-                gpui::StatefulInteractiveElement::tooltip(control, move |window, cx| {
+                control.with_tooltip(move |_, _| {
                     let (name, detail) = (tooltip_name.clone(), detail.clone());
                     Tooltip::element(move |_, cx| {
                         v_flex()
@@ -2198,7 +2199,6 @@ impl SessionsSidebar {
                                 div().text_color(cx.theme().muted_foreground).child(detail)
                             }))
                     })
-                    .build(window, cx)
                 })
             });
         div().flex_none().px_2().pb_1().child(control)
@@ -2798,17 +2798,15 @@ impl SessionsSidebar {
             None => row,
         };
         row.when(state.waiting_for_approval, |row| {
-            row.tooltip(|window, cx| {
+            row.with_tooltip(|_, _| {
                 Tooltip::new(crate::tr!("sidebar.waiting_approval_tooltip").into_owned())
-                    .build(window, cx)
             })
         })
         .when(
             state.waiting_for_input && !state.waiting_for_approval,
             |row| {
-                row.tooltip(|window, cx| {
+                row.with_tooltip(|_, _| {
                     Tooltip::new(crate::tr!("sidebar.waiting_input_tooltip").into_owned())
-                        .build(window, cx)
                 })
             },
         )
@@ -2882,9 +2880,7 @@ impl SessionsSidebar {
                 .id(SharedString::from(format!("follow-up-{}", meta.id)))
                 .flex_none()
                 .child(Icon::new(IconName::Bell).text_color(cx.theme().muted_foreground))
-                .tooltip(|window, cx| {
-                    Tooltip::new(crate::tr!("control.follow_up.marker")).build(window, cx)
-                }),
+                .with_tooltip(|_, _| Tooltip::new(crate::tr!("control.follow_up.marker"))),
         )
     }
 
@@ -2979,8 +2975,8 @@ impl SessionsSidebar {
         let store = store.clone();
         let session_id = session_id.to_owned();
         let watching = watching.to_vec();
-        element.tooltip(move |window, cx| {
-            Tooltip::new(waiting_reason(store.read(cx), &session_id, &watching)).build(window, cx)
+        element.with_tooltip(move |_, cx| {
+            Tooltip::new(waiting_reason(store.read(cx), &session_id, &watching))
         })
     }
 
@@ -3027,9 +3023,7 @@ impl SessionsSidebar {
                 .flex_none()
                 .child(badge)
                 .when(state.failed && !state.waiting(), |badge| {
-                    badge.tooltip(|window, cx| {
-                        Tooltip::new(crate::tr!("sidebar.failed_tooltip")).build(window, cx)
-                    })
+                    badge.with_tooltip(|_, _| Tooltip::new(crate::tr!("sidebar.failed_tooltip")))
                 })
                 .into_any_element(),
         )

@@ -2,6 +2,7 @@
 //! host decides which hosts exist, where each credential comes from and what is wrong; this
 //! panel shows it and sends the user's choices.
 
+use crate::widgets::TooltipTrigger as _;
 use crate::{
     icon::Icon,
     overlay::{DialogActions, OverlayExt as _},
@@ -20,8 +21,8 @@ use crate::{
 };
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_base::{h_flex, v_flex};
 use std::collections::{BTreeMap, BTreeSet};
@@ -418,7 +419,7 @@ impl SourceControlPanel {
                 )
             })
             .when(!order.is_empty(), |line| {
-                line.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                line.with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
             });
         // A notice folds in under the status when the host reports a problem
         // one can act on, and away once it is solved.

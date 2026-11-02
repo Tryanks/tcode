@@ -1,4 +1,5 @@
 use super::*;
+use crate::widgets::TooltipTrigger as _;
 
 /// Show or hide one of the panels a thread's header toggles, as its button
 /// or its row in the header's overflow menu does.
@@ -1033,9 +1034,7 @@ impl ChatView {
                         if let Some(hint) = item.hint {
                             let text: SharedString =
                                 crate::tr!(git_hint_key(hint)).into_owned().into();
-                            row = row.tooltip(move |window, cx| {
-                                Tooltip::new(text.clone()).build(window, cx)
-                            });
+                            row = row.with_tooltip(move |_, _| Tooltip::new(text.clone()));
                         }
                     } else {
                         row = row.cursor_pointer().hover(move |s| s.bg(hover)).on_click(

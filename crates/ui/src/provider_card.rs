@@ -6,6 +6,7 @@
 //! settings dialog, a transactional modal form.
 
 use crate::icon::Icon;
+use crate::widgets::TooltipTrigger as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
     icon::IconName,
@@ -182,11 +183,11 @@ impl ProviderCard {
                     )
                 }),
         )
-        .tooltip({
+        .with_tooltip({
             let name = name.clone();
-            move |window, cx| {
+            move |_, _| {
                 let label = crate::tr!("providers.configure", name = name.clone()).into_owned();
-                crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
+                crate::widgets::tooltip::Tooltip::new(label)
             }
         })
         .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx)));

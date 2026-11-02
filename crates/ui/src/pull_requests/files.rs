@@ -1,6 +1,7 @@
 //! The Files view: a pull request's changed files drawn by the diff list, from the host's
 //! files read and never from the local checkout.
 
+use crate::widgets::TooltipTrigger as _;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -730,7 +731,7 @@ impl PullRequestView {
                         Icon::new(IconName::CircleQuestionMark)
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .tooltip(move |window, cx| {
+                    .with_tooltip(move |_, _| {
                         Tooltip::new(
                             crate::tr!(if unreadable {
                                 "pull_requests.files.viewed_unreadable"
@@ -739,7 +740,6 @@ impl PullRequestView {
                             })
                             .into_owned(),
                         )
-                        .build(window, cx)
                     })
                     .into_any_element(),
                 cx,
@@ -781,7 +781,7 @@ impl PullRequestView {
                 .when(compact, |cell| cell.size(px(material::TOUCH_TARGET)))
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(checkbox)
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
                 .into_any_element(),
             cx,
         ))
@@ -870,7 +870,7 @@ impl PullRequestView {
                         },
                     )
                 }))
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
         });
         let split = self.store.read(cx).diff_split();
         let wrap = self.store.read(cx).diff_word_wrap();
@@ -1132,7 +1132,7 @@ impl PullRequestView {
             self.viewed_box(index, false, cx)
                 .filter(|_| !in_popover || compact),
         )
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
         .on_click(cx.listener(move |this, _, window, cx| {
             this.scroll_to(index, cx);
             if in_popover {
@@ -1578,7 +1578,7 @@ impl DiffListHost for PullRequestView {
                 .id(id.clone())
                 .flex_none()
                 .child(crate::widgets::Chevron::new(id, !collapsed).text_color(muted))
-                .tooltip(move |window, cx| {
+                .with_tooltip(move |_, _| {
                     Tooltip::new(
                         crate::tr!(if collapsed {
                             "pull_requests.files.expand_file"
@@ -1587,7 +1587,6 @@ impl DiffListHost for PullRequestView {
                         })
                         .into_owned(),
                     )
-                    .build(window, cx)
                 })
                 .into_any_element(),
         )

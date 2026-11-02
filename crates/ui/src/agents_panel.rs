@@ -2,6 +2,7 @@
 //! subagents of its transcript, in the desktop right panel and the phone sheet.
 //! It shows what the host reports; delivery is never decided here.
 
+use crate::widgets::TooltipTrigger as _;
 use std::time::Duration;
 
 use agent::{ItemContent, ItemStatus, ProviderKind};
@@ -809,7 +810,7 @@ impl AgentsPanel {
                 })
             })
             .when_some(readonly, |row_el, text| {
-                row_el.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                row_el.with_tooltip(move |_, _| Tooltip::new(text.clone()))
             })
             .into_any_element()
     }

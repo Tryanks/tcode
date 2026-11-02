@@ -4,6 +4,7 @@
 //! for page and view navigation, [`TabBar::segmented`] for a view switch
 //! inside a panel, and [`TabBar::rail`] for a vertical navigation list. The
 //! segmented drawing is shared with [`super::choice::ChoiceGroup`].
+use crate::widgets::TooltipTrigger as _;
 use crate::{
     icon::Icon,
     material::{self, TOUCH_TARGET, focus_ring},
@@ -594,7 +595,7 @@ fn render_item(
             })
         })
         .when(icon_only, |this| {
-            this.tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+            this.with_tooltip(move |_, _| Tooltip::new(label.clone()))
         })
         .when_some(on_click, |tab, handler| {
             tab.on_click(move |event, window, cx| handler(event, window, cx))

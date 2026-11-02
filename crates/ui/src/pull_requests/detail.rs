@@ -2,6 +2,7 @@
 //! the reads behind them. The desktop draws it inside the Pull requests tab; the phone draws it
 //! as a page.
 
+use crate::widgets::TooltipTrigger as _;
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
@@ -866,7 +867,7 @@ impl PullRequestView {
                     .id("pr-detail-number")
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(format!("#{}", key.number))
-                    .tooltip({
+                    .with_tooltip({
                         let label = crate::tr!(
                             "pull_requests.number_tooltip",
                             source = crate::tr!(source(link.as_ref())).into_owned(),
@@ -876,7 +877,7 @@ impl PullRequestView {
                                 .unwrap_or_default())
                         )
                         .into_owned();
-                        move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+                        move |_, _| Tooltip::new(label.clone())
                     }),
             )
             .child(material::semantic_chip(
@@ -916,7 +917,7 @@ impl PullRequestView {
                             .font_family(cx.theme().mono_font_family.clone())
                             // gpui-base has no middle truncation; the tooltip holds the full pair.
                             .child(crate::widgets::fade_text(format!("{base} ← {head}")))
-                            .tooltip(move |window, cx| {
+                            .with_tooltip(move |_, _| {
                                 Tooltip::new(
                                     crate::tr!(
                                         "pull_requests.detail.merging_into",
@@ -925,7 +926,6 @@ impl PullRequestView {
                                     )
                                     .into_owned(),
                                 )
-                                .build(window, cx)
                             }),
                     ),
                 )
@@ -1129,7 +1129,7 @@ impl PullRequestView {
                     div()
                         .id("pr-detail-watch")
                         .child(Icon::new(IconName::Eye).text_color(muted))
-                        .tooltip(move |window, cx| {
+                        .with_tooltip(move |_, _| {
                             Tooltip::new(
                                 crate::tr!(if paused {
                                     "pull_requests.watching_paused_tooltip"
@@ -1138,7 +1138,6 @@ impl PullRequestView {
                                 })
                                 .into_owned(),
                             )
-                            .build(window, cx)
                         }),
                 ),
             );
@@ -2297,9 +2296,9 @@ impl PullRequestView {
                                 .id("pr-failure-reason")
                                 .text_secondary(self.compact(cx), cx)
                                 .child(reason(error))
-                                .tooltip({
+                                .with_tooltip({
                                     let full = error.message.clone();
-                                    move |window, cx| Tooltip::new(full.clone()).build(window, cx)
+                                    move |_, _| Tooltip::new(full.clone())
                                 }),
                         )
                         .child(

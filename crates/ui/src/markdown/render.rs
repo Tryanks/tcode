@@ -14,7 +14,7 @@ use crate::highlight::HighlightTheme;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::copy::copy_button;
-use crate::widgets::tooltip::Tooltip;
+use crate::widgets::tooltip::{Tooltip, tooltip_area};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Display, Element, ElementId, Entity, EntityId,
     FlexDirection, FontStyle, FontWeight, Global, GlobalElementId, HighlightStyle,
@@ -904,6 +904,7 @@ fn render_paragraph(
                 let opened = view.read(cx).opened_image_source(&image.url);
                 let image_owner = view.clone();
                 let link = image.link.clone();
+                let has_link = link.is_some();
                 let context_view = view.clone();
                 let context_url = image.url.clone();
                 let context_title = title.clone();
@@ -924,11 +925,6 @@ fn render_paragraph(
                         .object_fit(ObjectFit::Contain)
                         .with_fallback(crate::image_viewer::unpreviewed(true, true, cx))
                         .cursor_pointer()
-                        .when(link.is_some(), |image| {
-                            image.tooltip(move |window, cx| {
-                                Tooltip::new(tooltip_title.clone()).build(window, cx)
-                            })
-                        })
                         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
                             context_view.update(cx, |state, cx| {
                                 state.set_pending_context(
@@ -953,7 +949,16 @@ fn render_paragraph(
                                 );
                             }
                         });
-                FittedImage::new(source, image, &image_owner, format!("{id}/image/{ix}"), cx)
+                let image =
+                    FittedImage::new(source, image, &image_owner, format!("{id}/image/{ix}"), cx);
+                if has_link {
+                    tooltip_area(("image-tooltip", ix), image, move |_, _| {
+                        Tooltip::new(tooltip_title.clone())
+                    })
+                    .into_any_element()
+                } else {
+                    image.into_any_element()
+                }
             }))
             .into_any_element();
     }

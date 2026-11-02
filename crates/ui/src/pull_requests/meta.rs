@@ -1,6 +1,7 @@
 //! Reviewers and labels: the block at the top of the conversation and the one picker both are
 //! changed through. A picker stages its changes and applies them together.
 
+use crate::widgets::TooltipTrigger as _;
 use std::collections::BTreeMap;
 
 use gpui::{
@@ -316,7 +317,7 @@ impl PullRequestView {
                             cx,
                         )
                     }))
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
                     .into_any_element()
             })
             .collect();
@@ -338,9 +339,7 @@ impl PullRequestView {
                     .child(dot(label_color(label.color.as_deref(), cx)))
                     .child(label.name.clone())
                     .when_some(description, |chip, description| {
-                        chip.tooltip(move |window, cx| {
-                            Tooltip::new(description.clone()).build(window, cx)
-                        })
+                        chip.with_tooltip(move |_, _| Tooltip::new(description.clone()))
                     })
                     .into_any_element()
             })
