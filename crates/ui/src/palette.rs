@@ -137,6 +137,11 @@ pub struct CommandPalette {
     search_generation: u64,
     results: Option<Rc<Results>>,
     list_state: ListState,
+    /// The rows a search of the messages brought, by index, folding in
+    /// below what the query listed.
+    arrived: crate::motion::list_rows::ListRows<(), ()>,
+    /// The next rebuild brings the messages' hits for the query shown.
+    hits_arrived: bool,
     /// Moving the selection scrolls it into view gradually.
     list_scroll: crate::motion::ListScroll,
     /// Whether [`Self::open`] has run since the palette last showed closed:
@@ -193,6 +198,8 @@ impl CommandPalette {
             search_generation: 0,
             results: None,
             list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            arrived: Default::default(),
+            hits_arrived: false,
             list_scroll: Default::default(),
             opened: false,
             _search_task: None,
@@ -265,6 +272,7 @@ impl CommandPalette {
             return;
         }
         self.content_hits = hits;
+        self.hits_arrived = true;
         self.invalidate_results(false, cx);
     }
 
@@ -293,6 +301,21 @@ impl CommandPalette {
             }
         }
         let top = self.list_state.logical_scroll_top();
+        let old_len = self.list_state.item_count();
+        // The messages' hits come after the rows a keystroke listed, and
+        // fold in under them; a keystroke replaces the rows at once.
+        self.arrived.clear();
+        if std::mem::take(&mut self.hits_arrived) && !cx.reduce_motion() {
+            let at = cx.background_executor().now();
+            for index in old_len..rows.len() {
+                self.arrived.arrive(
+                    index as u64,
+                    crate::motion::list_rows::Arrival::Appended,
+                    (),
+                    at,
+                );
+            }
+        }
         self.list_state
             .splice(0..self.list_state.item_count(), rows.len());
         if top.item_ix < rows.len() {
@@ -930,12 +953,20 @@ impl Render for CommandPalette {
                         list(
                             self.list_state.clone(),
                             cx.processor(move |this, ix: usize, window, cx| {
-                                this.render_row(
+                                let row = this.render_row(
                                     &results.rows[ix],
                                     &results.items,
                                     compact,
                                     window,
                                     cx,
+                                );
+                                this.arrived.around(ix as u64, cx).draw(
+                                    "palette-row",
+                                    ix as u64,
+                                    crate::motion::list_rows::Glide::Rest,
+                                    row,
+                                    |_, _| div().into_any_element(),
+                                    window,
                                 )
                             }),
                         )
