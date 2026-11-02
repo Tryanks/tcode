@@ -704,12 +704,6 @@ impl ChatView {
                             // keeps the other half however many are linked. A
                             // badge that comes or goes widens into the row.
                             let gap = gpui::rems(0.5).to_pixels(window.rem_size());
-                            let count = badge.value.len() as u64;
-                            let glide = crate::motion::GlideState::keyed(
-                                "header-pr-badge-glide",
-                                window,
-                                cx,
-                            );
                             let button = Button::new("header-pr-badge")
                                 .debug_selector(|| "header-pr-badge".into())
                                 .ghost()
@@ -722,10 +716,8 @@ impl ChatView {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.on_toggle_panel(&TogglePanel::PullRequests, window, cx)
                                 }));
-                            // Another number linked widens the badge in place.
-                            let button = crate::motion::SizeGlide::new(&glide, button)
-                                .axes(crate::motion::GlideAxes::Width)
-                                .on_change(count);
+                            // Another number linked widens the badge as its chip
+                            // widens in (`pull_requests::numbers`).
                             header.child(
                                 h_flex()
                                     .flex_none()
