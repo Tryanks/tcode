@@ -658,6 +658,8 @@ impl WorkspaceStore {
         self.anchor_turn_task = None;
         self.pending_chat_turn = Some((session_id.clone(), turn));
         self.select_session(session_id, cx);
+        // Selecting the thread already focused changes nothing else.
+        cx.notify();
     }
     /// Open a thread, then scroll it to the turn holding the entry at
     /// `position` once the host names that turn. Only the host can: the
