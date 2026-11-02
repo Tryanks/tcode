@@ -180,6 +180,9 @@ pub struct Composer {
     active_trigger: Option<ComposerTrigger>,
     /// Highlighted row index within the open trigger menu (arrows + hover).
     menu_highlight: usize,
+    /// Every row the open trigger menu has listed, by key, for a row a
+    /// keystroke takes away to be drawn from as it folds.
+    menu_rows_seen: Rc<std::cell::RefCell<std::collections::HashMap<u64, MenuRow>>>,
     /// The trigger identity the menu was last shown for; when it changes the
     /// highlight resets and any Escape-dismissal clears.
     menu_last_key: Option<String>,
@@ -391,6 +394,7 @@ impl Composer {
             control_row_folded: None,
             active_trigger: None,
             menu_highlight: 0,
+            menu_rows_seen: Rc::default(),
             menu_last_key: None,
             menu_dismissed: false,
             workspace: None,
@@ -1861,6 +1865,8 @@ impl Render for Composer {
         ) {
             let panel = self.render_trigger_menu(&shown.value, cx);
             panels.push(column_fold(&shown, panel));
+        } else {
+            self.menu_rows_seen.borrow_mut().clear();
         }
         if let Some(shown) =
             crate::motion::shown(self.motion_id("goal"), composer_state.goal, window, cx)

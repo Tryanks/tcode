@@ -242,70 +242,37 @@ impl Render for ProviderModelPicker {
                 } else {
                     profiles.first().map(|p| p.id.clone()).unwrap_or_default()
                 };
-                let available: Rc<[ModelOption]> = picker
-                    .read(cx)
-                    .profile_options(&current_profile, cx)
-                    .into_iter()
-                    .filter(|option| {
-                        !excluded.iter().any(|(provider, model)| {
-                            *provider == option.provider && model == &option.id
-                        })
-                    })
-                    .collect();
-
                 // The catalog is a viewport of its own; cap it against the
                 // window so a short one scrolls instead of overflowing it.
                 let catalog = crate::sizing::fit_viewport(300., window.viewport_size().height);
-                let rows = if available.is_empty() {
-                    div()
-                        .w_full()
-                        .h(catalog)
-                        .p_1()
-                        .child(crate::material::empty_row(
-                            crate::tr!("model_picker.no_models"),
-                            cx,
-                        ))
-                        .into_any_element()
-                } else {
-                    let picker = picker.clone();
-                    let store = store.clone();
-                    let popover = cx.entity();
-                    crate::scroll::VirtualList::uniform(
-                        "settings-model-options",
-                        available.len(),
-                        move |range, _, cx| {
-                            range
-                                .map(|index| {
-                                    let option = &available[index];
-                                    let is_selected = selected.as_ref().is_some_and(
-                                        |(provider, model, profile_id)| {
-                                            *provider == option.provider
-                                                && model == &option.id
-                                                && profile_id == &option.profile_id
-                                        },
-                                    );
-                                    div().pb_0p5().child(option_row(
-                                        index,
-                                        option,
-                                        is_selected,
-                                        &picker,
-                                        &store,
-                                        &popover,
-                                        cx,
-                                    ))
-                                })
-                                .collect()
-                        },
-                    )
-                    .scrollbar()
-                    .w_full()
-                    .h(catalog)
-                    .pt_1()
-                    .px_1()
-                    // The last row carries its gap.
-                    .pb(px(2.))
-                    .into_any_element()
-                };
+                // Each profile's options keep a layer of their own, so a tab's
+                // list (and its scroll) fades out under the next one's.
+                let current_tab = profiles
+                    .iter()
+                    .position(|profile| profile.id == current_profile)
+                    .unwrap_or(0);
+                let fade = crate::motion::CrossFade::new(
+                    "settings-model-option-tabs",
+                    current_tab,
+                    profiles.len().max(1),
+                    window,
+                    cx,
+                );
+                let popover = cx.entity();
+                let layers: Vec<(usize, AnyElement)> = profiles
+                    .iter()
+                    .enumerate()
+                    .filter(|(tab, _)| fade.shows(*tab))
+                    .map(|(tab, profile)| {
+                        let options: Rc<[ModelOption]> =
+                            picker.read(cx).profile_options(&profile.id, cx).into();
+                        let list = option_list(
+                            tab, options, &excluded, &selected, &picker, &store, &popover, cx,
+                        );
+                        (tab, list)
+                    })
+                    .collect();
+                let rows = fade.fill().render(layers).w_full().h(catalog);
 
                 // Keep profile tabs in the same order as the settings cards.
                 let mut tabs = TabBar::new("provider-model-picker-tabs")
@@ -369,6 +336,96 @@ impl Render for ProviderModelPicker {
                     .child(rows)
             })
     }
+}
+
+/// One profile's options, less the `excluded` ones: an option excluded or
+/// let back in folds out of or into the list as the others glide.
+#[allow(clippy::too_many_arguments)]
+fn option_list(
+    tab: usize,
+    options: Rc<[ModelOption]>,
+    excluded: &[(ProviderKind, String)],
+    selected: &Option<(ProviderKind, String, Option<String>)>,
+    picker: &Entity<ProviderModelPicker>,
+    store: &Entity<WorkspaceStore>,
+    popover: &Entity<PopoverState>,
+    cx: &App,
+) -> AnyElement {
+    let available: Rc<[ModelOption]> = options
+        .iter()
+        .filter(|option| {
+            !excluded
+                .iter()
+                .any(|(provider, model)| *provider == option.provider && model == &option.id)
+        })
+        .cloned()
+        .collect();
+    if available.is_empty() {
+        return div()
+            .size_full()
+            .p_1()
+            .child(crate::material::empty_row(
+                crate::tr!("model_picker.no_models"),
+                cx,
+            ))
+            .into_any_element();
+    }
+    let key = |option: &ModelOption| {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (option.provider, &option.id, &option.profile_id).hash(&mut hasher);
+        hasher.finish()
+    };
+    let keys: Rc<[u64]> = available.iter().map(key).collect();
+    let row = {
+        let (selected, picker, store, popover) = (
+            selected.clone(),
+            picker.clone(),
+            store.clone(),
+            popover.clone(),
+        );
+        move |index: usize, option: &ModelOption, cx: &App| {
+            let is_selected = selected
+                .as_ref()
+                .is_some_and(|(provider, model, profile_id)| {
+                    *provider == option.provider
+                        && model == &option.id
+                        && profile_id == &option.profile_id
+                });
+            div()
+                .pb_0p5()
+                .child(option_row(
+                    index,
+                    option,
+                    is_selected,
+                    &picker,
+                    &store,
+                    &popover,
+                    cx,
+                ))
+                .into_any_element()
+        }
+    };
+    let leaving = {
+        let row = row.clone();
+        move |left: u64, _: &mut Window, cx: &mut App| {
+            let index = options.iter().position(|option| key(option) == left)?;
+            Some(row(index, &options[index], cx))
+        }
+    };
+    crate::scroll::VirtualList::measured(
+        ("settings-model-options", tab),
+        available.len(),
+        move |index, _, cx| row(index, &available[index], cx),
+    )
+    .keyed(keys, crate::edge_back::SETTLE, leaving)
+    .scrollbar()
+    .size_full()
+    .pt_1()
+    .px_1()
+    // The last row carries its gap.
+    .pb(px(2.))
+    .into_any_element()
 }
 
 fn option_row(
