@@ -23,7 +23,13 @@ impl ChatView {
             })
             .unwrap_or_default();
 
-        let highlighted_turn = self.highlighted_turn;
+        let highlighted_turn = self.highlighted_turn.and_then(|turn| {
+            let first = self
+                .workspace_store
+                .read(cx)
+                .absolute_turn_for(self.session_id.as_deref(), 0);
+            turn.checked_sub(first)
+        });
         let item_count = self.rows.len();
         let item_cwd = cwd.to_path_buf();
         // Read before the list lays out, which holds its state.
@@ -536,5 +542,78 @@ mod tests {
         draw_settled(cx);
         assert_eq!(marked(&panes, cx), None, "another thread kept the mark");
         threads.shutdown(cx);
+    }
+
+    /// A page of history read in above the turn jumped to leaves the mark on
+    /// that turn, not on the turn now at its place in the held window.
+    #[gpui::test]
+    fn the_mark_stays_on_its_turn_as_history_is_read_in_above(cx: &mut TestAppContext) {
+        use crate::test_frames::draw;
+
+        let events = (0..400)
+            .flat_map(|turn| {
+                [
+                    agent::AgentEvent::TurnStarted {
+                        turn_id: turn.to_string(),
+                    },
+                    user_event(&format!("user-{turn}"), &format!("Question {turn}")),
+                    answer_event(&format!("answer-{turn}"), &format!("Answer {turn}.")),
+                    agent::AgentEvent::TurnCompleted {
+                        turn_id: turn.to_string(),
+                        status: agent::TurnStatus::Completed,
+                        usage: None,
+                    },
+                ]
+            })
+            .collect();
+        let mut thread = ScriptedThread::new(cx, events, 4 * 390, false);
+        let store = thread.store.clone();
+        let (view, cx) = thread.open(cx);
+        // A frame as the display draws it, then the page it asked for.
+        let frame = |thread: &mut ScriptedThread, cx: &mut VisualTestContext| -> Option<u64> {
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+            let before = thread.answer_page(8)?;
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(250));
+            Some(before)
+        };
+        let settle = |thread: &mut ScriptedThread, cx: &mut VisualTestContext| {
+            let pages = std::iter::from_fn(|| frame(thread, cx)).take(100).count();
+            assert!(pages < 100, "the prefetch settles");
+        };
+        settle(&mut thread, cx);
+        let first_held = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| store.absolute_turn_for(Some(THREAD), 0))
+        };
+        let turn = first_held(cx) + 1;
+
+        store.update(cx, |store, cx| {
+            store.select_session_at_turn(THREAD.into(), turn, cx);
+        });
+        let marked =
+            |cx: &mut VisualTestContext| view.read_with(cx, |chat, _| chat.highlighted_turn);
+        settle(&mut thread, cx);
+        assert!(
+            first_held(cx) + 1 < turn,
+            "no page was read in above the turn"
+        );
+        assert!(marked(cx).is_some());
+
+        draw_settled(cx);
+        let bubble = cx
+            .debug_bounds(format!("user-bubble-user-{turn}").leak())
+            .expect("the turn jumped to stays on screen");
+        cx.simulate_click(bubble.center(), Modifiers::default());
+        draw_settled(cx);
+        assert_eq!(
+            marked(cx),
+            None,
+            "the turn jumped to was no longer the one marked"
+        );
     }
 }

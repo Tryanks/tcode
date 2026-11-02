@@ -198,9 +198,10 @@ pub struct ChatView {
     /// Whole tool outputs fetched for the open session, by item id.
     full_outputs: HashMap<String, FullOutput>,
     session_key: Option<String>,
-    /// The turn the reader jumped to (a palette hit, a thread anchor),
-    /// marked until the thread changes, the keyboard is put to use
-    /// elsewhere, or a press lands inside it.
+    /// The turn the reader jumped to (a palette hit, a thread anchor), by
+    /// its turn number in the whole thread: a history page moves the held
+    /// window's turn indices under it. Marked until the thread changes, the
+    /// keyboard is put to use elsewhere, or a press lands inside it.
     highlighted_turn: Option<usize>,
     /// 1s ticker kept alive while an error card shows a scheduled resume.
     _limit_tick: Option<Task<()>>,
