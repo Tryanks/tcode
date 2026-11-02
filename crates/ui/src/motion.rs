@@ -647,4 +647,81 @@ mod tests {
         assert!(cx.debug_bounds("first").is_none(), "gone once faded out");
         assert!(cx.debug_bounds("second").is_some());
     }
+
+    /// A section that folds under a header, holding a counter its own clicks
+    /// keep in element state.
+    struct Section {
+        open: bool,
+    }
+
+    impl Render for Section {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let body = super::shown("section", self.open.then_some(()), window, cx).map(|fold| {
+                let clicks = window.use_keyed_state("section-clicks", cx, |_, _| 0usize);
+                let count = *clicks.read(cx);
+                fold.fold(
+                    div()
+                        .id("section-body")
+                        .debug_selector(move || format!("section-body-{count}"))
+                        .h(px(80.))
+                        .on_click(move |_, _, cx| clicks.update(cx, |count, _| *count += 1)),
+                )
+            });
+            div()
+                .w(px(200.))
+                .flex()
+                .flex_col()
+                .children(body)
+                .child(div().debug_selector(|| "below".into()).h(px(10.)))
+        }
+    }
+
+    /// A fold open when first drawn takes its height on that frame, so what
+    /// is below does not move a frame later. Shutting, it is drawn leaving and
+    /// takes no clicks; opened again before it has gone, it is the same
+    /// section, its state intact. With motion reduced it goes at once.
+    #[gpui::test]
+    fn a_fold_is_whole_when_first_drawn_and_inert_while_it_leaves(cx: &mut TestAppContext) {
+        use crate::test_frames::{draw, draw_settled};
+        // Opening the window draws its first frame.
+        let (section, cx) = cx.add_window_view(|_, _| Section { open: true });
+        let below = cx.debug_bounds("below").expect("below the section");
+        assert_eq!(below.top(), px(80.), "the open section has its height");
+
+        let body = cx.debug_bounds("section-body-0").expect("the open section");
+        cx.simulate_click(body.center(), Default::default());
+        draw(cx);
+        assert!(
+            cx.debug_bounds("section-body-1").is_some(),
+            "a click counts"
+        );
+
+        let set = |open: bool, cx: &mut VisualTestContext| {
+            section.update(cx, |section, cx| {
+                section.open = open;
+                cx.notify();
+            });
+            draw(cx);
+        };
+        set(false, cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let leaving = cx
+            .debug_bounds("section-body-1")
+            .expect("drawn while it leaves");
+        let below = cx.debug_bounds("below").unwrap();
+        assert!(below.top() > px(0.) && below.top() < px(80.), "it folds");
+        cx.simulate_click(leaving.center(), Default::default());
+        set(true, cx);
+        draw_settled(cx);
+        assert!(
+            cx.debug_bounds("section-body-1").is_some(),
+            "the leaving section took a click, or came back as another"
+        );
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        set(false, cx);
+        assert!(cx.debug_bounds("section-body-1").is_none());
+        assert_eq!(cx.debug_bounds("below").unwrap().top(), px(0.));
+    }
 }
