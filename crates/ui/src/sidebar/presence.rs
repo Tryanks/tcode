@@ -81,7 +81,7 @@ impl<V: Clone> RowPresence<V> {
             let viewport = list.viewport_bounds();
             let in_view = |index: usize| {
                 list.bounds_for_item(index).is_some_and(|bounds| {
-                    bounds.top() < viewport.bottom() && bounds.bottom() > viewport.top()
+                    bounds.top() < viewport.bottom() && bounds.bottom() >= viewport.top()
                 })
             };
             // How many rows the view showed: as many arrivals as that, from
