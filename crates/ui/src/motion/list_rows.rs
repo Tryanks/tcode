@@ -52,7 +52,7 @@
 //! stayed glide to their new places while the others fold in and out:
 //! `ListFlip::row(index, id, RowGlide::new(id, glide, content))`.
 
-use std::{collections::HashMap, ops::Range, rc::Rc};
+use std::{collections::HashMap, ops::Range, rc::Rc, time::Duration};
 
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
@@ -85,16 +85,17 @@ pub(crate) struct Arrived<A> {
     pub(crate) at: Instant,
     pub(crate) arrival: Arrival,
     pub(crate) note: A,
+    duration: Duration,
 }
 
 impl<A> Arrived<A> {
     /// How far in the row is, from absent to at rest, `now`.
     pub(crate) fn progress(&self, now: Instant) -> f32 {
-        eased(now.saturating_duration_since(self.at))
+        eased(now.saturating_duration_since(self.at), self.duration)
     }
 
     pub(crate) fn settled(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.at) >= crate::edge_back::SETTLE
+        now.saturating_duration_since(self.at) >= self.duration
     }
 }
 
@@ -136,13 +137,25 @@ pub(crate) struct Left<'a, V> {
 pub(crate) struct ListRows<A, V> {
     arrivals: HashMap<u64, Arrived<A>>,
     leaving: Vec<Leaving<V>>,
+    /// How long a row takes to come in or fold away.
+    duration: Duration,
 }
 
 impl<A, V> Default for ListRows<A, V> {
     fn default() -> Self {
+        Self::over(crate::edge_back::SETTLE)
+    }
+}
+
+impl<A, V> ListRows<A, V> {
+    /// Rows that come in and fold away over `duration`: shorter than the
+    /// default for a list a keystroke refilters, so the rows keep pace with
+    /// the typing.
+    pub(crate) fn over(duration: Duration) -> Self {
         Self {
             arrivals: HashMap::new(),
             leaving: Vec::new(),
+            duration,
         }
     }
 }
@@ -154,10 +167,20 @@ impl<A: Copy, V> ListRows<A, V> {
         let mut at = at;
         if let Some(index) = self.leaving.iter().position(|left| left.key == key) {
             let left = self.leaving.remove(index);
-            let shown = 1. - eased(at.saturating_duration_since(left.at));
-            at = at.checked_sub(elapsed_for(shown)).unwrap_or(at);
+            let shown = 1. - eased(at.saturating_duration_since(left.at), self.duration);
+            at = at
+                .checked_sub(elapsed_for(shown, self.duration))
+                .unwrap_or(at);
         }
-        self.arrivals.insert(key, Arrived { at, arrival, note });
+        self.arrivals.insert(
+            key,
+            Arrived {
+                at,
+                arrival,
+                note,
+                duration: self.duration,
+            },
+        );
     }
 
     /// Row `key` left `at`, drawn from `value` against `attach` until it has
@@ -167,7 +190,9 @@ impl<A: Copy, V> ListRows<A, V> {
         let mut start = at;
         if let Some(arrived) = self.arrivals.remove(&key) {
             let shown = arrived.progress(at);
-            start = at.checked_sub(elapsed_for(1. - shown)).unwrap_or(at);
+            start = at
+                .checked_sub(elapsed_for(1. - shown, self.duration))
+                .unwrap_or(at);
         }
         for left in &mut self.leaving {
             if left.attach.key() == key {
@@ -199,7 +224,7 @@ impl<A: Copy, V> ListRows<A, V> {
                 .map(|left| Left {
                     key: left.key,
                     value: &left.value,
-                    progress: 1. - eased(now.saturating_duration_since(left.at)),
+                    progress: 1. - eased(now.saturating_duration_since(left.at), self.duration),
                 })
                 .filter(|left| left.progress > 0.)
                 .collect::<Vec<_>>()
@@ -214,7 +239,7 @@ impl<A: Copy, V> ListRows<A, V> {
         self.arrivals.retain(|_, arrived| !arrived.settled(now));
         let mut folded = Vec::new();
         self.leaving.retain(|left| {
-            let gone = now.saturating_duration_since(left.at) >= crate::edge_back::SETTLE;
+            let gone = now.saturating_duration_since(left.at) >= self.duration;
             if gone {
                 folded.push(left.attach.key());
             }
@@ -350,21 +375,21 @@ impl<V> Around<V> {
     }
 }
 
-fn curve() -> Timing {
-    Timing::new(crate::edge_back::SETTLE).ease(Easing::Custom(Rc::new(
+fn curve(duration: Duration) -> Timing {
+    Timing::new(duration).ease(Easing::Custom(Rc::new(
         gpui_base::animation::ease_out_cubic,
     )))
 }
 
-fn eased(elapsed: std::time::Duration) -> f32 {
-    curve().sample(elapsed).directed_progress
+fn eased(elapsed: Duration, duration: Duration) -> f32 {
+    curve(duration).sample(elapsed).directed_progress
 }
 
 /// How long the glide takes to come `progress` of the way: the inverse of
 /// its ease-out cubic.
-fn elapsed_for(progress: f32) -> std::time::Duration {
+fn elapsed_for(progress: f32, duration: Duration) -> Duration {
     let progress = progress.clamp(0., 1.);
-    crate::edge_back::SETTLE.mul_f32(1. - (1. - progress).cbrt())
+    duration.mul_f32(1. - (1. - progress).cbrt())
 }
 
 /// The rows a set of splices brings in, by their index among the new rows,

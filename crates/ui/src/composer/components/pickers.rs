@@ -71,13 +71,15 @@ impl Composer {
         }
     }
 
-    /// The model-picker button + popover (anchored above, ~360px).
-    pub(in super::super) fn render_model_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The model-picker button + popover (anchored above, ~360px), with the
+    /// model's name; none before the thread has a model.
+    pub(in super::super) fn render_model_picker(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<(gpui::SharedString, AnyElement)> {
         let store = self.workspace_store.read(cx);
         let composer_state = store.composer_state_for(self.session_id.as_deref());
-        let Some(active_model) = composer_state.active_model.clone() else {
-            return div().into_any_element();
-        };
+        let active_model = composer_state.active_model.clone()?;
         let provider = active_model.provider;
         let current_model = active_model.model;
         let acp_agent_id = active_model.acp_agent_id;
@@ -92,7 +94,8 @@ impl Composer {
                 .as_deref()
                 .unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider)),
         );
-        let display = current_model_name_resolved(&resolved, &catalog, current_model.as_deref());
+        let display: gpui::SharedString =
+            current_model_name_resolved(&resolved, &catalog, current_model.as_deref()).into();
 
         // Build the filtered row list for the current frame. Favorites open
         // first when any exist. The favorites sweep covers every
@@ -179,9 +182,11 @@ impl Composer {
                 })
                 .collect(),
         };
+        let all_rows: Rc<[ModelRow]> = all_rows.into();
         let rows: Rc<[ModelRow]> = all_rows
-            .into_iter()
+            .iter()
             .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
+            .cloned()
             .collect();
         // Only the built-in profiles have a probed catalog that can still be
         // loading; a third-party profile shows its own slugs immediately.
@@ -228,7 +233,7 @@ impl Composer {
                     .child({
                         // A new model's name cross-fades over the last one's.
                         let id = self.motion_id("model-label");
-                        let display: gpui::SharedString = display.into();
+                        let display = display.clone();
                         div()
                             .min_w_0()
                             .overflow_hidden()
@@ -257,44 +262,50 @@ impl Composer {
         // field asks for the keyboard.
         let search_focus = (!crate::window_seam::is_mobile(cx))
             .then(|| self.model_search.read(cx).focus_handle(cx));
-        crate::material::overlay_popover(("model-picker-popover", self.model_picker_token), cx)
-            .when_some(search_focus, |popover, focus| popover.track_focus(&focus))
-            .anchor(Anchor::BottomLeft)
-            .when(self.compact, |popover| {
-                popover.bottom_sheet(crate::tr!("mobile.model"))
-            })
-            .default_open(self.model_picker_token > 0 && self.interactive(cx))
-            .trigger(trigger)
-            .content(move |_state, _window, cx| {
-                let rows = rows.clone();
-                let store_entity = store_entity.clone();
-                let model_search = model_search.clone();
-                let composer = composer.clone();
-                let selected = selected.clone();
-                let popover = cx.entity();
-                let rail = rail.clone();
-                let acp_rail_agents = acp_rail_agents.clone();
-                render_model_pane(
-                    rows,
-                    &selected,
-                    rail,
-                    &acp_rail_agents,
-                    pending_restart,
-                    loading,
-                    &store_entity,
-                    &model_search,
-                    &composer,
-                    &popover,
-                    cx,
-                )
-            })
-            .into_any_element()
+        let picker =
+            crate::material::overlay_popover(("model-picker-popover", self.model_picker_token), cx)
+                .when_some(search_focus, |popover, focus| popover.track_focus(&focus))
+                .anchor(Anchor::BottomLeft)
+                .when(self.compact, |popover| {
+                    popover.bottom_sheet(crate::tr!("mobile.model"))
+                })
+                .default_open(self.model_picker_token > 0 && self.interactive(cx))
+                .trigger(trigger)
+                .content(move |_state, _window, cx| {
+                    let rows = rows.clone();
+                    let all_rows = all_rows.clone();
+                    let store_entity = store_entity.clone();
+                    let model_search = model_search.clone();
+                    let composer = composer.clone();
+                    let selected = selected.clone();
+                    let popover = cx.entity();
+                    let rail = rail.clone();
+                    let acp_rail_agents = acp_rail_agents.clone();
+                    render_model_pane(
+                        rows,
+                        all_rows,
+                        &selected,
+                        rail,
+                        &acp_rail_agents,
+                        pending_restart,
+                        loading,
+                        &store_entity,
+                        &model_search,
+                        &composer,
+                        &popover,
+                        cx,
+                    )
+                });
+        Some((display, picker.into_any_element()))
     }
 
-    /// The traits chip ("High · Fast") + descriptor popover. Empty element when
-    /// the current model has no descriptors. The context window is the context
-    /// meter's, so it is neither listed nor named here.
-    pub(in super::super) fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The traits chip ("High · Fast") + descriptor popover, with its label;
+    /// none when the current model has no descriptors. The context window is
+    /// the context meter's, so it is neither listed nor named here.
+    pub(in super::super) fn render_traits_picker(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<(gpui::SharedString, AnyElement)> {
         let store = self.workspace_store.read(cx);
         let composer = store.composer_state_for(self.session_id.as_deref());
         let descriptors = composer
@@ -340,17 +351,21 @@ impl Composer {
                 effort.map(str::to_owned)
             }
             .unwrap_or_else(|| crate::tr!("composer.context_unknown").into_owned());
-            return Button::new("traits-chip")
-                .debug_selector(|| "traits-chip".into())
-                .ghost()
-                .chip()
-                .touch(self.compact)
-                .disabled(true)
-                .label(label)
-                .into_any_element();
+            let label = gpui::SharedString::from(label);
+            return Some((
+                label.clone(),
+                Button::new("traits-chip")
+                    .debug_selector(|| "traits-chip".into())
+                    .ghost()
+                    .chip()
+                    .touch(self.compact)
+                    .disabled(true)
+                    .label(label)
+                    .into_any_element(),
+            ));
         }
         if descriptors.is_empty() {
-            return div().into_any_element();
+            return None;
         }
         let spec = ModelSpec {
             options: descriptors,
@@ -372,9 +387,7 @@ impl Composer {
         {
             chip_spec.options = vec![effort.clone()];
         }
-        let Some(label) = traits_chip_label(&chip_spec, &selections) else {
-            return div().into_any_element();
-        };
+        let label = gpui::SharedString::from(traits_chip_label(&chip_spec, &selections)?);
         let muted = cx.theme().muted_foreground;
         let pending_restart = composer.options_pending_restart;
 
@@ -393,7 +406,7 @@ impl Composer {
                     .child(glided_label(
                         self.motion_id("traits-label"),
                         self.motion_id("traits-label-glide"),
-                        label.into(),
+                        label.clone(),
                     ))
                     .child(Icon::new(IconName::ChevronDown)),
             );
@@ -401,7 +414,7 @@ impl Composer {
         let store_entity = self.workspace_store.clone();
         let session_id = self.session_id.clone();
         let composer_entity = cx.entity();
-        crate::material::overlay_popover("traits-popover", cx)
+        let picker = crate::material::overlay_popover("traits-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("mobile.model"))
@@ -420,8 +433,8 @@ impl Composer {
                     window,
                     cx,
                 )
-            })
-            .into_any_element()
+            });
+        Some((label, picker.into_any_element()))
     }
 
     /// The circular context-window meter (ring showing used%, red > 90%) and
@@ -536,14 +549,18 @@ impl Composer {
                             .overflow_hidden()
                             .child(crate::widgets::fade_text(label)),
                     )
-                    .when(pending, |row| {
-                        row.child(
+                    .child(folding_suffix(
+                        "permission-chip-pending",
+                        pending,
+                        px(6.),
+                        |cx| {
                             div()
                                 .flex_none()
                                 .text_secondary(false, cx)
-                                .child(crate::tr!("permission.pending")),
-                        )
-                    })
+                                .child(crate::tr!("permission.pending"))
+                                .into_any_element()
+                        },
+                    ))
                     .child(Icon::new(IconName::ChevronDown)),
             );
         let store_entity = self.workspace_store.clone();
@@ -660,6 +677,9 @@ impl Composer {
 #[allow(clippy::too_many_arguments)]
 fn render_model_pane(
     rows: Rc<[ModelRow]>,
+    // The rail's rows before the search filtered them, which a row the
+    // search takes away is drawn from as it folds.
+    all_rows: Rc<[ModelRow]>,
     selected: &Option<String>,
     rail: PickerRail,
     // (id, name) of every installed+enabled ACP agent — one rail entry each.
@@ -780,6 +800,26 @@ fn render_model_pane(
                     .position(|row| selected.as_deref() == Some(row.id.as_str()))
             })
             .flatten();
+        let keys: Rc<[u64]> = rows.iter().map(model_row_key).collect();
+        let leaving = {
+            let selected = selected.clone();
+            let store_entity = store_entity.clone();
+            let session_id = session_id.clone();
+            let popover = popover.clone();
+            move |key, _: &mut Window, cx: &mut App| {
+                let index = all_rows.iter().position(|row| model_row_key(row) == key)?;
+                Some(render_model_row(
+                    &all_rows[index],
+                    index,
+                    &selected,
+                    compact,
+                    &store_entity,
+                    session_id.clone(),
+                    &popover,
+                    cx,
+                ))
+            }
+        };
         let rows = rows.clone();
         let selected = selected.clone();
         let store_entity = store_entity.clone();
@@ -807,6 +847,9 @@ fn render_model_pane(
                     },
                 )
                 .reveal(current)
+                // A keystroke's results, and a favourite moving to the top,
+                // glide into place.
+                .keyed(keys, crate::motion::KEYSTROKE, leaving)
                 .flex_1()
                 .min_h_0()
                 .px_1()
@@ -1347,7 +1390,7 @@ fn render_permission_pane(
                 if disabled {
                     crate::material::ItemFill::Inert
                 } else {
-                    crate::material::ItemFill::Hover
+                    crate::material::ItemFill::highlight(effective, cx.theme().list_active)
                 },
                 cx,
             )
@@ -1365,7 +1408,6 @@ fn render_permission_pane(
             .when(effective, |row| row.aria_active_descendant())
             .w_full()
             .items_start()
-            .when(effective, |row| row.bg(cx.theme().list_active))
             .when(disabled, |row| row.opacity(0.55))
             .when(!disabled, |row| {
                 row.cursor_pointer().on_click(move |_, window, cx| {
@@ -1397,9 +1439,17 @@ fn render_permission_pane(
                             .when(effective, |row| {
                                 row.child(Icon::new(IconName::Check).text_color(primary))
                             })
-                            .when(pending, |row| {
-                                row.child(caption(crate::tr!("permission.pending").into()))
-                            }),
+                            .child(folding_suffix(
+                                gpui::SharedString::from(format!("permission-row-pending-{index}")),
+                                pending,
+                                px(6.),
+                                move |cx| {
+                                    div()
+                                        .text_secondary(compact, cx)
+                                        .child(crate::tr!("permission.pending"))
+                                        .into_any_element()
+                                },
+                            )),
                     )
                     .when_some(option.description.clone(), |column, description| {
                         column.child(caption(description.into()))
@@ -2062,6 +2112,31 @@ fn render_context_meter_pane(
 
 /// A chip's label that cross-fades to a new text while the chip's width
 /// glides to fit it, so what is beside the chip moves over rather than jumps.
+/// What a model row is known by while the search and the favourites move it.
+fn model_row_key(row: &ModelRow) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&row.id, &row.profile_id, row.acp, row.provider).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A suffix beside a label (a "pending" note) that widens in while
+/// `present` and narrows away after, with the `gap` before it.
+fn folding_suffix(
+    id: impl Into<gpui::ElementId>,
+    present: bool,
+    gap: gpui::Pixels,
+    build: impl FnOnce(&mut App) -> AnyElement + 'static,
+) -> crate::motion::Sampled {
+    let id = id.into();
+    crate::motion::Sampled::new(move |window, cx| {
+        match crate::motion::shown(id, present.then_some(()), window, cx) {
+            Some(shown) => shown.fold_across_gap(gap, build(cx)),
+            None => gpui::Empty.into_any_element(),
+        }
+    })
+}
+
 fn glided_label(
     id: gpui::ElementId,
     glide: gpui::ElementId,

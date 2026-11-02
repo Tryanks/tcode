@@ -1476,13 +1476,47 @@ impl Render for Composer {
 
         // The platform picker is the phone's only way in; desktops paste and
         // drop, and the readonly and offline states have nothing to add to.
-        let attach_menu = (self.compact && !readonly && self.interactive(cx))
-            .then(|| {
-                cx.try_global::<crate::remote::ClientAttachment>()
-                    .is_some_and(|client| client.host().supports_image_picker())
-                    .then(|| self.render_attach_menu(cx))
-            })
-            .flatten();
+        let attach_shown = self.compact
+            && !readonly
+            && self.interactive(cx)
+            && cx
+                .try_global::<crate::remote::ClientAttachment>()
+                .is_some_and(|client| client.host().supports_image_picker());
+        // It narrows away when the host goes offline, and widens back.
+        let attach_menu = crate::motion::shown(
+            self.motion_id("attach-menu"),
+            attach_shown.then_some(()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold_across_gap(px(4.), div().flex_none().child(self.render_attach_menu(cx)))
+        });
+        // The model picker and the traits chip widen in once the thread has
+        // a model (and the model traits), and narrow away as they go, drawn
+        // with the name they last had.
+        let leaving_chip = |id: &'static str, label: &gpui::SharedString, cx: &App| {
+            Button::new(id)
+                .ghost()
+                .chip()
+                .touch(self.compact)
+                .label(label.clone())
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        };
+        let mut model_picker = self.render_model_picker(cx);
+        let model_label = model_picker.as_ref().map(|(label, _)| label.clone());
+        let model_picker =
+            crate::motion::shown(self.motion_id("model-picker"), model_label, window, cx).map(
+                |shown| {
+                    let picker = match model_picker.take() {
+                        Some((_, picker)) if !shown.leaving() => picker,
+                        _ => leaving_chip("model-picker-leaving", &shown.value, cx),
+                    };
+                    shown.fold_across(div().min_w(px(SEND_SIZE)).child(picker))
+                },
+            );
+        let mut traits_picker = self.render_traits_picker(cx);
         // The chips give way to the send/stop control: Stop must stay
         // reachable however long the chips' labels run.
         let leading = || {
@@ -1493,9 +1527,6 @@ impl Render for Composer {
                 .gap_1()
                 .items_center()
         };
-        // The model name truncates to make room, down to the width of one
-        // control so the picker can still be opened.
-        let model_cell = || div().min_w(px(SEND_SIZE));
         let primary = div()
             .flex_none()
             .child(self.render_primary_action(turn_running, window, cx));
@@ -1505,8 +1536,22 @@ impl Render for Composer {
                 .child(
                     leading()
                         .children(attach_menu)
-                        .child(model_cell().child(self.render_model_picker(cx)))
-                        .child(self.render_traits_picker(cx))
+                        .children(model_picker)
+                        .children(
+                            crate::motion::shown(
+                                self.motion_id("control-row-traits"),
+                                traits_picker.as_ref().map(|(label, _)| label.clone()),
+                                window,
+                                cx,
+                            )
+                            .map(|shown| {
+                                let picker = match traits_picker.take() {
+                                    Some((_, picker)) if !shown.leaving() => picker,
+                                    _ => leaving_chip("traits-chip-leaving", &shown.value, cx),
+                                };
+                                shown.fold_across_gap(px(4.), picker)
+                            }),
+                        )
                         .child(div().flex_1())
                         .children(mic),
                 )
@@ -1538,13 +1583,22 @@ impl Render for Composer {
                 )
                 .map(|shown| shown.fold_across(gapped(build(cx))))
             };
-            let traits = fold(
-                "traits",
-                !folded,
-                &mut |cx| self.render_traits_picker(cx),
+            let traits = crate::motion::shown(
+                self.motion_id("control-row-traits"),
+                traits_picker
+                    .as_ref()
+                    .filter(|_| !folded)
+                    .map(|(label, _)| label.clone()),
                 window,
                 cx,
-            );
+            )
+            .map(|shown| {
+                let picker = match traits_picker.take() {
+                    Some((_, picker)) if !shown.leaving() => picker,
+                    _ => leaving_chip("traits-chip-leaving", &shown.value, cx),
+                };
+                shown.fold_across(gapped(picker))
+            });
             let divider = fold(
                 "divider",
                 !folded,
@@ -1579,7 +1633,7 @@ impl Render for Composer {
                         .min_w_0()
                         .overflow_hidden()
                         .items_center()
-                        .child(model_cell().child(self.render_model_picker(cx)))
+                        .children(model_picker)
                         .children(traits)
                         .children(divider)
                         .children(meter_inside)
