@@ -229,6 +229,125 @@ impl<A: Copy, V> ListRows<A, V> {
         self.arrivals.clear();
         self.leaving.clear();
     }
+
+    /// Stamps what replacing the rows keyed `old` with the rows keyed `new`
+    /// brought and took away, for a change the reader sees happen: each new
+    /// row `arrives` notes comes in, and each row that went, rebuilt from
+    /// what `left` gives for its old index, folds away against its survivor.
+    /// A row either passes over (`None`) is in place, or gone, at once: a row
+    /// a disclosure folds, or one out of view. Reduced motion stamps nothing.
+    pub(crate) fn replace(
+        &mut self,
+        old: &[u64],
+        new: &[u64],
+        mut arrives: impl FnMut(usize, Arrival) -> Option<A>,
+        mut left: impl FnMut(usize) -> Option<V>,
+        cx: &App,
+    ) {
+        if cx.reduce_motion() || old == new {
+            return;
+        }
+        let at = cx.background_executor().now();
+        let Changes {
+            arrived,
+            left: gone,
+        } = changes(old, new);
+        for (index, arrival) in arrived {
+            if let Some(note) = arrives(index, arrival) {
+                self.arrive(new[index], arrival, note, at);
+            }
+        }
+        for (index, attach) in gone {
+            if let Some(value) = left(index) {
+                self.leave(old[index], value, attach, at);
+            }
+        }
+    }
+
+    /// Row `key`'s motion this frame: how far in it is while it arrives, and
+    /// the rows folding away against it, each with what it is drawn from.
+    pub(crate) fn around(&self, key: u64, cx: &App) -> Around<V>
+    where
+        V: Clone,
+    {
+        let now = cx.background_executor().now();
+        let (above, below) = self.leaving(key, now);
+        let owned = |left: Vec<Left<'_, V>>| {
+            left.into_iter()
+                .map(|left| (left.key, left.value.clone(), left.progress))
+                .collect()
+        };
+        Around {
+            entering: self.entering(key, now).map(|(_, progress)| progress),
+            above: owned(above),
+            below: owned(below),
+        }
+    }
+
+    /// [`Self::settle`] for a list drawn from `keys`: the rows that folded
+    /// away leave their survivors' measured heights stale, so `list` measures
+    /// those again.
+    pub(crate) fn settle_list(&mut self, list: &gpui::ListState, keys: &[u64], cx: &App) {
+        let now = cx.background_executor().now();
+        for key in self.settle(now) {
+            if let Some(index) = keys.iter().position(|row| *row == key) {
+                list.remeasure_items(index..index + 1);
+            }
+        }
+    }
+}
+
+/// One list row's motion this frame, as [`ListRows::around`] samples it.
+pub(crate) struct Around<V> {
+    /// How far in the row is, while it arrives.
+    pub(crate) entering: Option<f32>,
+    /// The rows folding away above its content: key, value, progress.
+    pub(crate) above: Vec<(u64, V, f32)>,
+    /// The rows folding away below it.
+    pub(crate) below: Vec<(u64, V, f32)>,
+}
+
+impl<V> Around<V> {
+    /// The row's `content` laid out through a [`RowGlide`] named `id` and
+    /// `key`, arriving or else gliding as `rest` says, with the rows that
+    /// left against it rebuilt by `build` above and below it. Asks for
+    /// frames while any of them moves.
+    pub(crate) fn draw(
+        self,
+        id: &'static str,
+        key: u64,
+        rest: Glide,
+        content: impl IntoElement,
+        mut build: impl FnMut(&V, &mut Window) -> AnyElement,
+        window: &mut Window,
+    ) -> AnyElement {
+        let glide = self.entering.map_or(rest, Glide::Enter);
+        if self.entering.is_none() && self.above.is_empty() && self.below.is_empty() {
+            return RowGlide::new((id, key), glide, content).into_any_element();
+        }
+        window.request_animation_frame();
+        let mut fold = |(key, value, progress): (u64, V, f32), window: &mut Window| {
+            RowGlide::leaving((id, key), progress, build(&value, window)).into_any_element()
+        };
+        let above: Vec<_> = self
+            .above
+            .into_iter()
+            .map(|left| fold(left, window))
+            .collect();
+        let below: Vec<_> = self
+            .below
+            .into_iter()
+            .map(|left| fold(left, window))
+            .collect();
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .children(above)
+            .child(RowGlide::new((id, key), glide, content))
+            .children(below)
+            .into_any_element()
+    }
 }
 
 fn curve() -> Timing {

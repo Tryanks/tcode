@@ -5,10 +5,10 @@ use std::{
 };
 
 use crate::material::{Bar, COMPACT_PAGE_INSET, bar, bar_height, empty_row, selectable_row};
+use crate::motion::list_rows::Glide;
 use crate::motion::{drag_ghost, settle};
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::remote::spaces::{self, ShareTarget, SpacesObserver};
-use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::TooltipTrigger as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -45,6 +45,7 @@ use crate::window_drag_area;
 use crate::window_state::{Destination, Route, WindowState};
 
 mod arrange;
+mod presence;
 mod swipe;
 pub(crate) use arrange::thread_carried;
 use arrange::{DropZone, ThreadDrag};
@@ -499,6 +500,8 @@ enum FlatListRow {
     Settled,
     More(usize),
     Empty,
+    /// What an empty list says in place of rows.
+    Hint(Cow<'static, str>),
 }
 
 impl FlatListRow {
@@ -510,8 +513,22 @@ impl FlatListRow {
             Self::Settled => ("settled", ""),
             Self::More(_) => ("more", ""),
             Self::Empty => ("empty", ""),
+            Self::Hint(_) => ("hint", ""),
         }
     }
+}
+
+/// What one frame of the Flat list drew its rows from, kept so a row that
+/// leaves is drawn as it was.
+#[derive(Default)]
+struct FlatFrame {
+    rows: Vec<FlatListRow>,
+    folds: Vec<f32>,
+    scope: Option<String>,
+    settled_count: usize,
+    project_names: HashMap<String, String>,
+    flags: HashMap<String, ThreadFlags>,
+    active_id: Option<String>,
 }
 
 /// A row of the desktop grouped list. Project-scoped rows index into the
@@ -535,6 +552,18 @@ enum GroupedListRow {
         group: usize,
         count: usize,
     },
+    /// What the list says while it has no projects.
+    Hint(Cow<'static, str>),
+}
+
+/// What one frame of the Grouped list drew its rows from, kept so a row
+/// that leaves is drawn as it was.
+#[derive(Default)]
+struct GroupedFrame {
+    rows: Vec<GroupedListRow>,
+    folds: Vec<f32>,
+    groups: Vec<ProjectGroup>,
+    flags: HashMap<String, ThreadFlags>,
 }
 
 impl GroupedListRow {
@@ -546,11 +575,12 @@ impl GroupedListRow {
             Self::ToggleThreads { group, .. } => ("toggle", project(group)),
             Self::Settled { group, .. } => ("settled", project(group)),
             Self::SettledMore { group, .. } => ("settled-more", project(group)),
+            Self::Hint(_) => ("hint", ""),
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct CompactListModel {
     rows: Vec<CompactListRow>,
     /// Each row's fold factor, as `SessionsSidebar::fold_row` takes it.
@@ -592,18 +622,27 @@ pub struct SessionsSidebar {
     /// How far open each disclosure of the list on screen is this frame, by
     /// [`fold_key`]: a closing one keeps its rows until it has shut.
     folds: HashMap<String, f32>,
+    /// Whether a disclosure moved this frame, bringing or taking its rows.
+    folding: bool,
     flat_list_state: ListState,
     /// The row keys `flat_list_state` was last spliced for.
     flat_row_keys: Vec<(&'static str, String)>,
     flat_flip: crate::motion::ListFlip,
+    /// Flat rows coming and going, each leaving one drawn from the frame it
+    /// was last drawn in.
+    flat_presence: presence::RowPresence<(Rc<FlatFrame>, usize)>,
+    flat_drawn: Rc<FlatFrame>,
     flat_scroll: crate::motion::ListScroll,
     grouped_list_state: ListState,
     /// The row keys `grouped_list_state` was last spliced for.
     grouped_row_keys: Vec<(&'static str, String)>,
     grouped_flip: crate::motion::ListFlip,
+    grouped_presence: presence::RowPresence<(Rc<GroupedFrame>, usize)>,
+    grouped_drawn: Rc<GroupedFrame>,
     compact_list_state: ListState,
     compact_scroll: crate::motion::ListScroll,
     compact_model: Option<Rc<CompactListModel>>,
+    compact_presence: presence::RowPresence<(Rc<CompactListModel>, usize)>,
     compact_model_dirty: bool,
     /// Returning from a thread scrolls its row into the upper part of the
     /// list; the row's next paint performs the scroll and clears this.
@@ -678,6 +717,18 @@ impl SessionsSidebar {
         groups: &[ProjectGroup],
         store: &WorkspaceStore,
     ) -> Vec<(GroupedListRow, f32)> {
+        let mut rows = self.grouped_rows_folding(groups, store);
+        rows.retain(|(_, factor)| *factor >= 0.);
+        rows
+    }
+
+    /// [`Self::grouped_rows`] with the rows a moving disclosure leaves out of
+    /// the list, at a negative factor.
+    fn grouped_rows_folding(
+        &self,
+        groups: &[ProjectGroup],
+        store: &WorkspaceStore,
+    ) -> Vec<(GroupedListRow, f32)> {
         let mut rows = Vec::new();
         for (group, project) in groups.iter().enumerate() {
             let project_id = &project.project.id;
@@ -736,7 +787,6 @@ impl SessionsSidebar {
                 *factor = nested_fold(fold_factor(progress, index, count), *factor);
             }
         }
-        rows.retain(|(_, factor)| *factor >= 0.);
         rows
     }
 
@@ -883,6 +933,7 @@ impl SessionsSidebar {
             folds.insert(key, progress);
         }
         self.folds = folds;
+        self.folding = moving;
         if moving {
             self.compact_model_dirty = true;
         }
@@ -958,7 +1009,7 @@ impl SessionsSidebar {
             return crate::material::loading_skeleton(cx);
         }
         if loading {
-            return self.pending_thread_rows(cx);
+            return self.pending_thread_rows(window, cx);
         }
         v_flex()
             .flex_1()
@@ -1044,14 +1095,20 @@ impl SessionsSidebar {
             renaming: None,
             hover: crate::motion::ListHover::new(),
             folds: HashMap::new(),
+            folding: false,
             flat_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             flat_row_keys: Vec::new(),
             flat_flip: Default::default(),
+            flat_presence: Default::default(),
+            flat_drawn: Rc::default(),
             flat_scroll: Default::default(),
             grouped_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             grouped_row_keys: Vec::new(),
             grouped_flip: Default::default(),
+            grouped_presence: Default::default(),
+            grouped_drawn: Rc::default(),
             compact_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            compact_presence: Default::default(),
             compact_scroll: Default::default(),
             compact_model: None,
             compact_model_dirty: true,
@@ -2601,6 +2658,10 @@ impl SessionsSidebar {
             GroupedListRow::SettledMore { group, count } => item
                 .child(self.render_settled_more(&groups[*group].project.id, *count, cx))
                 .into_any_element(),
+            GroupedListRow::Hint(hint) => item
+                .pb_2()
+                .child(empty_row(hint.clone(), cx))
+                .into_any_element(),
         }
     }
 
@@ -3970,9 +4031,23 @@ impl SessionsSidebar {
             }
             rows.push(CompactListRow::BottomInset);
             folds.resize(rows.len(), 1.);
+            let all: Vec<(u64, f32)> = rows
+                .iter()
+                .zip(&folds)
+                .map(|(row, factor)| (presence::row_key(row.key()), *factor))
+                .collect();
             let mut kept = folds.iter().map(|factor| *factor >= 0.);
             rows.retain(|_| kept.next().unwrap_or(true));
             folds.retain(|factor| *factor >= 0.);
+            let drawn = self.compact_model.clone().unwrap_or_default();
+            self.compact_presence.update(
+                &all,
+                format!("{layout:?}"),
+                self.folding,
+                &self.compact_list_state,
+                |index| (drawn.clone(), index),
+                cx,
+            );
             replace_list_rows(
                 &self.compact_list_state,
                 |index| {
@@ -4039,51 +4114,59 @@ impl SessionsSidebar {
 
     /// Compact thread list with shared layout preference. Navigation replaces
     /// persistent row selection; desktop-only controls stay in the desktop list.
-    fn pending_thread_rows(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let cached = self.store.read(cx).sidebar_sessions();
-        let loading = self.store.read(cx).threads_loading();
-        v_flex()
-            .w_full()
-            .children(
-                self.store
-                    .read(cx)
-                    .pending_sessions()
-                    .into_iter()
-                    .filter(|(id, _)| loading || !cached.iter().any(|meta| &meta.id == id))
-                    .map(|(id, preview)| {
-                        crate::material::list_row(
-                            SharedString::from(format!("pending-thread-{id}")),
-                            format!("{}, {preview}", crate::tr!("chat.waiting_connection")).into(),
-                            cx,
-                        )
-                        .debug_selector(|| "pending-thread-row".into())
+    /// The threads waiting for a connection, each folding in as it is
+    /// asked for and away once the host has it.
+    fn pending_thread_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let store = self.store.read(cx);
+        let cached = store.sidebar_sessions();
+        let loading = store.threads_loading();
+        let pending: Vec<(SharedString, (String, String))> = store
+            .pending_sessions()
+            .into_iter()
+            .filter(|(id, _)| loading || !cached.iter().any(|meta| &meta.id == id))
+            .map(|(id, preview)| (SharedString::from(id.clone()), (id, preview)))
+            .collect();
+        crate::motion::keyed(
+            "pending-thread-rows",
+            pending,
+            window,
+            cx,
+            |_, (id, preview), _, cx| {
+                let id = id.clone();
+                crate::material::list_row(
+                    SharedString::from(format!("pending-thread-{id}")),
+                    format!("{}, {preview}", crate::tr!("chat.waiting_connection")).into(),
+                    cx,
+                )
+                .debug_selector(|| "pending-thread-row".into())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(cx.theme().tokens.spacing.xs)
                         .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap(cx.theme().tokens.spacing.xs)
-                                .child(
-                                    div()
-                                        .text_body(true, cx)
-                                        .child(crate::tr!("chat.waiting_connection")),
-                                )
-                                .child(
-                                    div()
-                                        .text_secondary(true, cx)
-                                        .overflow_hidden()
-                                        .child(crate::widgets::fade_text(preview)),
-                                ),
+                            div()
+                                .text_body(true, cx)
+                                .child(crate::tr!("chat.waiting_connection")),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.store.update(cx, |store, cx| {
-                                store.select_session(id.clone(), cx);
-                            });
-                            this.window_state
-                                .update(cx, |state, cx| state.open_thread(cx));
-                        }))
-                    }),
-            )
-            .into_any_element()
+                        .child(
+                            div()
+                                .text_secondary(true, cx)
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(preview.clone())),
+                        ),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.store.update(cx, |store, cx| {
+                        store.select_session(id.clone(), cx);
+                    });
+                    this.window_state
+                        .update(cx, |state, cx| state.open_thread(cx));
+                }))
+                .into_any_element()
+            },
+        )
+        .render(v_flex().w_full())
     }
 
     fn render_compact_row(
@@ -4127,9 +4210,17 @@ impl SessionsSidebar {
         let layout = self.store.read(cx).sidebar_layout();
         let body = self.loading_body(
             move |this, window, cx| {
-                if !model.has_projects {
+                // The empty page fades in where the last project's list was.
+                let empty = crate::motion::shown(
+                    "threads-empty",
+                    (!model.has_projects).then_some(()),
+                    window,
+                    cx,
+                );
+                if let Some(empty) = empty.filter(|_| !model.has_projects) {
                     div()
                         .id("threads-empty")
+                        .opacity(empty.progress())
                         .debug_selector(|| "threads-empty".into())
                         .size_full()
                         .child(crate::material::empty_state(
@@ -4158,6 +4249,7 @@ impl SessionsSidebar {
                         .flatten();
                     let reveal_model = model.clone();
                     this.compact_scroll.step(&this.compact_list_state, window, cx);
+                    this.compact_presence.settle(&this.compact_list_state, cx);
                     let compact_width = this.compact_list_state.viewport_bounds().size.width;
                     div()
                         .id("compact-thread-list")
@@ -4214,9 +4306,20 @@ impl SessionsSidebar {
                                 this.compact_list_state.clone(),
                                 cx.processor(move |this, index: usize, window, cx| {
                                     let factor = model.folds.get(index).copied().unwrap_or(1.);
-                                    this.fold_row(factor, compact_width, window, cx, |this, window, cx| {
+                                    let folded = this.fold_row(factor, compact_width, window, cx, |this, window, cx| {
                                         this.render_compact_row(&model.rows[index], window, cx)
-                                    })
+                                    });
+                                    let key = presence::row_key(model.rows[index].key());
+                                    this.compact_presence.around(key, cx).draw(
+                                        "compact-row",
+                                        key,
+                                        Glide::Rest,
+                                        folded,
+                                        |(model, index): &(Rc<CompactListModel>, usize), window| {
+                                            this.render_compact_row(&model.rows[*index], window, cx)
+                                        },
+                                        window,
+                                    )
                                 }),
                             )
                             .size_full(),
@@ -4277,7 +4380,7 @@ impl SessionsSidebar {
                     ),
             )
             .when(!self.store.read(cx).threads_loading(), |list| {
-                list.child(self.pending_thread_rows(cx))
+                list.child(self.pending_thread_rows(window, cx))
             })
             .child(body)
             .into_any_element()
@@ -4688,86 +4791,120 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (gpui::AnyElement, gpui::AnyElement) {
-        let thread_list = if groups.is_empty() {
-            div()
-                .id("sidebar-project-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scrollbar()
-                .child(
-                    div()
-                        .size_full()
-                        .child(v_flex().w_full().px_2().pb_2().child(empty_row(
-                            if self.store.read(cx).scope().is_full() {
-                                crate::tr!("sidebar.empty")
-                            } else {
-                                crate::tr!("member.empty_description")
-                            },
+        let mut rows = self.grouped_rows_folding(&groups, self.store.read(cx));
+        if groups.is_empty() {
+            let hint = if self.store.read(cx).scope().is_full() {
+                crate::tr!("sidebar.empty")
+            } else {
+                crate::tr!("member.empty_description")
+            };
+            rows.push((GroupedListRow::Hint(hint), 1.));
+        }
+        let all: Vec<(u64, f32)> = rows
+            .iter()
+            .map(|(row, factor)| (presence::row_key(row.key(&groups)), *factor))
+            .collect();
+        rows.retain(|(_, factor)| *factor >= 0.);
+        let keys = rows.iter().map(|(row, _)| row.key(&groups));
+        if !keys.clone().eq(self
+            .grouped_row_keys
+            .iter()
+            .map(|(kind, id)| (*kind, id.as_str())))
+        {
+            let drawn = self.grouped_drawn.clone();
+            self.grouped_presence.update(
+                &all,
+                (),
+                self.folding,
+                &self.grouped_list_state,
+                |index| (drawn.clone(), index),
+                cx,
+            );
+            replace_gliding_rows(
+                &self.grouped_list_state,
+                &self.grouped_flip,
+                |index| {
+                    self.grouped_row_keys
+                        .get(index)
+                        .map(|(kind, id)| (*kind, id.as_str()))
+                },
+                keys.clone(),
+                window,
+            );
+            self.grouped_row_keys = keys.map(|(kind, id)| (kind, id.to_owned())).collect();
+        }
+        self.grouped_presence.settle(&self.grouped_list_state, cx);
+        let (rows, folds) = rows.into_iter().unzip();
+        let frame = Rc::new(GroupedFrame {
+            rows,
+            folds,
+            groups,
+            flags,
+        });
+        self.grouped_drawn = frame.clone();
+        let grouped_width = self.grouped_list_state.viewport_bounds().size.width;
+        let flip = self.grouped_flip.clone();
+        let thread_list = list(
+            self.grouped_list_state.clone(),
+            cx.processor(move |this, index: usize, window, cx| {
+                let Some(row) = frame.rows.get(index) else {
+                    return div().into_any_element();
+                };
+                let factor = frame.folds.get(index).copied().unwrap_or(1.);
+                let name = row.key(&frame.groups);
+                let folded =
+                    this.fold_row(factor, grouped_width, window, cx, |this, window, cx| {
+                        this.render_grouped_row(index, row, &frame.groups, &frame.flags, window, cx)
+                    });
+                let key = presence::row_key(name);
+                let row = this.grouped_presence.around(key, cx).draw(
+                    "grouped-row",
+                    key,
+                    Glide::Rest,
+                    folded,
+                    |(frame, index): &(Rc<GroupedFrame>, usize), window| {
+                        let Some(row) = frame.rows.get(*index) else {
+                            return div().into_any_element();
+                        };
+                        this.render_grouped_row(
+                            *index,
+                            row,
+                            &frame.groups,
+                            &frame.flags,
+                            window,
                             cx,
-                        ))),
-                )
-                .into_any_element()
-        } else {
-            let rows = self.grouped_rows(&groups, self.store.read(cx));
-            let keys = rows.iter().map(|(row, _)| row.key(&groups));
-            if !keys.clone().eq(self
-                .grouped_row_keys
-                .iter()
-                .map(|(kind, id)| (*kind, id.as_str())))
-            {
-                replace_gliding_rows(
-                    &self.grouped_list_state,
-                    &self.grouped_flip,
-                    |index| {
-                        self.grouped_row_keys
-                            .get(index)
-                            .map(|(kind, id)| (*kind, id.as_str()))
+                        )
                     },
-                    keys.clone(),
                     window,
                 );
-                self.grouped_row_keys = keys.map(|(kind, id)| (kind, id.to_owned())).collect();
-            }
-            let grouped_width = self.grouped_list_state.viewport_bounds().size.width;
-            let flip = self.grouped_flip.clone();
-            let thread_list = list(
-                self.grouped_list_state.clone(),
-                cx.processor(move |this, index: usize, window, cx| {
-                    let (row, factor) = &rows[index];
-                    let (kind, id) = row.key(&groups);
-                    let folded =
-                        this.fold_row(*factor, grouped_width, window, cx, |this, window, cx| {
-                            this.render_grouped_row(index, row, &groups, &flags, window, cx)
-                        });
-                    flip.row(
-                        index,
-                        SharedString::from(format!("grouped-{kind}-{id}")),
-                        folded,
-                    )
-                }),
-            )
+                flip.row(
+                    index,
+                    SharedString::from(format!("grouped-{}-{}", name.0, name.1)),
+                    row,
+                )
+            }),
+        )
+        .flex_1()
+        .min_h_0()
+        .pb_2();
+        let thread_list = v_flex()
+            .id("grouped-thread-list")
             .flex_1()
             .min_h_0()
-            .pb_2();
-            v_flex()
-                .id("grouped-thread-list")
-                .flex_1()
-                .min_h_0()
-                .relative()
-                .child(crate::scroll::page_viewport(
-                    "grouped-thread-bounce",
+            .relative()
+            .child(crate::scroll::page_viewport(
+                "grouped-thread-bounce",
+                &self.grouped_list_state,
+                thread_list,
+            ))
+            .when(!window.is_inspector_picking(cx), |list| {
+                list.child(thread_list_scrollbar(
+                    "grouped-thread-scrollbar",
                     &self.grouped_list_state,
-                    thread_list,
+                    crate::material::selectable_row_height(false),
                 ))
-                .when(!window.is_inspector_picking(cx), |list| {
-                    list.child(thread_list_scrollbar(
-                        "grouped-thread-scrollbar",
-                        &self.grouped_list_state,
-                        crate::material::selectable_row_height(false),
-                    ))
-                })
-                .into_any_element()
-        };
+            })
+            .into_any_element();
         (
             self.render_projects_header(cx).into_any_element(),
             thread_list,
@@ -4792,6 +4929,19 @@ impl SessionsSidebar {
             settled_count,
             settled_hidden_count,
         } = self.thread_rows(flat_sessions, scope.as_deref(), "recent");
+        let mut visible = Vec::new();
+        for (section, rows) in [
+            (ThreadSection::Pinned, &pinned),
+            (ThreadSection::Active, &active),
+        ] {
+            visible.push(FlatListRow::Boundary(section, rows.is_empty()));
+            for meta in rows.iter() {
+                visible.push(FlatListRow::Thread(Box::new((*meta).clone())));
+            }
+        }
+        let more = self.settled_more_count("recent", settled_hidden_count);
+        let (shelf, more_factor) = self.shelf_factors("recent", &settled_visible, more.is_some());
+        let mut folds = vec![1.; visible.len()];
         if pinned.is_empty() && active.is_empty() && settled_count == 0 {
             // An active project filter can empty the list while threads
             // exist; that state gets its own hint, not the no-projects one.
@@ -4806,211 +4956,222 @@ impl SessionsSidebar {
             } else {
                 crate::tr!("sidebar.filter_empty")
             };
-            let list_content = v_flex().w_full().px_2().pb_2().child(empty_row(hint, cx));
-            let thread_list = div()
-                .id("sidebar-project-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scrollbar()
-                .child(div().size_full().child(list_content))
-                .into_any_element();
-            (self.render_flat_header(cx).into_any_element(), thread_list)
-        } else {
-            let mut visible = Vec::new();
-            for (section, rows) in [
-                (ThreadSection::Pinned, &pinned),
-                (ThreadSection::Active, &active),
-            ] {
-                visible.push(FlatListRow::Boundary(section, rows.is_empty()));
-                for meta in rows.iter() {
-                    visible.push(FlatListRow::Thread(Box::new((*meta).clone())));
-                }
+            visible.push(FlatListRow::Hint(hint));
+            folds.push(1.);
+        }
+        if settled_count > 0 {
+            if pinned.is_empty() && active.is_empty() {
+                visible.push(FlatListRow::Empty);
             }
-            let more = self.settled_more_count("recent", settled_hidden_count);
-            let (shelf, more_factor) =
-                self.shelf_factors("recent", &settled_visible, more.is_some());
-            let mut folds = vec![1.; visible.len()];
-            if settled_count > 0 {
-                if pinned.is_empty() && active.is_empty() {
-                    visible.push(FlatListRow::Empty);
-                }
-                visible.push(FlatListRow::Settled);
-                folds.resize(visible.len(), 1.);
-                for (meta, factor) in settled_visible.into_iter().zip(shelf) {
-                    visible.push(FlatListRow::Thread(Box::new(meta.clone())));
-                    folds.push(factor);
-                }
+            visible.push(FlatListRow::Settled);
+            folds.resize(visible.len(), 1.);
+            for (meta, factor) in settled_visible.into_iter().zip(shelf) {
+                visible.push(FlatListRow::Thread(Box::new(meta.clone())));
+                folds.push(factor);
             }
-            if let Some(count) = more {
-                visible.push(FlatListRow::More(count));
-                folds.push(more_factor);
-            }
-            let mut kept = folds.iter().map(|factor| *factor >= 0.);
-            visible.retain(|_| kept.next().unwrap_or(true));
-            folds.retain(|factor| *factor >= 0.);
-            let keys = visible.iter().map(FlatListRow::key);
-            if !keys.clone().eq(self
-                .flat_row_keys
+        }
+        if let Some(count) = more {
+            visible.push(FlatListRow::More(count));
+            folds.push(more_factor);
+        }
+        let all: Vec<(u64, f32)> = visible
+            .iter()
+            .zip(&folds)
+            .map(|(row, factor)| (presence::row_key(row.key()), *factor))
+            .collect();
+        let mut kept = folds.iter().map(|factor| *factor >= 0.);
+        visible.retain(|_| kept.next().unwrap_or(true));
+        folds.retain(|factor| *factor >= 0.);
+        let keys = visible.iter().map(FlatListRow::key);
+        if !keys.clone().eq(self
+            .flat_row_keys
+            .iter()
+            .map(|(kind, id)| (*kind, id.as_str())))
+        {
+            let drawn = self.flat_drawn.clone();
+            self.flat_presence.update(
+                &all,
+                &scope,
+                self.folding,
+                &self.flat_list_state,
+                |index| (drawn.clone(), index),
+                cx,
+            );
+            replace_gliding_rows(
+                &self.flat_list_state,
+                &self.flat_flip,
+                |index| {
+                    self.flat_row_keys
+                        .get(index)
+                        .map(|(kind, id)| (*kind, id.as_str()))
+                },
+                keys.clone(),
+                window,
+            );
+            self.flat_row_keys = keys.map(|(kind, id)| (kind, id.to_owned())).collect();
+        }
+        self.flat_presence.settle(&self.flat_list_state, cx);
+        let pinned_row = |id: &str| {
+            let index = visible
                 .iter()
-                .map(|(kind, id)| (*kind, id.as_str())))
-            {
-                replace_gliding_rows(
-                    &self.flat_list_state,
-                    &self.flat_flip,
-                    |index| {
-                        self.flat_row_keys
-                            .get(index)
-                            .map(|(kind, id)| (*kind, id.as_str()))
+                .position(|row| matches!(row, FlatListRow::Thread(meta) if meta.id == id))?;
+            Some((index, pinned.iter().any(|meta| meta.id == id)))
+        };
+        if let Some(id) = self.reveal_pinned.clone() {
+            self.reveal_pinned_row(
+                &self.flat_list_state.clone(),
+                &self.flat_scroll.clone(),
+                pinned_row(&id),
+                cx,
+            );
+        }
+        let project_names = groups
+            .iter()
+            .map(|group| {
+                (
+                    group.project.id.clone(),
+                    crate::project_icon::label(&group.project),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let frame = Rc::new(FlatFrame {
+            rows: visible,
+            folds,
+            scope,
+            settled_count,
+            project_names,
+            flags,
+            active_id,
+        });
+        self.flat_drawn = frame.clone();
+        let flat_width = self.flat_list_state.viewport_bounds().size.width;
+        let flip = self.flat_flip.clone();
+        self.flat_scroll.step(&self.flat_list_state, window, cx);
+        let thread_list = list(
+            self.flat_list_state.clone(),
+            cx.processor(move |this, index: usize, window, cx| {
+                let factor = frame.folds.get(index).copied().unwrap_or(1.);
+                let folded = this.fold_row(factor, flat_width, window, cx, |this, window, cx| {
+                    this.render_flat_row(&frame, index, window, cx)
+                });
+                let name = frame.rows.get(index).map_or(("", ""), FlatListRow::key);
+                let key = presence::row_key(name);
+                let row = this.flat_presence.around(key, cx).draw(
+                    "flat-row",
+                    key,
+                    Glide::Rest,
+                    folded,
+                    |(frame, index): &(Rc<FlatFrame>, usize), window| {
+                        this.render_flat_row(frame, *index, window, cx)
                     },
-                    keys.clone(),
                     window,
                 );
-                self.flat_row_keys = keys.map(|(kind, id)| (kind, id.to_owned())).collect();
+                flip.row(
+                    index,
+                    SharedString::from(format!("flat-{}-{}", name.0, name.1)),
+                    row,
+                )
+            }),
+        )
+        .flex_1()
+        .min_h_0()
+        .into_any_element();
+        (
+            self.render_flat_header(cx).into_any_element(),
+            v_flex()
+                .id("flat-thread-list")
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .on_drop(cx.listener(|this, _: &AnyDrag, window, cx| this.drop_thread(window, cx)))
+                .on_drag_move(
+                    cx.listener(|this, event: &gpui::DragMoveEvent<AnyDrag>, _, cx| {
+                        this.drag_left_list(event, cx);
+                        this.drag_auto_scroll(event, cx)
+                    }),
+                )
+                .child(crate::scroll::page_viewport(
+                    "flat-thread-bounce",
+                    &self.flat_list_state,
+                    thread_list,
+                ))
+                .when(!window.is_inspector_picking(cx), |list| {
+                    list.child(thread_list_scrollbar(
+                        "flat-thread-scrollbar",
+                        &self.flat_list_state,
+                        FLAT_ROW_HEIGHT,
+                    ))
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Row `index` of a frame of the Flat list.
+    fn render_flat_row(
+        &mut self,
+        frame: &FlatFrame,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(row) = frame.rows.get(index) else {
+            return div().into_any_element();
+        };
+        let scope = frame.scope.clone();
+        let meta = match row {
+            FlatListRow::Thread(meta) => meta,
+            FlatListRow::Boundary(section, empty) => {
+                return div()
+                    .w_full()
+                    .px_2()
+                    .child(self.render_drag_boundary(*section, *empty, scope, window, cx))
+                    .into_any_element();
             }
-            let pinned_row = |id: &str| {
-                let index = visible
-                    .iter()
-                    .position(|row| matches!(row, FlatListRow::Thread(meta) if meta.id == id))?;
-                Some((index, pinned.iter().any(|meta| meta.id == id)))
-            };
-            if let Some(id) = self.reveal_pinned.clone() {
-                self.reveal_pinned_row(
-                    &self.flat_list_state.clone(),
-                    &self.flat_scroll.clone(),
-                    pinned_row(&id),
+            FlatListRow::Settled => {
+                let header = self.render_settled_header(
+                    "recent",
+                    frame.settled_count,
+                    scope.as_deref(),
+                    window,
                     cx,
                 );
+                return self
+                    .drop_zone(div().w_full().child(header), DropZone::Settled, scope, cx)
+                    .into_any_element();
             }
-            let project_names = groups
-                .iter()
-                .map(|group| {
-                    (
-                        group.project.id.clone(),
-                        crate::project_icon::label(&group.project),
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-            let active_id = active_id.clone();
-            let flat_width = self.flat_list_state.viewport_bounds().size.width;
-            let flip = self.flat_flip.clone();
-            self.flat_scroll.step(&self.flat_list_state, window, cx);
-            let thread_list = list(
-                self.flat_list_state.clone(),
-                cx.processor(move |this, index: usize, window, cx| {
-                    let factor = folds.get(index).copied().unwrap_or(1.);
-                    let folded =
-                        this.fold_row(factor, flat_width, window, cx, |this, window, cx| {
-                            let Some(row) = visible.get(index) else {
-                                return div().into_any_element();
-                            };
-                            let meta = match row {
-                                FlatListRow::Thread(meta) => meta,
-                                FlatListRow::Boundary(section, empty) => {
-                                    return div()
-                                        .w_full()
-                                        .px_2()
-                                        .child(this.render_drag_boundary(
-                                            *section,
-                                            *empty,
-                                            scope.clone(),
-                                            window,
-                                            cx,
-                                        ))
-                                        .into_any_element();
-                                }
-                                FlatListRow::Settled => {
-                                    let header = this.render_settled_header(
-                                        "recent",
-                                        settled_count,
-                                        scope.as_deref(),
-                                        window,
-                                        cx,
-                                    );
-                                    return this
-                                        .drop_zone(
-                                            div().w_full().child(header),
-                                            DropZone::Settled,
-                                            scope.clone(),
-                                            cx,
-                                        )
-                                        .into_any_element();
-                                }
-                                FlatListRow::More(count) => {
-                                    return this.render_settled_more("recent", *count, cx);
-                                }
-                                FlatListRow::Empty => return this.render_active_empty(cx),
-                            };
-                            // While carried, the row keeps its place, hidden
-                            // under its ghost.
-                            let project_name = meta
-                                .project_id
-                                .as_ref()
-                                .and_then(|project_id| project_names.get(project_id))
-                                .cloned();
-                            let is_active = active_id.as_deref() == Some(meta.id.as_str());
-                            let thread = this.render_flat_thread(
-                                meta,
-                                &flags,
-                                project_name,
-                                is_active,
-                                window,
-                                cx,
-                            );
-                            let row = div().w_full().px_2().pb(px(2.)).child(drag_ghost::slot(
-                                arrange::thread_slot(&meta.id),
-                                thread,
-                                window,
-                                cx,
-                            ));
-                            let zone = DropZone::Row {
-                                id: meta.id.clone(),
-                                section: tcode_core::thread_sort::thread_section(meta),
-                            };
-                            this.drop_zone(row, zone, scope.clone(), cx)
-                                .into_any_element()
-                        });
-                    let key = visible.get(index).map_or(("", ""), FlatListRow::key);
-                    flip.row(
-                        index,
-                        SharedString::from(format!("flat-{}-{}", key.0, key.1)),
-                        folded,
-                    )
-                }),
-            )
-            .flex_1()
-            .min_h_0()
-            .into_any_element();
-            (
-                self.render_flat_header(cx).into_any_element(),
-                v_flex()
-                    .id("flat-thread-list")
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .on_drop(
-                        cx.listener(|this, _: &AnyDrag, window, cx| this.drop_thread(window, cx)),
-                    )
-                    .on_drag_move(cx.listener(
-                        |this, event: &gpui::DragMoveEvent<AnyDrag>, _, cx| {
-                            this.drag_left_list(event, cx);
-                            this.drag_auto_scroll(event, cx)
-                        },
-                    ))
-                    .child(crate::scroll::page_viewport(
-                        "flat-thread-bounce",
-                        &self.flat_list_state,
-                        thread_list,
-                    ))
-                    .when(!window.is_inspector_picking(cx), |list| {
-                        list.child(thread_list_scrollbar(
-                            "flat-thread-scrollbar",
-                            &self.flat_list_state,
-                            FLAT_ROW_HEIGHT,
-                        ))
-                    })
-                    .into_any_element(),
-            )
-        }
+            FlatListRow::More(count) => {
+                return self.render_settled_more("recent", *count, cx);
+            }
+            FlatListRow::Empty => return self.render_active_empty(cx),
+            FlatListRow::Hint(hint) => {
+                return div()
+                    .w_full()
+                    .px_2()
+                    .pb_2()
+                    .child(empty_row(hint.clone(), cx))
+                    .into_any_element();
+            }
+        };
+        // While carried, the row keeps its place, hidden under its ghost.
+        let project_name = meta
+            .project_id
+            .as_ref()
+            .and_then(|project_id| frame.project_names.get(project_id))
+            .cloned();
+        let is_active = frame.active_id.as_deref() == Some(meta.id.as_str());
+        let thread =
+            self.render_flat_thread(meta, &frame.flags, project_name, is_active, window, cx);
+        let row = div().w_full().px_2().pb(px(2.)).child(drag_ghost::slot(
+            arrange::thread_slot(&meta.id),
+            thread,
+            window,
+            cx,
+        ));
+        let zone = DropZone::Row {
+            id: meta.id.clone(),
+            section: tcode_core::thread_sort::thread_section(meta),
+        };
+        self.drop_zone(row, zone, scope, cx).into_any_element()
     }
 }
 
@@ -5127,11 +5288,11 @@ impl Render for SessionsSidebar {
             .child(self.render_machine_control(window, cx))
             .child(header)
             .child(self.loading_body(
-                |this, _, cx| {
+                |this, window, cx| {
                     v_flex()
                         .flex_1()
                         .min_h_0()
-                        .child(this.pending_thread_rows(cx))
+                        .child(this.pending_thread_rows(window, cx))
                         .child(thread_list)
                         .into_any_element()
                 },
@@ -5514,6 +5675,102 @@ mod tests {
         );
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds(header).is_none(), "and is gone once it has");
+
+        driver.shutdown(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A thread archived from the list folds away where it was, taking no
+    /// clicks while it goes, and the rows below close up behind it; one that
+    /// comes back opens its room again. Nothing below jumps either way, and
+    /// with motion reduced the list changes at once.
+    #[gpui::test]
+    fn threads_that_leave_and_return_fold_out_of_and_into_the_list(cx: &mut TestAppContext) {
+        let (sidebar, store, _, mut driver, host, root) =
+            sidebar_over_host(cx, "sidebar-presence-test", &["newest", "middle", "oldest"]);
+        let (_, cx) =
+            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        cx.simulate_resize(size(px(320.), px(800.)));
+        crate::test_frames::draw_settled(cx);
+        let top = |id: &str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("sidebar-thread-{id}").leak())
+                .map(|bounds| bounds.top())
+        };
+        let (middle, oldest) = (top("middle", cx).unwrap(), top("oldest", cx).unwrap());
+        let mut lifecycle = |command: Command, listed: bool, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.perform_lifecycle(vec![command], None, window, cx)
+                })
+            });
+            driver.wait_until(cx, &store, "the lifecycle change", |cx| {
+                store.read_with(cx, |store, _| {
+                    store
+                        .sidebar_sessions()
+                        .iter()
+                        .any(|meta| meta.id == "middle")
+                        == listed
+                })
+            });
+            draw(cx);
+        };
+        let halfway = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+        };
+        let archive = || Command::ArchiveSession {
+            session_id: "middle".into(),
+        };
+
+        lifecycle(archive(), false, cx);
+        assert_eq!(top("middle", cx), Some(middle), "it folds from its place");
+        assert_eq!(
+            top("oldest", cx),
+            Some(oldest),
+            "the row below waits for it"
+        );
+        let pressed = cx.debug_bounds("sidebar-thread-middle").unwrap().center();
+        cx.simulate_click(pressed, Default::default());
+        assert_ne!(
+            store.read_with(cx, |store, _| store.roster_session_id()),
+            Some("middle".into()),
+            "a leaving row takes no clicks"
+        );
+        halfway(cx);
+        let closing = top("oldest", cx).unwrap();
+        assert!(
+            closing < oldest && closing > middle,
+            "the row below closes up behind it: {closing:?}"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(top("middle", cx), None, "it has gone");
+        assert_eq!(top("oldest", cx), Some(middle));
+
+        lifecycle(
+            Command::UnarchiveSession {
+                session_id: "middle".into(),
+            },
+            true,
+            cx,
+        );
+        assert_eq!(top("oldest", cx), Some(middle), "the row below waits");
+        halfway(cx);
+        let opening = top("oldest", cx).unwrap();
+        assert!(
+            opening > middle && opening < oldest,
+            "it opens its room: {opening:?}"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert!(top("middle", cx).is_some(), "it is back");
+        assert_eq!(top("oldest", cx), Some(oldest));
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        lifecycle(archive(), false, cx);
+        assert_eq!(top("middle", cx), None, "reduced motion takes it at once");
+        assert!(top("oldest", cx) < Some(oldest), "and closes up at once");
 
         driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
