@@ -14,6 +14,7 @@
 //! [`Ringed`]. Remove both once gpui-base's controls fade their own ring.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
@@ -22,8 +23,8 @@ use web_time::Instant;
 
 use gpui::{
     AbsoluteLength, AnyElement, App, Bounds, BoxShadow, Corners, CornersRefinement, ElementId,
-    FocusHandle, Global, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels,
-    WeakFocusHandle, Window,
+    Entity, EntityId, FocusHandle, Global, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, Pixels, WeakEntity, WeakFocusHandle, Window,
 };
 
 /// A ring's fade: from where, to where, since when.
@@ -130,13 +131,142 @@ pub(crate) fn paint(
 
 /// The focus handle of the control `id`, kept under it, for a control that
 /// would otherwise keep its handle to itself; a tab stop.
+///
+/// Kept in element state, which GPUI keys by the whole id path, so a control
+/// its view draws under a new parent (a page as the window turns compact or
+/// wide, a pane as a zoom lifts it over the column) gets a new place: there
+/// it takes over the focused handle the same view's control `id` held where
+/// it was drawn before, so the keyboard stays on it and its ring carries on.
+/// A control still drawn in its old place this frame keeps its handle, and
+/// one that took it over is given a new one.
 pub(crate) fn handle(id: &ElementId, window: &mut Window, cx: &mut App) -> FocusHandle {
-    window
-        .use_keyed_state(super::child_id(id, "focus"), cx, |_, cx| cx.focus_handle())
-        .read(cx)
-        .clone()
-        .tab_index(0)
-        .tab_stop(true)
+    let key = (window.current_view(), id.clone());
+    let frame = Handles::frame(cx);
+    let slot = window.use_keyed_state(super::child_id(id, "focus"), cx, |window, cx| {
+        moved_here(&key, frame, window).unwrap_or_else(|| cx.focus_handle())
+    });
+    claim(key, &slot, frame, cx);
+    slot.read(cx).clone().tab_index(0).tab_stop(true)
+}
+
+/// Where each view's controls keep their focus handles, by the view and the
+/// control's id. Not a GPUI global: a view that reads a global while it is
+/// built is built again whenever the global changes, and this one changes
+/// after every draw.
+struct Handles;
+
+thread_local! {
+    static CLAIMS: RefCell<Claims> = RefCell::default();
+}
+
+#[derive(Default)]
+struct Claims {
+    places: HashMap<(EntityId, ElementId), Vec<Place>>,
+    /// Counts the draws that asked for handles: it moves on once the draw
+    /// asking for one now is done.
+    frame: u64,
+    counting: bool,
+}
+
+/// One place a control was drawn in: the element state holding its handle,
+/// the handle, the draw it last asked in, and the draw it took over another
+/// place's handle in.
+struct Place {
+    slot: WeakEntity<FocusHandle>,
+    handle: WeakFocusHandle,
+    at: u64,
+    took: Option<u64>,
+}
+
+impl Handles {
+    /// The draw under way.
+    fn frame(cx: &mut App) -> u64 {
+        let (frame, started) = CLAIMS.with_borrow_mut(|claims| {
+            let started = !claims.counting;
+            claims.counting = true;
+            (claims.frame, started)
+        });
+        if started {
+            cx.defer(|_| {
+                CLAIMS.with_borrow_mut(|claims| {
+                    claims.frame += 1;
+                    claims.counting = false;
+                    // A place no longer drawn goes, and a control with it.
+                    claims.places.retain(|_, places| {
+                        places.retain(|place| place.slot.upgrade().is_some());
+                        !places.is_empty()
+                    });
+                })
+            });
+        }
+        frame
+    }
+}
+
+/// The focused handle the control `key` names held in a place not drawn in
+/// this draw yet: where it was before it moved.
+fn moved_here(key: &(EntityId, ElementId), frame: u64, window: &Window) -> Option<FocusHandle> {
+    CLAIMS.with_borrow(|claims| {
+        claims
+            .places
+            .get(key)?
+            .iter()
+            .filter(|place| place.at < frame)
+            .find_map(|place| {
+                place
+                    .handle
+                    .upgrade()
+                    .filter(|handle| handle.is_focused(window))
+            })
+    })
+}
+
+/// Records that the place `slot` asked for control `key`'s handle in draw
+/// `frame`. A place that took over another's handle shares it for the draw
+/// the control moves in, which may still draw both; if both are drawn again
+/// after that, they are two controls with one id, and the place that took
+/// the handle is given a new one.
+fn claim(key: (EntityId, ElementId), slot: &Entity<FocusHandle>, frame: u64, cx: &mut App) {
+    let handle = slot.read(cx).clone();
+    let id = slot.entity_id();
+    let taker = CLAIMS.with_borrow_mut(|claims| {
+        let places = claims.places.entry(key).or_default();
+        let took = places
+            .iter()
+            .any(|place| place.slot.entity_id() != id && handle == place.handle)
+            .then_some(frame);
+        match places.iter_mut().find(|place| place.slot.entity_id() == id) {
+            Some(place) => {
+                place.at = frame;
+                if !(handle == place.handle) {
+                    place.handle = handle.downgrade();
+                    place.took = None;
+                }
+            }
+            None => places.push(Place {
+                slot: slot.downgrade(),
+                handle: handle.downgrade(),
+                at: frame,
+                took,
+            }),
+        }
+        let mine = places
+            .iter()
+            .find(|place| place.slot.entity_id() == id)
+            .and_then(|place| place.took);
+        places
+            .iter()
+            .filter(|place| place.slot.entity_id() != id && handle == place.handle)
+            .filter(|place| place.at == frame)
+            .find_map(|place| match (mine, place.took) {
+                (Some(took), _) if took < frame => Some(slot.downgrade()),
+                (_, Some(took)) if took < frame => Some(place.slot.clone()),
+                _ => None,
+            })
+    });
+    if let Some(taker) = taker.and_then(|taker| taker.upgrade()) {
+        taker.update(cx, |taken, cx| *taken = cx.focus_handle());
+    }
 }
 
 /// `child`, a control that tracks `handle`, with its keyboard focus ring

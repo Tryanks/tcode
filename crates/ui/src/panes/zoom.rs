@@ -1,9 +1,8 @@
 //! A pane zoomed over the chat column.
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Styled as _, Window, div,
-    point, px,
+    AnyElement, App, Bounds, ElementId, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Styled as _, Window, div, point, px,
 };
 use gpui_base::FocusTrapElement as _;
 use gpui_base::motion::Interpolate as _;
@@ -125,11 +124,6 @@ impl Zoom {
         if sample.should_render() {
             zoomed.progress = sample.progress;
         } else {
-            // Back in its slot the pane's keyed state starts over, a focused
-            // button's handle with it, so a keyboard inside goes to the pane.
-            if zoomed.trap.contains_focused(window, cx) {
-                window.focus(&zoomed.pane.focus_handle(cx), cx);
-            }
             self.current = None;
         }
     }
