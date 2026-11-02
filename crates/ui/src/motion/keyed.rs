@@ -51,6 +51,11 @@ impl FlipBounds {
             .map_or_else(Point::default, |last| last.origin - now.origin)
     }
 
+    /// Where `key` was laid out when last recorded, relative to its scope.
+    pub(crate) fn get(&self, key: &SharedString) -> Option<Bounds<Pixels>> {
+        self.0.borrow().get(key).copied()
+    }
+
     /// Forgets every key `keep` rejects.
     pub(crate) fn retain(&self, keep: impl Fn(&SharedString) -> bool) {
         RefCell::borrow_mut(&self.0).retain(|key, _| keep(key));

@@ -4,9 +4,10 @@
 //!
 //! gpui-base has no sortable-list primitive, so the drag composes GPUI's
 //! `on_drag`, `on_drag_move` and `on_drop`, and GPUI does not cancel a drag on
-//! Escape by itself.
+//! Escape by itself. The row it carries is a [`drag_ghost`].
 
 use super::super::*;
+use crate::motion::drag_ghost;
 use crate::scroll::ScrollableElement as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, SharedString, WeakEntity};
@@ -28,37 +29,13 @@ pub(in super::super) struct QueueDrag {
     before: Option<u64>,
     /// `before` as the drag began, where a drop moves nothing.
     origin: Option<u64>,
-    width: Pixels,
     auto_scroll: gpui_base::AutoScroll,
     _escape: Subscription,
 }
 
-/// The lifted row that follows the pointer.
-struct QueuedDragView {
-    composer: WeakEntity<Composer>,
-    label: SharedString,
-    compact: bool,
-}
-
-impl Render for QueuedDragView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let width = self
-            .composer
-            .upgrade()
-            .and_then(|composer| Some(composer.read(cx).queue_drag.as_ref()?.width))
-            .unwrap_or(px(320.));
-        div()
-            .w(width)
-            .px_1()
-            .py_0p5()
-            .rounded(crate::material::radius_overlay(cx))
-            .bg(cx.theme().list_active)
-            .shadow_lg()
-            .text_body(self.compact, cx)
-            .text_color(cx.theme().foreground)
-            .overflow_hidden()
-            .child(crate::widgets::fade_text(self.label.clone()))
-    }
+/// The slot a queued row's ghost lifts from and settles into.
+fn queued_slot(id: u64) -> SharedString {
+    format!("queued-{id}").into()
 }
 
 impl Composer {
@@ -93,8 +70,10 @@ impl Composer {
     fn begin_queue_drag(
         composer: WeakEntity<Self>,
         dragged: &DraggedQueued,
+        grab: gpui::Point<Pixels>,
+        window: &mut Window,
         cx: &mut App,
-    ) -> Entity<QueuedDragView> {
+    ) -> Entity<drag_ghost::Carried> {
         let escape = {
             let composer = composer.clone();
             cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
@@ -123,24 +102,38 @@ impl Composer {
                 id: dragged.id,
                 before: origin,
                 origin,
-                width: px(320.),
                 auto_scroll: Default::default(),
                 _escape: escape,
             });
             cx.notify();
         });
         crate::haptics::threshold();
-        cx.new(|_| QueuedDragView {
-            composer,
-            label: dragged.label.clone(),
-            compact: dragged.compact,
-        })
+        let (label, compact) = (dragged.label.clone(), dragged.compact);
+        drag_ghost::lift(
+            queued_slot(dragged.id),
+            grab,
+            move |lift, _, cx| {
+                drag_ghost::lifted(div(), lift)
+                    .w_full()
+                    .px_1()
+                    .py_0p5()
+                    .rounded(crate::material::radius_overlay(cx))
+                    .bg(cx.theme().list_active)
+                    .text_body(compact, cx)
+                    .text_color(cx.theme().foreground)
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(label.clone()))
+                    .into_any_element()
+            },
+            window,
+            cx,
+        )
     }
 
     /// The pointer is over row `over`, in its lower half when `lower`. The
     /// gap counts the rows other than the dragged one, so a row sliding
     /// through the pointer never moves the gap back.
-    fn queue_drag_over(&mut self, over: u64, lower: bool, width: Pixels, cx: &mut Context<Self>) {
+    fn queue_drag_over(&mut self, over: u64, lower: bool, cx: &mut Context<Self>) {
         let Some(drag) = self.queue_drag.as_ref() else {
             return;
         };
@@ -166,9 +159,8 @@ impl Composer {
         if drag.before != before {
             crate::haptics::selection();
         }
-        if drag.before != before || drag.width != width {
+        if drag.before != before {
             drag.before = before;
-            drag.width = width;
             cx.notify();
         }
     }
@@ -213,6 +205,7 @@ impl Composer {
     /// messages also show a live countdown.
     pub(in super::super) fn render_queue_strip(
         &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         // A drag released outside the strip ends without a drop.
@@ -246,7 +239,6 @@ impl Composer {
             return None;
         }
         let reorderable = queued.len() > 1 && self.interactive(cx);
-        let dragging = self.queue_drag.as_ref().map(|drag| drag.id);
         if let Some(drag) = &self.queue_drag
             && let Some(from) = queued.iter().position(|message| message.id == drag.id)
         {
@@ -301,18 +293,17 @@ impl Composer {
                 .when(index > 0, |row| {
                     row.pt_1().border_t_1().border_color(cx.theme().border)
                 })
-                .when(dragging == Some(id), |row| row.opacity(0.4))
                 .on_drag_move::<DraggedQueued>(cx.listener(
                     move |this, event: &DragMoveEvent<DraggedQueued>, _, cx| {
                         if event.bounds.contains(&event.event.position) {
                             let lower = event.event.position.y > event.bounds.center().y;
-                            this.queue_drag_over(id, lower, event.bounds.size.width, cx);
+                            this.queue_drag_over(id, lower, cx);
                         }
                     },
                 ));
             let composer = cx.entity().downgrade();
-            let begin = move |dragged: &DraggedQueued, _, _: &mut Window, cx: &mut App| {
-                Self::begin_queue_drag(composer.clone(), dragged, cx)
+            let begin = move |dragged: &DraggedQueued, grab, window: &mut Window, cx: &mut App| {
+                Self::begin_queue_drag(composer.clone(), dragged, grab, window, cx)
             };
             let (row, grip) = match dragged {
                 Some(dragged) if self.compact => (
@@ -341,95 +332,93 @@ impl Composer {
                 Some(dragged) => (row.cursor_grab().on_drag(dragged, begin), None),
                 None => (row, None),
             };
-            strip = strip.child(
-                row.children(grip)
-                    .child(
+            let row = row
+                .children(grip)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_body(self.compact, cx)
+                        .text_color(cx.theme().foreground)
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(label)),
+                )
+                .when_some(countdown, |row, countdown| {
+                    row.child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_body(self.compact, cx)
-                            .text_color(cx.theme().foreground)
-                            .overflow_hidden()
-                            .child(crate::widgets::fade_text(label)),
+                            .flex_none()
+                            .text_secondary(self.compact, cx)
+                            .child(countdown),
                     )
-                    .when_some(countdown, |row, countdown| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_secondary(self.compact, cx)
-                                .child(countdown),
-                        )
-                    })
-                    .child(
-                        Button::new(("queue-steer", id as usize))
-                            .debug_selector(move || format!("queue-steer-{id}"))
-                            .ghost()
-                            .xsmall()
-                            .touch(self.compact)
-                            .icon(IconName::ArrowUp)
-                            // Scheduled rows always support send-now: the
-                            // runtime removes the deadline and uses the normal
-                            // send/queue path even when native steering is absent.
-                            .disabled(
-                                !editable || !self.interactive(cx) || (!scheduled && !can_steer),
-                            )
-                            .tooltip(steer_tooltip)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.workspace_store.update(cx, |store, _cx| {
-                                    store.steer_queued_for(
-                                        this.session_id.clone().unwrap_or_default(),
-                                        id,
-                                    )
-                                });
-                            })),
-                    )
-                    .child(
-                        Button::new(("queue-drop", id as usize))
-                            .debug_selector(move || format!("queue-drop-{id}"))
-                            .ghost()
-                            .xsmall()
-                            .touch(self.compact)
-                            .icon(IconName::Close)
-                            .disabled(!editable || !self.interactive(cx))
-                            .tooltip(crate::tr!("composer.drop_queued"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.drop_queued_and_refill(id, text.clone(), window, cx);
-                            })),
-                    )
-                    .context_menu({
-                        let text = message.text.clone();
-                        let interactive = editable && self.interactive(cx);
-                        move |menu, _, _| {
-                            menu.menu(
-                                crate::tr!("chat.copy_text").into_owned(),
-                                Box::new(CopyText(text.clone())),
-                            )
-                            .separator()
-                            .menu_with_enable(
-                                if scheduled {
-                                    crate::tr!("composer.send_now").into_owned()
-                                } else {
-                                    crate::tr!("composer.steer_queued").into_owned()
-                                },
-                                Box::new(ComposerMenu::QueueSteer(id)),
-                                interactive && (scheduled || can_steer),
-                            )
-                            .menu_with_enable(
-                                crate::tr!("composer.edit_queued").into_owned(),
-                                Box::new(ComposerMenu::QueueEdit {
+                })
+                .child(
+                    Button::new(("queue-steer", id as usize))
+                        .debug_selector(move || format!("queue-steer-{id}"))
+                        .ghost()
+                        .xsmall()
+                        .touch(self.compact)
+                        .icon(IconName::ArrowUp)
+                        // Scheduled rows always support send-now: the
+                        // runtime removes the deadline and uses the normal
+                        // send/queue path even when native steering is absent.
+                        .disabled(!editable || !self.interactive(cx) || (!scheduled && !can_steer))
+                        .tooltip(steer_tooltip)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.steer_queued_for(
+                                    this.session_id.clone().unwrap_or_default(),
                                     id,
-                                    text: text.clone(),
-                                }),
-                                interactive,
-                            )
-                            .menu_with_enable(
-                                crate::tr!("composer.drop_queued").into_owned(),
-                                Box::new(ComposerMenu::QueueDrop(id)),
-                                interactive,
-                            )
-                        }
-                    }),
-            );
+                                )
+                            });
+                        })),
+                )
+                .child(
+                    Button::new(("queue-drop", id as usize))
+                        .debug_selector(move || format!("queue-drop-{id}"))
+                        .ghost()
+                        .xsmall()
+                        .touch(self.compact)
+                        .icon(IconName::Close)
+                        .disabled(!editable || !self.interactive(cx))
+                        .tooltip(crate::tr!("composer.drop_queued"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.drop_queued_and_refill(id, text.clone(), window, cx);
+                        })),
+                )
+                .context_menu({
+                    let text = message.text.clone();
+                    let interactive = editable && self.interactive(cx);
+                    move |menu, _, _| {
+                        menu.menu(
+                            crate::tr!("chat.copy_text").into_owned(),
+                            Box::new(CopyText(text.clone())),
+                        )
+                        .separator()
+                        .menu_with_enable(
+                            if scheduled {
+                                crate::tr!("composer.send_now").into_owned()
+                            } else {
+                                crate::tr!("composer.steer_queued").into_owned()
+                            },
+                            Box::new(ComposerMenu::QueueSteer(id)),
+                            interactive && (scheduled || can_steer),
+                        )
+                        .menu_with_enable(
+                            crate::tr!("composer.edit_queued").into_owned(),
+                            Box::new(ComposerMenu::QueueEdit {
+                                id,
+                                text: text.clone(),
+                            }),
+                            interactive,
+                        )
+                        .menu_with_enable(
+                            crate::tr!("composer.drop_queued").into_owned(),
+                            Box::new(ComposerMenu::QueueDrop(id)),
+                            interactive,
+                        )
+                    }
+                });
+            strip = strip.child(drag_ghost::slot(queued_slot(id), row, window, cx));
         }
         Some(
             div()

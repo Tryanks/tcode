@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::material::{Bar, COMPACT_PAGE_INSET, bar, bar_height, empty_row, selectable_row};
-use crate::motion::settle;
+use crate::motion::{drag_ghost, settle};
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::remote::spaces::{self, ShareTarget, SpacesObserver};
 use crate::scroll::ScrollableElement as _;
@@ -2577,13 +2577,14 @@ impl SessionsSidebar {
             GroupedListRow::Thread(meta) => item
                 .child({
                     let active = self.selected_row(window, cx);
-                    self.render_thread(
+                    let thread = self.render_thread(
                         meta,
                         flags,
                         active.as_deref() == Some(meta.id.as_str()),
                         window,
                         cx,
-                    )
+                    );
+                    drag_ghost::slot(arrange::thread_slot(&meta.id), thread, window, cx)
                 })
                 .into_any_element(),
             GroupedListRow::ToggleThreads {
@@ -4903,7 +4904,6 @@ impl Render for SessionsSidebar {
                                                 div().w_full().child(header),
                                                 DropZone::Settled,
                                                 scope.clone(),
-                                                0.,
                                                 cx,
                                             )
                                             .into_any_element();
@@ -4915,13 +4915,19 @@ impl Render for SessionsSidebar {
                                 };
                                 let target_top = *target_top;
                                 let row = div().w_full().px_2().pb(px(2.));
+                                let slot = arrange::thread_slot(&meta.id);
                                 let row = if this
                                     .drag
                                     .as_ref()
                                     .is_some_and(|drag| drag.session_id == meta.id)
                                 {
-                                    row.child(Self::render_drag_gap(
-                                        crate::material::selectable_row_two_line_height(false),
+                                    row.child(drag_ghost::slot(
+                                        slot,
+                                        Self::render_drag_gap(
+                                            crate::material::selectable_row_two_line_height(false),
+                                        ),
+                                        window,
+                                        cx,
                                     ))
                                 } else {
                                     let project_name = meta
@@ -4930,14 +4936,15 @@ impl Render for SessionsSidebar {
                                         .and_then(|project_id| project_names.get(project_id))
                                         .cloned();
                                     let is_active = active_id.as_deref() == Some(meta.id.as_str());
-                                    row.child(this.render_flat_thread(
+                                    let thread = this.render_flat_thread(
                                         meta,
                                         &flags,
                                         project_name,
                                         is_active,
                                         window,
                                         cx,
-                                    ))
+                                    );
+                                    row.child(drag_ghost::slot(slot, thread, window, cx))
                                 };
                                 let zone = DropZone::Row {
                                     id: meta.id.clone(),
@@ -4949,7 +4956,6 @@ impl Render for SessionsSidebar {
                                     ),
                                     zone,
                                     scope.clone(),
-                                    8.,
                                     cx,
                                 )
                                 .into_any_element()
@@ -7751,14 +7757,32 @@ mod tests {
         assert_eq!(session_id, "fresh");
         assert!("f" < key.as_str() && key.as_str() < "t", "{key}");
 
-        let start = row(cx, "busy").center();
+        // The row lifts off its place and, cancelled, its ghost travels back
+        // into it rather than vanishing.
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        let ghost = |cx: &mut VisualTestContext| cx.debug_bounds("drag-ghost-thread-busy");
+        let busy = row(cx, "busy");
+        let start = busy.center();
         cx.simulate_mouse_down(start, left, none);
         cx.simulate_mouse_move(start + gpui::point(px(0.), px(8.)), left, none);
         draw(cx);
+        assert_eq!(ghost(cx).map(|ghost| ghost.origin), Some(busy.origin));
         let target = row(cx, "pin-a");
         cx.simulate_mouse_move(target.center(), left, none);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
         cx.simulate_keystrokes("escape");
+        draw(cx);
+        let leaving = ghost(cx).expect("Escape sends the row back");
+        assert!(
+            leaving.top() < busy.top(),
+            "it starts back from the pointer"
+        );
         cx.simulate_mouse_up(target.center(), left, none);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(ghost(cx), None);
+        assert_eq!(row(cx, "busy"), busy, "it is back in its place");
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         assert_eq!(sent(cx, &mut driver, 0), vec![], "Escape cancels the drag");
 
         sidebar.update_in(cx, |sidebar, window, cx| {
