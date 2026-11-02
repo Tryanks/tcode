@@ -3,6 +3,7 @@
 //! progress and the words every answer gets. The host owns every write and its state; the map
 //! reads only the stored topology and links, and each confirmation reads GitHub fresh.
 
+use crate::widgets::TooltipTrigger as _;
 use std::rc::Rc;
 
 use gpui::{
@@ -422,7 +423,7 @@ pub(super) fn operation_chip(
             .child(chip())
             .into_any_element(),
             None => chip()
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
                 .into_any_element(),
         };
     };
@@ -1066,9 +1067,8 @@ pub(super) fn caption(
                 .id(SharedString::from(format!("pr-stack-{}", stack.id)))
                 .gap_2()
                 .items_center()
-                .tooltip(|window, cx| {
+                .with_tooltip(|_, _| {
                     Tooltip::new(crate::tr!("pull_requests.stack_tooltip").into_owned())
-                        .build(window, cx)
                 })
                 .child(Icon::new(IconName::Layers))
                 .child(
@@ -1649,7 +1649,7 @@ fn layer_row(
                     .text_meta_mono(false, cx)
                     .child(head.as_deref().map(short).unwrap_or_else(|| "—".into()))
                     .when_some(head, |cell, head| {
-                        cell.tooltip(move |window, cx| Tooltip::new(head.clone()).build(window, cx))
+                        cell.with_tooltip(move |_, _| Tooltip::new(head.clone()))
                     }),
             )
         })

@@ -1,3 +1,4 @@
+use crate::widgets::TooltipTrigger as _;
 use crate::{
     icon::Icon,
     sizing::{Sizable, Size},
@@ -503,7 +504,7 @@ impl RenderOnce for Button {
             })
             .child(content)
             .when_some(self.tooltip, |this, text| {
-                this.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                this.with_tooltip(move |_, _| Tooltip::new(text.clone()))
             })
     }
 }

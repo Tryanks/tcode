@@ -7,14 +7,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::widgets::tooltip::Tooltip;
+use crate::widgets::tooltip::{Tooltip, tooltip_area};
 use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity,
     GlobalElementId, HighlightStyle, Hsla, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, LineFragment as WrapLineFragment, MouseButton, ObjectFit,
     ParentElement as _, Pixels, Role, SharedString, SharedUri, Size,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, TextRun, TextStyle, WhiteSpace,
-    Window, div, img, point, prelude::FluentBuilder as _, px, relative, size,
+    Window, div, img, point, px, relative, size,
 };
 
 use super::{
@@ -167,6 +167,7 @@ impl InlineFlow {
         let source = view.read(cx).image_source(url);
         let opened = view.read(cx).opened_image_source(url);
         let link = link.clone();
+        let has_link = link.is_some();
         let title = title.to_string();
         let tooltip_title = title.clone();
         let context_view = view.clone();
@@ -184,18 +185,13 @@ impl InlineFlow {
         } else {
             Role::Button
         };
-        crate::material::accessible_clickable(img(source), ix, role, label, cx)
+        let image = crate::material::accessible_clickable(img(source), ix, role, label, cx)
             .object_fit(ObjectFit::Contain)
             .with_fallback(crate::image_viewer::unpreviewed(false, true, cx))
             .max_w(relative(1.))
             .w(size.width)
             .h(size.height)
             .cursor_pointer()
-            .when(link.is_some(), |image| {
-                image.tooltip(move |window, cx| {
-                    Tooltip::new(tooltip_title.clone()).build(window, cx)
-                })
-            })
             .on_mouse_down(MouseButton::Right, move |_, _, cx| {
                 context_view.update(cx, |state, cx| {
                     state.set_pending_context(
@@ -214,8 +210,15 @@ impl InlineFlow {
                 } else {
                     crate::image_viewer::open(opened.clone(), title.clone(), window, cx);
                 }
+            });
+        if has_link {
+            tooltip_area(("image-tooltip", ix), image, move |_, _| {
+                Tooltip::new(tooltip_title.clone())
             })
             .into_any_element()
+        } else {
+            image.into_any_element()
+        }
     }
 }
 

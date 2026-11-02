@@ -2,6 +2,7 @@
 //! the line selection. A view supplies its files and the parts that differ through
 //! [`DiffListHost`]; the rows themselves are drawn here only.
 
+use crate::widgets::TooltipTrigger as _;
 use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
@@ -904,9 +905,8 @@ fn render_gap<H: DiffListHost>(
                         .id(("diff-gap-fixed", file_index * 100_000 + start as usize))
                         .child(label)
                         .when_some(reason, |this, reason| {
-                            this.tooltip(move |window, cx| {
+                            this.with_tooltip(move |_, _| {
                                 crate::widgets::tooltip::Tooltip::new(reason.clone())
-                                    .build(window, cx)
                             })
                         }),
                 )

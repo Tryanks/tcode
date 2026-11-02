@@ -9,6 +9,7 @@
 //! items — reads and changes that state through it, so a change made on one
 //! repaints the others.
 
+use crate::widgets::TooltipTrigger as _;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -21,8 +22,8 @@ use web_time::Instant;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EntityId, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _,
+    Subscription, Task, WeakEntity, Window, div, px,
 };
 use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
@@ -663,7 +664,7 @@ pub(crate) fn shared_badge(project_id: &str, names: &[String], cx: &App) -> AnyE
                 .path("icons/users.svg")
                 .text_color(cx.theme().muted_foreground),
         )
-        .tooltip(move |window, cx| crate::widgets::Tooltip::new(tooltip.clone()).build(window, cx))
+        .with_tooltip(move |_, _| crate::widgets::Tooltip::new(tooltip.clone()))
         .into_any_element()
 }
 
@@ -1011,6 +1012,7 @@ mod section {
     use crate::sizing::Sizable as _;
     use crate::widgets::checkbox::Checkbox;
     use crate::widgets::menu::DropdownMenu as _;
+    use gpui::StatefulInteractiveElement as _;
 
     /// Move a member to another space.
     #[derive(Action, Clone, PartialEq, Eq, Deserialize)]

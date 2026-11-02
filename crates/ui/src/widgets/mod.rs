@@ -30,4 +30,4 @@ pub use progress::Progress;
 pub use slider::Slider;
 pub use spinner::Spinner;
 pub use switch::Switch;
-pub use tooltip::Tooltip;
+pub use tooltip::{Tooltip, TooltipTrigger, tooltip_area};

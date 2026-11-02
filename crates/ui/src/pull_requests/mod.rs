@@ -1,3 +1,4 @@
+use crate::widgets::TooltipTrigger as _;
 use crate::{
     icon::{Icon, IconName, IconNamed as _},
     overlay::{Notification, NotificationType, OverlayExt as _},
@@ -1174,9 +1175,8 @@ impl PullRequestsPanel {
                             window,
                             cx,
                         ))
-                        .tooltip(move |window, cx| {
+                        .with_tooltip(move |_, _| {
                             crate::widgets::tooltip::Tooltip::new(crate::tr!(label).into_owned())
-                                .build(window, cx)
                         }),
                 ),
             );
@@ -1215,9 +1215,8 @@ impl PullRequestsPanel {
                             window,
                             cx,
                         ))
-                        .tooltip(move |window, cx| {
+                        .with_tooltip(move |_, _| {
                             crate::widgets::tooltip::Tooltip::new(crate::tr!(label).into_owned())
-                                .build(window, cx)
                         }),
                 ),
             );
@@ -1236,12 +1235,11 @@ impl PullRequestsPanel {
                     div()
                         .id("pr-conflict")
                         .child(Icon::new(IconName::GitMergeConflict).text_color(cx.theme().warning))
-                        .tooltip(move |window, cx| {
+                        .with_tooltip(move |_, _| {
                             crate::widgets::tooltip::Tooltip::new(
                                 crate::tr!("pull_requests.conflict", base = base.clone())
                                     .into_owned(),
                             )
-                            .build(window, cx)
                         }),
                 ),
             );
@@ -1271,8 +1269,8 @@ impl PullRequestsPanel {
                     div()
                         .id("pr-signal-blocked")
                         .child(Icon::new(IconName::Lock).text_color(cx.theme().muted_foreground))
-                        .tooltip(move |window, cx| {
-                            crate::widgets::tooltip::Tooltip::new(blocker.clone()).build(window, cx)
+                        .with_tooltip(move |_, _| {
+                            crate::widgets::tooltip::Tooltip::new(blocker.clone())
                         }),
                 ),
             );
@@ -1321,9 +1319,8 @@ impl PullRequestsPanel {
                             .id("pr-signal-operation")
                             .group_hover(group.clone(), |signal| signal.invisible())
                             .child(Icon::empty().path(icon.clone()).text_color(*color))
-                            .tooltip(move |window, cx| {
+                            .with_tooltip(move |_, _| {
                                 crate::widgets::tooltip::Tooltip::new(tooltip.clone())
-                                    .build(window, cx)
                             })
                             .into_any_element()
                     }
@@ -1375,7 +1372,7 @@ impl PullRequestsPanel {
                                     .text_meta_mono(compact, cx)
                                     .text_color(cx.theme().foreground)
                                     .id("pr-number")
-                                    .tooltip({
+                                    .with_tooltip({
                                         let label = crate::tr!(
                                             "pull_requests.number_tooltip",
                                             source = source.clone(),
@@ -1387,9 +1384,8 @@ impl PullRequestsPanel {
                                             )
                                         )
                                         .into_owned();
-                                        move |window, cx| {
+                                        move |_, _| {
                                             crate::widgets::tooltip::Tooltip::new(label.clone())
-                                                .build(window, cx)
                                         }
                                     })
                                     .child(format!("#{}", key.number)),
@@ -1421,9 +1417,8 @@ impl PullRequestsPanel {
                             .relative()
                             .min_w_0()
                             .text_secondary(compact, cx)
-                            .tooltip(move |window, cx| {
+                            .with_tooltip(move |_, _| {
                                 crate::widgets::tooltip::Tooltip::new(detail.clone())
-                                    .build(window, cx)
                             })
                             .child(line_two),
                     ),

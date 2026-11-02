@@ -7,6 +7,7 @@
 //! exception — favorites are a global, not a `ProviderSettings` field.
 
 use crate::scroll::ScrollableElement as _;
+use crate::widgets::TooltipTrigger as _;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -22,8 +23,8 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::motion::transition;
 use gpui_base::{h_flex, v_flex};
@@ -488,9 +489,7 @@ impl ProviderDialog {
                     .border_2()
                     .border_color(border)
                     .focus_visible(move |style| style.shadow(vec![ring]))
-                    .tooltip(move |window, cx| {
-                        crate::widgets::tooltip::Tooltip::new(label.clone()).build(window, cx)
-                    })
+                    .with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(label.clone()))
                     .on_click(move |_, _, _, cx| {
                         _ = dialog.update(cx, |this, cx| {
                             this.accent = Some(hex.clone());
@@ -784,9 +783,8 @@ impl ProviderDialog {
                                 .id(("model-info", index))
                                 .flex_none()
                                 .child(Icon::new(IconName::Info).text_color(muted))
-                                .tooltip(move |window, cx| {
+                                .with_tooltip(move |_, _| {
                                     crate::widgets::tooltip::Tooltip::new(capabilities.clone())
-                                        .build(window, cx)
                                 }),
                         )
                     })

@@ -3,6 +3,7 @@
 //! request fresh before a merge or a branch update and answers every write; nothing here
 //! retries one.
 
+use crate::widgets::TooltipTrigger as _;
 use std::rc::Rc;
 
 use gpui::{
@@ -1674,9 +1675,7 @@ pub(super) fn primary_element(
             .child(label);
         match tooltip {
             Some(tooltip) => chip
-                .tooltip(move |window, cx| {
-                    crate::widgets::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
-                })
+                .with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(tooltip.clone()))
                 .into_any_element(),
             None => chip.into_any_element(),
         }
@@ -1707,7 +1706,7 @@ pub(super) fn primary_element(
             button.small()
         }
     };
-    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    use gpui::InteractiveElement as _;
     match primary {
         Primary::ResolveConflicts | Primary::FixChecks => {
             let terms = super::host_terms(target.store.read(cx), &key.host);

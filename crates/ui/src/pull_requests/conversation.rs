@@ -1,5 +1,6 @@
 //! The Conversation view: the description, comments, reviews and review threads, oldest first.
 
+use crate::widgets::TooltipTrigger as _;
 use std::rc::Rc;
 
 use gpui::{
@@ -653,7 +654,7 @@ impl PullRequestView {
                     .id(SharedString::from(format!("pr-ago-{}", comment.id)))
                     .text_color(muted)
                     .children(ago_rfc3339(&comment.created_at))
-                    .tooltip(move |window, cx| {
+                    .with_tooltip(move |_, _| {
                         let local = chrono::DateTime::parse_from_rfc3339(&created)
                             .map(|time| {
                                 time.with_timezone(&chrono::Local)
@@ -661,7 +662,7 @@ impl PullRequestView {
                                     .to_string()
                             })
                             .unwrap_or_default();
-                        Tooltip::new(local).build(window, cx)
+                        Tooltip::new(local)
                     }),
             )
             .when(comment.edited_at.is_some(), |head| {

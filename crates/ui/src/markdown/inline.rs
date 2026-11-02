@@ -105,6 +105,26 @@ impl Inline {
         Self::link_and_range_for_position(layout, links, position).map(|(_, link)| link)
     }
 
+    /// Where a link's tooltip is placed: the part of `range` on the line
+    /// holding the character at `at`.
+    fn line_bounds(layout: &TextLayout, range: &Range<usize>, at: usize) -> Bounds<Pixels> {
+        let text = layout.bounds();
+        let Some(here) = layout.position_for_index(at) else {
+            return text;
+        };
+        let on_line = |index| {
+            layout
+                .position_for_index(index)
+                .filter(|position| position.y == here.y)
+        };
+        let left = on_line(range.start).map_or(text.left(), |position| position.x);
+        let right = on_line(range.end).map_or(text.right(), |position| position.x);
+        Bounds::from_corners(
+            point(left, here.y),
+            point(right.max(left), here.y + layout.line_height()),
+        )
+    }
+
     fn link_and_range_for_position(
         layout: &TextLayout,
         links: &[(Range<usize>, LinkMark)],
@@ -239,15 +259,7 @@ impl Element for Inline {
             .with_runs(runs)
             .with_font_family_overrides(self.font_overrides.clone());
         self.text_layout = styled_text.layout().clone();
-        let links = self.links.clone();
-        let view = self.view.clone();
-        self.interactive_text = InteractiveText::new(self.id.clone(), styled_text).tooltip(
-            move |position, window, cx| {
-                let (_, link) = links.iter().find(|(range, _)| range.contains(&position))?;
-                let text = view.read(cx).resolve_link(&link.url).tooltip_text();
-                Some(Tooltip::new(text).build(window, cx))
-            },
-        );
+        self.interactive_text = InteractiveText::new(self.id.clone(), styled_text);
         let (layout, _) = self
             .interactive_text
             .request_layout(global_id, inspector_id, window, cx);
@@ -324,6 +336,36 @@ impl Element for Inline {
         if let Some(selected) = &self.selected {
             Self::paint_selection(selected, &text_layout, bounds, window, cx);
         }
+
+        let owner = window.use_keyed_state("tcode-tooltip-trigger", cx, |_, _| {
+            crate::overlay::TooltipOwner::default()
+        });
+        crate::widgets::tooltip::track_parts(
+            owner,
+            {
+                let hitbox = hitbox.clone();
+                let layout = text_layout.clone();
+                let links = self.links.clone();
+                let view = self.view.clone();
+                move |window, cx| {
+                    if cx.has_active_drag() || !hitbox.is_hovered(window) {
+                        return None;
+                    }
+                    let at = layout.index_for_position(window.mouse_position()).ok()?;
+                    let (index, (range, link)) = links
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (range, _))| range.contains(&at))?;
+                    let (view, url) = (view.clone(), link.url.clone());
+                    let build: crate::overlay::TooltipBuilder = Rc::new(move |_, cx| {
+                        Tooltip::new(view.read(cx).resolve_link(&url).tooltip_text())
+                    });
+                    Some((index, Self::line_bounds(&layout, range, at), build))
+                }
+            },
+            window,
+            cx,
+        );
 
         window.on_mouse_event({
             let hitbox = hitbox.clone();

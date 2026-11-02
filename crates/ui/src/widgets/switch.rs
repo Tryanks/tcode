@@ -1,3 +1,4 @@
+use crate::widgets::TooltipTrigger as _;
 use crate::{
     sizing::{Sizable, Size},
     theme::ActiveTheme as _,
@@ -5,8 +6,7 @@ use crate::{
 };
 use gpui::{
     App, ElementId, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
-    px,
+    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::StyledExt as _;
 use gpui_base::motion::{Transition, transition};
@@ -149,7 +149,7 @@ impl RenderOnce for Switch {
                             .left(thumb_left),
                     )
                     .when_some(self.tooltip, |this, text| {
-                        this.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                        this.with_tooltip(move |_, _| Tooltip::new(text.clone()))
                     }),
             )
             .when_some(self.label, |this, label| {

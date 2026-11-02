@@ -2,6 +2,7 @@ use crate::icon::{Icon, IconName};
 use crate::material::semantic_chip;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
+use crate::widgets::TooltipTrigger as _;
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
@@ -151,9 +152,8 @@ pub(crate) fn subagent_row(
                             .debug_selector(|| "subagent-shown".into())
                             .role(Role::Status)
                             .aria_label(label.clone())
-                            .tooltip(move |window, cx| {
+                            .with_tooltip(move |_, _| {
                                 crate::widgets::tooltip::Tooltip::new(label.clone())
-                                    .build(window, cx)
                             })
                             .child(Icon::new(IconName::Check).text_color(muted)),
                     ),

@@ -1,6 +1,7 @@
 //! Tcode's single-choice form control: a styled composition of
 //! `gpui_base::RadioGroup`/`Radio`, drawn as a
 //! [`TabBar::segmented`](super::tabs::TabBar::segmented) track.
+use crate::widgets::TooltipTrigger as _;
 use crate::{
     icon::{Icon, IconName},
     material::focus_ring,
@@ -197,9 +198,7 @@ fn render_choice(
         .child(div().flex_none().child(label))
         .when(recommended, |this| {
             this.child(Icon::new(IconName::Star).flex_none())
-                .tooltip(|window, cx| {
-                    Tooltip::new(crate::tr!("choice.recommended")).build(window, cx)
-                })
+                .with_tooltip(|_, _| Tooltip::new(crate::tr!("choice.recommended")))
         });
     let pill = selected && !glide.drawn();
     glide.measure(ix, segment(radio, selected, pill, !disabled, compact, cx))

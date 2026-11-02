@@ -6,5 +6,7 @@
 disallowed-methods = [
     { path = "std::process::Command::new", reason = "use services::process::command or agent's process::command so Windows never flashes a console" },
     { path = "smol::process::Command::new", reason = "use services::process::async_command or agent's process::async_command so Windows never flashes a console" },
+    { path = "gpui::StatefulInteractiveElement::tooltip", reason = "use tcode_ui::widgets::TooltipTrigger::with_tooltip so the tooltip shows through the window's tooltip layer and can leave" },
+    { path = "gpui::InteractiveText::tooltip", reason = "track the text's parts with widgets::tooltip::track_parts so the tooltip shows through the window's tooltip layer and can leave" },
     { path = "smol::unblock", reason = "use Host::unblock or the agent crate's process::unblock so blocking work is scheduled in one place" },
 ]

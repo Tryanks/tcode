@@ -1,9 +1,11 @@
 mod dialog;
 mod notification;
+mod tooltip;
 
 pub(crate) use dialog::DIALOG_LIST_HEIGHT;
 pub use dialog::{AlertDialog, Dialog, DialogActions, DialogButtons, DialogContent};
 pub use notification::{Notification, NotificationType};
+pub(crate) use tooltip::{TooltipBuilder, TooltipHost, TooltipOwner};
 
 use std::rc::Rc;
 
@@ -86,6 +88,7 @@ pub(crate) struct Overlays {
 /// Register the overlays every window root mounts. Call before opening windows.
 pub(crate) fn init(cx: &mut App) {
     gpui_base::Root::register_plugin(cx, Overlays::new);
+    gpui_base::Root::register_plugin(cx, TooltipHost::new);
 }
 
 impl Overlays {
