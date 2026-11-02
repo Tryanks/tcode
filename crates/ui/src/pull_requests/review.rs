@@ -453,89 +453,94 @@ impl PullRequestView {
 
     /// Pending comments the diff does not draw: on files or lines not shown, and those whose lines
     /// changed when the draft moved to a new head.
-    pub(super) fn off_diff_pending(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn off_diff_pending(&self, cx: &App) -> Vec<PullRequestReviewDraftComment> {
         let Some(draft) = self.draft(cx) else {
             return Vec::new();
         };
         let drawn = self.stale_head(&draft).is_none()
             && self.files_head().as_deref() == Some(draft.head.as_str());
-        let muted = cx.theme().muted_foreground;
         draft
             .comments
             .iter()
             .filter(|comment| !comment.placed || !drawn || !self.pending_drawn(comment))
-            .map(|comment| {
-                let id = comment.id;
-                let removed = comment.clone();
-                material::card_header_row(cx)
-                    .id(SharedString::from(format!("pr-off-diff-pending-{id}")))
-                    .text_secondary(false, cx)
-                    .text_color(cx.theme().foreground)
-                    .child(material::semantic_chip(
-                        crate::tr!("pull_requests.review.pending").into_owned(),
-                        cx.theme().info.opacity(0.1),
-                        cx.theme().info,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(220.))
-                            .overflow_hidden()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .child(crate::widgets::fade_text(format!(
-                                "{}:{}",
-                                comment.path, comment.end_line
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_color(muted)
-                            .child(crate::widgets::fade_text(
-                                comment.body.lines().next().unwrap_or_default().to_owned(),
-                            )),
-                    )
-                    .when(!comment.placed, |row| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_color(cx.theme().warning)
-                                .child(crate::tr!("pull_requests.review.line_changed")),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("pr-pending-copy-{id}")))
-                                .ghost()
-                                .xsmall()
-                                .compact()
-                                .icon(IconName::Copy)
-                                .tooltip(crate::tr!("pull_requests.conversation.copy_text"))
-                                .on_click({
-                                    let text = comment.body.clone();
-                                    move |_, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            text.clone(),
-                                        ))
-                                    }
-                                }),
-                        )
-                    })
-                    .child(
-                        Button::new(SharedString::from(format!("pr-pending-off-remove-{id}")))
-                            .ghost()
-                            .xsmall()
-                            .compact()
-                            .icon(IconName::Trash)
-                            .tooltip(crate::tr!("pull_requests.review.remove_pending"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.remove_pending(&removed, window, cx)
-                            })),
-                    )
-                    .into_any_element()
-            })
+            .cloned()
             .collect()
+    }
+
+    /// A pending comment's row in the card of comments the diff does not draw.
+    pub(super) fn off_diff_pending_row(
+        &self,
+        comment: &PullRequestReviewDraftComment,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let id = comment.id;
+        let removed = comment.clone();
+        material::card_header_row(cx)
+            .id(SharedString::from(format!("pr-off-diff-pending-{id}")))
+            .text_secondary(false, cx)
+            .text_color(cx.theme().foreground)
+            .child(material::semantic_chip(
+                crate::tr!("pull_requests.review.pending").into_owned(),
+                cx.theme().info.opacity(0.1),
+                cx.theme().info,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(px(220.))
+                    .overflow_hidden()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(crate::widgets::fade_text(format!(
+                        "{}:{}",
+                        comment.path, comment.end_line
+                    ))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_color(muted)
+                    .child(crate::widgets::fade_text(
+                        comment.body.lines().next().unwrap_or_default().to_owned(),
+                    )),
+            )
+            .when(!comment.placed, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_color(cx.theme().warning)
+                        .child(crate::tr!("pull_requests.review.line_changed")),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("pr-pending-copy-{id}")))
+                        .ghost()
+                        .xsmall()
+                        .compact()
+                        .icon(IconName::Copy)
+                        .tooltip(crate::tr!("pull_requests.conversation.copy_text"))
+                        .on_click({
+                            let text = comment.body.clone();
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))
+                            }
+                        }),
+                )
+            })
+            .child(
+                Button::new(SharedString::from(format!("pr-pending-off-remove-{id}")))
+                    .ghost()
+                    .xsmall()
+                    .compact()
+                    .icon(IconName::Trash)
+                    .tooltip(crate::tr!("pull_requests.review.remove_pending"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.remove_pending(&removed, window, cx)
+                    })),
+            )
+            .into_any_element()
     }
 
     /// Whether the diff draws the comment's last line, as it would draw a thread there.

@@ -21,7 +21,7 @@ use crate::{
 use agent::FileChange;
 use gpui::{
     Action, AnyElement, App, AppContext as _, AvailableSpace, Context, Entity, HighlightStyle,
-    InteractiveElement as _, IntoElement, ListOffset, ParentElement as _, Render, Role,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
     prelude::FluentBuilder as _, px, size,
 };
@@ -283,17 +283,11 @@ impl DiffPanel {
         if let Some(index) =
             file_header_index(&list.files, &list.unified_items, &request.path, &cwd)
         {
-            list.unified_list.scroll_to(ListOffset {
-                item_ix: index,
-                offset_in_item: px(0.),
-            });
+            list.glide_to(false, index, cx);
         }
         if let Some(index) = file_header_index(&list.files, &list.split_items, &request.path, &cwd)
         {
-            list.split_list.scroll_to(ListOffset {
-                item_ix: index,
-                offset_in_item: px(0.),
-            });
+            list.glide_to(true, index, cx);
         }
         self.workspace_store.update(cx, |store, _cx| {
             store.take_diff_focus(session, turn);

@@ -228,10 +228,15 @@ impl PullRequestView {
             && count > 0
         {
             page.conversation_view.sync_rows(items);
-            page.conversation_view.list.scroll_to(gpui::ListOffset {
-                item_ix: count - 1,
-                offset_in_item: px(0.),
-            });
+            let view = &page.conversation_view;
+            view.scroll.scroll_to(
+                &view.list,
+                crate::motion::ScrollTarget::Row(gpui::ListOffset {
+                    item_ix: count - 1,
+                    offset_in_item: px(0.),
+                }),
+                cx,
+            );
         }
     }
 
@@ -412,10 +417,15 @@ impl PullRequestView {
         page.conversation_view.expanded.insert(id.to_owned());
         if let Some(position) = position {
             page.conversation_view.sync_rows(items);
-            page.conversation_view.list.scroll_to(gpui::ListOffset {
-                item_ix: position,
-                offset_in_item: px(0.),
-            });
+            let view = &page.conversation_view;
+            view.scroll.scroll_to(
+                &view.list,
+                crate::motion::ScrollTarget::Row(gpui::ListOffset {
+                    item_ix: position,
+                    offset_in_item: px(0.),
+                }),
+                cx,
+            );
         }
         cx.notify();
     }
@@ -431,7 +441,7 @@ impl PullRequestView {
             page.tab = Some(Tab::Files);
             page.files_view.collapsed.insert(anchor.path.clone(), false);
             if let (Some(index), Some(list)) = (index, page.files_view.list.as_ref()) {
-                list.scroll_to_file(index);
+                list.scroll_to_file(index, cx);
             }
         }
         cx.notify();
@@ -510,59 +520,19 @@ impl PullRequestView {
     }
 
     pub(super) fn avatar(&self, login: &str, url: Option<&str>, size: f32, cx: &App) -> AnyElement {
-        let initial = login
-            .chars()
-            .next()
-            .map(|initial| initial.to_uppercase().to_string())
-            .unwrap_or_default();
-        let fallback = Avatar::new()
-            .size(px(size))
-            .rounded_full()
-            .bg(cx.theme().muted)
-            .fallback(
-                AvatarFallback::new()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    // The initial scales with the avatar, which no text token does.
-                    .text_size(px(size * 0.5))
-                    .font_medium()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(initial),
-            );
-        let image = self
-            .current
-            .as_ref()
-            .zip(url)
-            .and_then(|((session, key), url)| {
-                let account = self.page()?.conversation.data.as_ref()?.account.clone();
-                Some(
-                    Avatar::new()
-                        .absolute()
-                        .inset_0()
-                        .rounded_full()
-                        .overflow_hidden()
-                        .image(
-                            AvatarImage::new(pull_request_media(
-                                session.clone(),
-                                key.clone(),
-                                account,
-                                url.to_owned(),
-                            ))
-                            .size(px(size))
-                            .rounded_full(),
-                        ),
-                )
-            });
-        // The initial stands behind the picture until it loads, and instead of it on failure.
-        div()
-            .relative()
-            .flex_none()
-            .size(px(size))
-            .child(fallback)
-            .children(image)
-            .into_any_element()
+        avatar_image(login, self.avatar_source(url), size, cx)
+    }
+
+    /// Where the host reads an avatar the conversation names.
+    pub(super) fn avatar_source(&self, url: Option<&str>) -> Option<gpui::ImageSource> {
+        let ((session, key), url) = self.current.as_ref().zip(url)?;
+        let account = self.page()?.conversation.data.as_ref()?.account.clone();
+        Some(pull_request_media(
+            session.clone(),
+            key.clone(),
+            account,
+            url.to_owned(),
+        ))
     }
 
     fn comment_head(
@@ -633,11 +603,13 @@ impl PullRequestView {
         let add_reaction =
             (writable && self.can_react(comment) && self.shown_reactions(comment).is_empty())
                 .then(|| self.reaction_popover(comment, true, cx));
+        let head = SharedString::from(format!("pr-comment-head-{}", comment.id));
+        let hover = self
+            .page()
+            .map(|page| page.conversation_view.hover.on_hover(head.clone()));
         h_flex()
-            .group(SharedString::from(format!(
-                "pr-comment-head-{}",
-                comment.id
-            )))
+            .id(head)
+            .when_some(hover, |head, hover| head.on_hover(hover))
             .gap_2()
             .items_center()
             .text_secondary(self.compact(cx), cx)
@@ -778,18 +750,13 @@ impl PullRequestView {
         )
         .icon(IconName::Sticker)
         .tooltip(crate::tr!("pull_requests.reactions.add"))
-        .when(reveal, |chip| {
-            // `focus`, not `focus_visible`: the Button paints its ring through `focus_visible`.
-            chip.opacity(0.)
-                .group_hover(
-                    SharedString::from(format!("pr-comment-head-{id}")),
-                    |chip| chip.opacity(1.),
-                )
-                .focus(|chip| chip.opacity(1.))
-        })
         .on_click(cx.listener(move |this, _, _, cx| {
             this.open_sheet(Some(Sheet::Reactions(open_id.clone())), cx)
         }));
+        let hover = reveal
+            .then(|| self.page().map(|page| page.conversation_view.hover.clone()))
+            .flatten();
+        let head_key = SharedString::from(format!("pr-comment-head-{id}"));
         let popover = Popover::new(SharedString::from(format!("pr-reactions-{id}-{head}")))
             .open(self.sheet_open(&sheet))
             .on_open_change({
@@ -800,7 +767,19 @@ impl PullRequestView {
                     }
                 }
             })
-            .trigger_with(move |_, _, _, _| chip.into_any_element());
+            .trigger_with(move |_, _, _, _| match hover {
+                // The chip fades in as the pointer comes onto its comment's head, and out as it
+                // leaves. `focus`, not `focus_visible`: the Button paints its ring through
+                // `focus_visible`.
+                Some(hover) => crate::motion::Sampled::new(move |window, cx| {
+                    let shown = hover.reveal(&head_key, window, cx);
+                    chip.opacity(shown)
+                        .focus(|chip| chip.opacity(1.))
+                        .into_any_element()
+                })
+                .into_any_element(),
+                None => chip.into_any_element(),
+            });
         let popover = if compact {
             popover.bottom_sheet(crate::tr!("pull_requests.reactions.add").into_owned())
         } else {
@@ -847,60 +826,103 @@ impl PullRequestView {
             return None;
         }
         let interactive = self.writable(cx) && self.can_react(comment);
-        let add = interactive.then(|| self.reaction_popover(comment, false, cx));
+        let mut add = interactive.then(|| self.reaction_popover(comment, false, cx));
+        let mut chips: Vec<(SharedString, Option<PullRequestReaction>)> = shown
+            .into_iter()
+            .map(|reaction| {
+                (
+                    SharedString::from(format!("{:?}", reaction.content)),
+                    Some(reaction),
+                )
+            })
+            .collect();
+        if add.is_some() {
+            chips.push(("add".into(), None));
+        }
+        let view = cx.entity();
+        let comment_id = comment.id.clone();
         Some(
-            h_flex()
-                .flex_wrap()
-                .gap_1()
-                .pt_1()
-                .children(shown.into_iter().map(|reaction| {
-                    let own = reaction.viewer_reacted;
-                    let label = crate::tr!(
-                        "pull_requests.reactions.chip_label",
-                        name = crate::tr!(reaction_name(reaction.content)).into_owned(),
-                        count = reaction.count.to_string()
-                    )
-                    .into_owned();
-                    let chip = reaction_chip(
-                        SharedString::from(format!(
-                            "pr-reaction-chip-{}-{:?}",
-                            comment.id, reaction.content
-                        )),
-                        label,
-                        own,
-                        cx,
-                    )
-                    .aria_toggled(if own {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .child(reaction_emoji(reaction.content))
-                    .child({
-                        let id = SharedString::from(format!(
-                            "pr-reaction-count-{}-{:?}",
-                            comment.id, reaction.content
-                        ));
-                        let count = reaction.count.to_string();
-                        crate::motion::Sampled::new(move |window, cx| {
-                            crate::motion::cross_fade(id, count, window, cx, |count, _, _| {
-                                div().child(count.clone()).into_any_element()
-                            })
-                        })
-                    });
-                    if interactive {
-                        let (id, content) = (comment.id.clone(), reaction.content);
-                        chip.on_click(cx.listener(move |this, _, window, cx| {
-                            this.react(id.clone(), content, !own, window, cx)
-                        }))
-                        .into_any_element()
-                    } else {
-                        chip.into_any_element()
-                    }
-                }))
-                .children(add)
-                .into_any_element(),
+            crate::motion::Sampled::new(move |window, cx| {
+                // A chip that comes or goes widens in or narrows away, carrying the gap before
+                // it; the row starts a gap early so each line's first chip sits at its start.
+                let chips = crate::motion::keyed_across(
+                    SharedString::from(format!("pr-reactions-row-{comment_id}")),
+                    chips,
+                    window,
+                    cx,
+                    |_, reaction, _, cx| {
+                        let chip = match reaction {
+                            None => add.take(),
+                            Some(reaction) => Some(Self::reaction_row_chip(
+                                &view,
+                                &comment_id,
+                                reaction,
+                                interactive,
+                                cx,
+                            )),
+                        };
+                        div().pl_1().children(chip).into_any_element()
+                    },
+                );
+                chips.render(h_flex().flex_wrap().gap_y_1().pt_1().ml(gpui::rems(-0.25)))
+            })
+            .into_any_element(),
         )
+    }
+
+    /// One reaction's chip under a comment, with its count.
+    fn reaction_row_chip(
+        view: &Entity<Self>,
+        comment_id: &str,
+        reaction: &PullRequestReaction,
+        interactive: bool,
+        cx: &App,
+    ) -> AnyElement {
+        let own = reaction.viewer_reacted;
+        let label = crate::tr!(
+            "pull_requests.reactions.chip_label",
+            name = crate::tr!(reaction_name(reaction.content)).into_owned(),
+            count = reaction.count.to_string()
+        )
+        .into_owned();
+        let chip = reaction_chip(
+            SharedString::from(format!(
+                "pr-reaction-chip-{}-{:?}",
+                comment_id, reaction.content
+            )),
+            label,
+            own,
+            cx,
+        )
+        .aria_toggled(if own {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .child(reaction_emoji(reaction.content))
+        .child({
+            let id = SharedString::from(format!(
+                "pr-reaction-count-{}-{:?}",
+                comment_id, reaction.content
+            ));
+            let count = reaction.count.to_string();
+            crate::motion::Sampled::new(move |window, cx| {
+                crate::motion::cross_fade(id, count, window, cx, |count, _, _| {
+                    div().child(count.clone()).into_any_element()
+                })
+            })
+        });
+        if interactive {
+            let (view, id, content) = (view.clone(), comment_id.to_owned(), reaction.content);
+            chip.on_click(move |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.react(id.clone(), content, !own, window, cx)
+                })
+            })
+            .into_any_element()
+        } else {
+            chip.into_any_element()
+        }
     }
 
     fn body(
@@ -1823,6 +1845,7 @@ impl PullRequestView {
         };
         page.conversation_view.sync_rows(items);
         let state = page.conversation_view.list.clone();
+        page.conversation_view.scroll.step(&state, window, cx);
         let view = cx.entity();
         div()
             .id("pr-conversation")
@@ -2026,4 +2049,56 @@ fn media_stand_in(
             ))
         }
     }
+}
+
+/// A person's avatar: their initial, with the picture `source` names fading in over it once it
+/// decodes; the initial stays instead of a picture that fails.
+pub(super) fn avatar_image(
+    login: &str,
+    source: Option<gpui::ImageSource>,
+    size: f32,
+    cx: &App,
+) -> AnyElement {
+    let initial = login
+        .chars()
+        .next()
+        .map(|initial| initial.to_uppercase().to_string())
+        .unwrap_or_default();
+    let fallback = Avatar::new()
+        .size(px(size))
+        .rounded_full()
+        .bg(cx.theme().muted)
+        .fallback(
+            AvatarFallback::new()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                // The initial scales with the avatar, which no text token does.
+                .text_size(px(size * 0.5))
+                .font_medium()
+                .text_color(cx.theme().muted_foreground)
+                .child(initial),
+        );
+    let image = source.map(|source| {
+        let id = SharedString::from(format!("pr-avatar-{login}-{size}"));
+        crate::motion::Sampled::new(move |window, cx| {
+            let arrived = crate::motion::image_arrival(id, &source, window, cx);
+            Avatar::new()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .overflow_hidden()
+                .opacity(arrived)
+                .image(AvatarImage::new(source).size(px(size)).rounded_full())
+                .into_any_element()
+        })
+    });
+    div()
+        .relative()
+        .flex_none()
+        .size(px(size))
+        .child(fallback)
+        .children(image)
+        .into_any_element()
 }

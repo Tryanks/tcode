@@ -110,6 +110,9 @@ pub(crate) struct DiffList {
     width_candidates: Vec<String>,
     pub(crate) unified_list: ListState,
     pub(crate) split_list: ListState,
+    /// A scroll to a file on its way, in each list.
+    unified_scroll: crate::motion::ListScroll,
+    split_scroll: crate::motion::ListScroll,
     pub(crate) selection: Option<LineSelection>,
     /// The viewport that scrolls the rows sideways; a file header spans it and stays in it.
     horizontal: ScrollHandle,
@@ -123,6 +126,8 @@ impl DiffList {
         Self {
             unified_list: ListState::new(items.unified.len(), ListAlignment::Top, px(180.)),
             split_list: ListState::new(items.split.len(), ListAlignment::Top, px(180.)),
+            unified_scroll: Default::default(),
+            split_scroll: Default::default(),
             files,
             layouts,
             unified_items: items.unified,
@@ -167,6 +172,8 @@ impl DiffList {
         self.width_candidates = width_candidates(&files);
         self.unified_list = ListState::new(items.unified.len(), ListAlignment::Top, px(180.));
         self.split_list = ListState::new(items.split.len(), ListAlignment::Top, px(180.));
+        self.unified_scroll.cancel();
+        self.split_scroll.cancel();
         self.files = files;
         self.layouts.clear();
         self.unified_items = items.unified;
@@ -237,21 +244,41 @@ impl DiffList {
         self.split_list.remeasure();
     }
 
-    /// Scrolls both lists so the file's header is at the top.
-    pub(crate) fn scroll_to_file(&self, file: usize) {
-        for (items, state) in [
-            (&self.unified_items, &self.unified_list),
-            (&self.split_items, &self.split_list),
-        ] {
+    /// Scrolls both lists so the file's header is at the top, gliding there.
+    pub(crate) fn scroll_to_file(&self, file: usize, cx: &App) {
+        for split in [false, true] {
+            let items = if split {
+                &self.split_items
+            } else {
+                &self.unified_items
+            };
             if let Some(index) = items
                 .iter()
                 .position(|item| matches!(item, DiffListItem::Header(index) if *index == file))
             {
-                state.scroll_to(ListOffset {
-                    item_ix: index,
-                    offset_in_item: px(0.),
-                });
+                self.glide_to(split, index, cx);
             }
+        }
+    }
+
+    /// Scrolls the unified or the split list so row `index` is at the top, gliding there.
+    pub(crate) fn glide_to(&self, split: bool, index: usize, cx: &App) {
+        let (list, scroll) = self.scrolled(split);
+        scroll.scroll_to(
+            list,
+            crate::motion::ScrollTarget::Row(ListOffset {
+                item_ix: index,
+                offset_in_item: px(0.),
+            }),
+            cx,
+        );
+    }
+
+    fn scrolled(&self, split: bool) -> (&ListState, &crate::motion::ListScroll) {
+        if split {
+            (&self.split_list, &self.split_scroll)
+        } else {
+            (&self.unified_list, &self.unified_scroll)
         }
     }
 
@@ -446,11 +473,9 @@ pub(crate) fn render_list<H: DiffListHost>(
     let Some(diff) = host.diff_list() else {
         return div().into_any_element();
     };
-    let list_state = if split {
-        diff.split_list.clone()
-    } else {
-        diff.unified_list.clone()
-    };
+    let (list_state, scroll) = diff.scrolled(split);
+    let list_state = list_state.clone();
+    scroll.step(&list_state, window, cx);
     let content_width = if wrap {
         px(0.)
     } else {

@@ -141,11 +141,17 @@ pub(super) struct ConversationView {
     pub(super) replies: HashMap<String, Replies>,
     /// Resolved threads and long comments the reader opened.
     pub(super) expanded: HashSet<String>,
+    /// The comment head the pointer is over, whose add-reaction chip shows.
+    pub(super) hover: crate::motion::ListHover,
+    /// A scroll to a thread, or to the composer, on its way.
+    pub(super) scroll: crate::motion::ListScroll,
 }
 
 impl Default for ConversationView {
     fn default() -> Self {
         Self {
+            hover: crate::motion::ListHover::new(),
+            scroll: crate::motion::ListScroll::default(),
             list: ListState::new(0, ListAlignment::Top, px(200.)),
             rows: Vec::new(),
             markdown: Default::default(),
@@ -1754,17 +1760,32 @@ impl PullRequestView {
         let target = self.shown_target(cx);
         let kept =
             crate::motion::shown(id("shown"), current.map(|(_, primary)| primary), window, cx)?;
-        let Some(target) = target else {
-            return Some(kept.fade(div()));
+        let action = match target {
+            // A new action, or a status in its place, cross-fades over the one it follows.
+            Some(target) => crate::motion::cross_fade(
+                id("kind"),
+                kept.value,
+                window,
+                cx,
+                move |primary, _, cx| {
+                    super::lifecycle::primary_element(&target, *primary, compact, cx)
+                },
+            ),
+            None => div().into_any_element(),
         };
-        // A new action, or a status in its place, cross-fades over the one it follows.
-        Some(kept.fade(crate::motion::cross_fade(
-            id("kind"),
-            kept.value,
-            window,
-            cx,
-            move |primary, _, cx| super::lifecycle::primary_element(&target, *primary, compact, cx),
-        )))
+        // On a phone the action is a row of its own under the header, which folds in and out
+        // so what is below moves with it.
+        Some(if compact {
+            kept.fold(
+                div()
+                    .flex_none()
+                    .px(px(material::COMPACT_PAGE_INSET))
+                    .pb_2()
+                    .child(action),
+            )
+        } else {
+            kept.fade(action)
+        })
     }
 
     pub(super) fn refresh_button(
@@ -2385,13 +2406,7 @@ impl Render for PullRequestView {
             .when(!compact, |view| view.child(self.sub_bar(window, cx)))
             .child(self.header(window, cx))
             .when(compact, |view| {
-                view.children(self.primary(true, window, cx).map(|primary| {
-                    div()
-                        .flex_none()
-                        .px(px(material::COMPACT_PAGE_INSET))
-                        .pb_2()
-                        .child(primary)
-                }))
+                view.children(self.primary(true, window, cx))
             })
             .children(self.notices(window, cx))
             .child(self.switch(window, cx))
@@ -2728,9 +2743,18 @@ mod tests {
                     .list
                     .as_ref()
                     .unwrap()
-                    .scroll_to_file(file);
+                    .scroll_to_file(file, cx);
                 cx.notify();
             });
+            // The jump glides; the display draws every frame of it.
+            let frame = std::time::Duration::from_millis(16);
+            for _ in 0..=crate::edge_back::SETTLE.as_millis() / frame.as_millis() {
+                cx.executor().advance_clock(frame);
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                    _ = window.draw(cx);
+                });
+            }
             settle(cx);
         };
         scroll_to(cx, 95);
@@ -3073,5 +3097,230 @@ mod tests {
                 filter.read(cx).presentation().placeholder().to_string()
             })
         });
+    }
+
+    /// The thread's index, with `links` on the one session.
+    fn send_links(incoming: &async_channel::Sender<String>, links: &[u64]) {
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            "/tmp/tcode-pr".into(),
+            None,
+        );
+        meta.id = "session".into();
+        meta.pull_requests = links
+            .iter()
+            .map(|number| ThreadPullRequestLink {
+                key: PullRequestKey::new("github.com", "octo/repo", *number),
+                url: format!("https://github.com/octo/repo/pull/{number}"),
+                source: PullRequestSource::Manual,
+                linked_at: None,
+                snapshot: None,
+                stack: Default::default(),
+                sync_error: None,
+                watch: None,
+            })
+            .collect();
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(tcode_protocol::EventEnvelope {
+                    request_id: None,
+                    topic: tcode_protocol::Topic::Index,
+                    event: tcode_protocol::ServerEvent::IndexSnapshot(
+                        tcode_protocol::IndexSnapshot {
+                            summary: Default::default(),
+                            sessions: vec![meta],
+                            projects: Vec::new(),
+                        },
+                    ),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// A pull request that leaves the thread's list folds away and the row below it moves up
+    /// as it does; rows that trade places glide there.
+    #[gpui::test]
+    fn the_pull_request_list_folds_out_a_row_and_glides_a_reorder(cx: &mut TestAppContext) {
+        use crate::test_frames::{draw, draw_settled};
+        use gpui::VisualContext as _;
+        let Mounted {
+            view,
+            incoming,
+            _pump,
+            cx,
+            ..
+        } = mount(cx);
+        let (store, window_state) = view.read_with(cx, |view, _| {
+            (view.store.clone(), view.window_state.clone())
+        });
+        send_links(&incoming, &[7, 8, 9]);
+        settle(cx);
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        store.update(cx, |store, cx| store.select_session("session".into(), cx));
+        cx.replace_root_view(|_, cx| {
+            super::super::PullRequestsPanel::new(store.clone(), window_state.clone(), cx)
+        });
+        draw_settled(cx);
+        let top = |number: u64, cx: &mut VisualTestContext| {
+            cx.debug_bounds(Box::leak(
+                format!("pr-entry-row-github.com/octo/repo#{number}").into_boxed_str(),
+            ))
+            .map(|bounds| bounds.top())
+        };
+        let (first, second, third) = (top(7, cx), top(8, cx), top(9, cx));
+        let (first, second, third) = (first.unwrap(), second.unwrap(), third.unwrap());
+
+        let change = |links: &[u64], cx: &mut VisualTestContext| {
+            send_links(&incoming, links);
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            draw(cx);
+        };
+        change(&[7, 9], cx);
+        let moving = top(9, cx).expect("the row below is drawn");
+        assert!(
+            moving > second && moving < third,
+            "the row below moves up as the row above folds away: {moving:?}"
+        );
+        assert!(top(8, cx).is_some(), "the leaving row is drawn as it folds");
+        draw_settled(cx);
+        assert_eq!(top(9, cx), Some(second));
+
+        change(&[9, 7], cx);
+        let (seven, nine) = (top(7, cx).unwrap(), top(9, cx).unwrap());
+        assert!(
+            seven > first && seven < second && nine > first && nine < second,
+            "the rows glide past each other: {seven:?} {nine:?}"
+        );
+        draw_settled(cx);
+        assert_eq!((top(9, cx), top(7, cx)), (Some(first), Some(second)));
+    }
+
+    /// A label the host adds widens into its row on the next read, and the label after it
+    /// moves over as it does rather than jumping.
+    #[gpui::test]
+    fn a_label_the_host_adds_widens_in(cx: &mut TestAppContext) {
+        use crate::test_frames::draw;
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        let labelled = |names: &[&str]| {
+            PullRequestReadResponse::Conversation(Box::new(PullRequestConversation {
+                labels: names
+                    .iter()
+                    .map(|name| tcode_protocol::PullRequestLabel {
+                        id: (*name).into(),
+                        name: (*name).into(),
+                        color: None,
+                        description: None,
+                    })
+                    .collect(),
+                ..conversation()
+            }))
+        };
+        let later = now() + 3600;
+        for (id, read) in reads(&requests) {
+            match read {
+                // Lands as its expiry passes, so the view reads it again at once.
+                PullRequestRead::Conversation => answer(&incoming, id, labelled(&["bug"]), now()),
+                PullRequestRead::Files { cursor: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..1, None)),
+                    later,
+                ),
+                read => answer_other(&incoming, id, read, later),
+            }
+        }
+        view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
+        settle(cx);
+        let left = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("pr-label-bug")
+                .expect("the label is drawn")
+                .left()
+        };
+        let before = left(cx);
+        let reread = reads(&requests)
+            .into_iter()
+            .find(|(_, read)| *read == PullRequestRead::Conversation)
+            .expect("an expired conversation is read again");
+        answer(&incoming, reread.0, labelled(&["feature", "bug"]), later);
+        draw(cx);
+        assert_eq!(left(cx), before, "the label starts where it was");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let moving = left(cx);
+        settle(cx);
+        let after = left(cx);
+        assert!(
+            moving > before && moving < after,
+            "the label moves over as the new one widens in: {before:?} {moving:?} {after:?}"
+        );
+    }
+
+    /// Jumping to a file glides the diff there, and ends with the file's header at the top.
+    #[gpui::test]
+    fn jumping_to_a_file_glides_there(cx: &mut TestAppContext) {
+        use crate::test_frames::draw;
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        let later = now() + 3600;
+        for (id, read) in reads(&requests) {
+            match read {
+                PullRequestRead::Files { cursor: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..60, None)),
+                    later,
+                ),
+                read => answer_other(&incoming, id, read, later),
+            }
+        }
+        settle(cx);
+        let top = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                let list = view.page().unwrap().files_view.list.as_ref().unwrap();
+                list.unified_list.logical_scroll_top().item_ix
+            })
+        };
+        let header = view.read_with(cx, |view, _| {
+            let list = view.page().unwrap().files_view.list.as_ref().unwrap();
+            crate::diff::list::file_header_index(
+                &list.files,
+                &list.unified_items,
+                "src/40.rs",
+                std::path::Path::new("/elsewhere"),
+            )
+            .expect("the file has a header")
+        });
+        assert_eq!(top(cx), 0);
+        view.update(cx, |view, cx| {
+            let list = view.page().unwrap().files_view.list.as_ref().unwrap();
+            list.scroll_to_file(40, cx);
+            cx.notify();
+        });
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        draw(cx);
+        let moving = top(cx);
+        assert!(
+            moving > 0 && moving < header,
+            "the diff is on its way to the file: {moving} of {header}"
+        );
+        settle(cx);
+        assert_eq!(top(cx), header);
     }
 }

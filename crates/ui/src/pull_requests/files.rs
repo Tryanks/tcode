@@ -69,8 +69,17 @@ enum Viewed {
     Unknown,
 }
 
+/// The file column's width beside the diff.
+const FILE_COLUMN_WIDTH: gpui::Pixels = px(280.);
 /// A column of files beside the diff once it has this much room.
 const FILE_COLUMN_MIN_WIDTH: f32 = 720.;
+
+/// A row of the card of comments the diff does not draw.
+#[derive(Clone, PartialEq)]
+pub(super) enum OffDiffRow {
+    Pending(tcode_core::pull_request::PullRequestReviewDraftComment),
+    Thread(PullRequestReviewThread),
+}
 
 impl PullRequestView {
     fn head(&self) -> Option<String> {
@@ -503,7 +512,7 @@ impl PullRequestView {
 
     fn scroll_to(&mut self, file: usize, cx: &mut Context<Self>) {
         if let Some(list) = self.page().and_then(|page| page.files_view.list.as_ref()) {
-            list.scroll_to_file(file);
+            list.scroll_to_file(file, cx);
         }
         cx.notify();
     }
@@ -542,22 +551,17 @@ impl PullRequestView {
             .collect()
     }
 
-    /// The card of comments not drawn on a diff line, which fades in with its first and out
-    /// with its last, holding its label as it leaves.
+    /// The card of comments not drawn on a diff line, which folds in with its first and out
+    /// with its last, holding its label and rows as it leaves.
     fn off_diff(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let card = self.off_diff_card(cx);
         let open = self.page()?.files_view.off_diff_open;
-        let kept = crate::motion::shown(
-            "pr-off-diff-card",
-            card.as_ref().map(|(label, _)| label.clone()),
-            window,
-            cx,
-        )?;
+        let kept = crate::motion::shown("pr-off-diff-card", card, window, cx)?;
         let chevron = crate::widgets::Chevron::new("pr-off-diff-chevron", open);
-        Some(self.off_diff_body(kept, card.map(|(_, rows)| rows), open, chevron, cx))
+        Some(self.off_diff_body(kept, open, chevron, window, cx))
     }
 
-    fn off_diff_card(&self, cx: &mut Context<Self>) -> Option<(String, Vec<AnyElement>)> {
+    fn off_diff_card(&self, cx: &mut Context<Self>) -> Option<(String, Vec<OffDiffRow>)> {
         let page = self.page()?;
         let conversation = page.conversation.data.as_ref()?;
         let inline: Vec<_> = self
@@ -593,76 +597,109 @@ impl PullRequestView {
             crate::tr!("pull_requests.files.off_diff", count = count.to_string())
         }
         .into_owned();
-        let muted = cx.theme().muted_foreground;
-        let xs = cx.theme().tokens.typography.xs;
         let rows = pending
             .into_iter()
-            .chain(threads.into_iter().map(|thread| {
-                let line = thread
-                    .anchor
-                    .as_ref()
-                    .map(|anchor| format!("{}:{}", thread.path, anchor.end_line))
-                    .unwrap_or_else(|| thread.path.clone());
-                let excerpt = thread
-                    .comments
-                    .first()
-                    .map(|comment| comment.body.lines().next().unwrap_or_default().to_owned())
-                    .unwrap_or_default();
-                let id = thread.id.clone();
-                material::accessible_clickable(
-                    material::card_header_row(cx),
-                    SharedString::from(format!("pr-off-diff-{}", thread.id)),
-                    gpui::Role::Button,
-                    format!("{line} {excerpt}"),
-                    cx,
-                )
-                .text_token(&xs)
-                .cursor_pointer()
-                .hover(|row| row.bg(cx.theme().list_hover))
-                .child(
-                    div()
-                        .flex_none()
-                        .max_w(px(220.))
-                        .overflow_hidden()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .child(crate::widgets::fade_text(line)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_color(muted)
-                        .child(crate::widgets::fade_text(excerpt)),
-                )
-                .when(thread.outdated, |row| {
-                    row.child(material::semantic_chip(
-                        crate::tr!("pull_requests.conversation.outdated").into_owned(),
-                        cx.theme().secondary,
-                        muted,
-                        cx,
-                    ))
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.show_thread(&id, cx);
-                }))
-                .into_any_element()
-            }))
+            .map(OffDiffRow::Pending)
+            .chain(threads.into_iter().map(OffDiffRow::Thread))
             .collect();
         Some((label, rows))
     }
 
-    fn off_diff_body(
+    /// A review thread's row in the card of comments not drawn on a diff line; the pointer over
+    /// it fills it gradually.
+    fn off_diff_thread_row(
         &self,
-        kept: crate::motion::Shown<String>,
-        rows: Option<Vec<AnyElement>>,
-        open: bool,
-        chevron: crate::widgets::Chevron,
+        thread: &PullRequestReviewThread,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label = kept.value.clone();
         let muted = cx.theme().muted_foreground;
         let xs = cx.theme().tokens.typography.xs;
+        let line = thread
+            .anchor
+            .as_ref()
+            .map(|anchor| format!("{}:{}", thread.path, anchor.end_line))
+            .unwrap_or_else(|| thread.path.clone());
+        let excerpt = thread
+            .comments
+            .first()
+            .map(|comment| comment.body.lines().next().unwrap_or_default().to_owned())
+            .unwrap_or_default();
+        let id = thread.id.clone();
+        let row_id = SharedString::from(format!("pr-off-diff-{}", thread.id));
+        let (fill, on_hover) =
+            crate::motion::hover_fill(row_id.clone(), cx.theme().list_hover, window, cx);
+        material::accessible_clickable(
+            material::card_header_row(cx),
+            row_id,
+            gpui::Role::Button,
+            format!("{line} {excerpt}"),
+            cx,
+        )
+        .text_token(&xs)
+        .cursor_pointer()
+        .bg(fill)
+        .on_hover(on_hover)
+        .child(
+            div()
+                .flex_none()
+                .max_w(px(220.))
+                .overflow_hidden()
+                .font_family(cx.theme().mono_font_family.clone())
+                .child(crate::widgets::fade_text(line)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_color(muted)
+                .child(crate::widgets::fade_text(excerpt)),
+        )
+        .when(thread.outdated, |row| {
+            row.child(material::semantic_chip(
+                crate::tr!("pull_requests.conversation.outdated").into_owned(),
+                cx.theme().secondary,
+                muted,
+                cx,
+            ))
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.show_thread(&id, cx);
+        }))
+        .into_any_element()
+    }
+
+    fn off_diff_body(
+        &self,
+        kept: crate::motion::Shown<(String, Vec<OffDiffRow>)>,
+        open: bool,
+        chevron: crate::widgets::Chevron,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (label, rows) = kept.value.clone();
+        let muted = cx.theme().muted_foreground;
+        let xs = cx.theme().tokens.typography.xs;
+        // A comment the diff comes to draw, or one written off it, folds out of or into the
+        // card, and the rows below it move up or down as it does.
+        let rows = rows.into_iter().map(|row| {
+            let key = match &row {
+                OffDiffRow::Pending(comment) => format!("pending-{}", comment.id),
+                OffDiffRow::Thread(thread) => format!("thread-{}", thread.id),
+            };
+            (SharedString::from(key), row)
+        });
+        let rows = crate::motion::keyed(
+            "pr-off-diff-rows",
+            rows,
+            window,
+            cx,
+            |_, row, window, cx| match row {
+                OffDiffRow::Pending(comment) => self.off_diff_pending_row(comment, cx),
+                OffDiffRow::Thread(thread) => self.off_diff_thread_row(thread, window, cx),
+            },
+        );
         // `card` insets its content, and these rows are full-bleed hover targets that
         // carry the card inset themselves (`card_header_row`).
         let card = v_flex()
@@ -698,7 +735,7 @@ impl PullRequestView {
                         .max_h(px(240.))
                         .overflow_y_scroll()
                         .pb_1()
-                        .children(rows.into_iter().flatten()),
+                        .child(rows.render(v_flex().w_full())),
                 ),
             );
         kept.fold(card)
@@ -1204,7 +1241,7 @@ impl PullRequestView {
         let count = self.count_label();
         v_flex()
             .flex_none()
-            .w(px(280.))
+            .w(FILE_COLUMN_WIDTH)
             .h_full()
             .border_r_1()
             .border_color(cx.theme().border)
@@ -1400,6 +1437,26 @@ impl PullRequestView {
             )
             .children(footer);
         let review_bar = self.review_bar(window, cx);
+        // The file column widens in beside the diff and narrows away, laid out at its own width
+        // and clipped meanwhile, so its rows do not reflow; one on its way out takes no input.
+        let column = gpui_base::motion::transition(
+            "pr-file-column",
+            if wide { 1f32 } else { 0. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        let column = (column > 0.).then(|| {
+            div()
+                .relative()
+                .flex_none()
+                .h_full()
+                .w(FILE_COLUMN_WIDTH * column)
+                .overflow_hidden()
+                .opacity(column)
+                .child(self.file_column(window, cx))
+                .when(!wide, |column| column.child(crate::motion::shield()))
+        });
         v_flex()
             .size_full()
             .min_h_0()
@@ -1411,7 +1468,7 @@ impl PullRequestView {
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .when(wide, |row| row.child(self.file_column(window, cx)))
+                    .children(column)
                     .child(content),
             )
             .into_any_element()

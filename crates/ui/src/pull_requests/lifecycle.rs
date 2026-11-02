@@ -1560,7 +1560,14 @@ impl Render for MergeDialog {
             )
         });
         let ready = state.is_some() && self.method.is_some();
-        v_flex()
+        // The dialog's height glides as what it read takes the place of what it showed meanwhile.
+        let read = match &self.state {
+            None => 0,
+            Some(Ok(_)) => 1,
+            Some(Err(_)) => 2,
+        };
+        let glide = crate::motion::GlideState::keyed("pr-merge-height", window, cx);
+        let content = v_flex()
             .gap_3()
             .child(facts)
             .child(
@@ -1600,7 +1607,8 @@ impl Render for MergeDialog {
                             .label(self.confirm_label())
                             .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     ),
-            )
+            );
+        crate::motion::SizeGlide::new(&glide, content).on_change(read)
     }
 }
 
