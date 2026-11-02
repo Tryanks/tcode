@@ -5,8 +5,6 @@
 //! viewport's bottom edge, so a row whose layout height grows carries the
 //! content above it upward: the row rises from below.
 
-use std::ops::Range;
-
 use gpui::App;
 use tcode_core::session::EntryContent;
 
@@ -83,41 +81,22 @@ impl ChatView {
 }
 
 impl ChatView {
-    /// The rows of `old` the splices take out with nothing in their place,
-    /// as they were drawn: a collapsed Work Log's activities. An expanded
-    /// live window is not among them: its activities stay on screen in the
-    /// run's own row.
-    pub(super) fn rows_leaving(
-        &self,
-        old: &[TimelineRow],
-        splices: &[(Range<usize>, usize)],
-        carried: &[Range<usize>],
-        cx: &App,
-    ) -> Leaving {
-        let removed = crate::motion::list_rows::removed_rows(splices, carried);
-        if removed.is_empty() {
+    /// The rows of `old` a regroup took out, as they were drawn: a collapsed
+    /// Work Log's activities. An expanded live window is not among them: its
+    /// activities stay on screen in the run's own row.
+    pub(super) fn rows_leaving(&self, old: &[TimelineRow], cx: &App) -> Leaving {
+        let keys = |rows: &[TimelineRow]| rows.iter().map(|row| row.identity).collect::<Vec<_>>();
+        let (_, left) = crate::motion::list_rows::changes(&keys(old), &keys(&self.rows));
+        if left.is_empty() {
             return Leaving::default();
         }
-        let survives = |index: usize| !removed.contains(&index);
-        let attach = |index: usize| {
-            (0..index)
-                .rev()
-                .find(|&above| survives(above))
-                .map(|above| Attach::Below(old[above].identity))
-                .or_else(|| {
-                    (index + 1..old.len())
-                        .find(|&below| survives(below))
-                        .map(|below| Attach::Above(old[below].identity))
-                })
-        };
         let rows = self
             .workspace_store
             .read(cx)
             .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                removed
-                    .iter()
-                    .filter(|&&index| old[index].part != RowPart::WorkLogLive)
-                    .filter_map(|&index| {
+                left.into_iter()
+                    .filter(|(index, _)| old[*index].part != RowPart::WorkLogLive)
+                    .filter_map(|(index, attach)| {
                         let row = &old[index];
                         let own = timeline.entries.get(row.entry_range.clone())?.to_vec();
                         Some((
@@ -130,7 +109,7 @@ impl ChatView {
                                 turn: timeline.turns.get(row.turn).cloned().unwrap_or_default(),
                                 own,
                             },
-                            attach(index)?,
+                            attach,
                         ))
                     })
                     .collect()

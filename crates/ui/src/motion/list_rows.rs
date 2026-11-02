@@ -44,6 +44,13 @@
 //! the list keeps its end on the viewport's bottom edge; one who paused is
 //! not moved by rows arriving above the row at the top of the viewport if
 //! the owner stamps only rows below it.
+//!
+//! A list whose rows are replaced whole (a sidebar re-sorted, filtered and
+//! grown in one change) finds what arrived and what left from the keys
+//! before and after with [`changes`] instead of splices, and hands
+//! [`super::list_flip::ListFlip::replace`] the same keys, so the rows that
+//! stayed glide to their new places while the others fold in and out:
+//! `ListFlip::row(index, id, RowGlide::new(id, glide, content))`.
 
 use std::{collections::HashMap, ops::Range, rc::Rc};
 
@@ -273,17 +280,44 @@ pub(crate) fn arrived_rows(
     arrived
 }
 
-/// The old rows a set of splices removes without bringing anything in their
-/// place, by their index among the old rows: the rows that leave.
-pub(crate) fn removed_rows(
-    splices: &[(Range<usize>, usize)],
-    carried: &[Range<usize>],
-) -> Vec<usize> {
-    splices
+/// What replacing the rows keyed `old` with the rows keyed `new` brought
+/// and took away: each new row whose key is new, by its index in `new`, with
+/// how it came in; and each old row whose key went, by its index in `old`,
+/// with the surviving row it folds against.
+pub(crate) fn changes(old: &[u64], new: &[u64]) -> (Vec<(usize, Arrival)>, Vec<(usize, Attach)>) {
+    let before: std::collections::HashSet<u64> = old.iter().copied().collect();
+    let after: std::collections::HashSet<u64> = new.iter().copied().collect();
+    let last_kept = new.iter().rposition(|key| before.contains(key));
+    let arrived = new
         .iter()
-        .filter(|(range, count)| *count == 0 && !carried.contains(range))
-        .flat_map(|(range, _)| range.clone())
-        .collect()
+        .enumerate()
+        .filter(|(_, key)| !before.contains(key))
+        .map(|(index, _)| {
+            let arrival = if last_kept.is_some_and(|last| index < last) {
+                Arrival::Inserted
+            } else {
+                Arrival::Appended
+            };
+            (index, arrival)
+        })
+        .collect();
+    let survives = |index: usize| after.contains(&old[index]);
+    let left = (0..old.len())
+        .filter(|&index| !survives(index))
+        .filter_map(|index| {
+            let attach = (0..index)
+                .rev()
+                .find(|&above| survives(above))
+                .map(|above| Attach::Below(old[above]))
+                .or_else(|| {
+                    (index + 1..old.len())
+                        .find(|&below| survives(below))
+                        .map(|below| Attach::Above(old[below]))
+                })?;
+            Some((index, attach))
+        })
+        .collect();
+    (arrived, left)
 }
 
 /// What a [`RowGlide`] does this frame.
@@ -543,5 +577,23 @@ impl Element for RowGlide {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arrival, Attach, changes};
+
+    /// One replacement that reorders, inserts and removes at once: a new row
+    /// between kept ones is inserted and one after them all appended; a row
+    /// that went folds below the kept row above it, or above the first kept
+    /// row when none was above it. Kept rows, moved or not, are neither.
+    #[test]
+    fn a_replacement_tells_what_came_and_what_went() {
+        let (arrived, left) = changes(&[1, 2, 3, 4], &[3, 5, 1, 6]);
+        assert_eq!(arrived, [(1, Arrival::Inserted), (3, Arrival::Appended)]);
+        assert_eq!(left, [(1, Attach::Below(1)), (3, Attach::Below(3))]);
+        let (_, left) = changes(&[1, 2, 3], &[3]);
+        assert_eq!(left, [(0, Attach::Above(3)), (1, Attach::Above(3))]);
     }
 }
