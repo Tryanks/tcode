@@ -47,15 +47,21 @@ fn usage_line(goal: &Goal) -> String {
 impl Composer {
     /// The harness's standing goal: what it works toward, how far it got, and
     /// the pause, edit and clear controls the harness offers.
+    ///
+    /// A new status cross-fades its glyph and glides its colour; the pause
+    /// control folds in and away with the statuses that offer it, and the
+    /// last check's reason folds in under the objective.
     pub(in super::super) fn render_goal_strip(
-        &mut self,
+        &self,
+        goal: &Goal,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    ) -> AnyElement {
         let state = self
             .workspace_store
             .read(cx)
             .composer_state_for(self.session_id.as_deref());
-        let goal = state.goal.clone()?;
+        let goal = goal.clone();
         let control = state.provider.and_then(|provider| provider.caps().goals);
         let enabled = self.interactive(cx) && goal_offered(&state).is_some();
         let theme = cx.theme();
@@ -69,42 +75,49 @@ impl Composer {
             }
         };
         let pause = match goal.status {
-            GoalStatus::Active => {
-                Some((IconName::Pause, GoalStatus::Paused, "composer.goal_pause"))
-            }
+            GoalStatus::Active => Some((GoalStatus::Paused, "composer.goal_pause")),
             GoalStatus::Paused | GoalStatus::Blocked | GoalStatus::UsageLimited => {
-                Some((IconName::Play, GoalStatus::Active, "composer.goal_resume"))
+                Some((GoalStatus::Active, "composer.goal_resume"))
             }
             GoalStatus::BudgetLimited | GoalStatus::Complete => None,
         }
         .filter(|_| control.is_some_and(|control| control.pause));
         let usage = usage_line(&goal);
-        let last_check = goal
-            .last_check
-            .clone()
-            .filter(|_| goal.status != GoalStatus::Complete);
-        let objective = goal.objective.clone();
+        let foreground = theme.foreground;
         let touch = self.compact;
-
-        let header = h_flex()
-            .w_full()
-            .gap_1()
-            .items_center()
-            .text_secondary(touch, cx)
-            .child(Icon::new(icon).text_color(color))
-            .child(div().flex_none().child(crate::tr!(
-                "composer.goal_header",
-                status = status_label(goal.status)
-            )))
-            .child(
+        let last_check = crate::motion::shown(
+            self.motion_id("goal-last-check"),
+            goal.last_check
+                .clone()
+                .filter(|_| goal.status != GoalStatus::Complete),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(crate::widgets::fade_text(usage)),
+                    .w_full()
+                    .pt_0p5()
+                    .line_clamp(2)
+                    .text_secondary(touch, cx)
+                    .child(crate::tr!(
+                        "composer.goal_last_check",
+                        reason = shown.value.as_str()
+                    )),
             )
-            .when_some(pause, |row, (icon, status, label)| {
-                row.child(
+        });
+        let objective = goal.objective.clone();
+        let status_icon =
+            crate::motion::status_icon(self.motion_id("goal-status"), icon, color, window, cx);
+        let pause =
+            crate::motion::shown(self.motion_id("goal-pause"), pause, window, cx).map(|shown| {
+                let (status, label) = shown.value;
+                let icon = if status == GoalStatus::Paused {
+                    IconName::Pause
+                } else {
+                    IconName::Play
+                };
+                shown.fold_across(
                     Button::new("goal-pause")
                         .debug_selector(|| "goal-pause".into())
                         .ghost()
@@ -123,7 +136,26 @@ impl Composer {
                             });
                         })),
                 )
-            })
+            });
+
+        let header = h_flex()
+            .w_full()
+            .gap_1()
+            .items_center()
+            .text_secondary(touch, cx)
+            .child(status_icon)
+            .child(div().flex_none().child(crate::tr!(
+                "composer.goal_header",
+                status = status_label(goal.status)
+            )))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(usage)),
+            )
+            .children(pause)
             .child(
                 Button::new("goal-edit")
                     .debug_selector(|| "goal-edit".into())
@@ -154,38 +186,28 @@ impl Composer {
                     })),
             );
 
-        Some(
-            v_flex()
-                .id("goal-strip")
-                .w_full()
-                .gap_0p5()
-                .px_1()
-                .child(header)
-                .child(
-                    div()
-                        .w_full()
-                        .line_clamp(3)
-                        .text_body(touch, cx)
-                        .text_color(theme.foreground)
-                        .child(objective.clone()),
+        v_flex()
+            .id("goal-strip")
+            .w_full()
+            .px_1()
+            .child(header)
+            .child(
+                div()
+                    .w_full()
+                    .pt_0p5()
+                    .line_clamp(3)
+                    .text_body(touch, cx)
+                    .text_color(foreground)
+                    .child(objective.clone()),
+            )
+            .children(last_check)
+            .context_menu(move |menu, _, _| {
+                menu.menu(
+                    crate::tr!("chat.copy_text").into_owned(),
+                    Box::new(CopyText(objective.clone())),
                 )
-                .when_some(last_check, |strip, reason| {
-                    strip.child(
-                        div()
-                            .w_full()
-                            .line_clamp(2)
-                            .text_secondary(touch, cx)
-                            .child(crate::tr!("composer.goal_last_check", reason = reason)),
-                    )
-                })
-                .context_menu(move |menu, _, _| {
-                    menu.menu(
-                        crate::tr!("chat.copy_text").into_owned(),
-                        Box::new(CopyText(objective.clone())),
-                    )
-                })
-                .into_any_element(),
-        )
+            })
+            .into_any_element()
     }
 
     /// Put `/goal <objective>` in the composer with the objective selected.

@@ -14,13 +14,44 @@ impl Composer {
 
     /// The grant requests the thread's model made with `request_grant`. Only
     /// these buttons answer one; nothing said in the chat does.
-    pub(in super::super) fn render_control_request_panel(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    pub(in super::super) fn control_request(&self, cx: &App) -> Option<ControlRequest> {
         let (session_id, status) = self.control_status(cx)?;
         let count = status.pending_requests.len();
         let request = status.pending_requests.into_iter().next()?;
+        Some(ControlRequest {
+            session_id,
+            request,
+            count,
+        })
+    }
+
+    /// The card for the first grant request; when it is answered and the next
+    /// shows, the next cross-fades over it.
+    pub(in super::super) fn render_control_request_panel(
+        &self,
+        pending: &ControlRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let count = pending.count;
+        let session_id = pending.session_id.clone();
+        crate::motion::cross_fade(
+            self.motion_id("control-request"),
+            pending.request.clone(),
+            window,
+            cx,
+            move |request, _, cx| self.render_control_request(&session_id, request, count, cx),
+        )
+    }
+
+    fn render_control_request(
+        &self,
+        session_id: &str,
+        request: &tcode_core::control::ControlGrantRequest,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let session_id = session_id.to_owned();
         let respond = |approve: bool| {
             let session_id = session_id.clone();
             let request_id = request.id.clone();
@@ -37,114 +68,108 @@ impl Composer {
             summary = crate::control::grant_summary(&request.grant)
         )
         .into_owned();
-        Some(
-            crate::material::card_raised(cx)
-                .w_full()
-                .debug_selector(|| "control-request".into())
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        .child(
+        crate::material::card_raised(cx)
+            .w_full()
+            .debug_selector(|| "control-request".into())
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_caption(cx)
+                            .child(crate::tr!("control.request.caption")),
+                    )
+                    .child(div().flex_1().text_title(cx).child(summary))
+                    .when(count > 1, |row| {
+                        row.child(
                             div()
-                                .text_caption(cx)
-                                .child(crate::tr!("control.request.caption")),
+                                .text_secondary(self.compact, cx)
+                                .child(format!("1/{count}")),
                         )
-                        .child(div().flex_1().text_title(cx).child(summary))
-                        .when(count > 1, |row| {
-                            row.child(
-                                div()
-                                    .text_secondary(self.compact, cx)
-                                    .child(format!("1/{count}")),
-                            )
-                        }),
-                )
-                .when(!request.reason.trim().is_empty(), |card| {
-                    card.child(div().text_body(self.compact, cx).child(crate::tr!(
-                        "control.request.reason",
-                        reason = request.reason.as_str()
-                    )))
-                })
-                .child(
-                    div()
-                        .text_secondary(self.compact, cx)
-                        .child(crate::tr!("control.request.note")),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .child(
-                            Button::new("control-request-approve")
-                                .primary()
-                                .chip()
-                                .touch(self.compact)
-                                .disabled(!self.interactive(cx))
-                                .label(crate::tr!("control.request.approve"))
-                                .on_click(respond(true)),
-                        )
-                        .child(
-                            Button::new("control-request-decline")
-                                .danger()
-                                .outline()
-                                .chip()
-                                .touch(self.compact)
-                                .disabled(!self.interactive(cx))
-                                .label(crate::tr!("control.request.decline"))
-                                .on_click(respond(false)),
-                        ),
-                )
-                .into_any_element(),
-        )
+                    }),
+            )
+            .when(!request.reason.trim().is_empty(), |card| {
+                card.child(div().text_body(self.compact, cx).child(crate::tr!(
+                    "control.request.reason",
+                    reason = request.reason.as_str()
+                )))
+            })
+            .child(
+                div()
+                    .text_secondary(self.compact, cx)
+                    .child(crate::tr!("control.request.note")),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        Button::new("control-request-approve")
+                            .primary()
+                            .chip()
+                            .touch(self.compact)
+                            .disabled(!self.interactive(cx))
+                            .label(crate::tr!("control.request.approve"))
+                            .on_click(respond(true)),
+                    )
+                    .child(
+                        Button::new("control-request-decline")
+                            .danger()
+                            .outline()
+                            .chip()
+                            .touch(self.compact)
+                            .disabled(!self.interactive(cx))
+                            .label(crate::tr!("control.request.decline"))
+                            .on_click(respond(false)),
+                    ),
+            )
+            .into_any_element()
     }
 
-    /// One chip per thread this one may read, in the composer's chip row.
-    pub(in super::super) fn render_reference_chips(
+    /// The threads this one may read, for the composer's chip rows.
+    pub(in super::super) fn thread_references(
         &self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+        cx: &App,
+    ) -> Option<(String, Vec<ThreadReferenceStatus>)> {
         let (session_id, status) = self.control_status(cx)?;
-        if status.references.is_empty() {
-            return None;
-        }
-        Some(
-            h_flex()
-                .w_full()
-                .flex_wrap()
-                .gap_1()
-                .children(
-                    status
-                        .references
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, reference)| {
-                            let session_id = session_id.clone();
-                            let thread_id = reference.thread_id.clone();
-                            Button::new(("thread-reference-chip", index))
-                                .debug_selector(move || format!("thread-reference-chip-{index}"))
-                                .ghost()
-                                .small()
-                                .chip()
-                                .text_meta_mono(self.compact, cx)
-                                .label(format!("{}  ×", reference_chip_label(&reference)))
-                                .tooltip(reference_chip_tooltip(&reference))
-                                .aria_label(
-                                    crate::tr!("control.reference.remove").into_owned()
-                                        + ": "
-                                        + &reference_title(&reference),
-                                )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let session_id = session_id.clone();
-                                    let thread_id = thread_id.clone();
-                                    this.workspace_store.update(cx, |store, _| {
-                                        store.remove_thread_reference(session_id, thread_id)
-                                    });
-                                }))
-                        }),
-                )
-                .into_any_element(),
+        (!status.references.is_empty()).then_some((session_id, status.references))
+    }
+
+    /// The chip for one thread this one may read; pressing it takes the
+    /// reference back.
+    pub(in super::super) fn reference_chip(
+        &self,
+        session_id: &str,
+        reference: &ThreadReferenceStatus,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        let session_id = session_id.to_owned();
+        let thread_id = reference.thread_id.clone();
+        let selector = format!("thread-reference-chip-{thread_id}");
+        Button::new(gpui::SharedString::from(format!(
+            "thread-reference-chip-{thread_id}"
+        )))
+        .debug_selector(move || selector.clone())
+        .ghost()
+        .small()
+        .chip()
+        .text_meta_mono(self.compact, cx)
+        .label(format!("{}  ×", reference_chip_label(reference)))
+        .tooltip(reference_chip_tooltip(reference))
+        .aria_label(
+            crate::tr!("control.reference.remove").into_owned()
+                + ": "
+                + &reference_title(reference),
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let session_id = session_id.clone();
+            let thread_id = thread_id.clone();
+            this.workspace_store.update(cx, |store, _| {
+                store.remove_thread_reference(session_id, thread_id)
+            });
+        }))
     }
 
     /// Reference `thread_id` from the active thread. When the host answers that the new
@@ -250,4 +275,13 @@ fn reference_chip_tooltip(reference: &ThreadReferenceStatus) -> String {
         tooltip.push_str(&crate::tr!("control.reference.boundary_tooltip"));
     }
     tooltip
+}
+
+/// The grant request the composer asks about, kept while its card folds
+/// away so it leaves as it was.
+#[derive(Clone, PartialEq)]
+pub(in super::super) struct ControlRequest {
+    session_id: String,
+    request: tcode_core::control::ControlGrantRequest,
+    count: usize,
 }

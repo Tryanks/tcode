@@ -6,10 +6,29 @@ use crate::scroll::ScrollableElement as _;
 const DETAIL_MAX_HEIGHT: f32 = 240.;
 
 impl Composer {
+    /// The card for the first pending approval; when it is answered and the
+    /// next shows, the next cross-fades over it.
     pub(in super::super) fn render_approval_panel(
         &self,
         request: &ApprovalRequest,
         count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        crate::motion::cross_fade(
+            self.motion_id("approval-request"),
+            request.clone(),
+            window,
+            cx,
+            |request, window, cx| self.render_approval(request, count, window, cx),
+        )
+    }
+
+    fn render_approval(
+        &self,
+        request: &ApprovalRequest,
+        count: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let summary = match &request.kind {
@@ -140,30 +159,65 @@ impl Composer {
         let expanded = self.approval_expanded;
         let cancel_id = request.id.clone();
 
+        // The delivery line and the offline notice fold in and away; the
+        // card's own gap is carried under each, so it folds with them.
+        let gap = cx.theme().tokens.spacing.sm;
+        let connected = self
+            .workspace_store
+            .read(cx)
+            .connection_state()
+            .is_connected();
+        let delivery = crate::motion::shown(
+            self.motion_id(format_args!("approval-delivery-{}", request.id)),
+            pending.then_some(connected),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let line = crate::motion::cross_fade_part(
+                self.motion_id(format_args!("approval-delivery-text-{}", request.id)),
+                shown.value,
+                window,
+                cx,
+                |connected, _, _| {
+                    div()
+                        .child(crate::tr!(if *connected {
+                            "chat.sending"
+                        } else {
+                            "chat.waiting_connection"
+                        }))
+                        .into_any_element()
+                },
+            );
+            shown.fold(div().pb(gap).text_secondary(self.compact, cx).child(line))
+        });
+        let offline = crate::motion::shown(
+            self.motion_id(format_args!("approval-offline-{}", request.id)),
+            (self.compact && !self.interactive(cx)).then_some(()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold(
+                div()
+                    .pb(gap)
+                    .text_body(self.compact, cx)
+                    .text_color(muted)
+                    .child(crate::tr!("mobile.offline_action")),
+            )
+        });
+        let detail = crate::widgets::Collapsible::new(
+            self.motion_id(format_args!("approval-detail-{}", request.id)),
+            expanded,
+        )
+        .w_full()
+        .content(div().w_full().pb(gap).child(detail));
+
         crate::material::card_raised(cx)
             .w_full()
-            .when(pending, |card| {
-                card.child(div().text_secondary(self.compact, cx).child(crate::tr!(
-                    if self
-                        .workspace_store
-                        .read(cx)
-                        .connection_state()
-                        .is_connected()
-                    {
-                        "chat.sending"
-                    } else {
-                        "chat.waiting_connection"
-                    }
-                )))
-            })
-            .when(self.compact && !self.interactive(cx), |card| {
-                card.child(
-                    div()
-                        .text_body(self.compact, cx)
-                        .text_color(muted)
-                        .child(crate::tr!("mobile.offline_action")),
-                )
-            })
+            .gap_0()
+            .children(delivery)
+            .children(offline)
             .child(
                 crate::material::accessible_clickable(
                     h_flex(),
@@ -197,15 +251,15 @@ impl Composer {
                     )
                 })
                 .child(
-                    Icon::new(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
+                    crate::widgets::Chevron::new(
+                        self.motion_id(format_args!("approval-chevron-{}", request.id)),
+                        expanded,
+                    )
                     .text_color(muted),
                 ),
             )
-            .when(expanded, |this| this.child(detail))
+            .child(div().h(gap))
+            .child(detail)
             .child({
                 let mut options = h_flex()
                     .flex_1()

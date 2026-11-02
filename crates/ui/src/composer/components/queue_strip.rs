@@ -202,7 +202,10 @@ impl Composer {
     }
 
     /// Queued messages with edit, send-now and removal actions. Scheduled
-    /// messages also show a live countdown.
+    /// messages also show a live countdown. A row sent, dropped or steered
+    /// folds away and one queued folds in; rows a drag moves past glide to
+    /// their new places; the strip folds in with its first row and away with
+    /// its last.
     pub(in super::super) fn render_queue_strip(
         &mut self,
         window: &mut Window,
@@ -212,12 +215,10 @@ impl Composer {
         if self.queue_drag.is_some() && !cx.has_active_drag() {
             self.queue_drag = None;
         }
-        let Some((queue, mut queued)) = self.queued_rows(cx) else {
-            self.scheduled_countdown_tick = None;
-            return None;
+        let (can_steer, agent, mut queued) = match self.queued_rows(cx) {
+            Some((queue, queued)) => (queue.can_steer, queue.agent, queued),
+            None => (false, "", Vec::new()),
         };
-        let can_steer = queue.can_steer;
-        let agent = queue.agent;
         let has_scheduled = queued
             .iter()
             .any(|message| message.fire_at_unix_secs.is_some());
@@ -235,9 +236,12 @@ impl Composer {
             // exists and it stops as soon as the last scheduled row disappears.
             self.scheduled_countdown_tick = None;
         }
-        if queued.is_empty() {
-            return None;
-        }
+        let shown = crate::motion::shown(
+            self.motion_id("queue-strip"),
+            (!queued.is_empty()).then_some(()),
+            window,
+            cx,
+        )?;
         let reorderable = queued.len() > 1 && self.interactive(cx);
         if let Some(drag) = &self.queue_drag
             && let Some(from) = queued.iter().position(|message| message.id == drag.id)
@@ -250,8 +254,56 @@ impl Composer {
             queued.insert(to, message);
         }
 
-        let mut strip = v_flex().w_full().gap_1();
-        for (index, message) in queued.into_iter().enumerate() {
+        let this = &*self;
+        let rows = queued
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| (queued_slot(message.id), (index, message)));
+        let strip = crate::motion::keyed(
+            this.motion_id("queue-rows"),
+            rows.collect::<Vec<_>>(),
+            window,
+            cx,
+            |_, (index, message), window, cx| {
+                this.render_queued_row(*index, message, reorderable, can_steer, agent, window, cx)
+            },
+        )
+        .render(v_flex().w_full());
+        Some(super::super::column_fold(
+            &shown,
+            div()
+                .id("queued-messages-scroll")
+                .w_full()
+                // A few queued rows before the strip scrolls, so the field
+                // under it stays in reach; no owner sizes a composer strip.
+                .max_h(px(180.))
+                .on_drop(cx.listener(|this, _: &DraggedQueued, _, cx| this.drop_queued_row(cx)))
+                .on_drag_move(
+                    cx.listener(|this, event: &DragMoveEvent<DraggedQueued>, _, cx| {
+                        this.queue_drag_auto_scroll(event, cx)
+                    }),
+                )
+                .overflow_y_scroll_area()
+                .track_scroll(&self.queue_scroll)
+                .child(strip),
+        ))
+    }
+
+    /// One queued message's row, the `index`th in the strip; the rows after
+    /// the first carry the gap and rule above them.
+    #[allow(clippy::too_many_arguments)]
+    fn render_queued_row(
+        &self,
+        index: usize,
+        message: &tcode_protocol::QueuedMessageStatus,
+        reorderable: bool,
+        can_steer: bool,
+        agent: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        {
+            let message = message.clone();
             let id = message.id;
             let editable = message.editable;
             let text = message.text.clone();
@@ -418,25 +470,12 @@ impl Composer {
                         )
                     }
                 });
-            strip = strip.child(drag_ghost::slot(queued_slot(id), row, window, cx));
-        }
-        Some(
+            let row = drag_ghost::slot(queued_slot(id), row, window, cx);
             div()
-                .id("queued-messages-scroll")
                 .w_full()
-                // A few queued rows before the strip scrolls, so the field
-                // under it stays in reach; no owner sizes a composer strip.
-                .max_h(px(180.))
-                .on_drop(cx.listener(|this, _: &DraggedQueued, _, cx| this.drop_queued_row(cx)))
-                .on_drag_move(
-                    cx.listener(|this, event: &DragMoveEvent<DraggedQueued>, _, cx| {
-                        this.queue_drag_auto_scroll(event, cx)
-                    }),
-                )
-                .overflow_y_scroll_area()
-                .track_scroll(&self.queue_scroll)
-                .child(strip)
-                .into_any_element(),
-        )
+                .when(index > 0, |gap| gap.pt_1())
+                .child(row)
+                .into_any_element()
+        }
     }
 }

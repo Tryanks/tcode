@@ -3,13 +3,10 @@ use super::super::*;
 impl Composer {
     pub(in super::super) fn render_checkout_row(
         &self,
+        checkout: &crate::store::ComposerCheckoutState,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let checkout = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .checkout?;
+    ) -> AnyElement {
+        let checkout = checkout.clone();
         let branch = checkout.branch;
         let branches: Rc<[String]> = checkout.branches.into();
         let checkout_blocked = checkout.checkout_blocked;
@@ -154,17 +151,15 @@ impl Composer {
         let left =
             self.render_workspace_chip(is_draft, worktree_mode, worktree.is_some(), &branch, cx);
 
-        Some(
-            h_flex()
-                .w_full()
-                .px_2()
-                .items_center()
-                .justify_between()
-                .text_secondary(self.compact, cx)
-                .child(left)
-                .child(right)
-                .into_any_element(),
-        )
+        h_flex()
+            .w_full()
+            .px_2()
+            .items_center()
+            .justify_between()
+            .text_secondary(self.compact, cx)
+            .child(left)
+            .child(right)
+            .into_any_element()
     }
 
     /// The left-hand workspace chip: a draft can pick current checkout vs a new

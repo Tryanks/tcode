@@ -93,32 +93,61 @@ impl Composer {
         }
         .into_owned()
         .into();
-        let color = if status == SpeechStatus::Recording {
-            cx.theme().danger
-        } else {
-            cx.theme().muted_foreground
-        };
+        let recording = status == SpeechStatus::Recording;
+        let level = state.level();
+        // The glyph turns red and gains a halo while it records, the halo
+        // following the voice's level smoothly rather than each raw reading;
+        // a spinner cross-fades in while it connects or stops.
+        let mark = crate::motion::Sampled::new(move |window, cx| {
+            let theme = cx.theme().clone();
+            let color = gpui_base::motion::transition(
+                "voice-mic-color",
+                if recording {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            let halo = gpui_base::motion::spring(
+                "voice-mic-halo",
+                if recording { 0.08 + level * 0.42 } else { 0. },
+                crate::motion::FOLLOW,
+                window,
+                cx,
+            );
+            crate::motion::cross_fade_part(
+                "voice-mic-mark",
+                preparing,
+                window,
+                cx,
+                move |preparing, _, cx| {
+                    if *preparing {
+                        return Spinner::new().color(color).into_any_element();
+                    }
+                    div()
+                        .relative()
+                        .child(
+                            div()
+                                .absolute()
+                                .inset(-cx.theme().tokens.spacing.xxs)
+                                .rounded_full()
+                                .bg(cx.theme().danger.opacity(halo.max(0.))),
+                        )
+                        .child(Icon::empty().path("icons/mic.svg").text_color(color))
+                        .into_any_element()
+                },
+            )
+        });
         Some(
             Button::new("voice-mic")
                 .ghost()
                 .chip()
                 .disabled(!available)
                 .tooltip(tooltip)
-                .child(if preparing {
-                    Spinner::new().color(color).into_any_element()
-                } else {
-                    let icon = Icon::empty().path("icons/mic.svg").text_color(color);
-                    if status == SpeechStatus::Recording {
-                        div()
-                            .rounded_full()
-                            .p(cx.theme().tokens.spacing.xxs)
-                            .bg(cx.theme().danger.opacity(0.08 + state.level() * 0.42))
-                            .child(icon)
-                            .into_any_element()
-                    } else {
-                        icon.into_any_element()
-                    }
-                })
+                .child(mark)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.voice.state.update(cx, |state, cx| state.toggle(cx));
                 }))

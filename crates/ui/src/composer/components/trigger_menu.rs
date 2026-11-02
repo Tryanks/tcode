@@ -316,17 +316,35 @@ impl Composer {
         cx.notify();
     }
 
-    /// The floating `@`/`/`/`$` menu, rendered in-flow just above the composer
-    /// card. `None` when no trigger is active (or it was dismissed).
-    pub(in super::super) fn render_trigger_menu(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    /// What the `@`/`/`/`$` menu shows, `None` when no trigger is active (or
+    /// it was dismissed).
+    pub(in super::super) fn trigger_menu(&self, cx: &App) -> Option<TriggerMenu> {
         if !self.menu_visible(cx) {
             return None;
         }
         let (rows, empty_text, loading) = self.menu_rows(cx);
         let highlight = self.menu_highlight.min(rows.len().saturating_sub(1));
+        Some(TriggerMenu {
+            rows,
+            empty_text,
+            loading,
+            highlight,
+        })
+    }
+
+    /// The floating `@`/`/`/`$` menu, rendered in-flow just above the composer
+    /// card.
+    pub(in super::super) fn render_trigger_menu(
+        &self,
+        menu: &TriggerMenu,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let TriggerMenu {
+            rows,
+            empty_text,
+            loading,
+            highlight,
+        } = menu.clone();
 
         let compact = self.compact;
         let list = if rows.is_empty() {
@@ -392,21 +410,14 @@ impl Composer {
             .into_any_element()
         };
 
-        Some(
-            crate::material::overlay_contour(div(), cx)
-                .rounded(crate::material::radius_overlay(cx))
-                .id("composer-trigger-menu")
-                .role(Role::ListBox)
-                .aria_label(crate::tr!("composer.trigger_results"))
-                .w_full()
-                .child(list)
-                .with_animation(
-                    "composer-trigger-menu-pop-in",
-                    Animation::new(Duration::from_millis(150)),
-                    |element, delta| element.opacity(delta),
-                )
-                .into_any_element(),
-        )
+        crate::material::overlay_contour(div(), cx)
+            .rounded(crate::material::radius_overlay(cx))
+            .id("composer-trigger-menu")
+            .role(Role::ListBox)
+            .aria_label(crate::tr!("composer.trigger_results"))
+            .w_full()
+            .child(list)
+            .into_any_element()
     }
 }
 
@@ -466,6 +477,16 @@ fn render_menu_row(
         .on_click(cx.listener(move |this, _, window, cx| {
             this.accept_menu(index, window, cx);
         }))
+}
+
+/// What the trigger menu shows: kept while the menu folds away, so it leaves
+/// as it was.
+#[derive(Clone, PartialEq)]
+pub(in super::super) struct TriggerMenu {
+    rows: Vec<MenuRow>,
+    empty_text: String,
+    loading: bool,
+    highlight: usize,
 }
 
 #[cfg(test)]

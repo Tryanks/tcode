@@ -37,10 +37,10 @@ use agent::{
 };
 use chrono::Local;
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardEntry,
-    Context, Entity, EventEmitter, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, img, prelude::FluentBuilder as _, px, rgb,
+    Anchor, AnyElement, App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter,
+    ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    img, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::PopoverState;
 use gpui_base::input::{MoveDown, MoveUp};
@@ -172,6 +172,9 @@ pub struct Composer {
     /// fit, which folds them into the "⋯" overflow menu. Only layout knows
     /// the width, so its prepaint callback writes it here.
     control_row_narrow: Rc<Cell<bool>>,
+    /// Whether the desktop control row was last rendered folded, so the
+    /// frame that folds or unfolds it glides its controls to their places.
+    control_row_folded: Option<bool>,
     /// The inline trigger (`@`/`/`/`$`) active at the cursor, recomputed on every
     /// input change. Drives the trigger menu.
     active_trigger: Option<ComposerTrigger>,
@@ -385,6 +388,7 @@ impl Composer {
             ui_expanded: false,
             model_picker_token: 0,
             control_row_narrow: Rc::default(),
+            control_row_folded: None,
             active_trigger: None,
             menu_highlight: 0,
             menu_last_key: None,
@@ -903,102 +907,143 @@ impl Composer {
         cx.notify();
     }
 
-    /// Compact control that switches between Send, Queue and Stop.
+    /// Compact control that switches between Send, Queue and Stop: one
+    /// cross-fades into the next, and the caption naming what a press does
+    /// folds in under it while a turn runs and there is text.
     fn render_compact_primary_action(
         &self,
         turn_running: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let interactive = self.interactive(cx);
         let has_text = interactive && !self.input.read(cx).value().trim().is_empty();
-        if self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .preparing_worktree
-        {
-            return div()
-                .size(px(crate::material::TOUCH_TARGET))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(Spinner::new().color(cx.theme().primary))
-                .into_any_element();
-        }
-        let stopping = turn_running && !has_text;
         let composer_state = self
             .workspace_store
             .read(cx)
             .composer_state_for(self.session_id.as_deref());
+        let stopping = turn_running && !has_text;
         let stop_pending = composer_state.stopping;
         let steerable = turn_running && has_text && composer_state.steering_supported;
         let armed = self.steer_gesture.as_ref().is_some_and(SteerGesture::armed);
-        let (label, id): (_, &'static str) = if stopping {
-            (crate::tr!("composer.stop"), "stop-turn")
-        } else if turn_running {
-            (crate::tr!("mobile.queue"), "steer-turn")
+        let mode = if composer_state.preparing_worktree {
+            CompactAction::Preparing
+        } else if stopping {
+            CompactAction::Stop
         } else {
-            (crate::tr!("composer.send"), "send-message")
+            CompactAction::Arrow
         };
         let touch = px(crate::material::TOUCH_TARGET);
-        let button = Button::new(id)
-            .debug_selector(move || id.into())
-            .with_size(touch)
-            .rounded(touch / 2.)
-            .aria_label(label)
-            .map(|button| {
-                if stopping {
-                    // A filled stop square; the icon set's square is an outline.
-                    // A child is not an icon, so the button's width is set too.
-                    button
-                        .danger()
-                        .w(touch)
-                        .disabled(!interactive || stop_pending)
-                        .child(div().size(px(13.)).rounded(px(2.)).bg(cx.theme().danger))
-                } else {
-                    button.primary().disabled(!has_text).icon(IconName::ArrowUp)
-                }
-            })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if stopping {
-                    if this.interactive(cx) {
-                        this.workspace_store.update(cx, |store, _cx| {
-                            store.interrupt_for(this.session_id.clone().unwrap_or_default())
-                        });
+        let button = crate::motion::cross_fade(
+            self.motion_id("compact-action"),
+            mode,
+            window,
+            cx,
+            move |mode, _, cx| {
+                let (label, id): (_, &'static str) = match mode {
+                    CompactAction::Preparing => {
+                        return div()
+                            .size(touch)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Spinner::new().color(cx.theme().primary))
+                            .into_any_element();
                     }
-                    return;
-                }
-                let input = this.input.clone();
-                this.submit(&input, false, window, cx);
-            }));
-        let button = div()
-            .relative()
-            .flex_none()
-            .child(button)
-            .when(steerable || self.steer_gesture.is_some(), |el| {
-                el.child(self.render_steer_gesture(cx))
-            });
-        v_flex()
-            .flex_none()
-            .items_center()
-            .gap(cx.theme().tokens.spacing.xxs)
-            .child(button)
-            .when(turn_running && has_text, |el| {
-                el.child(
-                    div()
-                        .text_secondary(false, cx)
-                        .text_color(if armed {
-                            cx.theme().primary
+                    CompactAction::Stop => (crate::tr!("composer.stop"), "stop-turn"),
+                    CompactAction::Arrow if turn_running => {
+                        (crate::tr!("mobile.queue"), "steer-turn")
+                    }
+                    CompactAction::Arrow => (crate::tr!("composer.send"), "send-message"),
+                };
+                let stop = *mode == CompactAction::Stop;
+                Button::new(id)
+                    .debug_selector(move || id.into())
+                    .with_size(touch)
+                    .rounded(touch / 2.)
+                    .aria_label(label)
+                    .map(|button| {
+                        if stop {
+                            // A filled stop square; the icon set's square is an
+                            // outline. A child is not an icon, so the button's
+                            // width is set too.
+                            button
+                                .danger()
+                                .w(touch)
+                                .disabled(!interactive || stop_pending)
+                                .child(div().size(px(13.)).rounded(px(2.)).bg(cx.theme().danger))
                         } else {
-                            cx.theme().muted_foreground
-                        })
-                        .child(crate::tr!(if armed {
+                            button.primary().disabled(!has_text).icon(IconName::ArrowUp)
+                        }
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if stop {
+                            if this.interactive(cx) {
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.interrupt_for(this.session_id.clone().unwrap_or_default())
+                                });
+                            }
+                            return;
+                        }
+                        let input = this.input.clone();
+                        this.submit(&input, false, window, cx);
+                    }))
+                    .into_any_element()
+            },
+        );
+        let button = div().relative().flex_none().child(button).when(
+            mode != CompactAction::Preparing && (steerable || self.steer_gesture.is_some()),
+            |el| el.child(self.render_steer_gesture(cx)),
+        );
+        let caption = crate::motion::shown(
+            self.motion_id("compact-action-caption"),
+            (mode == CompactAction::Arrow && turn_running && has_text).then_some(()),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let color = gpui_base::motion::transition(
+                self.motion_id("compact-action-caption-color"),
+                if armed {
+                    cx.theme().primary
+                } else {
+                    cx.theme().muted_foreground
+                },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            let text = crate::motion::cross_fade_part(
+                self.motion_id("compact-action-caption-text"),
+                armed,
+                window,
+                cx,
+                |armed, _, _| {
+                    div()
+                        .whitespace_nowrap()
+                        .child(crate::tr!(if *armed {
                             "mobile.steer"
                         } else {
                             "mobile.queue"
-                        })),
-                )
-            })
+                        }))
+                        .into_any_element()
+                },
+            );
+            shown.fold(
+                div()
+                    .flex()
+                    .justify_center()
+                    .pt(cx.theme().tokens.spacing.xxs)
+                    .text_secondary(false, cx)
+                    .text_color(color)
+                    .child(text),
+            )
+        });
+        v_flex()
+            .flex_none()
+            .items_center()
+            .child(button)
+            .children(caption)
             .into_any_element()
     }
 
@@ -1031,82 +1076,111 @@ impl Composer {
             }))
     }
 
-    fn render_send_or_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// The desktop send control. A running turn widens it into a spinner,
+    /// Steer (for providers that steer) and Stop, worktree preparation into
+    /// a spinner and its caption: each part folds in or away along the row
+    /// and the parts that stay move over, so the chips beside it give way
+    /// rather than jump.
+    fn render_send_or_stop(
+        &self,
+        turn_running: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if self.compact {
-            return self.render_compact_primary_action(turn_running, cx);
+            return self.render_compact_primary_action(turn_running, window, cx);
         }
-        if turn_running {
-            // Providers with native mid-turn steering keep a send button active
-            // beside Stop while a turn runs.
-            let steers = self
-                .workspace_store
-                .read(cx)
-                .composer_state_for(self.session_id.as_deref())
-                .steering_supported;
-            let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
-            let mut row = h_flex()
-                .gap_2()
-                .items_center()
-                .child(Spinner::new().color(cx.theme().primary));
-            if steers {
-                let queue_hint = crate::tr!(
-                    "composer.queue_hint",
-                    shortcut = format_secondary_shortcut("enter", cx)
-                )
-                .into_owned();
-                row = row.child(
-                    Button::new("steer-turn")
-                        .debug_selector(|| "steer-turn".into())
+        let composer_state = self
+            .workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref());
+        let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
+        let parts: &[DesktopAction] = if turn_running {
+            // Providers with native mid-turn steering keep a send button
+            // active beside Stop while a turn runs.
+            if composer_state.steering_supported {
+                &[
+                    DesktopAction::Spinner,
+                    DesktopAction::Steer,
+                    DesktopAction::Stop,
+                ]
+            } else {
+                &[DesktopAction::Spinner, DesktopAction::Stop]
+            }
+        } else if composer_state.preparing_worktree {
+            // First-send worktree preparation holds the send control.
+            &[DesktopAction::Spinner, DesktopAction::Preparing]
+        } else {
+            &[DesktopAction::Send]
+        };
+        crate::motion::keyed_across(
+            self.motion_id("send-or-stop"),
+            parts
+                .iter()
+                .map(|part| (gpui::SharedString::from(part.key()), *part)),
+            window,
+            cx,
+            |_, part, _, cx| {
+                let part = match part {
+                    DesktopAction::Spinner => {
+                        Spinner::new().color(cx.theme().primary).into_any_element()
+                    }
+                    DesktopAction::Steer => {
+                        let queue_hint = crate::tr!(
+                            "composer.queue_hint",
+                            shortcut = format_secondary_shortcut("enter", cx)
+                        )
+                        .into_owned();
+                        Button::new("steer-turn")
+                            .debug_selector(|| "steer-turn".into())
+                            .primary()
+                            .with_size(px(SEND_SIZE))
+                            .icon(IconName::ArrowUp)
+                            .aria_label(crate::tr!("composer.steer_tooltip"))
+                            .tooltip(queue_hint)
+                            .disabled(!has_text)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let input = this.input.clone();
+                                this.submit(&input, false, window, cx);
+                            }))
+                            .into_any_element()
+                    }
+                    DesktopAction::Stop => self.render_stop(cx).into_any_element(),
+                    DesktopAction::Preparing => div()
+                        .whitespace_nowrap()
+                        .text_secondary(false, cx)
+                        .child(crate::tr!("composer.preparing_worktree"))
+                        .into_any_element(),
+                    DesktopAction::Send => Button::new("send-message")
+                        .debug_selector(|| "send-message".into())
                         .primary()
                         .with_size(px(SEND_SIZE))
                         .icon(IconName::ArrowUp)
-                        .aria_label(crate::tr!("composer.steer_tooltip"))
-                        .tooltip(queue_hint)
+                        .aria_label(crate::tr!("composer.send"))
                         .disabled(!has_text)
                         .on_click(cx.listener(|this, _, window, cx| {
                             let input = this.input.clone();
                             this.submit(&input, false, window, cx);
-                        })),
-                );
-            }
-            return row.child(self.render_stop(cx)).into_any_element();
-        }
-
-        // First-send worktree preparation temporarily disables the send control.
-        if self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .preparing_worktree
-        {
-            return h_flex()
-                .gap_2()
-                .items_center()
-                .child(Spinner::new().color(cx.theme().primary))
-                .child(
-                    div()
-                        .text_secondary(false, cx)
-                        .child(crate::tr!("composer.preparing_worktree")),
-                )
-                .into_any_element();
-        }
-
-        let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
-        Button::new("send-message")
-            .debug_selector(|| "send-message".into())
-            .primary()
-            .with_size(px(SEND_SIZE))
-            .icon(IconName::ArrowUp)
-            .aria_label(crate::tr!("composer.send"))
-            .disabled(!has_text)
-            .on_click(cx.listener(|this, _, window, cx| {
-                let input = this.input.clone();
-                this.submit(&input, false, window, cx);
-            }))
-            .into_any_element()
+                        }))
+                        .into_any_element(),
+                };
+                // Each part carries the gap before it, so the gap goes with it.
+                h_flex()
+                    .pl_2()
+                    .items_center()
+                    .child(part)
+                    .into_any_element()
+            },
+        )
+        .render(h_flex().items_center())
     }
 
-    fn render_primary_action(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_primary_action(
+        &self,
+        turn_running: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if self
             .workspace_store
             .read(cx)
@@ -1126,10 +1200,238 @@ impl Composer {
                 .icon(IconName::ArrowUp)
                 .into_any_element();
         }
-        if turn_running {
-            return self.render_send_or_stop(true, cx);
+        self.render_send_or_stop(turn_running, window, cx)
+    }
+}
+
+/// What the compact send control shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompactAction {
+    Preparing,
+    /// Send, or Queue while a turn runs.
+    Arrow,
+    Stop,
+}
+
+/// One part of the desktop send control.
+#[derive(Clone, Copy)]
+enum DesktopAction {
+    Spinner,
+    Steer,
+    Stop,
+    Preparing,
+    Send,
+}
+
+impl DesktopAction {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Spinner => "spinner",
+            Self::Steer => "steer",
+            Self::Stop => "stop",
+            Self::Preparing => "preparing",
+            Self::Send => "send",
         }
-        self.render_send_or_stop(turn_running, cx)
+    }
+}
+
+/// One row of the card's chips: what the draft carries besides its text.
+#[derive(Clone)]
+enum ChipRow {
+    Terminal(Vec<tcode_protocol::TerminalContextStatus>),
+    Review(Vec<tcode_core::session::ReviewComment>),
+    References(String, Vec<tcode_protocol::ThreadReferenceStatus>),
+}
+
+impl Composer {
+    /// The id of a part's motion for the thread the composer is showing, so
+    /// what one thread showed never folds away over another's.
+    fn motion_id(&self, part: impl std::fmt::Display) -> gpui::ElementId {
+        gpui::ElementId::Name(
+            format!(
+                "composer:{}:{part}",
+                self.session_id.as_deref().unwrap_or_default()
+            )
+            .into(),
+        )
+    }
+
+    /// The chip rows above the field: terminal contexts, review comments and
+    /// thread references. A chip that goes narrows away and the ones after
+    /// it move over; a row folds in with its first chip and away with its
+    /// last. Each chip carries the gap after and under it, and each row the
+    /// space under it, so a gap goes with what it separates.
+    fn render_chip_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let store = self.workspace_store.read(cx);
+        let terminal = store
+            .composer_state_for(self.session_id.as_deref())
+            .terminal_contexts;
+        let review = store.review_comments_for(self.session_id.as_deref());
+        let mut rows = Vec::new();
+        if !terminal.is_empty() {
+            rows.push((
+                gpui::SharedString::from("terminal"),
+                ChipRow::Terminal(terminal),
+            ));
+        }
+        if !review.is_empty() {
+            rows.push((gpui::SharedString::from("review"), ChipRow::Review(review)));
+        }
+        if let Some((session_id, references)) = self.thread_references(cx) {
+            rows.push((
+                gpui::SharedString::from("references"),
+                ChipRow::References(session_id, references),
+            ));
+        }
+        let chip = |button: AnyElement| div().pr_1().pb_1().child(button).into_any_element();
+        crate::motion::keyed(
+            self.motion_id("chip-rows"),
+            rows,
+            window,
+            cx,
+            |key, row, window, cx| {
+                let id = self.motion_id(format_args!("chips-{key}"));
+                let chips = match row {
+                    ChipRow::Terminal(contexts) => crate::motion::keyed_across(
+                        id,
+                        contexts
+                            .iter()
+                            .map(|context| (context.id.to_string().into(), context.clone())),
+                        window,
+                        cx,
+                        |_, context, _, cx| chip(self.terminal_context_chip(context, cx)),
+                    ),
+                    ChipRow::Review(comments) => {
+                        // The same comment twice is two chips, told apart by
+                        // how many came before.
+                        let mut seen = std::collections::HashMap::<String, usize>::new();
+                        let items = comments.iter().enumerate().map(|(index, comment)| {
+                            let key = format!(
+                                "{}:{:?}:{}-{}:{}",
+                                comment.file,
+                                comment.side,
+                                comment.line_start,
+                                comment.line_end,
+                                comment.text
+                            );
+                            let nth = seen.entry(key.clone()).or_default();
+                            *nth += 1;
+                            (format!("{key}#{nth}").into(), (index, comment.clone()))
+                        });
+                        crate::motion::keyed_across(
+                            id,
+                            items.collect::<Vec<_>>(),
+                            window,
+                            cx,
+                            |key, (index, comment), _, cx| {
+                                chip(self.review_comment_chip(key, *index, comment, cx))
+                            },
+                        )
+                    }
+                    ChipRow::References(session_id, references) => crate::motion::keyed_across(
+                        id,
+                        references.iter().map(|reference| {
+                            (reference.thread_id.clone().into(), reference.clone())
+                        }),
+                        window,
+                        cx,
+                        |_, reference, _, cx| {
+                            chip(
+                                self.reference_chip(session_id, reference, cx)
+                                    .into_any_element(),
+                            )
+                        },
+                    ),
+                };
+                chips.render(h_flex().w_full().flex_wrap().pb_0p5())
+            },
+        )
+        .render(v_flex().w_full())
+    }
+
+    fn terminal_context_chip(
+        &self,
+        context: &tcode_protocol::TerminalContextStatus,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = context.id;
+        let range = if context.line_start == context.line_end {
+            format!("L{}", context.line_start)
+        } else {
+            format!("L{}-L{}", context.line_start, context.line_end)
+        };
+        let text = context.text.clone();
+        Button::new(("terminal-context-chip", id))
+            .ghost()
+            .small()
+            .chip()
+            .text_meta_mono(self.compact, cx)
+            .label(format!("{} · {}  ×", context.terminal_label, range))
+            .tooltip(context.text.clone())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.workspace_store.update(cx, |store, _cx| {
+                    store.remove_terminal_context_for(
+                        this.session_id.clone().unwrap_or_default(),
+                        id,
+                    )
+                });
+            }))
+            .context_menu(move |menu, _, _| {
+                menu.menu(
+                    crate::tr!("chat.copy_text").into_owned(),
+                    Box::new(CopyText(text.clone())),
+                )
+                .separator()
+                .menu(
+                    crate::tr!("composer.remove_context").into_owned(),
+                    Box::new(ComposerMenu::RemoveTerminalContext(id)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The chip for the review comment at `index`; `key` names it for as
+    /// long as it is drafted, wherever it moves in the list.
+    fn review_comment_chip(
+        &self,
+        key: &gpui::SharedString,
+        index: usize,
+        comment: &tcode_core::session::ReviewComment,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let range = if comment.line_start == comment.line_end {
+            format!("L{}", comment.line_start)
+        } else {
+            format!("L{}-L{}", comment.line_start, comment.line_end)
+        };
+        let text = comment.text.clone();
+        Button::new(gpui::ElementId::NamedChild(
+            std::sync::Arc::new("review-comment-chip".into()),
+            key.clone(),
+        ))
+        .ghost()
+        .small()
+        .chip()
+        .text_meta_mono(self.compact, cx)
+        .label(format!("{} {}  ×", comment.file, range))
+        .tooltip(comment.text.clone())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.workspace_store.update(cx, |store, _cx| {
+                store.remove_review_comment_for(this.session_id.clone().unwrap_or_default(), index)
+            });
+        }))
+        .context_menu(move |menu, _, _| {
+            menu.menu(
+                crate::tr!("chat.copy_text").into_owned(),
+                Box::new(CopyText(text.clone())),
+            )
+            .separator()
+            .menu(
+                crate::tr!("composer.remove_context").into_owned(),
+                Box::new(ComposerMenu::RemoveReviewComment(index)),
+            )
+        })
+        .into_any_element()
     }
 }
 
@@ -1196,7 +1498,8 @@ impl Render for Composer {
         let model_cell = || div().min_w(px(SEND_SIZE));
         let primary = div()
             .flex_none()
-            .child(self.render_primary_action(turn_running, cx));
+            .child(self.render_primary_action(turn_running, window, cx));
+        let mut reflow_scope = None;
         let control_row = if self.compact || (readonly && compact) {
             control_row_base
                 .child(
@@ -1208,30 +1511,87 @@ impl Render for Composer {
                         .children(mic),
                 )
                 .child(primary)
-        } else if compact {
-            control_row_base
-                .child(
-                    leading()
-                        .child(model_cell().child(self.render_model_picker(cx)))
-                        .child(self.render_overflow_menu(cx))
-                        .child(div().flex_1())
-                        .children(mic)
-                        .child(self.render_context_meter(cx)),
-                )
-                .child(primary)
         } else {
-            control_row_base
-                .child(
-                    leading()
-                        .child(model_cell().child(self.render_model_picker(cx)))
-                        .child(self.render_traits_picker(cx))
-                        .child(divider())
-                        .child(self.render_context_meter(cx))
-                        .child(self.render_permission_picker(cx))
-                        .child(div().flex_1())
-                        .children(mic),
+            // A row that folds narrows the traits, permission and divider
+            // away and the overflow in, and glides the context meter and
+            // the mic to their places on the frame that folds it. Each part
+            // after the model carries the gap before it, so a gap goes with
+            // its part.
+            let folded = compact;
+            let reflowed = self
+                .control_row_folded
+                .replace(folded)
+                .is_some_and(|last| last != folded);
+            let reflow =
+                crate::motion::reflow(self.motion_id("control-row"), window, cx).reflowed(reflowed);
+            let gapped = |part: AnyElement| div().flex_none().pl_1().child(part);
+            let fold = |part: &'static str,
+                        shown: bool,
+                        build: &mut dyn FnMut(&mut Context<Self>) -> AnyElement,
+                        window: &mut Window,
+                        cx: &mut Context<Self>| {
+                crate::motion::shown(
+                    self.motion_id(format_args!("control-row-{part}")),
+                    shown.then_some(()),
+                    window,
+                    cx,
                 )
-                .child(primary)
+                .map(|shown| shown.fold_across(gapped(build(cx))))
+            };
+            let traits = fold(
+                "traits",
+                !folded,
+                &mut |cx| self.render_traits_picker(cx),
+                window,
+                cx,
+            );
+            let divider = fold(
+                "divider",
+                !folded,
+                &mut |_| divider().into_any_element(),
+                window,
+                cx,
+            );
+            let permission = fold(
+                "permission",
+                !folded,
+                &mut |cx| self.render_permission_picker(cx),
+                window,
+                cx,
+            );
+            let overflow = fold(
+                "overflow",
+                folded,
+                &mut |cx| self.render_overflow_menu(cx),
+                window,
+                cx,
+            );
+            let meter = reflow.part("meter", gapped(self.render_context_meter(cx)));
+            let (meter_inside, meter_end) = if folded {
+                (None, Some(meter))
+            } else {
+                (Some(meter), None)
+            };
+            let row = control_row_base
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .items_center()
+                        .child(model_cell().child(self.render_model_picker(cx)))
+                        .children(traits)
+                        .children(divider)
+                        .children(meter_inside)
+                        .children(permission)
+                        .children(overflow)
+                        .child(div().flex_1())
+                        .children(mic.map(|mic| reflow.part("mic", gapped(mic))))
+                        .children(meter_end),
+                )
+                .child(primary);
+            reflow_scope = Some(reflow);
+            row
         };
 
         // The row's width is known only once it is laid out, after this
@@ -1244,6 +1604,10 @@ impl Render for Composer {
                 window.on_next_frame(move |_, cx| cx.notify(composer));
             }
         });
+        let control_row = match reflow_scope {
+            Some(reflow) => reflow.render(control_row),
+            None => control_row.into_any_element(),
+        };
 
         let desired_placeholder = if readonly {
             crate::tr!("chat.subagent_readonly")
@@ -1268,104 +1632,30 @@ impl Render for Composer {
             .cloned();
 
         let composer = cx.entity();
-        let terminal_contexts = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .terminal_contexts;
-        let has_terminal_contexts = !terminal_contexts.is_empty();
-        let context_chips =
-            h_flex()
-                .w_full()
-                .flex_wrap()
-                .gap_1()
-                .children(terminal_contexts.into_iter().map(|context| {
-                    let id = context.id;
-                    let range = if context.line_start == context.line_end {
-                        format!("L{}", context.line_start)
-                    } else {
-                        format!("L{}-L{}", context.line_start, context.line_end)
-                    };
-                    let text = context.text.clone();
-                    Button::new(("terminal-context-chip", id))
-                        .ghost()
-                        .small()
-                        .chip()
-                        .text_meta_mono(self.compact, cx)
-                        .label(format!("{} · {}  ×", context.terminal_label, range))
-                        .tooltip(context.text)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store.update(cx, |store, _cx| {
-                                store.remove_terminal_context_for(
-                                    this.session_id.clone().unwrap_or_default(),
-                                    id,
-                                )
-                            });
-                        }))
-                        .context_menu(move |menu, _, _| {
-                            menu.menu(
-                                crate::tr!("chat.copy_text").into_owned(),
-                                Box::new(CopyText(text.clone())),
-                            )
-                            .separator()
-                            .menu(
-                                crate::tr!("composer.remove_context").into_owned(),
-                                Box::new(ComposerMenu::RemoveTerminalContext(id)),
-                            )
-                        })
-                }));
-        let review_comments = self
-            .workspace_store
-            .read(cx)
-            .review_comments_for(self.session_id.as_deref());
-        let has_review_comments = !review_comments.is_empty();
-        let review_chips = h_flex().w_full().flex_wrap().gap_1().children(
-            review_comments
-                .into_iter()
-                .enumerate()
-                .map(|(index, comment)| {
-                    let range = if comment.line_start == comment.line_end {
-                        format!("L{}", comment.line_start)
-                    } else {
-                        format!("L{}-L{}", comment.line_start, comment.line_end)
-                    };
-                    let text = comment.text.clone();
-                    Button::new(("review-comment-chip", index))
-                        .ghost()
-                        .small()
-                        .chip()
-                        .text_meta_mono(self.compact, cx)
-                        .label(format!("{} {}  ×", comment.file, range))
-                        .tooltip(comment.text)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store.update(cx, |store, _cx| {
-                                store.remove_review_comment_for(
-                                    this.session_id.clone().unwrap_or_default(),
-                                    index,
-                                )
-                            });
-                        }))
-                        .context_menu(move |menu, _, _| {
-                            menu.menu(
-                                crate::tr!("chat.copy_text").into_owned(),
-                                Box::new(CopyText(text.clone())),
-                            )
-                            .separator()
-                            .menu(
-                                crate::tr!("composer.remove_context").into_owned(),
-                                Box::new(ComposerMenu::RemoveReviewComment(index)),
-                            )
-                        })
-                }),
-        );
+        let chip_rows = self.render_chip_rows(window, cx);
+        // The field grows and shrinks a line at a time as the draft does, and
+        // clears to one line on send; its height glides there, carrying the
+        // card and everything above it.
+        let draft_key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.input.read(cx).value().hash(&mut hasher);
+            hasher.finish()
+        };
+        let draft_glide =
+            crate::motion::GlideState::keyed(self.motion_id("draft-glide"), window, cx);
 
-        // Focus swaps the hairline to primary in one frame. Geometry stays
-        // fixed: focus never changes border width, radius, or layout.
+        // Focus swaps the hairline to primary. Geometry stays fixed: focus
+        // never changes border width, radius, or layout.
         let composer_focused = self.has_keyboard(window, cx);
+        let hairline = if composer_focused {
+            cx.theme().primary
+        } else {
+            cx.theme().border
+        };
         let card = v_flex()
             .debug_selector(|| "composer-card".into())
             .w_full()
-            .gap_1p5()
             .p(px(6.))
             .rounded(if self.compact {
                 px(16.)
@@ -1373,11 +1663,7 @@ impl Render for Composer {
                 crate::material::radius_composer(cx)
             })
             .border_1()
-            .border_color(if composer_focused {
-                cx.theme().primary
-            } else {
-                cx.theme().border
-            })
+            .border_color(hairline)
             // The editor needs an opaque fill over the translucent canvas.
             .bg(cx.theme().popover)
             .shadow_md()
@@ -1449,17 +1735,92 @@ impl Render for Composer {
                     });
                 },
             )
-            .when(has_terminal_contexts, |this| this.child(context_chips))
-            .when(has_review_comments, |this| this.child(review_chips))
-            .children(self.render_reference_chips(cx))
+            .child(chip_rows)
             .child(
-                Textarea::new(&self.input)
-                    .placeholder(desired_placeholder)
-                    .disabled(readonly)
-                    .appearance(false),
+                crate::motion::SizeGlide::new(
+                    &draft_glide,
+                    Textarea::new(&self.input)
+                        .placeholder(desired_placeholder)
+                        .disabled(readonly)
+                        .appearance(false),
+                )
+                .on_change(draft_key),
             )
-            .children(self.render_image_strip(cx))
-            .child(control_row);
+            .child(self.render_image_strip(window, cx))
+            .child(div().w_full().pt_1p5().child(control_row));
+
+        // The panels above the card, each folding in as it comes and away,
+        // drawn as it was, as it goes.
+        let mut panels = Vec::new();
+        if let Some(shown) = crate::motion::shown(
+            self.motion_id("approval"),
+            approval.map(|request| (request, approval_count)),
+            window,
+            cx,
+        ) {
+            let (request, count) = &shown.value;
+            let panel = self.render_approval_panel(request, *count, window, cx);
+            panels.push(column_fold(&shown, panel));
+        }
+        if let Some(shown) = crate::motion::shown(
+            self.motion_id("control-request"),
+            self.control_request(cx),
+            window,
+            cx,
+        ) {
+            let panel = self.render_control_request_panel(&shown.value, window, cx);
+            panels.push(column_fold(&shown, panel));
+        }
+        if let Some(shown) =
+            crate::motion::shown(self.motion_id("user-input"), user_input, window, cx)
+        {
+            let panel = self.render_user_input_panel(&shown.value, window, cx);
+            panels.push(column_fold(&shown, panel));
+        }
+        if let Some(shown) =
+            crate::motion::shown(self.motion_id("fallback"), fallback_block, window, cx)
+        {
+            let panel = self.render_fallback_panel(&shown.value, window, cx);
+            panels.push(column_fold(&shown, panel));
+        }
+        if let Some(shown) = crate::motion::shown(
+            self.motion_id("fallback-review"),
+            fallback_review,
+            window,
+            cx,
+        ) {
+            let panel = self.render_fallback_review_panel(&shown.value, cx);
+            panels.push(column_fold(&shown, panel));
+        }
+        if let Some(shown) = crate::motion::shown(
+            self.motion_id("trigger-menu"),
+            self.trigger_menu(cx),
+            window,
+            cx,
+        ) {
+            let panel = self.render_trigger_menu(&shown.value, cx);
+            panels.push(column_fold(&shown, panel));
+        }
+        if let Some(shown) =
+            crate::motion::shown(self.motion_id("goal"), composer_state.goal, window, cx)
+        {
+            let panel = self.render_goal_strip(&shown.value, window, cx);
+            panels.push(column_fold(&shown, panel));
+        }
+        panels.extend(self.render_queue_strip(window, cx));
+        // The checkout row under the card carries the space above it.
+        let checkout = crate::motion::shown(
+            self.motion_id("checkout"),
+            composer_state
+                .checkout
+                .filter(|_| !self.compact && !readonly),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let row = self.render_checkout_row(&shown.value, cx);
+            shown.fold(div().w_full().pt_2().child(row))
+        });
 
         // Mirror the chat timeline's centered content column (same page
         // padding, same max width) so the composer lines up with the messages
@@ -1481,23 +1842,7 @@ impl Render for Composer {
                 v_flex()
                     .w_full()
                     .max_w(px(crate::chat::CONTENT_MAX_WIDTH))
-                    .gap_2()
-                    .when_some(approval, |this, request| {
-                        this.child(self.render_approval_panel(&request, approval_count, cx))
-                    })
-                    .children(self.render_control_request_panel(cx))
-                    .when_some(user_input, |this, pending| {
-                        this.child(self.render_user_input_panel(&pending, window, cx))
-                    })
-                    .when_some(fallback_block, |this, block| {
-                        this.child(self.render_fallback_panel(&block, cx))
-                    })
-                    .when_some(fallback_review, |this, review| {
-                        this.child(self.render_fallback_review_panel(&review, cx))
-                    })
-                    .children(self.render_trigger_menu(cx))
-                    .children(self.render_goal_strip(cx))
-                    .children(self.render_queue_strip(window, cx))
+                    .children(panels)
                     .child(v_flex().w_full().child(card).when(
                         self.compact || (readonly && compact),
                         |el| {
@@ -1520,11 +1865,15 @@ impl Render for Composer {
                             )
                         },
                     ))
-                    .when(!self.compact && !readonly, |el| {
-                        el.children(self.render_checkout_row(cx))
-                    }),
+                    .children(checkout),
             )
     }
+}
+
+/// A panel in the column above the card, folding in as it comes and away as
+/// it goes. It carries the space under it, so the space folds with it.
+fn column_fold<T>(shown: &crate::motion::Shown<T>, panel: impl IntoElement) -> AnyElement {
+    shown.fold(div().w_full().pb_2().child(panel))
 }
 
 #[cfg(test)]
@@ -1762,13 +2111,8 @@ mod replica_tests {
             cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
         let resize = |width: f32, cx: &mut gpui::VisualTestContext| {
             cx.simulate_resize(gpui::size(px(width), px(800.)));
-            for _ in 0..100 {
-                cx.run_until_parked();
-                if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
-                    return cx.debug_bounds("overflow-controls").is_some();
-                }
-            }
-            panic!("the composer kept asking for frames");
+            crate::test_frames::draw_settled(cx);
+            cx.debug_bounds("overflow-controls").is_some()
         };
         assert!(!resize(1200., cx), "a wide row folded its controls");
         assert!(resize(400., cx), "a narrow row kept its controls");
@@ -1818,6 +2162,49 @@ mod replica_tests {
                 "the model picker runs under Stop at {width}px: {picker:?} vs {stop:?}"
             );
         }
+    }
+
+    /// A turn starting widens the desktop send control into its spinner and
+    /// Stop: they open along the row as Send narrows away, so Stop arrives
+    /// from the right rather than appearing in its place.
+    #[gpui::test]
+    fn a_starting_turn_widens_send_into_stop(cx: &mut TestAppContext) {
+        use crate::test_frames::{draw, draw_settled};
+        let (store, incoming, _outgoing, mut status) = attach(cx);
+        let (_composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(gpui::size(px(1024.), px(800.)));
+        draw_settled(cx);
+        assert!(cx.debug_bounds("send-message").is_some());
+        status.activity.turn_running = true;
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let opening = cx.debug_bounds("stop-turn").expect("Stop opens").left();
+        assert!(
+            cx.debug_bounds("send-message").is_some(),
+            "Send is narrowing away"
+        );
+        // The spinner turns for as long as the turn runs, so the window never
+        // rests; time enough for the row to settle has passed.
+        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        draw(cx);
+        draw(cx);
+        let open = cx.debug_bounds("stop-turn").unwrap().left();
+        assert!(
+            opening > open,
+            "Stop came in from the right: {opening:?} then {open:?}"
+        );
+        assert!(cx.debug_bounds("send-message").is_none());
     }
 
     /// A value the provider reports as unavailable is shown but never sent.
@@ -2207,6 +2594,8 @@ mod replica_tests {
         let (composer, cx) =
             cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
         cx.simulate_resize(gpui::size(px(1024.), px(768.)));
+        // Each step is drawn once; with motion reduced it is drawn at rest.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         cx.update(|window, cx| _ = window.draw(cx));
         for action in ["queue-drop-7", "queue-steer-7"] {
             let button = cx.debug_bounds(action).expect("queue action visible");
@@ -2315,6 +2704,107 @@ mod replica_tests {
 
     /// Dragging a queued row onto another asks the host to send it in that
     /// row's place; letting go where it started asks nothing.
+    /// A queued message the host sends folds away and the one after it rises
+    /// into its place; the strip folds away with its last row. With motion
+    /// reduced both are gone at once.
+    #[gpui::test]
+    fn a_sent_queued_row_folds_away_and_the_strip_with_the_last(cx: &mut TestAppContext) {
+        use crate::test_frames::{draw, draw_settled};
+        let (store, incoming, _outgoing, mut status) = attach(cx);
+        let queued = |ids: &[u64]| {
+            ids.iter()
+                .map(|&id| tcode_protocol::QueuedMessageStatus {
+                    id,
+                    editable: true,
+                    delivery_key: None,
+                    text: format!("Queued {id}"),
+                    fire_at_unix_secs: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let topic = Topic::SessionStatus {
+            session_id: status.session_id.clone(),
+        };
+        status.queued_messages = queued(&[1, 2]);
+        replace(
+            &incoming,
+            topic.clone(),
+            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (_composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(gpui::size(px(1024.), px(768.)));
+        draw_settled(cx);
+        let top = |id: u64, cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds(format!("queued-row-{id}").leak())
+                .map(|row| row.top())
+        };
+        let card =
+            |cx: &mut gpui::VisualTestContext| cx.debug_bounds("composer-card").unwrap().top();
+        let (first, second) = (top(1, cx).unwrap(), top(2, cx).unwrap());
+        let card_top = card(cx);
+        let mut send = |ids: &[u64], cx: &mut gpui::VisualTestContext| {
+            status.queued_messages = queued(ids);
+            replace(
+                &incoming,
+                topic.clone(),
+                ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+            );
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            draw(cx);
+        };
+
+        send(&[2], cx);
+        assert!(top(1, cx).is_some(), "the sent row is still folding away");
+        let rising = top(2, cx).unwrap();
+        assert!(
+            rising > first && rising < second,
+            "the row left rises as the one above it folds: {rising:?} from {second:?} to {first:?}"
+        );
+        draw_settled(cx);
+        assert_eq!(top(1, cx), None);
+        assert_eq!(top(2, cx), Some(first));
+
+        send(&[], cx);
+        assert!(
+            top(2, cx).is_some(),
+            "the last row folds away with its strip"
+        );
+        draw_settled(cx);
+        assert_eq!(top(2, cx), None);
+        assert!(
+            card(cx) < card_top,
+            "the card takes the room the strip gave back"
+        );
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        status.queued_messages = queued(&[3]);
+        replace(
+            &incoming,
+            topic.clone(),
+            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        draw(cx);
+        assert!(top(3, cx).is_some());
+        status.queued_messages.clear();
+        replace(
+            &incoming,
+            topic,
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        draw(cx);
+        assert_eq!(top(3, cx), None, "with motion reduced it is gone at once");
+    }
+
     #[gpui::test]
     fn dragging_a_queued_row_moves_it_in_the_host_queue(cx: &mut TestAppContext) {
         let (store, incoming, outgoing, mut status) = attach(cx);
@@ -2516,7 +3006,8 @@ mod replica_tests {
             composer.update(cx, |composer, cx| composer.focus(window, cx));
         });
         cx.simulate_input("@release");
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // The menu has folded open by the time it is clicked.
+        crate::test_frames::draw_settled(cx);
         composer.read_with(cx, |composer, cx| {
             assert_eq!(composer.menu_rows(cx).0[0].primary, "Release notes");
         });

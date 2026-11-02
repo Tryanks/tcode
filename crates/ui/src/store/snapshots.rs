@@ -18,7 +18,7 @@ pub struct ComposerActiveModel {
     pub profile_id: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct ComposerCheckoutState {
     pub branch: String,
     pub branches: Vec<String>,
