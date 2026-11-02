@@ -237,17 +237,16 @@ pub fn sidebar_badge(
         })
         .child(badge);
     Some(
-        gpui_base::HoverCard::new("pr-hover-card")
+        crate::widgets::Popover::new("pr-hover-card")
+            .open_on_hover()
             .anchor(Anchor::TopLeft)
-            .trigger(trigger)
+            .trigger_with(move |_, _, _, _| trigger.into_any_element())
+            .p(cx.theme().tokens.spacing.sm)
             .content(move |_, _, cx| {
-                // gpui-base's HoverCard is an unstyled popup; the surface is the popover's.
                 let spacing = &cx.theme().tokens.spacing;
-                let mut rows = crate::material::overlay_contour(v_flex(), cx)
-                    .rounded(crate::material::radius_overlay(cx))
+                let mut rows = v_flex()
                     .id("pr-mini-list")
                     .w(px(320.))
-                    .p(spacing.sm)
                     .gap(spacing.xxs)
                     .text_token(&cx.theme().tokens.typography.xs)
                     .child(
