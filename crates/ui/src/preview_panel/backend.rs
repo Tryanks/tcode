@@ -7,6 +7,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Styled as _,
@@ -481,35 +482,57 @@ impl PreviewPanel {
     }
 
     /// A row of quick-pick buttons for discovered localhost dev ports.
-    pub(super) fn render_port_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The ports a scan found, as buttons: the row folds in once there are
+    /// some, and a rescan's ports widen in and narrow away where they are.
+    pub(super) fn render_port_row(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         use crate::sizing::Sizable as _;
         use crate::widgets::button::Button;
-        if self.dev_ports.is_empty() {
-            return None;
-        }
-        let mut row = gpui_base::h_flex()
-            .flex_none()
-            .w_full()
-            .gap(cx.theme().tokens.spacing.xs)
-            .px(cx.theme().tokens.spacing.xs)
-            .pb(cx.theme().tokens.spacing.xs)
-            .flex_wrap();
-        for port in self.dev_ports.clone() {
-            row = row.child(
-                Button::new(("dev-port", port as usize))
-                    .outline()
-                    .small()
-                    .compact()
-                    .label(format!(":{port}"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let url = format!("http://localhost:{port}/");
-                        if let Some(key) = this.active_key(cx) {
-                            this.navigate(&key, &url, window, cx);
-                        }
-                    })),
-            );
-        }
-        Some(row.into_any_element())
+        let shown = crate::motion::shown(
+            "preview-dev-ports",
+            (!self.dev_ports.is_empty()).then(|| self.dev_ports.clone()),
+            window,
+            cx,
+        )?;
+        let gap = cx.theme().tokens.spacing.xs;
+        let ports = shown
+            .value
+            .iter()
+            .map(|port| (gpui::SharedString::from(port.to_string()), *port));
+        let buttons = crate::motion::keyed_across("preview-dev-port-buttons", ports, window, cx, {
+            |_, port, _, cx| {
+                let port = *port;
+                div()
+                    .flex_none()
+                    .pr(gap)
+                    .child(
+                        Button::new(("dev-port", port as usize))
+                            .outline()
+                            .small()
+                            .compact()
+                            .label(format!(":{port}"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let url = format!("http://localhost:{port}/");
+                                if let Some(key) = this.active_key(cx) {
+                                    this.navigate(&key, &url, window, cx);
+                                }
+                            })),
+                    )
+                    .into_any_element()
+            }
+        })
+        .render(
+            gpui_base::h_flex()
+                .flex_none()
+                .w_full()
+                .px(gap)
+                .pb(gap)
+                .flex_wrap(),
+        );
+        Some(shown.fold(buttons))
     }
 
     pub(super) fn rescan_ports(&mut self, cx: &mut Context<Self>) {
@@ -539,18 +562,11 @@ impl PreviewPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.window_state.read(cx).compact
-            && let Some(key) = active
-            && self.store.read(cx).preview_url(key).is_none()
-            && self.lifecycle_entity().read(cx).ready_view(key).is_none()
-        {
-            return self.render_note(
-                IconName::Globe,
-                crate::tr!("preview.url_placeholder").into_owned(),
-                None,
-                cx,
-            );
-        }
+        let placeholder = self.window_state.read(cx).compact
+            && active.is_some_and(|key| {
+                self.store.read(cx).preview_url(key).is_none()
+                    && self.lifecycle_entity().read(cx).ready_view(key).is_none()
+            });
         #[cfg(target_os = "android")]
         if let Some(key) = active {
             let url = self
@@ -578,7 +594,12 @@ impl PreviewPanel {
             self.url_input
                 .update(cx, |input, cx| input.set_value(url, window, cx));
         }
-        let body: AnyElement = match active {
+        // The notes and the page each keep a layer, so one cross-fades into
+        // the next; a page leaving is not drawn again, as its native view
+        // fades out on its own once it is let go.
+        let mut page: Option<AnyElement> = None;
+        let state = match active {
+            _ if placeholder => 0,
             Some(id) => match self.ensure_webview(id, window, cx) {
                 Availability::Ready(view) => {
                     #[cfg(target_os = "ios")]
@@ -590,14 +611,19 @@ impl PreviewPanel {
                     // gpui-webview 0.8 has no corner radius or layer clip for
                     // the native view, so the page stays square inside the
                     // rounded frame and its corners cover the frame's.
-                    let page = div()
+                    let frame = div()
                         .size_full()
                         .rounded(crate::material::radius_card(cx))
                         .border_1()
                         .border_color(cx.theme().border)
                         .overflow_hidden()
                         .child(view);
-                    if let Some((width, height)) = self.store.read(cx).preview_canvas(id) {
+                    // The page fills the panel or keeps a fixed canvas; going
+                    // from one to the other its size glides, the native view
+                    // following its bounds. A panel resized is followed at once.
+                    let canvas = self.store.read(cx).preview_canvas(id);
+                    let size = page_size(canvas, window, cx);
+                    page = Some(
                         div()
                             .p(margin)
                             .flex()
@@ -605,32 +631,45 @@ impl PreviewPanel {
                             .min_h_0()
                             .items_center()
                             .justify_center()
+                            .child(size.measure_area(div().absolute().inset_0().into_any_element()))
+                            .relative()
                             .child(
                                 div()
                                     .flex_none()
-                                    .w(px(width as f32))
-                                    .h(px(height as f32))
+                                    .map(|page| match size.size {
+                                        Some(size) => page.w(size.width).h(size.height),
+                                        None => page.size_full(),
+                                    })
                                     .max_w_full()
                                     .max_h_full()
-                                    .child(page),
+                                    .child(frame),
                             )
-                            .into_any_element()
-                    } else {
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .p(margin)
-                            .child(page)
-                            .into_any_element()
-                    }
+                            .into_any_element(),
+                    );
+                    4
                 }
-                Availability::Starting(_) => self.render_note(
+                Availability::Starting(_) => 1,
+                Availability::Unavailable => 2,
+            },
+            None => 3,
+        };
+        let fade = crate::motion::CrossFade::new("preview-body", state, 5, window, cx);
+        let mut layers = Vec::new();
+        for layer in (0..5).filter(|layer| fade.shows(*layer)) {
+            let content = match layer {
+                0 => self.render_note(
+                    IconName::Globe,
+                    crate::tr!("preview.url_placeholder").into_owned(),
+                    None,
+                    cx,
+                ),
+                1 => self.render_note(
                     IconName::Globe,
                     crate::tr!("preview.starting").into_owned(),
                     None,
                     cx,
                 ),
-                Availability::Unavailable => self.render_note(
+                2 => self.render_note(
                     IconName::TriangleAlert,
                     crate::tr!("preview.unavailable").into_owned(),
                     Some(
@@ -642,39 +681,54 @@ impl PreviewPanel {
                     ),
                     cx,
                 ),
-            },
-            None => self.render_note(
-                IconName::Globe,
-                crate::tr!("preview.no_session").into_owned(),
-                None,
-                cx,
-            ),
-        };
+                3 => self.render_note(
+                    IconName::Globe,
+                    crate::tr!("preview.no_session").into_owned(),
+                    None,
+                    cx,
+                ),
+                _ => match page.take() {
+                    Some(page) => page,
+                    None => continue,
+                },
+            };
+            layers.push((
+                layer,
+                v_flex().size_full().child(content).into_any_element(),
+            ));
+        }
+        let body = fade
+            .fill()
+            .render(layers)
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .into_any_element();
         // `ensure_webview` creates children hidden; make the owning
         // conversation visible only after the current layout owns it.
         self.sync_mounted_visibility(cx);
-        if let Some(error) =
-            active.and_then(|key| self.lifecycle_entity().read(cx).load_error(key, cx))
-        {
+        // A page that failed to load says so in a banner that folds in over
+        // it, and away once a load succeeds, drawn as it was.
+        let error = active.and_then(|key| self.lifecycle_entity().read(cx).load_error(key, cx));
+        if let Some(shown) = crate::motion::shown("preview-load-error", error, window, cx) {
+            let error = &shown.value;
+            let banner = div()
+                .px(cx.theme().tokens.spacing.sm)
+                .py(cx.theme().tokens.spacing.xs)
+                .text_token(&cx.theme().tokens.typography.xs)
+                .text_color(cx.theme().danger)
+                .child(
+                    crate::tr!(
+                        "preview.load_error",
+                        url = error.url,
+                        message = error.message,
+                        code = error.code
+                    )
+                    .into_owned(),
+                );
             return v_flex()
                 .size_full()
-                .child(
-                    div()
-                        .flex_none()
-                        .px(cx.theme().tokens.spacing.sm)
-                        .py(cx.theme().tokens.spacing.xs)
-                        .text_token(&cx.theme().tokens.typography.xs)
-                        .text_color(cx.theme().danger)
-                        .child(
-                            crate::tr!(
-                                "preview.load_error",
-                                url = error.url,
-                                message = error.message,
-                                code = error.code
-                            )
-                            .into_owned(),
-                        ),
-                )
+                .child(div().flex_none().child(shown.fold(banner)))
                 .child(body)
                 .into_any_element();
         }
@@ -1312,4 +1366,94 @@ fn png_reply(cg_image: &objc2_core_graphics::CGImage) -> Result<PreviewResponse,
         mime: "image/png".into(),
         data_base64: base64::engine::general_purpose::STANDARD.encode(data.to_vec()),
     })
+}
+
+/// The size the page is drawn at this frame, and the area it is laid out in.
+struct PageSize {
+    size: Option<gpui::Size<Pixels>>,
+    area: Rc<std::cell::Cell<gpui::Size<Pixels>>>,
+}
+
+impl PageSize {
+    /// An element over the page's area that measures it each frame.
+    fn measure_area(&self, element: AnyElement) -> AnyElement {
+        let area = self.area.clone();
+        div()
+            .absolute()
+            .inset_0()
+            .child(element)
+            .child(
+                gpui::canvas(move |bounds, _, _| area.set(bounds.size), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0(),
+            )
+            .into_any_element()
+    }
+}
+
+/// The page's size: a fixed `canvas` within the area, or the whole area,
+/// gliding over `SETTLE` when the one changes to the other or the canvas
+/// changes. gpui has no layout transition and the native view follows its
+/// element's bounds, so the size is eased here; a panel resized is followed
+/// at once. Before the area is known the page fills it.
+fn page_size(canvas: Option<(u32, u32)>, window: &mut Window, cx: &mut App) -> PageSize {
+    #[derive(Default)]
+    struct Glide {
+        canvas: Option<Option<(u32, u32)>>,
+        from: Option<gpui::Size<Pixels>>,
+        drawn: Option<gpui::Size<Pixels>>,
+        started: Option<std::time::Instant>,
+    }
+    let area = window
+        .use_keyed_state("preview-page-area", cx, |_, _| {
+            Rc::new(std::cell::Cell::new(gpui::Size::default()))
+        })
+        .read(cx)
+        .clone();
+    let glide = window
+        .use_keyed_state("preview-page-glide", cx, |_, _| {
+            Rc::new(std::cell::RefCell::new(Glide::default()))
+        })
+        .read(cx)
+        .clone();
+    let room = area.get();
+    if room.width <= px(0.) || room.height <= px(0.) {
+        return PageSize { size: None, area };
+    }
+    let target = match canvas {
+        Some((width, height)) => gpui::size(
+            px(width as f32).min(room.width),
+            px(height as f32).min(room.height),
+        ),
+        None => room,
+    };
+    let now = cx.background_executor().now();
+    let mut glide = glide.borrow_mut();
+    if glide.canvas.is_some_and(|last| last != canvas) && !cx.reduce_motion() {
+        glide.from = glide.drawn;
+        glide.started = Some(now);
+    }
+    glide.canvas = Some(canvas);
+    let size = match (glide.from, glide.started) {
+        (Some(from), Some(started)) => {
+            let progress = crate::motion::settle_progress(now.saturating_duration_since(started));
+            if progress >= 1. {
+                glide.from = None;
+                glide.started = None;
+                target
+            } else {
+                window.request_animation_frame();
+                gpui::size(
+                    from.width + (target.width - from.width) * progress,
+                    from.height + (target.height - from.height) * progress,
+                )
+            }
+        }
+        _ => target,
+    };
+    glide.drawn = Some(size);
+    PageSize {
+        size: Some(size),
+        area,
+    }
 }
