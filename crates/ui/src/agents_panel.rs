@@ -359,6 +359,8 @@ pub struct AgentsPanel {
     /// threads, from which archived agents come.
     shown: bool,
     done_expanded: bool,
+    /// The row the pointer is over, whose actions fade in over its time.
+    hover: crate::motion::ListHover,
     /// The phone sheet this panel fills, dismissed when an agent opens.
     sheet: Option<WeakEntity<PopoverState>>,
     vscroll: ScrollHandle,
@@ -417,6 +419,7 @@ impl AgentsPanel {
             store,
             shown: false,
             done_expanded: false,
+            hover: crate::motion::ListHover::new(),
             sheet: None,
             vscroll: ScrollHandle::new(),
             live: false,
@@ -552,68 +555,79 @@ impl AgentsPanel {
             })
     }
 
-    fn delivery_badges(row: &AgentRow, cx: &App) -> Vec<AnyElement> {
-        let label = |key: &str| SharedString::from(crate::tr!(key).into_owned());
+    /// A row's badges, keyed by what each says: (key, style, checked).
+    fn delivery_badges(row: &AgentRow) -> Vec<(SharedString, (BadgeStyle, bool))> {
         let mut badges = Vec::new();
         match row.delivery {
-            Some(AgentDelivery::AwaitingSettle) => badges.push(
-                Self::badge(label("agents.delivery_awaiting"), BadgeStyle::Warning, cx)
-                    .into_any_element(),
-            ),
-            Some(AgentDelivery::Settled) => badges.push(
-                Self::badge(label("agents.delivery_settled"), BadgeStyle::Plain, cx)
-                    .child(Icon::new(IconName::Check))
-                    .into_any_element(),
-            ),
-            Some(AgentDelivery::NotDelivered) => badges.push(
-                Self::badge(
-                    label("agents.delivery_not_delivered"),
-                    BadgeStyle::Plain,
-                    cx,
-                )
-                .into_any_element(),
-            ),
+            Some(AgentDelivery::AwaitingSettle) => badges.push((
+                "agents.delivery_awaiting".into(),
+                (BadgeStyle::Warning, false),
+            )),
+            Some(AgentDelivery::Settled) => {
+                badges.push(("agents.delivery_settled".into(), (BadgeStyle::Plain, true)))
+            }
+            Some(AgentDelivery::NotDelivered) => badges.push((
+                "agents.delivery_not_delivered".into(),
+                (BadgeStyle::Plain, false),
+            )),
             Some(AgentDelivery::Running) | None => {}
         }
         match row.report {
-            AgentReport::Reported => badges.push(
-                Self::badge(label("agents.report_reported"), BadgeStyle::Plain, cx)
-                    .child(Icon::new(IconName::Check))
-                    .into_any_element(),
-            ),
-            AgentReport::Unreported => badges.push(
-                Self::badge(label("agents.report_unreported"), BadgeStyle::Warning, cx)
-                    .into_any_element(),
-            ),
-            AgentReport::Failed => badges.push(
-                Self::badge(label("agents.report_failed"), BadgeStyle::Danger, cx)
-                    .into_any_element(),
-            ),
+            AgentReport::Reported => {
+                badges.push(("agents.report_reported".into(), (BadgeStyle::Plain, true)))
+            }
+            AgentReport::Unreported => badges.push((
+                "agents.report_unreported".into(),
+                (BadgeStyle::Warning, false),
+            )),
+            AgentReport::Failed => {
+                badges.push(("agents.report_failed".into(), (BadgeStyle::Danger, false)))
+            }
             AgentReport::None | AgentReport::Expected => {}
         }
         if row.archived {
-            badges.push(
-                Self::badge(label("agents.archived"), BadgeStyle::Outline, cx).into_any_element(),
-            );
+            badges.push(("agents.archived".into(), (BadgeStyle::Outline, false)));
         }
         badges
     }
 
-    fn status_mark(row: &AgentRow, cx: &App) -> AnyElement {
-        match row.execution {
-            Some(AgentExecution::Working) => {
-                Spinner::new().color(cx.theme().primary).into_any_element()
-            }
-            execution => crate::material::status_dot(
-                execution.map_or(cx.theme().muted_foreground, |execution| {
+    /// The spinner while the agent works, a dot in its state's colour
+    /// otherwise: one cross-fades into the other and the dot's colour glides.
+    fn status_mark(row: &AgentRow, window: &mut Window, cx: &mut App) -> AnyElement {
+        let working = row.execution == Some(AgentExecution::Working);
+        let color = gpui_base::motion::transition(
+            SharedString::from(format!("agent-status-color-{}", row.key)),
+            row.execution
+                .filter(|_| !working)
+                .map_or(cx.theme().muted_foreground, |execution| {
                     execution_color(execution, cx)
                 }),
-            )
-            .into_any_element(),
-        }
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        crate::motion::cross_fade_part(
+            SharedString::from(format!("agent-status-{}", row.key)),
+            working,
+            window,
+            cx,
+            move |working, _, cx| {
+                if *working {
+                    Spinner::new().color(cx.theme().primary).into_any_element()
+                } else {
+                    crate::material::status_dot(color).into_any_element()
+                }
+            },
+        )
     }
 
-    fn render_row(&self, row: &AgentRow, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(
+        &self,
+        row: &AgentRow,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let group = SharedString::from(format!("agent-row-{}", row.key));
         let title = if row.title.trim().is_empty() {
@@ -627,6 +641,13 @@ impl AgentsPanel {
         let coarse = crate::window_seam::is_mobile(cx);
         let inline_actions = !compact && !actions.is_empty();
         let elapsed = row.elapsed().filter(|_| !(inline_actions && coarse));
+        // The actions fade in over the time as the pointer comes onto the
+        // row, and the time fades out under them.
+        let reveal = if inline_actions && !coarse {
+            self.hover.reveal(&row.key, window, cx)
+        } else {
+            0.
+        };
         let trailing = (inline_actions || elapsed.is_some()).then(|| {
             let cluster_width =
                 actions.len() as f32 * 20. + actions.len().saturating_sub(1) as f32 * 2.;
@@ -643,9 +664,7 @@ impl AgentsPanel {
                             .items_center()
                             .whitespace_nowrap()
                             .text_secondary(compact, cx)
-                            .when(inline_actions, |time| {
-                                time.group_hover(group.clone(), |time| time.invisible())
-                            })
+                            .when(inline_actions, |time| time.opacity(1. - reveal))
                             .child(elapsed),
                     )
                 })
@@ -658,11 +677,7 @@ impl AgentsPanel {
                             .gap_0p5()
                             // Opacity, not visibility, keeps the buttons tab
                             // stops so keyboard focus can reveal them.
-                            .when(!coarse, |cluster| {
-                                cluster
-                                    .opacity(0.)
-                                    .group_hover(group.clone(), |cluster| cluster.opacity(1.))
-                            })
+                            .when(!coarse, |cluster| cluster.opacity(reveal))
                             .children(actions.iter().enumerate().map(
                                 |(index, (icon, label, action))| {
                                     let action = action.boxed_clone();
@@ -687,22 +702,44 @@ impl AgentsPanel {
                     )
                 })
         });
+        // A badge that comes or goes widens in or narrows away, carrying
+        // the gap before it.
+        let badges = crate::motion::keyed_across(
+            SharedString::from(format!("agent-badges-{}", row.key)),
+            Self::delivery_badges(row),
+            window,
+            cx,
+            |key, (style, checked), _, cx| {
+                div()
+                    .pl_2()
+                    .child(
+                        Self::badge(
+                            SharedString::from(crate::tr!(key.as_ref()).into_owned()),
+                            *style,
+                            cx,
+                        )
+                        .when(*checked, |badge| badge.child(Icon::new(IconName::Check))),
+                    )
+                    .into_any_element()
+            },
+        )
+        .render(h_flex().flex_none().items_center());
         let line_one = h_flex()
             .w_full()
             .min_w_0()
-            .gap_2()
             .items_center()
             .text_body(compact, cx)
-            .child(Self::status_mark(row, cx))
+            .child(Self::status_mark(row, window, cx))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
+                    .pl_2()
                     .overflow_hidden()
                     .child(crate::widgets::fade_text(title.clone())),
             )
-            .children(Self::delivery_badges(row, cx))
-            .children(trailing);
+            .child(badges)
+            .children(trailing.map(|trailing| div().pl_2().child(trailing)));
         let line_two = h_flex()
             .w_full()
             .min_w_0()
@@ -732,27 +769,33 @@ impl AgentsPanel {
                         .child(execution_label(execution)),
                 )
             });
-        let content = v_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_0p5()
-            .child(line_one)
-            .child(line_two)
-            .when_some(row.preview.clone(), |content, preview| {
-                content.child(
+        // The result's preview folds in under the row as it arrives.
+        let failed = row.execution == Some(AgentExecution::Failed);
+        let preview = crate::motion::shown(
+            SharedString::from(format!("agent-preview-{}", row.key)),
+            row.preview.clone(),
+            window,
+            cx,
+        )
+        .map(|shown| {
+            shown.fold(
+                div().w_full().pt_0p5().child(
                     div()
                         .w_full()
                         .text_secondary(false, cx)
                         .line_clamp(2)
                         .overflow_hidden()
-                        .text_color(if row.execution == Some(AgentExecution::Failed) {
-                            cx.theme().danger
-                        } else {
-                            muted
-                        })
-                        .child(crate::widgets::fade_text(preview)),
-                )
-            });
+                        .text_color(if failed { cx.theme().danger } else { muted })
+                        .child(crate::widgets::fade_text(shown.value.clone())),
+                ),
+            )
+        });
+        let content = v_flex()
+            .flex_1()
+            .min_w_0()
+            .child(line_one)
+            .child(line_two.pt_0p5())
+            .children(preview);
         let label = SharedString::from(title);
         let open = row.open.clone();
         let readonly = row.managed_by.map(|provider| {
@@ -800,6 +843,7 @@ impl AgentsPanel {
             )
         });
         base.group(group)
+            .on_hover(self.hover.on_hover(row.key.clone()))
             .debug_selector({
                 let key = row.key.clone();
                 move || format!("agent-row-{key}")
@@ -845,131 +889,204 @@ impl Render for AgentsPanel {
             .on_action(cx.listener(Self::on_stop))
             .on_action(cx.listener(Self::on_settle))
             .on_action(cx.listener(Self::on_cancel));
-        if agents.is_empty() {
-            return root.child(Self::render_empty(cx));
+        // The empty state and the list cross-fade as the first agent starts
+        // or the last one goes.
+        let fade = crate::motion::CrossFade::new(
+            "agents-empty-or-list",
+            usize::from(!agents.is_empty()),
+            2,
+            window,
+            cx,
+        )
+        .fill();
+        let mut layers = Vec::new();
+        if fade.shows(0) {
+            layers.push((0, Self::render_empty(cx)));
         }
+        if fade.shows(1) {
+            layers.push((1, self.render_list(&agents, compact, window, cx)));
+        }
+        root.child(fade.render(layers).flex_1().min_h_0().w_full())
+    }
+}
+
+/// One entry of the agents list.
+#[derive(Clone)]
+enum Entry {
+    SettleAll { disabled: bool },
+    Summary(String),
+    Row(Box<AgentRow>),
+    NativeCaption,
+    ReadOnly(&'static str),
+    DoneHeader { count: usize, expanded: bool },
+}
+
+impl AgentsPanel {
+    /// The list as one column keyed by entry, so a row that moves from one
+    /// group to another glides there, rows that come or go fold in or away,
+    /// and the done rows fold open and shut under their header.
+    fn render_list(
+        &mut self,
+        agents: &Agents,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let inset = px(if compact {
             material::COMPACT_PAGE_INSET
         } else {
             material::CARD_INSET
         });
-        let mut column = v_flex()
-            .w_full()
-            .min_w_0()
-            .px(if compact {
-                px(0.)
-            } else {
-                cx.theme().tokens.spacing.sm
-            })
-            .pb_3()
-            .gap_0p5();
-        let parent_id = self.store.read(cx).active_session_id();
-        column = column.child(
-            div()
-                .px(inset)
-                .py_2()
-                .debug_selector(|| "agents-settle-all".into())
-                .child(
-                    Button::new("agents-settle-all")
-                        .w_full()
-                        .outline()
-                        .small()
-                        .label(crate::tr!("agents.settle_all"))
-                        .touch(compact)
-                        .disabled(agents.needs_settle.is_empty())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(id) = parent_id.clone() {
-                                this.store.update(cx, |store, _| store.settle_children(id));
-                            }
-                        })),
-                ),
-        );
+        let mut entries: Vec<(SharedString, Entry)> = vec![(
+            "settle-all".into(),
+            Entry::SettleAll {
+                disabled: agents.needs_settle.is_empty(),
+            },
+        )];
         if let Some(summary) = agents.summary() {
-            column = column.child(
-                div()
-                    .px(inset)
-                    .py_2()
-                    .text_secondary(compact, cx)
-                    .debug_selector(|| "agents-summary".into())
-                    .child(summary),
-            );
+            entries.push(("summary".into(), Entry::Summary(summary)));
         }
-        for row in agents.needs_settle.iter().chain(&agents.running) {
-            column = column.child(self.render_row(row, compact, cx));
-        }
+        let row = |row: &AgentRow| {
+            (
+                SharedString::from(format!("row-{}", row.key)),
+                Entry::Row(Box::new(row.clone())),
+            )
+        };
+        entries.extend(agents.needs_settle.iter().chain(&agents.running).map(row));
         if !agents.native.is_empty() {
-            column = column.child(material::list_caption(
-                crate::tr!("agents.provider_subagents").into_owned().into(),
-                compact,
-                cx,
-            ));
-            for row in &agents.native {
-                column = column.child(self.render_row(row, compact, cx));
-            }
+            entries.push(("native-caption".into(), Entry::NativeCaption));
+            entries.extend(agents.native.iter().map(row));
             if let Some(provider) = agents.native.first().and_then(|row| row.managed_by) {
-                column = column.child(
-                    div()
-                        .px(inset)
-                        .py_1()
-                        .text_secondary(compact, cx)
-                        .child(crate::tr!("agents.readonly", provider = provider)),
-                );
+                entries.push(("native-readonly".into(), Entry::ReadOnly(provider)));
             }
         }
         if !agents.done.is_empty() {
             let expanded = self.done_expanded;
-            let label: SharedString = crate::tr!("agents.done", count = agents.done.len())
-                .into_owned()
-                .into();
-            column = column.child(
-                gpui_base::Button::new("agents-done")
-                    .accessibility_label(label.clone())
-                    .aria_expanded(expanded)
-                    .w_full()
-                    .h(px(material::bar_height(material::Bar::Section, compact)))
-                    .px(inset)
-                    .flex()
-                    .items_center()
-                    .rounded(material::radius_card(cx))
-                    .when(!crate::window_seam::is_mobile(cx), |header| {
-                        header.hover(|header| header.bg(cx.theme().list_hover))
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.done_expanded = !this.done_expanded;
-                        cx.notify();
-                    }))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_1p5()
-                            .items_center()
-                            .text_caption(cx)
-                            .child(Icon::new(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            }))
-                            .child(label),
-                    ),
-            );
+            entries.push((
+                "done-header".into(),
+                Entry::DoneHeader {
+                    count: agents.done.len(),
+                    expanded,
+                },
+            ));
             if expanded {
-                for row in &agents.done {
-                    column = column.child(self.render_row(row, compact, cx));
-                }
+                entries.extend(agents.done.iter().map(row));
             }
         }
-        root.child(crate::scroll::page_viewport(
+        let parent_id = self.store.read(cx).active_session_id();
+        let this = &*self;
+        let column = crate::motion::keyed(
+            "agents-list",
+            entries,
+            window,
+            cx,
+            |_, entry, window, cx| {
+                let entry = match entry {
+                    Entry::SettleAll { disabled } => {
+                        let parent_id = parent_id.clone();
+                        div()
+                            .px(inset)
+                            .py_2()
+                            .debug_selector(|| "agents-settle-all".into())
+                            .child(
+                                Button::new("agents-settle-all")
+                                    .w_full()
+                                    .outline()
+                                    .small()
+                                    .label(crate::tr!("agents.settle_all"))
+                                    .touch(compact)
+                                    .disabled(*disabled)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(id) = parent_id.clone() {
+                                            this.store
+                                                .update(cx, |store, _| store.settle_children(id));
+                                        }
+                                    })),
+                            )
+                            .into_any_element()
+                    }
+                    Entry::Summary(summary) => div()
+                        .px(inset)
+                        .py_2()
+                        .text_secondary(compact, cx)
+                        .debug_selector(|| "agents-summary".into())
+                        .child(summary.clone())
+                        .into_any_element(),
+                    Entry::Row(row) => this.render_row(row, compact, window, cx),
+                    Entry::NativeCaption => material::list_caption(
+                        crate::tr!("agents.provider_subagents").into_owned().into(),
+                        compact,
+                        cx,
+                    )
+                    .into_any_element(),
+                    Entry::ReadOnly(provider) => div()
+                        .px(inset)
+                        .py_1()
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("agents.readonly", provider = *provider))
+                        .into_any_element(),
+                    Entry::DoneHeader { count, expanded } => {
+                        let label: SharedString = crate::tr!("agents.done", count = *count)
+                            .into_owned()
+                            .into();
+                        gpui_base::Button::new("agents-done")
+                            .accessibility_label(label.clone())
+                            .aria_expanded(*expanded)
+                            .w_full()
+                            .h(px(material::bar_height(material::Bar::Section, compact)))
+                            .px(inset)
+                            .flex()
+                            .items_center()
+                            .rounded(material::radius_card(cx))
+                            .when(!crate::window_seam::is_mobile(cx), |header| {
+                                header.hover(|header| header.bg(cx.theme().list_hover))
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.done_expanded = !this.done_expanded;
+                                cx.notify();
+                            }))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .text_caption(cx)
+                                    .child(crate::widgets::Chevron::new(
+                                        "agents-done-chevron",
+                                        *expanded,
+                                    ))
+                                    .child(label),
+                            )
+                            .into_any_element()
+                    }
+                };
+                // Each entry carries the gap under it, so the gap goes with it.
+                div().w_full().pb_0p5().child(entry).into_any_element()
+            },
+        )
+        .render(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .px(if compact {
+                    px(0.)
+                } else {
+                    cx.theme().tokens.spacing.sm
+                })
+                .pb_3(),
+        );
+        crate::scroll::page_viewport(
             "agents-scroll-bounce",
             &self.vscroll,
             div()
                 .id("agents-scroll")
-                .flex_1()
-                .min_h_0()
+                .size_full()
                 .overflow_y_scroll()
                 .lock_scroll_axis()
                 .track_scroll(&self.vscroll)
                 .child(column),
-        ))
+        )
+        .into_any_element()
     }
 }
 
