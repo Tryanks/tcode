@@ -49,7 +49,7 @@ impl ChatView {
 
     pub(super) fn render_empty_state(
         &self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // A phone reaches this state when the host has no threads. Project
@@ -115,7 +115,7 @@ impl ChatView {
             .items_center()
             .gap_3()
             .child(div().text_title(cx).child(crate::tr!("chat.empty_title")));
-        let mut launcher = v_flex().w_full().gap_1().child(
+        let launcher = v_flex().w_full().gap_1().child(
             div()
                 .px_3()
                 .text_size(px(10.5))
@@ -125,11 +125,20 @@ impl ChatView {
                     crate::tr!("chat.start_hub_title").as_ref(),
                 )),
         );
-        for (project, last_activity) in hub_projects {
-            let project_id = project.id.clone();
-            let cwd = project.root.clone();
-            let row_label = crate::tr!("sidebar.project", name = project.name.clone()).into_owned();
-            launcher = launcher.child(
+        // A project that comes or goes folds in or out where it stands, and
+        // the others glide to their new places as its last activity moves it.
+        let rows = crate::motion::keyed(
+            "start-hub-projects",
+            hub_projects
+                .into_iter()
+                .map(|row| (SharedString::from(row.0.id.clone()), row)),
+            window,
+            cx,
+            |_, (project, last_activity), _, cx| {
+                let project_id = project.id.clone();
+                let cwd = project.root.clone();
+                let row_label =
+                    crate::tr!("sidebar.project", name = project.name.clone()).into_owned();
                 crate::material::accessible_clickable(
                     crate::material::selectable_row(h_flex(), false, false, cx),
                     SharedString::from(format!("start-hub-project-{}", project.id)),
@@ -137,13 +146,17 @@ impl ChatView {
                     row_label,
                     cx,
                 )
+                .debug_selector({
+                    let id = project.id.clone();
+                    move || format!("start-hub-project-{id}")
+                })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.workspace_store.update(cx, |store, cx| {
                         store.start_draft(project_id.clone(), cwd.clone(), cx);
                     });
                 }))
-                .child(crate::project_icon::artwork(&project, 16.))
+                .child(crate::project_icon::artwork(project, 16.))
                 .child(
                     div()
                         .flex_1()
@@ -151,16 +164,18 @@ impl ChatView {
                         .text_body(false, cx)
                         .text_color(cx.theme().foreground)
                         .overflow_hidden()
-                        .child(crate::widgets::fade_text(project.name)),
+                        .child(crate::widgets::fade_text(project.name.clone())),
                 )
-                .when_some(last_activity, |row, last_activity| {
+                .when_some(*last_activity, |row, last_activity| {
                     row.child(div().flex_none().text_secondary(false, cx).child(
                         crate::time::humanize_ago(now_secs().saturating_sub(last_activity)),
                     ))
-                }),
-            );
-        }
-        content = content.child(launcher).child(
+                })
+                .into_any_element()
+            },
+        )
+        .render(launcher);
+        content = content.child(rows).child(
             h_flex()
                 .items_center()
                 .justify_center()
@@ -219,5 +234,136 @@ impl ChatView {
                 .child(shown.fade(pill))
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use gpui::{AppContext as _, Bounds, Pixels, TestAppContext, VisualTestContext, px, size};
+    use tcode_core::project::Project;
+    use tcode_protocol::{
+        EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
+    };
+
+    use crate::chat::ChatView;
+    use crate::store::WorkspaceStore;
+    use crate::test_frames::{draw, draw_settled};
+    use crate::window_state::WindowState;
+
+    /// The start hub's projects follow the host's: one removed folds away
+    /// where it stood, drawn as it was, while the one below it glides up
+    /// into its place, and one added folds in and pushes it back down, over
+    /// several frames; with motion reduced each change lands at once.
+    #[gpui::test]
+    fn start_hub_projects_fold_in_and_out_as_the_host_changes_them(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let project = |name: &str| {
+            let mut project = Project::from_root(PathBuf::from(format!("/{name}")));
+            project.id = name.into();
+            project.name = name.into();
+            project
+        };
+        let index = |names: &[&str]| {
+            encode_line(&HostMessage::Event(EventEnvelope {
+                request_id: None,
+                topic: Topic::Index,
+                event: ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: Vec::new(),
+                    projects: names.iter().map(|name| project(name)).collect(),
+                }),
+            }))
+            .unwrap()
+        };
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Settings,
+                    event: ServerEvent::SettingsSnapshot(Default::default()),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        incoming
+            .try_send(index(&["alpha", "beta", "gamma"]))
+            .unwrap();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (_, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw_settled(cx);
+        let row = |name: &str, cx: &mut VisualTestContext| -> Option<Bounds<Pixels>> {
+            cx.debug_bounds(format!("start-hub-project-{name}").leak())
+        };
+        assert!(row("gamma", cx).is_some(), "the hub lists the projects");
+
+        for reduce in [false, true] {
+            cx.update(|_, cx| cx.set_reduce_motion(reduce));
+            for (names, beta_stays) in [
+                (&["alpha", "gamma"][..], false),
+                (&["alpha", "beta", "gamma"][..], true),
+            ] {
+                incoming.try_send(index(names)).unwrap();
+                cx.run_until_parked();
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                draw(cx);
+                let mut frames = Vec::new();
+                for _ in 0..20 {
+                    frames.push((
+                        row("beta", cx).is_some(),
+                        row("gamma", cx).expect("gamma stays").top(),
+                    ));
+                    cx.executor().advance_clock(Duration::from_millis(16));
+                    cx.update(|window, cx| window.simulate_next_frame(cx));
+                    draw(cx);
+                }
+                draw_settled(cx);
+                assert_eq!(row("beta", cx).is_some(), beta_stays);
+                let rest = row("gamma", cx).unwrap().top();
+                let tops: Vec<_> = frames.iter().map(|(_, top)| *top).collect();
+                // Frames beta was drawn on: leaving, it is drawn as it folds.
+                let drawn = frames.iter().filter(|(beta, _)| *beta).count();
+                let between = tops
+                    .iter()
+                    .filter(|top| **top != tops[0] && **top != rest)
+                    .count();
+                if reduce {
+                    assert_eq!(tops[0], rest, "gamma glided with motion reduced: {tops:?}");
+                    assert!(beta_stays || drawn == 0, "beta lingered");
+                } else {
+                    assert!(between >= 3, "gamma jumped: {tops:?}");
+                    assert!(beta_stays || drawn >= 3, "beta went at once");
+                }
+            }
+        }
     }
 }
