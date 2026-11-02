@@ -141,8 +141,9 @@ enum LineFragmentKind {
 }
 
 impl InlineFlow {
+    /// `id` is the paragraph's render path.
     pub(super) fn new(
-        id: impl Into<ElementId>,
+        id: String,
         path: Rc<[u32]>,
         view: Entity<MarkdownState>,
         items: Vec<InlineFlowItem>,
@@ -155,6 +156,13 @@ impl InlineFlow {
         }
     }
 
+    /// The glide of the image at `ix`: once it decodes, its width goes from
+    /// the square it held to its own proportion, moving the text after it
+    /// along the line rather than jumping it.
+    fn image_glide(&self, ix: usize, cx: &App) -> crate::motion::GlideState {
+        self.view.read(cx).glide(&format!("{}/image/{ix}", self.id))
+    }
+
     fn image_element(
         ix: usize,
         view: Entity<MarkdownState>,
@@ -162,9 +170,17 @@ impl InlineFlow {
         link: &Option<LinkMark>,
         title: &str,
         size: Size<Pixels>,
-        cx: &App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> AnyElement {
         let source = view.read(cx).image_source(url);
+        // The picture fades in over the line once it decodes.
+        let arrived = crate::motion::image_arrival(
+            SharedString::from(format!("inline-image-{ix}")),
+            &source,
+            window,
+            cx,
+        );
         let opened = view.read(cx).opened_image_source(url);
         let link = link.clone();
         let has_link = link.is_some();
@@ -187,6 +203,7 @@ impl InlineFlow {
         };
         let image = crate::material::accessible_clickable(img(source), ix, role, label, cx)
             .object_fit(ObjectFit::Contain)
+            .opacity(arrived)
             .with_fallback(crate::image_viewer::unpreviewed(false, true, cx))
             .max_w(relative(1.))
             .w(size.width)
@@ -256,10 +273,15 @@ impl Element for InlineFlow {
             .iter()
             .enumerate()
             .map(|(ix, item)| match item {
-                InlineFlowItem::Image { url, .. } => Some(inline_image_size_for_line(
-                    intrinsic_image_size(ix, url, &self.view, window, cx),
-                    line_height,
-                )),
+                InlineFlowItem::Image { url, .. } => {
+                    let intrinsic = intrinsic_image_size(ix, url, &self.view, window, cx);
+                    let target = inline_image_size_for_line(intrinsic, line_height);
+                    Some(self.image_glide(ix, cx).toward(
+                        crate::motion::size_key(intrinsic.unwrap_or_default()),
+                        target,
+                        cx,
+                    ))
+                }
                 InlineFlowItem::ImageLink { url, label } => {
                     let mut badge = super::image_link::badge(
                         ix,
@@ -422,15 +444,20 @@ impl Element for InlineFlow {
                     size: fragment_size,
                 } => {
                     let mut element = match &self.items[item_ix] {
-                        InlineFlowItem::Image { url, link, title } => Self::image_element(
-                            elements.len(),
-                            self.view.clone(),
-                            url,
-                            link,
-                            title,
-                            fragment_size,
-                            cx,
-                        ),
+                        InlineFlowItem::Image { url, link, title } => {
+                            self.image_glide(item_ix, cx)
+                                .painted_at(fragment_size, window);
+                            Self::image_element(
+                                elements.len(),
+                                self.view.clone(),
+                                url,
+                                link,
+                                title,
+                                fragment_size,
+                                window,
+                                cx,
+                            )
+                        }
                         InlineFlowItem::ImageLink { url, label } => super::image_link::badge(
                             item_ix,
                             self.view.clone(),

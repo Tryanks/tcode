@@ -703,35 +703,36 @@ impl ChatView {
                             // title's stretch; past that they clip, so the title
                             // keeps the other half however many are linked. A
                             // badge that comes or goes widens into the row.
+                            let gap = gpui::rems(0.5).to_pixels(window.rem_size());
+                            let count = badge.value.len() as u64;
+                            let glide = crate::motion::GlideState::keyed(
+                                "header-pr-badge-glide",
+                                window,
+                                cx,
+                            );
+                            let button = Button::new("header-pr-badge")
+                                .debug_selector(|| "header-pr-badge".into())
+                                .ghost()
+                                .small()
+                                .compact()
+                                .selected(right_panel_open && right_tab == RightTab::PullRequests)
+                                .tooltip(crate::tr!("pull_requests.toggle"))
+                                .aria_label(label)
+                                .child(numbers)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.on_toggle_panel(&TogglePanel::PullRequests, window, cx)
+                                }));
+                            // Another number linked widens the badge in place.
+                            let button = crate::motion::SizeGlide::new(&glide, button)
+                                .axes(crate::motion::GlideAxes::Width)
+                                .on_change(count);
                             header.child(
-                                badge.fold_across_gap(
-                                    gpui::rems(0.5).to_pixels(window.rem_size()),
-                                    h_flex()
-                                        .flex_none()
-                                        .max_w(gpui::relative(0.5))
-                                        .overflow_hidden()
-                                        .child(
-                                            Button::new("header-pr-badge")
-                                                .debug_selector(|| "header-pr-badge".into())
-                                                .ghost()
-                                                .small()
-                                                .compact()
-                                                .selected(
-                                                    right_panel_open
-                                                        && right_tab == RightTab::PullRequests,
-                                                )
-                                                .tooltip(crate::tr!("pull_requests.toggle"))
-                                                .aria_label(label)
-                                                .child(numbers)
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.on_toggle_panel(
-                                                        &TogglePanel::PullRequests,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                })),
-                                        ),
-                                ),
+                                h_flex()
+                                    .flex_none()
+                                    .max_w(gpui::relative(0.5))
+                                    .overflow_hidden()
+                                    .ml(-gap * (1. - badge.progress()))
+                                    .child(badge.fold_across(button)),
                             )
                         },
                     ),

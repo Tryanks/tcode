@@ -1,0 +1,177 @@
+//! Pictures that fade in over what stands in for them once they decode.
+//!
+//! GPUI's `img` decodes asynchronously and draws nothing (or its loading
+//! element) until the decode lands, then the picture at once; it tells its
+//! caller nothing about where it stands. The state it reads lives in GPUI's
+//! asset system, keyed by the source, so [`image_load`] asks the same assets
+//! `img` will ask (the window's assets: Tcode draws no `img` under an
+//! `image_cache` element), and [`image_arrival`] turns the answer into an
+//! opacity that rises once it lands. Asking first starts the decode `img`
+//! would have started; it is the same asset, decoded once.
+
+use std::sync::Arc;
+
+use gpui::{App, ElementId, ImageCacheError, ImageSource, Pixels, RenderImage, Size, Window, px};
+
+/// Where a source's decode stands this frame.
+#[derive(Clone)]
+pub(crate) enum ImageLoad {
+    /// Still decoding, or still being read.
+    Loading,
+    /// Decoded: what `img` draws.
+    Loaded(Arc<RenderImage>),
+    /// It will not decode: `img` draws its fallback.
+    Failed,
+}
+
+impl ImageLoad {
+    /// Whether `img` draws something of its own: the picture, or its
+    /// fallback.
+    pub(crate) fn settled(&self) -> bool {
+        !matches!(self, Self::Loading)
+    }
+
+    /// The picture's own size, once decoded.
+    pub(crate) fn size(&self) -> Option<Size<Pixels>> {
+        match self {
+            Self::Loaded(image) => {
+                let size = image.size(0);
+                (size.width.0 > 0 && size.height.0 > 0)
+                    .then(|| gpui::size(px(size.width.0 as f32), px(size.height.0 as f32)))
+            }
+            Self::Loading | Self::Failed => None,
+        }
+    }
+}
+
+/// Where `source`'s decode stands, as `img` will find it this frame.
+pub(crate) fn image_load(source: &ImageSource, window: &mut Window, cx: &mut App) -> ImageLoad {
+    let decoded: Option<Result<Arc<RenderImage>, ImageCacheError>> = match source {
+        ImageSource::Resource(resource) => {
+            window.use_asset::<gpui::ImgResourceLoader>(resource, cx)
+        }
+        ImageSource::Custom(load) => load(window, cx),
+        ImageSource::Render(image) => Some(Ok(image.clone())),
+        ImageSource::Image(image) => image.clone().use_render_image(window, cx).map(Ok),
+    };
+    match decoded {
+        None => ImageLoad::Loading,
+        Some(Ok(image)) => ImageLoad::Loaded(image),
+        Some(Err(_)) => ImageLoad::Failed,
+    }
+}
+
+/// The opacity to draw `source`'s `img` (and so its fallback) at, over what
+/// stands in for it: 0 while it decodes, rising to 1 over `SETTLE` once it
+/// has. A picture already decoded when it is first drawn — a page of
+/// history, a thread opened again — is whole at once; reduced motion shows
+/// it whole the frame it lands. `id` names the picture's place.
+pub(crate) fn image_arrival(
+    id: impl Into<ElementId>,
+    source: &ImageSource,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
+    let settled = image_load(source, window, cx).settled();
+    gpui_base::motion::transition(
+        super::child_id(&id.into(), "image-arrival"),
+        if settled { 1f32 } else { 0. },
+        super::settle(),
+        window,
+        cx,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+
+    use gpui::{
+        Context, ImageSource, IntoElement, ParentElement as _, Render, RenderImage, Styled as _,
+        StyledImage as _, TestAppContext, Window, div, img, px,
+    };
+
+    use crate::test_frames::{draw, draw_settled};
+
+    /// A tile whose picture decodes when `ready` is set, recording the
+    /// opacity it draws the picture at each frame.
+    struct Tile {
+        source: ImageSource,
+        drawn: Rc<RefCell<Vec<f32>>>,
+    }
+
+    impl Render for Tile {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let arrived = super::image_arrival("tile", &self.source, window, cx);
+            self.drawn.borrow_mut().push(arrived);
+            div().size(px(120.)).child(
+                img(self.source.clone())
+                    .size_full()
+                    .opacity(arrived)
+                    .with_fallback(|| div().into_any_element()),
+            )
+        }
+    }
+
+    fn tile(ready: Rc<Cell<bool>>, drawn: Rc<RefCell<Vec<f32>>>) -> Tile {
+        let picture = Arc::new(RenderImage::new(vec![image::Frame::new(
+            image::ImageBuffer::from_pixel(4, 4, image::Rgba([0, 0, 255, 255])),
+        )]));
+        Tile {
+            source: ImageSource::Custom(Arc::new(move |_, _| {
+                ready.get().then(|| Ok(picture.clone()))
+            })),
+            drawn,
+        }
+    }
+
+    /// A picture never pops: while it decodes nothing of it is drawn over
+    /// its tile, then it fades in over several frames to whole, and the
+    /// window rests. One already decoded when first drawn is whole at once.
+    #[gpui::test]
+    fn a_picture_fades_in_once_it_decodes(cx: &mut TestAppContext) {
+        let drawn = Rc::new(RefCell::new(Vec::new()));
+        let ready = Rc::new(Cell::new(false));
+        let (view, cx) = cx.add_window_view({
+            let (ready, drawn) = (ready.clone(), drawn.clone());
+            move |_, _| tile(ready, drawn)
+        });
+        draw_settled(cx);
+        assert!(drawn.borrow().iter().all(|opacity| *opacity == 0.));
+        drawn.borrow_mut().clear();
+        ready.set(true);
+        view.update(cx, |_, cx| cx.notify());
+        draw(cx);
+        for _ in 0..20 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+        }
+        draw_settled(cx);
+        let seen = drawn.borrow().clone();
+        assert!(
+            seen.windows(2).all(|pair| pair[1] >= pair[0]),
+            "the picture faded back: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .filter(|opacity| **opacity > 0. && **opacity < 1.)
+                .count()
+                >= 6,
+            "the picture popped in: {seen:?}"
+        );
+        assert_eq!(*seen.last().unwrap(), 1.);
+
+        let decoded = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let decoded = decoded.clone();
+            move |_, _| tile(Rc::new(Cell::new(true)), decoded)
+        });
+        draw(cx);
+        assert!(
+            decoded.borrow().iter().all(|opacity| *opacity == 1.),
+            "a decoded picture faded in: {:?}",
+            decoded.borrow()
+        );
+    }
+}

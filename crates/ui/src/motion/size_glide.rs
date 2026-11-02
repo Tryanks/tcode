@@ -139,6 +139,12 @@ impl Glide {
     }
 }
 
+/// A content key for content whose size is all that changes about it: a
+/// picture that decoded, for [`GlideState::toward`].
+pub(crate) fn size_key(size: Size<Pixels>) -> u64 {
+    (u64::from(f32::from(size.width).to_bits()) << 32) | u64::from(f32::from(size.height).to_bits())
+}
+
 fn lerp(from: Size<Pixels>, to: Size<Pixels>, progress: f32, axes: GlideAxes) -> Size<Pixels> {
     let progress = progress.clamp(0., 1.);
     let glide = |from: Pixels, to: Pixels| from + (to - from) * progress;

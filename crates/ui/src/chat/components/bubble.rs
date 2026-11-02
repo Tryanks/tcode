@@ -259,14 +259,23 @@ pub(crate) fn user_bubble(
                     .overflow_hidden()
                     .bg(cx.theme().muted)
                     .cursor_pointer()
-                    .child(
-                        img(crate::store::image_preview(path, 120., true))
-                            .id("attachment-image")
-                            .size(px(120.))
-                            .rounded(crate::material::radius_card(cx))
-                            .object_fit(ObjectFit::Cover)
-                            .with_fallback(crate::image_viewer::unpreviewed(true, false, cx)),
-                    )
+                    .child(crate::motion::Sampled::new({
+                        let source = crate::store::image_preview(path, 120., true);
+                        let id = SharedString::from(format!("user-image-{entry_id}-{image_index}"));
+                        // The picture fades in over the tile's fill once it
+                        // decodes.
+                        move |window, cx| {
+                            let arrived = crate::motion::image_arrival(id, &source, window, cx);
+                            img(source)
+                                .id("attachment-image")
+                                .size(px(120.))
+                                .rounded(crate::material::radius_card(cx))
+                                .object_fit(ObjectFit::Cover)
+                                .opacity(arrived)
+                                .with_fallback(crate::image_viewer::unpreviewed(true, false, cx))
+                                .into_any_element()
+                        }
+                    }))
                     .on_click(on_click)
                     .context_menu(move |menu, _, _| menu.path_items(&menu_path, None))
                 })

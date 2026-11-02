@@ -182,6 +182,10 @@ pub(super) fn block(
         .items_start()
         .child(shown)
         .child(actions);
+    // Shown as its source or as the formula, the block's height glides
+    // between the two, and the blocks after it follow.
+    let body = crate::motion::SizeGlide::new(&view.read(cx).glide(path), body)
+        .on_change(show_source as u64);
     let block = div()
         .group(group)
         .w_full()

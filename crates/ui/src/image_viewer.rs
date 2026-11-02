@@ -9,7 +9,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use gpui::{
-    App, AppContext as _, Bounds, ClickEvent, Context, FocusHandle, ImageCacheError, ImageSource,
+    App, AppContext as _, Bounds, ClickEvent, Context, FocusHandle, ImageSource,
     InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
     ParentElement as _, PinchEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollEvent,
     SharedString, Size, StatefulInteractiveElement as _, Styled as _, TouchPhase, Window, actions,
@@ -276,6 +276,9 @@ pub(crate) struct ImageViewer {
     target: Option<tcode_protocol::OriginalTarget>,
     remote_progress: bool,
     original: Option<Arc<RenderImage>>,
+    /// The preview the original replaced, and when: it stays under the
+    /// original while the original fades in over it.
+    replaced: Option<(ImageSource, Instant)>,
     original_state: Option<OriginalState>,
     transfer: Option<gpui::Task<()>>,
     host_changes: Option<gpui::Subscription>,
@@ -299,6 +302,7 @@ impl ImageViewer {
             target: None,
             remote_progress: false,
             original: None,
+            replaced: None,
             original_state: None,
             transfer: None,
             host_changes: None,
@@ -389,7 +393,11 @@ impl ImageViewer {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(original) => {
-                        this.source = ImageSource::Render(original.clone());
+                        let preview = std::mem::replace(
+                            &mut this.source,
+                            ImageSource::Render(original.clone()),
+                        );
+                        this.replaced = Some((preview, cx.background_executor().now()));
                         this.original = Some(original);
                         this.original_state = Some(OriginalState::Complete);
                     }
@@ -602,24 +610,9 @@ impl ImageViewer {
     }
 
     fn decode(&mut self, window: &mut Window, cx: &mut App) {
-        let decoded = match &self.source {
-            ImageSource::Resource(resource) => {
-                window.use_asset::<gpui::ImgResourceLoader>(resource, cx)
-            }
-            ImageSource::Custom(load) => load(window, cx),
-            ImageSource::Render(image) => Some(Ok(image.clone())),
-            ImageSource::Image(image) => image.clone().use_render_image(window, cx).map(Ok),
-        };
-        let natural = decoded.map(|result: Result<Arc<RenderImage>, ImageCacheError>| {
-            result
-                .ok()
-                .map(|image| image.size(0))
-                .filter(|size| size.width.0 > 0 && size.height.0 > 0)
-        });
-        self.failed = matches!(natural, Some(None));
-        let decoded = natural
-            .flatten()
-            .map(|size| gpui::size(px(size.width.0 as f32), px(size.height.0 as f32)));
+        let load = crate::motion::image_load(&self.source, window, cx);
+        self.failed = load.settled() && load.size().is_none();
+        let decoded = load.size();
         self.natural = match self.original_state {
             Some(OriginalState::Complete) => decoded,
             _ => decoded.and(self.original_size).or(decoded),
@@ -672,6 +665,21 @@ impl Render for ImageViewer {
             window,
             cx,
         );
+        // The original fades in over the preview it replaces, in its place.
+        let now = cx.background_executor().now();
+        let swapped = match &self.replaced {
+            Some((_, at)) if !cx.reduce_motion() => {
+                crate::motion::settle_progress(now.saturating_duration_since(*at))
+            }
+            _ => 1.,
+        };
+        let replaced = if swapped < 1. {
+            window.request_animation_frame();
+            self.replaced.clone()
+        } else {
+            self.replaced = None;
+            None
+        };
         let placeholder = image.is_none().then(|| {
             if self.failed
                 || matches!(
@@ -710,6 +718,18 @@ impl Render for ImageViewer {
             .on_click(cx.listener(|this, event, window, cx| this.clicked(event, window, cx)))
             .on_scroll(cx.listener(|this, event, _, cx| this.scrolled(event, cx)))
             .on_pinch(cx.listener(|this, event, _, cx| this.pinched(event, cx)))
+            .when_some(image.zip(replaced), |el, (bounds, (preview, _))| {
+                el.child(
+                    img(preview)
+                        .id("image-viewer-replaced")
+                        .absolute()
+                        .left(bounds.origin.x)
+                        .top(bounds.origin.y)
+                        .w(bounds.size.width)
+                        .h(bounds.size.height)
+                        .opacity(arrived),
+                )
+            })
             .when_some(image, |el, bounds| {
                 el.child(
                     img(self.source.clone())
@@ -720,7 +740,7 @@ impl Render for ImageViewer {
                         .top(bounds.origin.y)
                         .w(bounds.size.width)
                         .h(bounds.size.height)
-                        .opacity(arrived),
+                        .opacity(arrived * swapped),
                 )
             })
             .children(placeholder.map(|placeholder| {
