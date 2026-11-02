@@ -401,7 +401,11 @@ impl ChatView {
                 item_ix: row,
                 offset_in_item: px(0.),
             });
-            self.highlighted_turn = Some(turn);
+            self.highlighted_turn = Some(
+                self.workspace_store
+                    .read(cx)
+                    .absolute_turn_for(self.session_key.as_deref(), turn),
+            );
             self.markdown_visible_rows = viewport_row_window(row, self.rows.len());
             self.markdown_scroll_top = Some(row);
             if let Some(session_id) = self.session_key.as_deref() {
@@ -858,14 +862,17 @@ mod tests {
 
         let opened = |cx: &mut VisualTestContext| {
             let view = cx.update(|window, _| window.root::<ChatView>().flatten())?;
-            let (row, highlighted) = view.read_with(cx, |chat, _| {
+            let (row, highlighted, first) = view.read_with(cx, |chat, cx| {
                 let row = chat.list_state.logical_scroll_top().item_ix;
                 (
                     chat.rows.get(row).map(|row| row.turn),
                     chat.highlighted_turn,
+                    chat.workspace_store
+                        .read(cx)
+                        .absolute_turn_for(chat.session_id.as_deref(), 0),
                 )
             });
-            let turn = row.filter(|turn| highlighted == Some(*turn))?;
+            let turn = row.filter(|turn| highlighted == Some(first + *turn))?;
             store
                 .read_with(cx, |store, _| {
                     store.with_active_timeline(|timeline| {
