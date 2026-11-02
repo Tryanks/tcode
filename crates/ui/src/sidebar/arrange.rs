@@ -815,8 +815,15 @@ impl SessionsSidebar {
         let targeted = drag.map(|drag| drag.target(scope.as_deref()) == Some(section));
         let id = SharedString::from(format!("drag-boundary-{section:?}"));
         // The seam's label fades in as a drag starts and out as it ends, and
-        // lights up while the drag targets its section.
+        // lights up while the drag targets its section; an empty section's
+        // target folds open in its place instead.
         let shown = crate::motion::shown(id.clone(), targeted.filter(|_| !empty), window, cx);
+        let target = crate::motion::shown(
+            SharedString::from(format!("drag-boundary-target-{section:?}")),
+            targeted.filter(|_| empty).map(|_| ()),
+            window,
+            cx,
+        );
         let lit = transition(
             (id, "lit"),
             if targeted == Some(true) { 1. } else { 0. },
@@ -824,12 +831,10 @@ impl SessionsSidebar {
             window,
             cx,
         );
-        if targeted.is_none() || !empty {
-            let Some(shown) = shown else {
-                return div().into_any_element();
-            };
-            return self.render_seam_label(section, lit, shown, cx);
-        }
+        let seam = shown.map(|shown| self.render_seam_label(section, lit, shown, cx));
+        let Some(target) = target else {
+            return seam.unwrap_or_else(|| div().into_any_element());
+        };
         let color = gpui_base::animation::Lerp::lerp(
             &cx.theme().sidebar_foreground,
             &cx.theme().primary,
@@ -839,7 +844,7 @@ impl SessionsSidebar {
             ThreadSection::Pinned => crate::tr!("sidebar.pinned"),
             _ => crate::tr!("sidebar.active"),
         };
-        let target = div().w_full().py_1().child(
+        let target_row = div().w_full().py_1().child(
             h_flex()
                 .h(px(EMPTY_TARGET_HEIGHT - 8.))
                 .px_2()
@@ -852,7 +857,15 @@ impl SessionsSidebar {
                 .text_color(color)
                 .child(label),
         );
-        self.drop_zone(target, DropZone::Start(section), scope, cx)
+        div()
+            .w_full()
+            .child(self.drop_zone(
+                div().w_full().child(target.fold(target_row)),
+                DropZone::Start(section),
+                scope,
+                cx,
+            ))
+            .children(seam)
             .into_any_element()
     }
 
@@ -903,25 +916,6 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
-    /// The height of the target [`Self::render_drag_boundary`] shows for an
-    /// empty section, for row offsets; a label takes none.
-    pub(super) fn drag_boundary_height(&self, empty: bool, scope: Option<&str>) -> f32 {
-        let dragging = self
-            .drag
-            .as_ref()
-            .is_some_and(|drag| drag.scope.as_deref() == scope);
-        if dragging && empty {
-            EMPTY_TARGET_HEIGHT
-        } else {
-            0.
-        }
-    }
-
-    /// The slot a dragged row leaves while it follows the pointer.
-    pub(super) fn render_drag_gap(height: f32) -> gpui::AnyElement {
-        div().w_full().h(px(height)).into_any_element()
-    }
-
     pub(crate) fn render_arrange(
         &mut self,
         window: &mut Window,
@@ -939,13 +933,12 @@ impl SessionsSidebar {
             Some(drag) => drag.preview(scope.as_deref(), sections),
             None => sections,
         };
-        let mut rows: Vec<ArrangeRow> = vec![ArrangeRow::Caption(
-            ThreadSection::Pinned,
-            sections.pinned.len(),
-        )];
-        if sections.pinned.is_empty() {
-            rows.push(ArrangeRow::PinnedEmpty);
-        }
+        // The empty-Pinned row stays in the list, folding in and out with
+        // the last pinned thread.
+        let mut rows: Vec<ArrangeRow> = vec![
+            ArrangeRow::Caption(ThreadSection::Pinned, sections.pinned.len()),
+            ArrangeRow::PinnedEmpty(sections.pinned.is_empty()),
+        ];
         rows.extend(
             sections
                 .pinned
@@ -988,10 +981,12 @@ impl SessionsSidebar {
         self.arrange_settled_fold = settled_fold;
         let keys: Vec<String> = rows.iter().map(ArrangeRow::key).collect();
         if keys != self.arrange_row_keys {
-            replace_list_rows(
+            replace_gliding_rows(
                 &self.arrange_list_state,
+                &self.arrange_flip,
                 |index| self.arrange_row_keys.get(index).cloned(),
                 keys.iter().cloned(),
+                window,
             );
             self.arrange_row_keys = keys;
         }
@@ -1004,6 +999,7 @@ impl SessionsSidebar {
             .collect();
         let rows = Rc::new(rows);
         let width = self.arrange_list_state.viewport_bounds().size.width;
+        let flip = self.arrange_flip.clone();
         v_flex()
             .size_full()
             .child(
@@ -1040,9 +1036,13 @@ impl SessionsSidebar {
                             self.arrange_list_state.clone(),
                             cx.processor(move |this, index: usize, window, cx| {
                                 let factor = folds.get(index).copied().unwrap_or(1.);
-                                this.fold_row(factor, width, window, cx, |this, window, cx| {
-                                    this.render_arrange_row(&rows[index], &projects, window, cx)
-                                })
+                                let folded =
+                                    this.fold_row(factor, width, window, cx, |this, window, cx| {
+                                        this.render_arrange_row(&rows[index], &projects, window, cx)
+                                    });
+                                let key =
+                                    SharedString::from(format!("arrange-{}", rows[index].key()));
+                                flip.row(index, key, folded)
                             }),
                         )
                         .size_full(),
@@ -1092,14 +1092,23 @@ impl SessionsSidebar {
                 self.drop_zone(caption, DropZone::Start(*section), scope, cx)
                     .into_any_element()
             }
-            ArrangeRow::PinnedEmpty => self
-                .drop_zone(
-                    crate::material::empty_row(crate::tr!("sidebar.arrange_pinned_empty"), cx),
+            ArrangeRow::PinnedEmpty(empty) => {
+                let Some(shown) =
+                    crate::motion::shown("arrange-pinned-empty", empty.then_some(()), window, cx)
+                else {
+                    return div().into_any_element();
+                };
+                let row =
+                    crate::material::empty_row(crate::tr!("sidebar.arrange_pinned_empty"), cx)
+                        .debug_selector(|| "arrange-pinned-empty".into());
+                self.drop_zone(
+                    div().w_full().child(shown.fold(row)),
                     DropZone::Start(ThreadSection::Pinned),
                     scope,
                     cx,
                 )
-                .into_any_element(),
+                .into_any_element()
+            }
             ArrangeRow::Settled(count) => {
                 let expanded = self.arrange_settled_expanded;
                 let color = caption_color(ThreadSection::Settled);
@@ -1136,16 +1145,9 @@ impl SessionsSidebar {
                     id: meta.id.clone(),
                     section: thread_section(meta),
                 };
-                let dragged = self
-                    .drag
-                    .as_ref()
-                    .is_some_and(|drag| drag.session_id == meta.id);
-                let row = if dragged {
-                    Self::render_drag_gap(crate::material::LIST_ROW_MIN_HEIGHT)
-                } else {
-                    self.render_arrange_thread(meta, projects, cx)
-                        .into_any_element()
-                };
+                // While carried, the row keeps its place, hidden under its
+                // ghost.
+                let row = self.render_arrange_thread(meta, projects, cx);
                 let element =
                     div()
                         .w_full()
@@ -1246,7 +1248,8 @@ impl SessionsSidebar {
 
 enum ArrangeRow {
     Caption(ThreadSection, usize),
-    PinnedEmpty,
+    /// Whether Pinned is empty: the row folds in and out with it.
+    PinnedEmpty(bool),
     Thread(Box<SessionMeta>),
     Settled(usize),
 }
@@ -1255,7 +1258,7 @@ impl ArrangeRow {
     fn key(&self) -> String {
         match self {
             Self::Caption(section, _) => format!("caption-{section:?}"),
-            Self::PinnedEmpty => "pinned-empty".into(),
+            Self::PinnedEmpty(_) => "pinned-empty".into(),
             Self::Thread(meta) => format!("thread-{}", meta.id),
             Self::Settled(_) => "settled".into(),
         }
