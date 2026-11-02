@@ -837,6 +837,7 @@ impl ChatView {
             )))
             .child(header)
             .overflow_x_scroll_area()
+            .track_scroll(&self.header_scroll)
             .into_any_element()
     }
 

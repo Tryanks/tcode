@@ -14,6 +14,8 @@ mod scene;
 pub(crate) mod keyed;
 pub(crate) use keyed::keyed;
 
+pub(crate) mod owned;
+
 /// How far a surface rises while it appears, and sinks while it leaves.
 pub(crate) const LIFT: Pixels = px(6.);
 

@@ -1138,15 +1138,12 @@ impl AppShell {
         let observed_session_id = store.read(cx).active_session_id();
         let thread_panel = self.new_pane(&store, window, cx);
         let shell = cx.entity().downgrade();
-        let lands: crate::panes::DropLands = Rc::new(move |bounds, placement, window, cx| {
-            shell
-                .upgrade()
-                .is_some_and(|shell| shell.read(cx).drop_lands(bounds, placement, window, cx))
-        });
+        let drop_target: crate::panes::DropTarget =
+            Rc::new(move |window, cx| shell.upgrade()?.read(cx).drop_target(window, cx));
         let split_handle_held = crate::panes::HandleHeld::default();
         let thread_panes = cx.new(|cx| {
             let mut area = DockArea::new("thread-panes", None, window, cx).with_renderer(Rc::new(
-                crate::panes::ThreadPanes::new(lands, split_handle_held.clone()),
+                crate::panes::ThreadPanes::new(drop_target, split_handle_held.clone()),
             ));
             area.set_center(DockLayout::tabs().panel(thread_panel.clone()), window, cx);
             area
@@ -1550,6 +1547,23 @@ impl AppShell {
             }
         }
         self.open_thread(window, cx);
+    }
+
+    /// Where a thread dragged over the column would land, in window
+    /// coordinates: the part of the hovered pane the dock's drop names, if it
+    /// lands.
+    fn drop_target(&self, window: &Window, cx: &App) -> Option<gpui::Bounds<Pixels>> {
+        self.attachment.as_ref()?.panes(cx).iter().find_map(|pane| {
+            let indicator = pane
+                .read(cx)
+                .group()?
+                .read(cx)
+                .context(cx)
+                .drop_indicator()?;
+            let (bounds, to) = (indicator.bounds(), indicator.to());
+            self.drop_lands(bounds, indicator.placement(), window, cx)
+                .then(|| gpui::Bounds::new(bounds.origin + to.origin(), to.size()))
+        })
     }
 
     /// Whether a thread dragged over the pane painted at `bounds` would land:
@@ -6868,8 +6882,11 @@ mod tests {
 
         cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
+        // The placeholder leaves where the drop landed, fading out.
+        assert_eq!(cx.debug_bounds("pane-drop-indicator"), Some(indicator));
         serve_thread(&host, "thread-2");
         await_restore_update(&shell, cx, |store| !store.chat_loading());
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert!(cx.debug_bounds("pane-drop-indicator").is_none());
         assert_eq!(
@@ -6881,6 +6898,101 @@ mod tests {
             assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
             assert!(store.is_thread_open("thread-1"));
         });
+    }
+
+    /// A thread carried from one pane to the next takes its placeholder
+    /// along, from where it showed the drop to the pane it now would land
+    /// in, rather than the first pane's vanishing and the next one's
+    /// appearing at rest.
+    #[gpui::test]
+    fn a_drops_placeholder_travels_from_pane_to_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
+            let attachment = shell.attachment.as_ref().expect("attached");
+            attachment
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).bounds())
+                .collect()
+        });
+        assert_eq!(panes.len(), 2);
+        drag_row("sidebar-thread-thread-2", panes[0].center(), cx);
+        let first = cx
+            .debug_bounds("pane-drop-indicator")
+            .expect("the pane the drop would replace");
+        assert!(panes[0].contains(&first.center()), "{first:?} in {panes:?}");
+
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_move(panes[1].center(), Some(MouseButton::Left), none);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        draw(cx);
+        let moving = cx
+            .debug_bounds("pane-drop-indicator")
+            .expect("the placeholder, on its way");
+        assert!(
+            first.left() < moving.left() && moving.left() < panes[1].left(),
+            "between {first:?} and {:?}: {moving:?}",
+            panes[1]
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        draw(cx);
+        let landed = cx
+            .debug_bounds("pane-drop-indicator")
+            .expect("the pane the drop would fill");
+        assert!(
+            panes[1].contains(&landed.center()),
+            "{landed:?} in {panes:?}"
+        );
+    }
+
+    /// A pane's outline keeps fading in when the dock draws the pane under a
+    /// new parent part of the way: here a second split, below the pane, put
+    /// in while the first one's outline is still coming.
+    #[gpui::test]
+    fn a_panes_outline_keeps_fading_when_the_dock_moves_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (_shell, _host, cx) = mount_panes(cx);
+        let outline_alpha = |cx: &mut VisualTestContext| {
+            let outline = cx.debug_bounds("pane-outline-0")?;
+            cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .find(|quad| {
+                        quad.bounds == outline.scale(window.scale_factor())
+                            && quad.border_widths.top > gpui::ScaledPixels(0.)
+                    })
+                    .map(|quad| quad.border_color.a)
+            })
+        };
+        assert_eq!(outline_alpha(cx), None, "a lone pane wears no outline");
+        let full = cx.update(|_, cx| crate::material::pane_colour(0, cx).a);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 8);
+        draw(cx);
+        let coming = outline_alpha(cx).expect("the outline, fading in");
+        assert!(0. < coming && coming < full, "{coming} of {full}");
+        // The keyboard back to the first pane, which then splits downward:
+        // its group moves under a new split.
+        cx.simulate_keystrokes("secondary-alt-left");
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        let moved = outline_alpha(cx).expect("the outline, still fading in");
+        assert!(
+            coming <= moved && moved < full,
+            "{coming}, then {moved} of {full}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        assert_eq!(outline_alpha(cx), Some(full));
     }
 
     /// Dropped in a pane's middle, a thread takes that pane's place and the

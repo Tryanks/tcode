@@ -10,8 +10,8 @@ use gpui::{
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::dock::{
-    DockAreaRenderer, DockLayout, DropIndicator, NodeId, PaneNode, PaneRef, Panel, PanelEvent,
-    PanelId, TabGroup, TabGroupContext, TabGroupRenderer,
+    DockAreaRenderer, DockLayout, NodeId, PaneNode, PaneRef, Panel, PanelEvent, PanelId, TabGroup,
+    TabGroupContext, TabGroupRenderer,
 };
 use gpui_base::{ElementExt as _, Placement, ResizeHandleContext, v_flex};
 use serde::Deserialize;
@@ -225,6 +225,10 @@ pub(crate) struct ThreadPanel {
     closing: bool,
     /// How the content is drawn while its split glides.
     held: Held,
+    /// The pane's fades: its outline and the waiting hint's cross-fade with
+    /// its chat. Kept here because the dock draws the pane under a new
+    /// parent whenever the layout around it changes (see [`ThreadPanes`]).
+    motion: crate::motion::owned::Owned,
     _focus: Subscription,
     _focus_in: Subscription,
 }
@@ -264,6 +268,7 @@ impl ThreadPanel {
             colour: None,
             closing: false,
             held: Held::default(),
+            motion: Default::default(),
             _focus: focus,
             _focus_in: focus_in,
         }
@@ -384,26 +389,24 @@ impl Render for ThreadPanel {
         let bounds = self.bounds.clone();
         let held = self.held;
         // A pane beside others waits for a thread rather than offering the
-        // empty workspace's way to start one. The swap cross-fades when the
-        // binding changes inside a layout that holds, and when the last
-        // neighbour starts closing, which the dock re-parents the group for
-        // only once its glide has played; when a neighbour comes it lands
-        // with the dock re-parenting the group and snaps (see
-        // `ThreadPanes`). A pane whose thread closes is rebound before
-        // the fade, so the leaving layer is this chat already showing the
-        // empty workspace: GPUI cannot draw an element tree from an earlier
-        // frame, and the store frees a closed thread's timeline in
+        // empty workspace's way to start one. A pane whose thread closes is
+        // rebound before the fade, so the leaving layer is this chat already
+        // showing the empty workspace: GPUI cannot draw an element tree from
+        // an earlier frame, and the store frees a closed thread's timeline in
         // `close_thread` before the shell hears of it, so a chat kept bound
         // to it would draw its loading skeleton instead.
         let waiting = self.among_others && self.session_id.is_none();
-        let content = crate::motion::CrossFade::new(
-            "pane-content",
-            if waiting { WAITING } else { CHAT },
-            2,
-            window,
-            cx,
-        )
-        .fill();
+        let content = self
+            .motion
+            .cross_fade(
+                "pane-content",
+                if waiting { WAITING } else { CHAT },
+                2,
+                &crate::motion::owned::Curve::settle(),
+                window,
+                cx,
+            )
+            .fill();
         let mut layers = Vec::new();
         if content.shows(WAITING) {
             // A waiting pane draws no chat header, so its close button sits in
@@ -510,9 +513,10 @@ pub(crate) fn close_button(id: &'static str, pane: FocusHandle) -> Button {
         })
 }
 
-/// Whether a thread dragged over a pane would land there: the pane's content
-/// bounds and the edge it would open on, `None` for the pane itself.
-pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window, &App) -> bool>;
+/// Where a thread dragged over the column would land: the slot it would
+/// open as or replace, in window coordinates, `None` while it would land
+/// nowhere.
+pub(crate) type DropTarget = Rc<dyn Fn(&Window, &App) -> Option<Bounds<Pixels>>>;
 
 /// The panes' appearance: the area is the chat column's reading surface.
 ///
@@ -525,16 +529,13 @@ pub(crate) type DropLands = Rc<dyn Fn(Bounds<Pixels>, Option<Placement>, &Window
 /// lone group sits in the area's frame, a split puts it under
 /// `("dock-split", node)`, a merge or a close lifts it back out, and a layout
 /// builds every group anew. Element state is keyed by the full id path from
-/// the window root, so every pane that moves in the tree starts over: its
-/// colour outline and its waiting-hint cross-fade snap to their targets in
-/// the frame of a split, of a layout, or the frame a closing pane is taken
-/// out once its glide has played, and its chat loses its
-/// handle-less stateful scrolls, such as the header's `chat-header-scroll`,
-/// and any other keyed state under it. A zoom moves no group, only the
-/// zoomed pane's own view: its keyed state starts over as it leaves its slot
-/// and again as it is back.
+/// the window root, so keyed state in a pane that moves in the tree starts
+/// over. What must not — a pane's outline and waiting hint, its header's
+/// scroll — lives with the pane's and its chat's entities instead (see
+/// [`crate::motion::owned`]). A zoom moves no group, only the zoomed pane's
+/// own view.
 pub(crate) struct ThreadPanes {
-    lands: DropLands,
+    drop_target: DropTarget,
     handle_held: HandleHeld,
 }
 
@@ -543,23 +544,31 @@ pub(crate) struct ThreadPanes {
 pub(crate) type HandleHeld = Rc<Cell<Option<(Axis, Point<Pixels>)>>>;
 
 impl ThreadPanes {
-    pub(crate) fn new(lands: DropLands, handle_held: HandleHeld) -> Self {
-        Self { lands, handle_held }
+    pub(crate) fn new(drop_target: DropTarget, handle_held: HandleHeld) -> Self {
+        Self {
+            drop_target,
+            handle_held,
+        }
     }
 }
 
 impl DockAreaRenderer for ThreadPanes {
+    /// The area draws the one placeholder of a dragged thread's drop, over
+    /// every pane; see [`drop_placeholder`].
     fn frame(&self, _: &mut Window, cx: &mut App) -> Stateful<Div> {
+        let drop_target = self.drop_target.clone();
         div()
             .id("thread-panes")
             .bg(crate::material::content_surface(cx))
             .shadow_sm()
+            .child(crate::motion::Sampled::new(move |window, cx| {
+                let target = drop_target(window, cx);
+                drop_placeholder(target, window, cx)
+            }))
     }
 
     fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
-        Rc::new(ThreadTabs {
-            lands: self.lands.clone(),
-        })
+        Rc::new(ThreadTabs)
     }
 
     /// Base's own line. A handle the pointer holds takes its split's sizes
@@ -578,10 +587,69 @@ impl DockAreaRenderer for ThreadPanes {
     }
 }
 
-/// A pane's thread wears its own header, so the group draws no tab bar.
-struct ThreadTabs {
-    lands: DropLands,
+/// The pane a dragged thread would open as, or the pane it would replace.
+///
+/// Drawn once for the whole area rather than through the tab groups'
+/// `render_drop_indicator`: gpui-base's `TabGroup::render` calls that under
+/// each group's own element path, and stops calling it once the drag leaves
+/// the group, lands or is cancelled, so a group's placeholder could neither
+/// travel to another pane nor leave. This one fades in where the drop first
+/// lands, springs between the edges and middles of one pane and on to the
+/// next pane, and fades out where it last could land: over a spot where the
+/// drop cannot land, once the drag leaves the column, and as the drop lands
+/// or is cancelled. It is built once the area's frame has been rendered, so
+/// it reads the groups' drags as they are now, and painted after the panes,
+/// over them.
+fn drop_placeholder(
+    target: Option<Bounds<Pixels>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let id = "pane-drop-placeholder";
+    let Some(shown) = crate::motion::shown(id, target, window, cx) else {
+        return Empty.into_any_element();
+    };
+    // Coming in from nothing it starts where it lands; coming back while it
+    // fades out it travels from where it was.
+    let travel = shown.leaving() || shown.progress() > 0.;
+    let to = shown.value;
+    let mut spring = |channel, target| -> Pixels {
+        gpui_base::motion::spring(
+            (id, channel),
+            target,
+            crate::motion::FOLLOW.with_travel(travel),
+            window,
+            cx,
+        )
+    };
+    let left = spring("left", to.left());
+    let top = spring("top", to.top());
+    let width = spring("width", to.size.width);
+    let height = spring("height", to.size.height);
+    let inset = cx.theme().tokens.spacing.sm;
+    let accent = cx.theme().primary;
+    // No hitbox and no shield: the drop is the group's beneath it.
+    gpui::deferred(
+        gpui::anchored()
+            .position_mode(gpui::AnchoredPositionMode::Window)
+            .position(gpui::point(left + inset, top + inset))
+            .child(
+                div()
+                    .debug_selector(|| "pane-drop-indicator".into())
+                    .w((width - inset * 2.).max(px(0.)))
+                    .h((height - inset * 2.).max(px(0.)))
+                    .opacity(shown.progress())
+                    .rounded(crate::material::radius_card(cx))
+                    .border_1()
+                    .border_color(accent.opacity(0.5))
+                    .bg(accent.opacity(0.1)),
+            ),
+    )
+    .into_any_element()
 }
+
+/// A pane's thread wears its own header, so the group draws no tab bar.
+struct ThreadTabs;
 
 impl TabGroupRenderer for ThreadTabs {
     fn render_tab_bar(&self, _: &TabGroupContext, _: &mut Window, _: &mut App) -> AnyElement {
@@ -601,33 +669,30 @@ impl TabGroupRenderer for ThreadTabs {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        // Always sampled, so it glides in and out while the panes stay where
-        // they are: out as the last neighbour starts closing or a pane zooms.
-        // A split or a layout re-parents the group and it snaps (see
-        // `ThreadPanes`).
-        let pane = panel.clone().downcast::<ThreadPanel>().ok();
-        let (zoom, slot) = pane.as_ref().map_or_else(
-            || (PaneZoom::default(), Rc::default()),
-            |pane| {
-                let pane = pane.read(cx);
-                (pane.zoom, pane.slot.clone())
-            },
-        );
-        let shared = !zoom.zoomed
-            && group.is_closable()
-            && pane.as_ref().is_some_and(|pane| pane.read(cx).among_others);
-        let outline = match pane
-            .and_then(|pane| pane.read(cx).colour)
-            .map(|slot| crate::material::pane_colour(slot, cx))
-        {
+        let Ok(pane) = panel.clone().downcast::<ThreadPanel>() else {
+            return panel.into_any_element();
+        };
+        let (zoom, slot, motion, shared, colour) = {
+            let pane = pane.read(cx);
+            (
+                pane.zoom,
+                pane.slot.clone(),
+                pane.motion.clone(),
+                !pane.zoom.zoomed && group.is_closable() && pane.among_others,
+                pane.colour,
+            )
+        };
+        // Toward the colour at alpha 0 rather than transparent black, so it
+        // keeps its hue while it fades.
+        let outline = match colour.map(|slot| crate::material::pane_colour(slot, cx)) {
             Some(colour) if shared => colour,
             Some(colour) => colour.opacity(0.),
             None => gpui::transparent_black(),
         };
-        let outline = gpui_base::motion::transition(
-            gpui::ElementId::NamedInteger("pane-outline".into(), panel.entity_id().as_u64()),
+        let outline = motion.transition(
+            "outline",
             outline,
-            crate::motion::settle(),
+            &crate::motion::owned::Curve::settle(),
             window,
             cx,
         );
@@ -642,61 +707,18 @@ impl TabGroupRenderer for ThreadTabs {
                 false => this.child(panel),
             })
             .when(outline.a > 0., |this| {
-                this.child(div().absolute().inset_0().border_1().border_color(outline))
+                this.child(
+                    div()
+                        .debug_selector(move || {
+                            format!("pane-outline-{}", colour.unwrap_or_default())
+                        })
+                        .absolute()
+                        .inset_0()
+                        .border_1()
+                        .border_color(outline),
+                )
             })
             .into_any_element()
-    }
-
-    /// The pane a dragged thread would open as, or the pane it would replace.
-    /// `DropIndicator` names no group, so the shell finds the pane by the
-    /// bounds the drag hovers.
-    ///
-    /// Over a spot where the drop cannot land the placeholder fades out where
-    /// it last could, and fades back in when the drag returns; within one
-    /// pane it springs between the edges and the middle. Moving to another
-    /// pane it neither travels nor fades: each tab group draws its own
-    /// indicator under its own element path (gpui-base's `TabGroup::render`)
-    /// and the dock has no area-level one, so the old pane's is gone and the
-    /// new one's starts at rest. Base also stops calling this hook once the
-    /// drag leaves the group, lands or is cancelled, so there is nothing left
-    /// to draw an exit with, and an entry fade alone would be enter-only.
-    fn render_drop_indicator(
-        &self,
-        indicator: DropIndicator,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<AnyElement> {
-        let id = "pane-drop-placeholder";
-        let lands = (self.lands)(indicator.bounds(), indicator.placement(), window, cx);
-        let shown = crate::motion::shown(id, lands.then(|| indicator.to()), window, cx)?;
-        let to = shown.value;
-        let spring = |channel, target, window: &mut Window, cx: &mut App| -> Pixels {
-            gpui_base::motion::spring((id, channel), target, crate::motion::FOLLOW, window, cx)
-        };
-        let left = spring("left", to.origin().x, window, cx);
-        let top = spring("top", to.origin().y, window, cx);
-        let width = spring("width", to.size().width, window, cx);
-        let height = spring("height", to.size().height, window, cx);
-        let inset = cx.theme().tokens.spacing.sm;
-        let accent = cx.theme().primary;
-        // The opacity is set here rather than through `Shown::fade`, whose
-        // relative frame would become the absolute placeholder's containing
-        // block, and whose shield would take the drop from the group beneath.
-        Some(
-            div()
-                .debug_selector(|| "pane-drop-indicator".into())
-                .absolute()
-                .left(left + inset)
-                .top(top + inset)
-                .w((width - inset * 2.).max(px(0.)))
-                .h((height - inset * 2.).max(px(0.)))
-                .opacity(shown.progress())
-                .rounded(crate::material::radius_card(cx))
-                .border_1()
-                .border_color(accent.opacity(0.5))
-                .bg(accent.opacity(0.1))
-                .into_any_element(),
-        )
     }
 }
 
