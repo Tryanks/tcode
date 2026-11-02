@@ -191,6 +191,7 @@ impl ChatView {
                 compact: false,
                 copy: copy_items,
                 path: None,
+                hover: self.hover.clone(),
             },
             detail,
             cx.listener(move |this, _, _, cx| {

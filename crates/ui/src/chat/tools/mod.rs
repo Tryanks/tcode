@@ -314,7 +314,12 @@ pub(in crate::chat) fn activity(
 
 /// An activity's window drawn outside a chat, for the component gallery:
 /// its header, and a command's terminal when open.
-pub(crate) fn preview_window(entry: &TimelineEntry, open: bool, cx: &App) -> AnyElement {
+pub(crate) fn preview_window(
+    entry: &TimelineEntry,
+    open: bool,
+    hover: crate::motion::ListHover,
+    cx: &App,
+) -> AnyElement {
     let activity = activity(entry, false, Path::new(""));
     let error = activity.failure();
     let elapsed_ms = window::elapsed(&activity.header, entry);
@@ -349,6 +354,7 @@ pub(crate) fn preview_window(entry: &TimelineEntry, open: bool, cx: &App) -> Any
             compact: false,
             copy,
             path: None,
+            hover,
         },
         detail,
         |_, _, _| {},

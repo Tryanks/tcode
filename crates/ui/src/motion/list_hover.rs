@@ -115,6 +115,36 @@ impl ListHover {
         }
         value
     }
+
+    /// The hover fill of `item`, for the first child of its frame, under the
+    /// item's content: `fill` painted at the item's reveal, rounded by
+    /// `radius`. It hears the pointer through its own hitbox over the item,
+    /// so the item's own `on_hover` stays the caller's. [`super::hover_layer`]
+    /// for an item of a list: the fill holds no state of its own. The item
+    /// must be positioned.
+    pub(crate) fn layer(
+        &self,
+        item: impl Into<SharedString>,
+        fill: gpui::Hsla,
+        radius: gpui::Pixels,
+    ) -> super::Sampled {
+        use gpui::{
+            InteractiveElement as _, IntoElement as _, StatefulInteractiveElement as _,
+            Styled as _, prelude::FluentBuilder as _,
+        };
+        let (hover, item) = (self.clone(), item.into());
+        super::Sampled::new(move |window, cx| {
+            let reveal = hover.reveal(&item, window, cx);
+            gpui::div()
+                .id("list-hover-layer")
+                .absolute()
+                .inset_0()
+                .rounded(radius)
+                .when(reveal > 0., |layer| layer.bg(fill.opacity(reveal)))
+                .on_hover(hover.on_hover(item))
+                .into_any_element()
+        })
+    }
 }
 
 impl Hover {

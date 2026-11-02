@@ -27,11 +27,13 @@ fn model_chip(model: &Option<String>, effort: &Option<String>) -> Option<String>
 }
 
 /// `shown` marks a row whose thread a pane already shows, where opening it
-/// only moves the focus there.
+/// only moves the focus there. A row that opens its agent fills under the
+/// pointer as `hover`, the timeline's, follows it.
 pub(crate) fn subagent_row(
     entry: &TimelineEntry,
     on_open: Option<ClickHandler>,
     shown: bool,
+    hover: crate::motion::ListHover,
     cx: &App,
 ) -> AnyElement {
     let EntryContent::Item(ItemContent::Subagent {
@@ -166,6 +168,13 @@ pub(crate) fn subagent_row(
             .border_color(cx.theme().border)
             .bg(fill)
             .text_body(false, cx)
+            .when(clickable, |row| {
+                row.relative().child(hover.layer(
+                    format!("subagent-row-{id}"),
+                    cx.theme().accent,
+                    px(999.),
+                ))
+            })
             .child(glyph)
             .child(div().flex_none().font_medium().child(verb))
             .child(div().flex_none().font_medium().child(agent_type))
@@ -187,7 +196,6 @@ pub(crate) fn subagent_row(
         let Some(on_open) = on_open else {
             return row.into_any_element();
         };
-        let fill = cx.theme().accent;
         crate::material::accessible_clickable(
             row,
             SharedString::from(format!("subagent-row-{id}")),
@@ -197,7 +205,6 @@ pub(crate) fn subagent_row(
         )
         .debug_selector(move || format!("subagent-row-{id}"))
         .cursor_pointer()
-        .hover(move |row| row.bg(fill))
         .on_click(on_open)
         .into_any_element()
     })

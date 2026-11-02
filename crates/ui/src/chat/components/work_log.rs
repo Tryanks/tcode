@@ -35,6 +35,8 @@ pub(crate) struct WorkLogData {
     pub(crate) expanded: bool,
     pub(crate) running: bool,
     pub(crate) rows: Vec<AnyElement>,
+    /// The timeline's hover, which the header's fill follows.
+    pub(crate) hover: crate::motion::ListHover,
 }
 
 /// One work log as a naked disclosure: a hugging header row, then the trace
@@ -54,21 +56,22 @@ pub(crate) fn work_log(
         expanded,
         running,
         rows,
+        hover,
     } = data;
     let muted = cx.theme().muted_foreground;
+    let key = format!("worklog-header-{index}-{segment_id}");
+    let radius = crate::material::radius_button(cx);
+    let fill = hover.layer(key.clone(), cx.theme().accent, radius);
     // Not a `Button`: on a touch layout the label wraps, and `Button` lays its
     // content out on one line.
     let header = crate::material::accessible_clickable(
         h_flex(),
-        SharedString::from(format!("worklog-header-{index}-{segment_id}")),
+        SharedString::from(key.clone()),
         Role::Button,
         capsule_label.clone(),
         cx,
     )
-    .debug_selector({
-        let selector = format!("worklog-header-{index}-{segment_id}");
-        move || selector
-    })
+    .debug_selector(move || key)
     .aria_expanded(expanded)
     .self_start()
     .h(px(bar_height(Bar::Section, false)))
@@ -77,12 +80,13 @@ pub(crate) fn work_log(
     .px_1p5()
     .gap_1p5()
     .items_center()
-    .rounded(crate::material::radius_button(cx))
+    .relative()
+    .rounded(radius)
     .text_body(false, cx)
     .text_color(muted)
     .cursor_pointer()
-    .hover(|row| row.bg(cx.theme().accent))
     .on_click(on_toggle)
+    .child(fill)
     .child(
         crate::widgets::Chevron::new(
             SharedString::from(format!("worklog-chevron-{index}-{segment_id}")),
