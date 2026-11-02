@@ -100,9 +100,17 @@ impl ChatView {
                 if entering.is_some() || below.is_some() {
                     window.request_animation_frame();
                 }
+                // The followed end of a running turn glides, and so does the
+                // end the row now rising below took over from: the record that
+                // brings a row often reshapes the one before it, as prose ends
+                // a run of tool calls.
                 let glide = match entering {
                     Some((_, progress)) => Glide::Enter(progress),
-                    None if moving && turn.running && index + 1 == item_count && following => {
+                    None if moving
+                        && turn.running
+                        && following
+                        && (index + 1 == item_count || below.is_some()) =>
+                    {
                         Glide::Tail {
                             content: row.content,
                         }

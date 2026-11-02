@@ -1132,4 +1132,120 @@ mod tests {
         );
         assert!(list.is_following_tail());
     }
+
+    /// When prose ends a live run of tool calls, the run settles into its
+    /// Work Log header in the same record that brings the reply's row. The
+    /// run shrinks as the reply rises, so the content above moves one way,
+    /// up, from where it was: never down, then up.
+    #[gpui::test]
+    fn a_run_settling_as_the_reply_arrives_moves_the_content_above_one_way(
+        cx: &mut TestAppContext,
+    ) {
+        let mut events = earlier_turns_and_a_running_one(4);
+        events.push(command("first"));
+        let mut thread = ScriptedThread::new(cx, events, 0, true);
+        let (chat, cx) = thread.open(cx);
+        thread.deliver(cx);
+        for _ in 0..40 {
+            frame(cx);
+        }
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        assert!(crate::chat::tests::command_open(cx, "first").is_some());
+        let rows = list.item_count();
+        // The question's row sits above the run.
+        let question = rows - 2;
+        let top = |cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("timeline-row-{question}").leak())
+                .expect("the question is on screen")
+                .top()
+        };
+        let before = top(cx);
+        thread.live(answer(
+            "answer-4",
+            &"The command printed what was expected; the build is fine.\n\n".repeat(4),
+        ));
+        thread.deliver(cx);
+        let mut tops = Vec::new();
+        for index in 0..16 {
+            if index == 0 {
+                draw(cx);
+            } else {
+                frame(cx);
+            }
+            assert_eq!(list.item_count(), rows + 1);
+            tops.push(top(cx));
+        }
+        assert!(
+            crate::chat::tests::command_open(cx, "first").is_none(),
+            "the run settled into its header"
+        );
+        assert!(
+            (tops[0] - before).abs() <= px(0.5),
+            "the content above jumped as the reply arrived: {before:?} -> {tops:?}"
+        );
+        assert!(
+            tops.windows(2).all(|pair| pair[1] <= pair[0] + px(0.5)),
+            "the content above moved back down: {before:?} -> {tops:?}"
+        );
+    }
+
+    /// A computer run that gains a call is the same window growing, not a
+    /// row arriving: the list keeps its rows, and the tail stays on the
+    /// bottom edge without anything above moving down.
+    #[gpui::test]
+    fn a_computer_run_gaining_a_call_is_its_row_growing(cx: &mut TestAppContext) {
+        let call = |id: &str| {
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content: agent::ItemContent::ToolCall {
+                    name: "mcp__tcode_computer_use__find_roots".into(),
+                    input: serde_json::json!({}),
+                    output: Some("@r1 window app=\"Notes\"".into()),
+                    status: agent::ItemStatus::Completed,
+                    image_reads: Vec::new(),
+                },
+            })
+        };
+        let mut events = earlier_turns_and_a_running_one(4);
+        events.push(call("look-0"));
+        let mut thread = ScriptedThread::new(cx, events, 0, true);
+        let (chat, cx) = thread.open(cx);
+        thread.deliver(cx);
+        for _ in 0..20 {
+            frame(cx);
+        }
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        let rows = list.item_count();
+        assert!(
+            cx.debug_bounds("activity-row-run-look-0").is_some(),
+            "a run window"
+        );
+        let question = rows - 2;
+        let top = |cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("timeline-row-{question}").leak())
+                .expect("the question is on screen")
+                .top()
+        };
+        for step in 1..4 {
+            let before = top(cx);
+            thread.live(call(&format!("look-{step}")));
+            thread.deliver(cx);
+            for _ in 0..16 {
+                frame(cx);
+                assert_eq!(list.item_count(), rows, "call {step} arrived as a row");
+                assert!(
+                    top(cx) <= before + px(0.5),
+                    "call {step} moved the content above down"
+                );
+                let last = cx
+                    .debug_bounds(format!("timeline-row-{}", rows - 1).leak())
+                    .expect("the run is on screen");
+                assert!(
+                    (list.viewport_bounds().bottom() - last.bottom()).abs() <= px(1.),
+                    "call {step}: the tail left the bottom edge"
+                );
+            }
+        }
+    }
 }
