@@ -602,26 +602,30 @@ impl AcpPanel {
         };
         let keys: Rc<[u64]> = market.iter().map(|agent| row_key(&agent.id)).collect();
         if !market.iter().map(|agent| &agent.id).eq(&self.market_ids) {
-            let old_keys: Vec<u64> = self.market_ids.iter().map(|id| row_key(id)).collect();
-            let everything = self.store.read(cx).acp_marketplace_items();
-            let old_items: Vec<Option<AcpMarketplaceItem>> = self
-                .market_ids
-                .iter()
-                .map(|id| everything.iter().find(|agent| agent.id == *id).cloned())
-                .collect();
-            self.market_flip.replace(
-                &self.market_list,
-                |index| old_keys.get(index).copied(),
-                &keys,
-                window,
-            );
-            self.market_rows.replace(
-                &old_keys,
-                &keys,
-                |_, _| Some(()),
-                |index| old_items.get(index).cloned().flatten(),
-                cx,
-            );
+            // The registry arriving is in place at once; a keystroke after
+            // it folds agents in and out.
+            if !self.market_ids.is_empty() {
+                let old_keys: Vec<u64> = self.market_ids.iter().map(|id| row_key(id)).collect();
+                let everything = self.store.read(cx).acp_marketplace_items();
+                let old_items: Vec<Option<AcpMarketplaceItem>> = self
+                    .market_ids
+                    .iter()
+                    .map(|id| everything.iter().find(|agent| agent.id == *id).cloned())
+                    .collect();
+                self.market_flip.replace(
+                    &self.market_list,
+                    |index| old_keys.get(index).copied(),
+                    &keys,
+                    window,
+                );
+                self.market_rows.replace(
+                    &old_keys,
+                    &keys,
+                    |_, _| Some(()),
+                    |index| old_items.get(index).cloned().flatten(),
+                    cx,
+                );
+            }
             self.market_ids = market.iter().map(|agent| agent.id.clone()).collect();
             self.market_list.reset(market.len());
         }

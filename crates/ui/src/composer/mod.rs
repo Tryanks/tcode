@@ -1517,7 +1517,9 @@ impl Render for Composer {
                         Some((_, picker)) if !shown.leaving() => picker,
                         _ => leaving_chip("model-picker-leaving", &shown.value, cx),
                     };
-                    shown.fold_across(div().min_w(px(SEND_SIZE)).child(picker))
+                    // The name truncates to make room, down to one
+                    // control's width so the picker can still be opened.
+                    shown.fold_across_min(px(SEND_SIZE), div().min_w(px(SEND_SIZE)).child(picker))
                 },
             );
         let mut traits_picker = self.render_traits_picker(cx);

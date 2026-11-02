@@ -1090,8 +1090,8 @@ impl PluginsSettingsPanel {
         let available = self.lists.entry(profile_id.to_string()).or_default();
         if available.listed.as_ref() != Some(&listed) {
             // A keystroke or an install folds rows in and out and glides the
-            // rest; the list first shown is in place.
-            if let Some(old) = available.listed.as_ref() {
+            // rest; the list first shown, or shown after none, is in place.
+            if let Some(old) = available.listed.as_ref().filter(|old| !old.is_empty()) {
                 let old_keys: Vec<u64> = old.iter().map(|(_, id)| row_key(id)).collect();
                 let old_indices: Vec<usize> = old.iter().map(|(index, _)| *index).collect();
                 available.flip.replace(

@@ -476,8 +476,11 @@ impl RenderOnce for VirtualList {
                         .clone();
                     let mut rows = motion.borrow_mut();
                     let new = keyed.keys.clone();
+                    // A list that had no rows (still loading) is in place
+                    // at once: there is nothing for its rows to glide from.
                     if let Some(old) = rows.keys.clone()
                         && old != new
+                        && !old.is_empty()
                     {
                         rows.flip
                             .replace(&state, |index| old.get(index).copied(), &new, window);

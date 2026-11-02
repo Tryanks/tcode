@@ -194,6 +194,21 @@ impl<T> Shown<T> {
         .into_any_element()
     }
 
+    /// [`Self::fold_across`] for content that must keep `min` of its width
+    /// at rest however narrow its row gets (a picker that must stay
+    /// pressable): the row shrinks it to `min` and no further, so what is
+    /// beside it never comes to lie over it.
+    pub(crate) fn fold_across_min(&self, min: Pixels, content: impl IntoElement) -> AnyElement {
+        Reveal {
+            id: child_id(&self.id, "fold-across"),
+            progress: self.progress,
+            axis: Axis::Horizontal,
+            gap: px(0.),
+            child: self.frame(content).min_w(min).into_any_element(),
+        }
+        .into_any_element()
+    }
+
     /// In a row that divides its width among its children (a segmented
     /// track): its share grows from nothing and fades in, and gives itself
     /// back to the others as it fades out, with the `gap` before it. At
