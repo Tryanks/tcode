@@ -1542,6 +1542,29 @@ impl AppShell {
         }) else {
             return;
         };
+        // The thread's ghost settles into the pane, or the half of it a split
+        // opens in.
+        let into = {
+            let bounds = pane.read(cx).bounds();
+            let half = gpui::size(bounds.size.width / 2., bounds.size.height / 2.);
+            match target.placement() {
+                None => bounds,
+                Some(gpui_base::Placement::Top) => {
+                    gpui::Bounds::new(bounds.origin, gpui::size(bounds.size.width, half.height))
+                }
+                Some(gpui_base::Placement::Bottom) => gpui::Bounds::new(
+                    bounds.origin + gpui::point(px(0.), half.height),
+                    gpui::size(bounds.size.width, half.height),
+                ),
+                Some(gpui_base::Placement::Left) => {
+                    gpui::Bounds::new(bounds.origin, gpui::size(half.width, bounds.size.height))
+                }
+                Some(gpui_base::Placement::Right) => gpui::Bounds::new(
+                    bounds.origin + gpui::point(half.width, px(0.)),
+                    gpui::size(half.width, bounds.size.height),
+                ),
+            }
+        };
         match target.placement() {
             Some(placement) => {
                 if !self.open_in_new_pane(session_id, &pane, &[placement], window, cx) {
@@ -1555,6 +1578,7 @@ impl AppShell {
                 store.update(cx, |store, cx| store.select_session(session_id, cx));
             }
         }
+        crate::motion::drag_ghost::land_in(into, window, cx);
         self.open_thread(window, cx);
     }
 

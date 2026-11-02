@@ -11,6 +11,7 @@ pub(crate) use scene::Scene;
 
 mod scene;
 
+pub(crate) mod drag_ghost;
 pub(crate) mod keyed;
 pub(crate) use keyed::keyed;
 #[cfg(any(

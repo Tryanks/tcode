@@ -1497,7 +1497,7 @@ impl Render for Composer {
                     })
                     .children(self.render_trigger_menu(cx))
                     .children(self.render_goal_strip(cx))
-                    .children(self.render_queue_strip(cx))
+                    .children(self.render_queue_strip(window, cx))
                     .child(v_flex().w_full().child(card).when(
                         self.compact || (readonly && compact),
                         |el| {
@@ -2383,6 +2383,91 @@ mod replica_tests {
         let second = cx.debug_bounds("queued-row-2").unwrap().center();
         drag(cx, 2, second);
         assert!(moves(&outgoing).is_empty(), "a row dropped in place stays");
+    }
+
+    /// A queued row lifts off its place as it is dragged, and once let go its
+    /// ghost travels back into the row's slot rather than vanishing, the row
+    /// showing again as it arrives; with motion reduced it is there at once.
+    #[gpui::test]
+    fn a_dragged_queued_row_settles_back_into_its_slot(cx: &mut TestAppContext) {
+        use crate::test_frames::{draw, draw_settled};
+        let (store, incoming, _outgoing, mut status) = attach(cx);
+        status.queued_messages = (1..=3)
+            .map(|id| tcode_protocol::QueuedMessageStatus {
+                id,
+                editable: true,
+                delivery_key: None,
+                text: format!("Queued {id}"),
+                fire_at_unix_secs: None,
+            })
+            .collect();
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let composer = cx.new(|cx| Composer::new(store.clone(), window, cx));
+            gpui_base::Root::new(composer, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(1024.), px(768.)));
+        draw_settled(cx);
+        let left = gpui::MouseButton::Left;
+        let none = Modifiers::default();
+        let ghost = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("drag-ghost-queued-1");
+        let row = cx.debug_bounds("queued-row-1").unwrap();
+        let last = cx.debug_bounds("queued-row-3").unwrap();
+
+        let start = row.center();
+        cx.simulate_mouse_down(start, left, none);
+        cx.simulate_mouse_move(start + gpui::point(px(0.), px(8.)), left, none);
+        draw(cx);
+        let lifted = ghost(cx).expect("the row lifts as the drag starts");
+        assert_eq!(lifted.origin, row.origin, "it lifts from where the row is");
+        assert_eq!(lifted.size.width, row.size.width);
+
+        let over = gpui::point(last.center().x, last.bottom() - px(2.));
+        cx.simulate_mouse_move(over, left, none);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let carried = ghost(cx).unwrap();
+        assert!(
+            carried.top() < lifted.top() + (over.y - start.y - px(8.)),
+            "it follows the pointer, risen off the page"
+        );
+
+        cx.simulate_mouse_up(over, left, none);
+        draw(cx);
+        assert_eq!(
+            ghost(cx).map(|ghost| ghost.origin),
+            Some(carried.origin),
+            "let go, it starts back from where it was"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let returning = ghost(cx).unwrap().top();
+        assert!(
+            returning < carried.top() && returning > row.top(),
+            "it is on its way back"
+        );
+        draw_settled(cx);
+        assert_eq!(ghost(cx), None, "it has settled into the row");
+        assert_eq!(cx.debug_bounds("queued-row-1").unwrap(), row);
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_mouse_down(start, left, none);
+        cx.simulate_mouse_move(start + gpui::point(px(0.), px(8.)), left, none);
+        draw(cx);
+        cx.simulate_mouse_move(over, left, none);
+        draw(cx);
+        assert!(ghost(cx).is_some());
+        cx.simulate_mouse_up(over, left, none);
+        draw(cx);
+        assert_eq!(ghost(cx), None, "with motion reduced it is back at once");
     }
 
     /// Choosing a thread from the `@` menu references it: the host is asked to

@@ -8,9 +8,11 @@
 //! gpui-base has no sortable-list primitive (its dock drag is specific to tab
 //! groups), so the drag composes GPUI's `on_drag`, `on_drag_move` and
 //! `on_drop`, and GPUI does not cancel a drag on Escape by itself. The payload
-//! is the dock's host-owned `AnyDrag`, the only kind its panes accept.
+//! is the dock's host-owned `AnyDrag`, the only kind its panes accept; the row
+//! it carries is a [`drag_ghost`].
 
 use super::*;
+use crate::motion::drag_ghost;
 use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, WeakEntity, deferred};
 use gpui_base::dock::AnyDrag;
 use tcode_core::thread_sort::{order_key_between, plan_reorder, thread_section};
@@ -57,7 +59,6 @@ pub(super) struct ThreadDrag {
     /// Where the drag began, which it returns to once it leaves the list.
     home: (Option<(ThreadSection, usize)>, Option<ThreadSection>),
     can_settle: bool,
-    width: Pixels,
     auto_scroll: gpui_base::AutoScroll,
     _escape: Subscription,
 }
@@ -143,83 +144,100 @@ impl ThreadDrag {
     }
 }
 
-/// The lifted row that follows the pointer.
-pub(super) struct ThreadDragView {
-    sidebar: WeakEntity<SessionsSidebar>,
-    title: SharedString,
-    compact: bool,
+/// The slot a thread's row lifts from and settles into, in whichever list
+/// shows it.
+pub(super) fn thread_slot(id: &str) -> SharedString {
+    format!("thread-{id}").into()
 }
 
-impl Render for ThreadDragView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (action, width) = self
-            .sidebar
-            .upgrade()
-            .and_then(|sidebar| {
-                let drag = sidebar.read(cx).drag.as_ref()?;
-                Some((drag.action(), drag.width))
-            })
-            .unwrap_or((None, px(240.)));
-        if self.compact {
-            // The lifted `list_row` a finger carries: its height and inset,
-            // floated at the overlay radius.
-            return v_flex()
-                .w(width)
-                .min_h(px(crate::material::LIST_ROW_MIN_HEIGHT))
-                .justify_center()
-                .px(px(COMPACT_PAGE_INSET))
-                .py(cx.theme().tokens.spacing.sm)
-                .rounded(crate::material::radius_overlay(cx))
-                .bg(cx.theme().list_active)
-                .shadow_lg()
-                .child(
-                    div()
-                        .text_body(true, cx)
-                        .line_clamp(2)
-                        .text_color(cx.theme().foreground)
-                        .child(self.title.clone()),
-                )
-                .when_some(action, |card, action| {
-                    card.child(
-                        div()
-                            .text_secondary(true, cx)
-                            .text_color(cx.theme().primary)
-                            .child(action.label()),
-                    )
-                })
-                .into_any_element();
-        }
-        crate::material::selectable_row_two_line(h_flex(), true, false, cx)
-            .w(width)
-            .shadow_lg()
-            .text_color(cx.theme().sidebar_foreground)
-            .child(sidebar_label(self.title.clone()).text_body(false, cx))
-            .when_some(action, |row, action| {
-                row.child(
-                    h_flex()
-                        .id("thread-drag-badge")
-                        .role(Role::Status)
-                        .aria_label(action.label())
-                        // A bordered status badge with a leading icon:
-                        // `semantic_chip` takes neither.
-                        .flex_none()
-                        .h(px(20.))
-                        .px(px(6.))
-                        .gap_1()
-                        .items_center()
-                        .rounded(crate::material::radius_chip(cx))
-                        .border_1()
-                        .border_color(cx.theme().primary.opacity(0.4))
-                        .bg(cx.theme().primary.opacity(0.1))
-                        .text_token(&cx.theme().tokens.typography.xs)
-                        .font_medium()
-                        .text_color(cx.theme().primary)
-                        .child(Icon::new(action.icon()))
-                        .child(action.label()),
-                )
-            })
-            .into_any_element()
+/// The row a drag carries: its title, and what dropping it where it is would
+/// do.
+fn carried_thread(
+    sidebar: &WeakEntity<SessionsSidebar>,
+    title: &SharedString,
+    compact: bool,
+    lift: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let action = sidebar
+        .upgrade()
+        .and_then(|sidebar| sidebar.read(cx).drag.as_ref()?.action());
+    if compact {
+        // The lifted `list_row` a finger carries: its height and inset,
+        // floated at the overlay radius.
+        let badge = crate::motion::cross_fade_part(
+            "thread-drag-action",
+            action,
+            window,
+            cx,
+            |action, _, cx| {
+                div()
+                    .text_secondary(true, cx)
+                    .text_color(cx.theme().primary)
+                    .children(action.map(DragAction::label))
+                    .into_any_element()
+            },
+        );
+        return drag_ghost::lifted(v_flex(), lift)
+            .w_full()
+            .min_h(px(crate::material::LIST_ROW_MIN_HEIGHT))
+            .justify_center()
+            .px(px(COMPACT_PAGE_INSET))
+            .py(cx.theme().tokens.spacing.sm)
+            .rounded(crate::material::radius_overlay(cx))
+            .bg(cx.theme().list_active)
+            .child(
+                div()
+                    .text_body(true, cx)
+                    .line_clamp(2)
+                    .text_color(cx.theme().foreground)
+                    .child(title.clone()),
+            )
+            .child(badge)
+            .into_any_element();
     }
+    let badge = crate::motion::cross_fade_part(
+        "thread-drag-action",
+        action,
+        window,
+        cx,
+        |action, _, cx| {
+            let Some(action) = *action else {
+                return div().into_any_element();
+            };
+            h_flex()
+                .id("thread-drag-badge")
+                .role(Role::Status)
+                .aria_label(action.label())
+                // A bordered status badge with a leading icon:
+                // `semantic_chip` takes neither.
+                .flex_none()
+                .h(px(20.))
+                .px(px(6.))
+                .gap_1()
+                .items_center()
+                .rounded(crate::material::radius_chip(cx))
+                .border_1()
+                .border_color(cx.theme().primary.opacity(0.4))
+                .bg(cx.theme().primary.opacity(0.1))
+                .text_token(&cx.theme().tokens.typography.xs)
+                .font_medium()
+                .text_color(cx.theme().primary)
+                .child(Icon::new(action.icon()))
+                .child(action.label())
+                .into_any_element()
+        },
+    );
+    drag_ghost::lifted(
+        crate::material::selectable_row_two_line(h_flex(), true, false, cx),
+        lift,
+    )
+    .w_full()
+    .text_color(cx.theme().sidebar_foreground)
+    .child(sidebar_label(title.clone()).text_body(false, cx))
+    .child(div().flex_none().child(badge))
+    .into_any_element()
 }
 
 impl SessionsSidebar {
@@ -295,8 +313,8 @@ impl SessionsSidebar {
         cx: &Context<Self>,
     ) -> E {
         let sidebar = cx.entity().downgrade();
-        element.on_drag(AnyDrag::new(dragged.clone()), move |_, _, _, cx| {
-            Self::begin_drag(sidebar.clone(), &dragged, cx)
+        element.on_drag(AnyDrag::new(dragged.clone()), move |_, grab, window, cx| {
+            Self::begin_drag(sidebar.clone(), &dragged, grab, window, cx)
         })
     }
 
@@ -308,8 +326,10 @@ impl SessionsSidebar {
     fn begin_drag(
         sidebar: WeakEntity<Self>,
         dragged: &DraggedThread,
+        grab: gpui::Point<Pixels>,
+        window: &mut Window,
         cx: &mut App,
-    ) -> Entity<ThreadDragView> {
+    ) -> Entity<drag_ghost::Carried> {
         let escape = {
             let sidebar = sidebar.clone();
             cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
@@ -357,7 +377,6 @@ impl SessionsSidebar {
                 over,
                 home: (gap, over),
                 can_settle: dragged.can_settle,
-                width: px(240.),
                 auto_scroll: Default::default(),
                 _escape: escape,
             });
@@ -365,11 +384,14 @@ impl SessionsSidebar {
             cx.notify();
         });
         crate::haptics::threshold();
-        cx.new(|_| ThreadDragView {
-            sidebar,
-            title: dragged.title.clone(),
-            compact: dragged.compact,
-        })
+        let (title, compact) = (dragged.title.clone(), dragged.compact);
+        drag_ghost::lift(
+            thread_slot(&dragged.session_id),
+            grab,
+            move |lift, window, cx| carried_thread(&sidebar, &title, compact, lift, window, cx),
+            window,
+            cx,
+        )
     }
 
     /// Escape: the row returns to its place.
@@ -396,15 +418,13 @@ impl SessionsSidebar {
         element: gpui::Div,
         zone: DropZone,
         scope: Option<String>,
-        inset: f32,
         cx: &Context<Self>,
     ) -> gpui::Div {
         element.on_drag_move::<AnyDrag>(cx.listener(
             move |this, event: &DragMoveEvent<AnyDrag>, _, cx| {
                 if event.bounds.contains(&event.event.position) {
                     let lower = event.event.position.y > event.bounds.center().y;
-                    let width = event.bounds.size.width - px(inset * 2.);
-                    this.drag_over(&zone, scope.as_deref(), lower, width, cx);
+                    this.drag_over(&zone, scope.as_deref(), lower, cx);
                 }
             },
         ))
@@ -415,7 +435,6 @@ impl SessionsSidebar {
         zone: &DropZone,
         scope: Option<&str>,
         lower: bool,
-        width: Pixels,
         cx: &mut Context<Self>,
     ) {
         let Some(drag) = self.drag.as_ref().filter(|drag| drag.arranges) else {
@@ -452,16 +471,10 @@ impl SessionsSidebar {
             }
         }
         let drag = self.drag.as_mut().expect("checked above");
-        let row = matches!(zone, DropZone::Row { .. });
         if (drag.gap, drag.over) != (gap, over) {
             crate::haptics::selection();
-        }
-        if (drag.gap, drag.over) != (gap, over) || (row && drag.width != width) {
             drag.gap = gap;
             drag.over = over;
-            if row {
-                drag.width = width;
-            }
             self.compact_model_dirty = true;
             cx.notify();
         }
@@ -839,7 +852,7 @@ impl SessionsSidebar {
                 .text_color(color)
                 .child(label),
         );
-        self.drop_zone(target, DropZone::Start(section), scope, 0., cx)
+        self.drop_zone(target, DropZone::Start(section), scope, cx)
             .into_any_element()
     }
 
@@ -1076,7 +1089,7 @@ impl SessionsSidebar {
                 let color = caption_color(*section);
                 let caption = crate::material::list_caption(label.into_owned().into(), true, cx)
                     .text_color(color);
-                self.drop_zone(caption, DropZone::Start(*section), scope, 0., cx)
+                self.drop_zone(caption, DropZone::Start(*section), scope, cx)
                     .into_any_element()
             }
             ArrangeRow::PinnedEmpty => self
@@ -1084,7 +1097,6 @@ impl SessionsSidebar {
                     crate::material::empty_row(crate::tr!("sidebar.arrange_pinned_empty"), cx),
                     DropZone::Start(ThreadSection::Pinned),
                     scope,
-                    0.,
                     cx,
                 )
                 .into_any_element(),
@@ -1116,14 +1128,8 @@ impl SessionsSidebar {
                 }))
                 .child(collapse_chevron(self.arrange_settled_fold, cx).text_color(color))
                 .child(crate::tr!("sidebar.settled_count", count = count));
-                self.drop_zone(
-                    div().w_full().child(header),
-                    DropZone::Settled,
-                    scope,
-                    0.,
-                    cx,
-                )
-                .into_any_element()
+                self.drop_zone(div().w_full().child(header), DropZone::Settled, scope, cx)
+                    .into_any_element()
             }
             ArrangeRow::Thread(meta) => {
                 let zone = DropZone::Row {
@@ -1134,17 +1140,17 @@ impl SessionsSidebar {
                     .drag
                     .as_ref()
                     .is_some_and(|drag| drag.session_id == meta.id);
-                let element = if dragged {
-                    div()
-                        .w_full()
-                        .child(Self::render_drag_gap(crate::material::LIST_ROW_MIN_HEIGHT))
+                let row = if dragged {
+                    Self::render_drag_gap(crate::material::LIST_ROW_MIN_HEIGHT)
                 } else {
+                    self.render_arrange_thread(meta, projects, cx)
+                        .into_any_element()
+                };
+                let element =
                     div()
                         .w_full()
-                        .child(self.render_arrange_thread(meta, projects, cx))
-                };
-                self.drop_zone(element, zone, scope, 0., cx)
-                    .into_any_element()
+                        .child(drag_ghost::slot(thread_slot(&meta.id), row, window, cx));
+                self.drop_zone(element, zone, scope, cx).into_any_element()
             }
         }
     }

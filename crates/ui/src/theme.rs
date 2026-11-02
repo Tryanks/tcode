@@ -334,6 +334,7 @@ pub fn init(cx: &mut App) {
 pub fn init_with_json(theme_json: &str, cx: &mut App) {
     gpui_base::init(cx);
     crate::overlay::init(cx);
+    crate::motion::drag_ghost::init(cx);
     crate::widgets::menu::init(cx);
     let themes = parse_theme_file(theme_json).expect("embedded themes/tcode.json must be valid");
 
