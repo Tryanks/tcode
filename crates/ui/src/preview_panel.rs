@@ -509,7 +509,7 @@ impl Render for PreviewPanel {
             .size_full()
             .on_action(cx.listener(Self::on_preview_action))
             .child(self.render_chrome(window, cx))
-            .children(self.render_port_row(cx))
+            .children(self.render_port_row(window, cx))
             .child(body);
         #[cfg(all(preview_backend, not(target_os = "android")))]
         let panel = panel.child(self.yield_to_resize_handles(active.as_deref(), cx));
@@ -571,7 +571,11 @@ mod portable {
             Vec::new()
         }
 
-        pub(super) fn render_port_row(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        pub(super) fn render_port_row(
+            &self,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> Option<AnyElement> {
             None
         }
 
