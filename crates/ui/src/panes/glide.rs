@@ -201,6 +201,76 @@ impl Glides {
         }
     }
 
+    /// The window jumped from one size to another (maximised, made
+    /// fullscreen, turned), taking the column `tree` from `was` to `now`:
+    /// each split's seams glide from where they were drawn to where the new
+    /// size puts them. The slots before a split's last keep their drawn
+    /// size at first, and its last takes what the jump gave or took; a
+    /// split already gliding turns toward its target from where it is.
+    pub(crate) fn resize(&mut self, tree: &PaneTree, was: Size<Pixels>, now: Size<Pixels>) {
+        let mut started = Vec::new();
+        self.seams_from(tree.root(), was, now, &mut started);
+        for (node, from, to) in started {
+            let widest = from.clone();
+            self.start(node, from, to, widest);
+        }
+    }
+
+    /// For each split under `node`, drawn at `was` and starting the jump at
+    /// `now`: the shares that keep its slots where they were drawn, and the
+    /// shares it lands at.
+    fn seams_from(
+        &self,
+        node: &PaneNode,
+        was: Size<Pixels>,
+        now: Size<Pixels>,
+        started: &mut Vec<(NodeId, Vec<f32>, Vec<f32>)>,
+    ) {
+        let PaneRef::Split {
+            axis,
+            children,
+            sizes,
+        } = node.kind()
+        else {
+            return;
+        };
+        let (was_extent, now_extent) = (was.along(axis), now.along(axis));
+        let glide = self
+            .splits
+            .get(&node.id())
+            .filter(|glide| glide.to.len() == children.len());
+        let (drawn, to) = match glide {
+            Some(glide) => (glide.now.clone(), glide.to.clone()),
+            None => (
+                tree_shares(sizes, was_extent),
+                tree_shares(sizes, now_extent),
+            ),
+        };
+        let scale = f32::from(was_extent) / f32::from(now_extent).max(1.);
+        let mut left = 1.;
+        let mut from: Vec<f32> = drawn
+            .iter()
+            .take(children.len().saturating_sub(1))
+            .map(|share| {
+                let share = (share * scale).min(left);
+                left -= share;
+                share
+            })
+            .collect();
+        from.push(left);
+        for (ix, child) in children.iter().enumerate() {
+            self.seams_from(
+                child,
+                was.apply_along(axis, |_| was_extent * drawn[ix]),
+                now.apply_along(axis, |_| now_extent * from[ix]),
+                started,
+            );
+        }
+        if (f32::from(was_extent) - f32::from(now_extent)).abs() >= 1. {
+            started.push((node.id(), from, to));
+        }
+    }
+
     /// Glide the pane holding `panel` out of its split: its slot shrinks to
     /// nothing and its neighbours share what it leaves in proportion, as the
     /// dock divides a removed slot's space. A split whose other slots are all
@@ -503,4 +573,18 @@ fn with_along(
             ..size
         },
     }
+}
+
+/// Whether the window went from `was` to `now` in one frame, rather than
+/// following a pointer dragging its edge: a frame of a live resize moves
+/// the edge a few pixels, while maximising, going fullscreen or turning a
+/// tablet moves it hundreds at once. `restated` is the window becoming or
+/// ceasing to be maximised or fullscreen, a jump whatever its size.
+pub(crate) fn window_jumped(was: Size<Pixels>, now: Size<Pixels>, restated: bool) -> bool {
+    /// Further than a dragged edge goes between two frames.
+    const JUMP: f32 = 96.;
+    was != now
+        && (restated
+            || f32::from(now.width - was.width).abs() >= JUMP
+            || f32::from(now.height - was.height).abs() >= JUMP)
 }

@@ -181,6 +181,9 @@ struct ShellAttachment {
     thread_panes: Entity<DockArea>,
     /// The column's splits gliding toward the layout an edit made.
     glides: crate::panes::Glides,
+    /// The window's size, and whether it was maximised and fullscreen, on
+    /// the last frame that drew the column, for a jump to glide from.
+    window_seen: Option<(gpui::Size<Pixels>, (bool, bool))>,
     /// The pane zoomed over the column.
     zoom: crate::panes::Zoom,
     /// A layout being put in while the column fades.
@@ -1281,6 +1284,7 @@ impl AppShell {
         self.attachment = Some(ShellAttachment {
             thread_panes,
             glides: Default::default(),
+            window_seen: None,
             zoom: Default::default(),
             scene: Default::default(),
             routes: Default::default(),
@@ -1853,9 +1857,12 @@ impl AppShell {
     /// toward, and the closing panes whose split has landed are taken out
     /// before the dock draws them. A split's handle under the pointer stops
     /// that split's glide where it is, and the compact layout, which draws no
-    /// panes, lands them.
+    /// panes, lands them. A window that jumped to another size since the
+    /// last frame glides the seams there (see [`crate::panes::Glides::resize`]);
+    /// one whose edge is dragged is followed at once.
     fn glide_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
+        let column_shown = !compact && self.window_state.read(cx).route() == Route::Chat;
         let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
@@ -1863,9 +1870,17 @@ impl AppShell {
         if handle_held.is_none() {
             attachment.held_split = None;
         }
+        let seen = (
+            window.viewport_size(),
+            (window.is_maximized(), window.is_fullscreen()),
+        );
+        let jumped = std::mem::replace(&mut attachment.window_seen, column_shown.then_some(seen))
+            .filter(|_| column_shown)
+            .filter(|(size, state)| crate::panes::window_jumped(*size, seen.0, *state != seen.1))
+            .map(|(size, _)| (seen.0.width - size.width, seen.0.height - size.height));
         let panes = attachment.all_panes(cx);
         let closing = panes.iter().any(|pane| pane.read(cx).is_closing());
-        if attachment.glides.is_idle() && !closing {
+        if attachment.glides.is_idle() && !closing && jumped.is_none() {
             return;
         }
         let area = attachment.thread_panes.clone();
@@ -1879,6 +1894,14 @@ impl AppShell {
         let Some(tree) = tree else {
             return;
         };
+        // The column takes what the window gained or lost; it is laid out
+        // at its new size only later in this frame.
+        if let Some((wider, taller)) = jumped
+            && size.width > px(0.)
+        {
+            let now = gpui::size(size.width + wider, size.height + taller);
+            attachment.glides.resize(&tree, size, now);
+        }
         if let Some((axis, at)) = handle_held
             && attachment.held_split.is_none()
         {
@@ -2090,10 +2113,10 @@ impl AppShell {
     /// so a half-written message stays with its thread; the panes, their
     /// slots and colours stay where they are. The keyboard stays in the
     /// acting pane, or with `follow` goes with its thread to the neighbour.
-    /// Neither conversation closes.
-    ///
-    /// The conversations change places in one frame: gpui-base has no
-    /// shared-element transition to carry a view from one place to another.
+    /// Neither conversation closes. Each conversation shown travels from
+    /// where it was drawn into its new pane (see
+    /// [`ThreadPanel::replace_chat`]); a waiting pane's has nothing shown to
+    /// carry.
     fn swap_pane(&mut self, side: Side, follow: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.compact(cx)
             || self
@@ -2109,9 +2132,14 @@ impl AppShell {
         let Some(to) = self.neighbour_of(&from, side, cx) else {
             return;
         };
+        let drawn = |pane: &Entity<ThreadPanel>| {
+            let pane = pane.read(cx);
+            pane.session_id().is_some().then(|| pane.chat_drawn(cx))
+        };
+        let (ours_at, theirs_at) = (drawn(&from), drawn(&to));
         let chat = from.read(cx).chat();
-        let theirs = to.update(cx, |to, cx| to.replace_chat(chat, cx));
-        from.update(cx, |from, cx| from.replace_chat(theirs, cx));
+        let theirs = to.update(cx, |to, cx| to.replace_chat(chat, ours_at, cx));
+        from.update(cx, |from, cx| from.replace_chat(theirs, theirs_at, cx));
         let focused = if follow { to } else { from };
         if let Some(attachment) = self.attachment.as_mut() {
             attachment.focused_pane = focused.clone();
@@ -7169,6 +7197,18 @@ mod tests {
         )
     }
 
+    /// Where each pane on screen was painted, in the layout's order.
+    fn pane_bounds(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<gpui::Bounds<Pixels>> {
+        shell.read_with(cx, |shell, cx| {
+            let attachment = shell.attachment.as_ref().expect("attached");
+            attachment
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).bounds())
+                .collect()
+        })
+    }
+
     /// Answer the scratch draft the client asked for with `draft`.
     fn answer_draft(
         shell: &Entity<AppShell>,
@@ -8234,6 +8274,7 @@ mod tests {
         let [Some(left), Some(right)] = colours[..] else {
             panic!("two panes, each in its colour: {colours:?}");
         };
+        let slots = pane_bounds(&shell, cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
         draw(cx);
         let midway = row("sidebar-thread-thread-2", cx);
@@ -8241,8 +8282,22 @@ mod tests {
             midway != left && midway != right,
             "the moved thread's row glides between the colours: {midway:?}"
         );
+        // Each conversation is on its way across to the other pane.
+        let leftward = cx.debug_bounds("flying-chat-thread-2").expect("travels");
+        let rightward = cx.debug_bounds("flying-chat-thread-1").expect("travels");
+        assert!(
+            slots[0].left() < leftward.left() && leftward.left() < slots[1].left(),
+            "{leftward:?} between {slots:?}"
+        );
+        assert!(
+            slots[0].left() < rightward.left() && rightward.left() < slots[1].left(),
+            "{rightward:?} between {slots:?}"
+        );
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
+        assert_eq!(cx.debug_bounds("flying-chat-thread-2"), None, "landed");
+        assert_eq!(cx.debug_bounds("flying-chat-thread-1"), None, "landed");
+        assert_eq!(pane_bounds(&shell, cx), slots, "the panes held still");
         assert_eq!(pane_outlines(&shell, cx), colours);
         assert_eq!(row("sidebar-thread-thread-2", cx), left);
         assert_eq!(row("sidebar-thread-thread-1", cx), right);
@@ -8259,10 +8314,21 @@ mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
 
         let mac = cx.update(|_, cx| cx.platform_info().is_mac());
+        let slots = pane_bounds(&shell, cx);
         cx.simulate_keystrokes(if mac { "cmd-ctrl-left" } else { "alt-left" });
         draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        // The keyboard is with the moved thread while it travels left.
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        let moved = cx.debug_bounds("flying-chat-thread-2").expect("travels");
+        assert!(
+            slots[0].left() < moved.left() && moved.left() < slots[1].left(),
+            "{moved:?} between {slots:?}"
+        );
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
+        assert_eq!(cx.debug_bounds("flying-chat-thread-2"), None, "landed");
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-2".into()), Some("thread-1".into())]
@@ -8273,6 +8339,52 @@ mod tests {
             assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("thread-2"));
         });
+    }
+
+    /// A window that jumps to another size (maximised, fullscreen, turned)
+    /// glides the seam between its panes from where it was drawn to where
+    /// the new size puts it; a window whose edge is dragged keeps its panes'
+    /// shares on every frame.
+    #[gpui::test]
+    fn a_window_jump_glides_the_seams_and_a_dragged_edge_is_followed(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let share = |cx: &VisualTestContext| {
+            let (column, widths) = pane_widths(&shell, cx);
+            (widths[0] / column, widths[0])
+        };
+        let (rest, _) = share(cx);
+
+        for width in [1990., 1975., 1960., 1950.] {
+            resize(cx, width);
+            let (now, _) = share(cx);
+            assert!(
+                (now - rest).abs() < 0.005,
+                "followed at {width}: {now} of {rest}"
+            );
+        }
+
+        let (_, was) = share(cx);
+        resize(cx, 2600.);
+        let (_, start) = share(cx);
+        assert!(
+            (start - was).abs() < px(2.),
+            "kept where it was: {start:?} of {was:?}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let (midway, halfway) = share(cx);
+        assert!(
+            start < halfway && midway < rest,
+            "on its way: {start:?} then {halfway:?}, {midway} of {rest}"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE);
+        draw(cx);
+        let (landed, _) = share(cx);
+        assert!((landed - rest).abs() < 0.005, "{landed} of {rest}");
     }
 
     /// With the keyboard in a thread's terminal, the pane keys are the

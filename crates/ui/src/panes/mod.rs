@@ -2,6 +2,8 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 
 use gpui::{
     Action, Along as _, AnyElement, AnyView, App, Axis, Bounds, Context, Div, Empty, Entity,
@@ -13,14 +15,17 @@ use gpui_base::dock::{
     DockAreaRenderer, DockLayout, NodeId, PaneNode, PaneRef, Panel, PanelEvent, PanelId, TabGroup,
     TabGroupContext, TabGroupRenderer,
 };
+use gpui_base::motion::Interpolate as _;
 use gpui_base::{ElementExt as _, Placement, ResizeHandleContext, v_flex};
 use serde::Deserialize;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 mod glide;
 mod scene;
 mod zoom;
 
-pub(crate) use glide::{Before, Glides, Held};
+pub(crate) use glide::{Before, Glides, Held, window_jumped};
 pub(crate) use scene::Scene;
 pub(crate) use zoom::{PaneZoom, Zoom};
 
@@ -232,6 +237,9 @@ pub(crate) struct ThreadPanel {
     fading_out: bool,
     /// How the content is drawn while its split glides.
     held: Held,
+    /// The chat on its way in from another pane: where it was drawn there,
+    /// and when it set off.
+    flight: Option<(Bounds<Pixels>, Instant)>,
     /// The pane's fades: its outline and the waiting hint's cross-fade with
     /// its chat. Kept here because the dock draws the pane under a new
     /// parent whenever the layout around it changes (see [`ThreadPanes`]).
@@ -282,6 +290,7 @@ impl ThreadPanel {
             lease: None,
             fading_out: false,
             held: Held::default(),
+            flight: None,
             motion: Default::default(),
             _focus: focus,
             _focus_in: focus_in,
@@ -320,9 +329,20 @@ impl ThreadPanel {
     }
 
     /// Show `chat`, as bound, in place of the pane's own, which it returns.
+    /// A chat drawn at `from` in another pane on the last frame travels
+    /// from there into this pane over `edge_back::SETTLE`, drawn over the
+    /// column on the opaque canvas, at the pane's size; under reduced motion
+    /// it is here at once.
+    ///
+    /// The shell says where the chat comes from rather than the pane
+    /// noticing a chat it drew elsewhere (as `motion::SharedMoves` notices
+    /// within one view): a pane is a view of its own, drawn again from the
+    /// last frame while nothing in it changes, so it does not see each
+    /// frame of its neighbours.
     pub(crate) fn replace_chat(
         &mut self,
         chat: Entity<ChatView>,
+        from: Option<Bounds<Pixels>>,
         cx: &mut Context<Self>,
     ) -> Entity<ChatView> {
         let session_id = chat.read(cx).session_id().map(str::to_owned);
@@ -330,8 +350,20 @@ impl ThreadPanel {
         let replaced = std::mem::replace(&mut self.chat, chat);
         self.hold(session_id.as_deref(), cx);
         self.session_id = session_id;
+        self.flight = from
+            .filter(|from| !cx.reduce_motion() && *from != self.bounds.get())
+            .map(|from| (from, cx.background_executor().now()));
         cx.notify();
         replaced
+    }
+
+    /// Where the pane's chat is drawn now: on its way in, or in the pane.
+    pub(crate) fn chat_drawn(&self, cx: &App) -> Bounds<Pixels> {
+        let to = self.bounds.get();
+        match self.flight {
+            Some((from, at)) => from.interpolate(&to, flight_progress(at, cx)),
+            None => to,
+        }
     }
 
     pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
@@ -422,6 +454,41 @@ impl ThreadPanel {
         }
         cx.propagate();
     }
+
+    /// The chat on its way in, drawn over the column where it is now, laid
+    /// out at the pane's size. The elements around it carry no id, so the
+    /// chat keeps its element path, and its keyed state, as it lands.
+    fn flying_chat(&self, cx: &App) -> AnyElement {
+        let at = self.chat_drawn(cx);
+        let size = self.bounds.get().size;
+        let session = self.session_id.clone().unwrap_or_default();
+        div()
+            .size_full()
+            .child(gpui::deferred(
+                gpui::anchored()
+                    .position_mode(gpui::AnchoredPositionMode::Window)
+                    .position(at.origin)
+                    .child(
+                        div()
+                            .debug_selector(move || format!("flying-chat-{session}"))
+                            .w(at.size.width)
+                            .h(at.size.height)
+                            .overflow_hidden()
+                            // Over the other pane the column's paper would
+                            // let that pane's chat through.
+                            .bg(crate::material::opaque_canvas(cx)
+                                .blend(crate::material::content_surface(cx)))
+                            .shadow_sm()
+                            .child(div().w(size.width).h(size.height).child(self.chat.clone())),
+                    ),
+            ))
+            .into_any_element()
+    }
+}
+
+/// How far a chat that set off `at` has come into its pane, from 0 to 1.
+fn flight_progress(at: Instant, cx: &App) -> f32 {
+    crate::motion::settle_progress(cx.background_executor().now().saturating_duration_since(at))
 }
 
 impl EventEmitter<PanelEvent> for ThreadPanel {}
@@ -483,7 +550,18 @@ impl Render for ThreadPanel {
             ));
         }
         if content.shows(CHAT) {
-            layers.push((CHAT, self.chat.clone().into_any_element()));
+            let flying = !cx.reduce_motion()
+                && self
+                    .flight
+                    .is_some_and(|(_, at)| flight_progress(at, cx) < 1.);
+            let chat = if flying {
+                window.request_animation_frame();
+                self.flying_chat(cx)
+            } else {
+                self.flight = None;
+                self.chat.clone().into_any_element()
+            };
+            layers.push((CHAT, chat));
         } else if self.fading_out {
             // The closed thread has faded out: the chat lets it go.
             self.fading_out = false;
@@ -576,8 +654,11 @@ pub(crate) type DropTarget = Rc<dyn Fn(&Window, &App) -> Option<Bounds<Pixels>>>
 ///
 /// A pane opening or closing glides its split's slots (see [`Glides`]), a
 /// zoomed pane grows over the column out of its slot (see [`Zoom`]), a
-/// layout is put in while the column is faded out (see [`Scene`]); the
-/// widths a window resize redistributes land at once.
+/// layout is put in while the column is faded out (see [`Scene`]), and
+/// the seams glide when the window jumps to another size
+/// ([`Glides::resize`]); a window whose edge is dragged is followed at once.
+/// Two panes that swap conversations carry each across to the other
+/// ([`ThreadPanel::replace_chat`]).
 ///
 /// The dock re-parents a group whenever the tree around it changes: a
 /// lone group sits in the area's frame, a split puts it under
