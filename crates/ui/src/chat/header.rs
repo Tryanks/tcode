@@ -543,10 +543,21 @@ impl ChatView {
             window,
             cx,
         );
+        // The clearance for the traffic lights glides in and out as the
+        // sidebar collapses or a pane moves to or off the window's left edge.
+        let left_inset = self.header_motion.transition(
+            "traffic-light-inset",
+            if under_traffic_lights && traffic_lights > px(0.) {
+                traffic_lights
+            } else {
+                cx.theme().tokens.spacing.sm
+            },
+            &crate::motion::owned::Curve::settle(),
+            window,
+            cx,
+        );
         let base = crate::material::bar("chat-header", crate::material::Bar::Strip, false, cx)
-            .when(under_traffic_lights && traffic_lights > px(0.), |this| {
-                this.pl(traffic_lights)
-            })
+            .pl(left_inset)
             .when(hosts_caption, |this| this.pr_0())
             .min_w(px(HEADER_OVERFLOW_MIN_WIDTH + compact_extra));
 
@@ -1380,5 +1391,67 @@ mod tests {
             labelled,
             "a 1024pt header lost its labels"
         );
+    }
+
+    /// Over a collapsed sidebar the header clears the traffic lights; as its
+    /// pane moves off the window's left edge and back the clearance glides
+    /// over several frames, one way each time, and with motion reduced it
+    /// changes at once.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn the_traffic_light_clearance_glides_as_a_pane_leaves_the_edge(cx: &mut TestAppContext) {
+        use crate::chat::WindowEdges;
+        use crate::test_frames::draw_settled;
+        use gpui::{VisualTestContext, px, size};
+        use std::time::Duration;
+
+        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(1));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(store.clone(), window_state.clone(), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        draw_settled(cx);
+        let toggle = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("toggle-sidebar")
+                .expect("the sidebar toggle")
+                .left()
+        };
+        let cleared = toggle(cx);
+        for reduce in [false, true] {
+            cx.update(|_, cx| cx.set_reduce_motion(reduce));
+            for left in [false, true] {
+                let from = toggle(cx);
+                view.update(cx, |chat, cx| {
+                    chat.set_edges(WindowEdges { left, right: true }, cx)
+                });
+                draw(cx);
+                let mut seen = vec![from, toggle(cx)];
+                for _ in 0..20 {
+                    cx.executor().advance_clock(Duration::from_millis(16));
+                    cx.update(|window, cx| window.simulate_next_frame(cx));
+                    draw(cx);
+                    seen.push(toggle(cx));
+                }
+                draw_settled(cx);
+                let to = toggle(cx);
+                assert_eq!(left, to == cleared, "{seen:?}");
+                assert!(
+                    seen.windows(2).all(|pair| if to > from {
+                        pair[1] >= pair[0]
+                    } else {
+                        pair[1] <= pair[0]
+                    }),
+                    "the clearance stepped back: {seen:?}"
+                );
+                let between = seen.iter().filter(|at| **at != from && **at != to).count();
+                if reduce {
+                    assert_eq!(seen[1], to, "it glided with motion reduced: {seen:?}");
+                } else {
+                    assert!(between >= 3, "the clearance jumped: {seen:?}");
+                }
+            }
+        }
     }
 }
