@@ -487,86 +487,79 @@ impl SettingsPage {
         rows
     }
 
-    /// Threads holding a grant, cross-fading with the empty row when the
-    /// first is granted or the last revoked.
+    /// Threads holding a grant: a revoked one folds away, and the empty row
+    /// is one more row, which leaves as the first is granted and comes back
+    /// once the last is revoked.
     fn control_thread_rows(
         &self,
         compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let threads: Vec<SessionMeta> = self
+        let threads: Vec<(SharedString, Option<SessionMeta>)> = self
             .store
             .read(cx)
             .flat_sessions()
             .into_iter()
             .filter(|meta| meta.control_grant.is_some())
+            .map(|meta| (SharedString::from(meta.id.clone()), Some(meta)))
             .collect();
-        let slot = if threads.is_empty() {
-            "empty"
+        let threads = if threads.is_empty() {
+            vec![("control-threads-empty".into(), None)]
         } else {
-            "threads"
+            threads
         };
-        let body =
-            crate::motion::cross_fade(
-                "control-threads",
-                slot,
-                window,
-                cx,
-                |slot, _, cx| match *slot {
-                    "empty" => {
-                        crate::material::empty_row(crate::tr!("control.settings.threads_empty"), cx)
-                            .into_any_element()
-                    }
-                    _ => v_flex()
-                        .w_full()
-                        .children(self.control_thread_list(&threads, compact, cx))
-                        .into_any_element(),
-                },
-            );
-        vec![body]
+        let list = crate::motion::keyed(
+            "control-threads",
+            threads,
+            window,
+            cx,
+            |_, meta, _, cx| match meta {
+                Some(meta) => self.control_thread_row(meta, compact, cx),
+                None => {
+                    crate::material::empty_row(crate::tr!("control.settings.threads_empty"), cx)
+                        .into_any_element()
+                }
+            },
+        );
+        vec![list.render(v_flex().w_full())]
     }
 
-    fn control_thread_list(
+    fn control_thread_row(
         &self,
-        threads: &[SessionMeta],
+        meta: &SessionMeta,
         compact: bool,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        threads
-            .iter()
-            .map(|meta| {
-                let summary = meta
-                    .control_grant
-                    .as_ref()
-                    .map(crate::control::grant_summary)
-                    .unwrap_or_default();
-                let id = meta.id.clone();
-                crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-                    .child(crate::settings_rows::row_labels(
-                        meta.title.clone(),
-                        Some(summary.into()),
-                        None,
-                        self.window_state.read(cx).compact,
-                        cx,
-                    ))
-                    .child(
-                        Button::new(SharedString::from(format!(
-                            "revoke-thread-grant-{}",
-                            meta.id
-                        )))
-                        .ghost()
-                        .when(!compact, |button| button.xsmall())
-                        .label(crate::tr!("control.settings.revoke"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let id = id.clone();
-                            this.store
-                                .update(cx, |store, _| store.clear_control_grant(id));
-                        })),
-                    )
-                    .into_any_element()
-            })
-            .collect()
+    ) -> AnyElement {
+        let summary = meta
+            .control_grant
+            .as_ref()
+            .map(crate::control::grant_summary)
+            .unwrap_or_default();
+        let id = meta.id.clone();
+        crate::settings_rows::row_frame(compact, cx)
+            .child(crate::settings_rows::row_labels(
+                meta.title.clone(),
+                Some(summary.into()),
+                None,
+                compact,
+                cx,
+            ))
+            .child(
+                Button::new(SharedString::from(format!(
+                    "revoke-thread-grant-{}",
+                    meta.id
+                )))
+                .ghost()
+                .when(!compact, |button| button.xsmall())
+                .label(crate::tr!("control.settings.revoke"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let id = id.clone();
+                    this.store
+                        .update(cx, |store, _| store.clear_control_grant(id));
+                })),
+            )
+            .into_any_element()
     }
 
     /// The activity list, cross-fading between loading, failed, empty and
@@ -583,13 +576,18 @@ impl SettingsPage {
             Some(Ok(entries)) if entries.is_empty() => ActivityState::Empty,
             Some(Ok(_)) => ActivityState::Entries,
         };
-        let body =
-            crate::motion::cross_fade("control-activity", state, window, cx, |state, _, cx| {
+        let body = crate::motion::cross_fade(
+            "control-activity",
+            state,
+            window,
+            cx,
+            |state, window, cx| {
                 v_flex()
                     .w_full()
-                    .children(self.control_activity_state(state.clone(), compact, cx))
+                    .children(self.control_activity_state(state.clone(), compact, window, cx))
                     .into_any_element()
-            });
+            },
+        );
         vec![body]
     }
 
@@ -597,6 +595,7 @@ impl SettingsPage {
         &self,
         state: ActivityState,
         compact: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let refresh = Button::new("control-activity-refresh")
@@ -648,38 +647,65 @@ impl SettingsPage {
                 .child(refresh)
                 .into_any_element(),
         ];
-        rows.extend(entries.iter().map(|entry| {
-            let target = if entry.target_title.is_empty() {
-                crate::tr!("control.settings.deleted_thread").into_owned()
-            } else {
-                entry.target_title.clone()
-            };
-            let title = crate::tr!(
-                "control.settings.activity_row",
-                actor = entry.action.actor_title.as_str(),
-                target = target
+        // A refresh keeps the entries it found before where they were and
+        // folds new ones in. Two entries alike in every field are told apart
+        // by their order.
+        let mut seen = std::collections::HashMap::<String, usize>::new();
+        let entries = entries.iter().map(|entry| {
+            let identity = format!(
+                "{}-{}-{}-{}-{}",
+                entry.at,
+                entry.target_thread_id,
+                entry.action.actor_thread_id,
+                entry.action.action,
+                entry.action.detail.as_deref().unwrap_or_default()
+            );
+            let count = seen.entry(identity.clone()).or_default();
+            *count += 1;
+            (
+                SharedString::from(format!("{identity}-{count}")),
+                entry.clone(),
             )
-            .into_owned();
-            let mut action = crate::control::action_label(&entry.action.action);
-            if let Some(detail) = entry.action.detail.as_deref().filter(|d| !d.is_empty()) {
-                action.push_str(&format!(" ({detail})"));
-            }
-            crate::settings_rows::row_frame(self.window_state.read(cx).compact, cx)
-                .child(crate::settings_rows::row_labels(
-                    title,
-                    Some(action.into()),
-                    None,
-                    self.window_state.read(cx).compact,
-                    cx,
-                ))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_secondary(compact, cx)
-                        .child(humanize_ago(now.saturating_sub(entry.at / 1000))),
+        });
+        let entries = crate::motion::keyed(
+            "control-activity-entries",
+            entries.collect::<Vec<_>>(),
+            window,
+            cx,
+            |_, entry, _, cx| {
+                let target = if entry.target_title.is_empty() {
+                    crate::tr!("control.settings.deleted_thread").into_owned()
+                } else {
+                    entry.target_title.clone()
+                };
+                let title = crate::tr!(
+                    "control.settings.activity_row",
+                    actor = entry.action.actor_title.as_str(),
+                    target = target
                 )
-                .into_any_element()
-        }));
+                .into_owned();
+                let mut action = crate::control::action_label(&entry.action.action);
+                if let Some(detail) = entry.action.detail.as_deref().filter(|d| !d.is_empty()) {
+                    action.push_str(&format!(" ({detail})"));
+                }
+                crate::settings_rows::row_frame(compact, cx)
+                    .child(crate::settings_rows::row_labels(
+                        title,
+                        Some(action.into()),
+                        None,
+                        compact,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_secondary(compact, cx)
+                            .child(humanize_ago(now.saturating_sub(entry.at / 1000))),
+                    )
+                    .into_any_element()
+            },
+        );
+        rows.push(entries.render(v_flex().w_full()));
         rows
     }
 }
