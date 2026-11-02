@@ -761,11 +761,7 @@ fn raised_segment(cx: &App) -> Hsla {
     // The popover surface is the lightest plane in the light theme but
     // matches the track in the dark one, where the pill is lifted with the
     // foreground instead.
-    if theme.mode.is_dark() {
-        theme.foreground.opacity(0.12)
-    } else {
-        theme.popover
-    }
+    theme.by_mode(theme.popover, theme.foreground.opacity(0.12))
 }
 
 /// One segment's surface: transparent at rest. `pill` raises it itself, for

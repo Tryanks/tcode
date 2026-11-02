@@ -448,13 +448,14 @@ impl SettingsInput {
 }
 
 /// Apply a settings theme mode to the live window (shared with the palette's
-/// "Toggle theme" action).
+/// "Toggle theme" action), its colours gliding to the new palette.
 pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
-    match mode {
-        ThemeMode::Light => theme::change_mode(UiThemeMode::Light, Some(window), cx),
-        ThemeMode::Dark => theme::change_mode(UiThemeMode::Dark, Some(window), cx),
-        ThemeMode::System => theme::sync_system_appearance(Some(window), cx),
-    }
+    let mode = match mode {
+        ThemeMode::Light => UiThemeMode::Light,
+        ThemeMode::Dark => UiThemeMode::Dark,
+        ThemeMode::System => window.appearance().into(),
+    };
+    theme::glide_mode(mode, window, cx);
 }
 
 pub struct SettingsPage {
