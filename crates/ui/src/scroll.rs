@@ -301,6 +301,24 @@ pub(crate) struct VirtualList {
     style: StyleRefinement,
     scrollbar: bool,
     reveal: Option<usize>,
+    keyed: Option<Keyed>,
+}
+
+/// What a [`VirtualList::keyed`] list knows of its rows: each row's key, and
+/// how to draw a row that left from its key.
+struct Keyed {
+    keys: Rc<[u64]>,
+    duration: std::time::Duration,
+    leaving: LeavingRow,
+}
+
+type LeavingRow = Box<dyn FnMut(u64, &mut Window, &mut App) -> Option<AnyElement>>;
+
+/// A keyed list's rows as last drawn, and their motion.
+struct RowsMotion {
+    keys: Option<Rc<[u64]>>,
+    rows: crate::motion::list_rows::ListRows<(), u64>,
+    flip: crate::motion::ListFlip,
 }
 
 impl VirtualList {
@@ -346,7 +364,27 @@ impl VirtualList {
             style: StyleRefinement::default(),
             scrollbar: false,
             reveal: None,
+            keyed: None,
         }
+    }
+
+    /// Rows known by `keys`, one per row, which stay the same for as long as
+    /// a row means the same thing: when they change (a filter, a re-sort),
+    /// the rows that stayed glide to their new places, new ones fold in and
+    /// the ones that went fold away, drawn by `leaving` from their keys, all
+    /// over `duration`. Measured rows only.
+    pub(crate) fn keyed(
+        mut self,
+        keys: impl Into<Rc<[u64]>>,
+        duration: std::time::Duration,
+        leaving: impl FnMut(u64, &mut Window, &mut App) -> Option<AnyElement> + 'static,
+    ) -> Self {
+        self.keyed = Some(Keyed {
+            keys: keys.into(),
+            duration,
+            leaving: Box::new(leaving),
+        });
+        self
     }
 
     /// Scroll row `index` into view whenever it changes, as a keyboard
@@ -378,7 +416,7 @@ impl Styled for VirtualList {
 }
 
 impl RenderOnce for VirtualList {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let root_style = root_style_from(&self.style);
         let revealed = window.use_keyed_state((self.id.clone(), "revealed"), cx, |_, _| None);
         let mut last_revealed = *revealed.read(cx);
@@ -421,6 +459,44 @@ impl RenderOnce for VirtualList {
                     .use_keyed_state((self.id.clone(), "glide"), cx, |_, _| ListScroll::default())
                     .read(cx)
                     .clone();
+                // A keyed list notes where its rows were before it takes the
+                // new ones, and lays every row out afresh: an index may hold
+                // another row now, whatever the count did.
+                let motion = self.keyed.take().map(|keyed| {
+                    let duration = keyed.duration;
+                    let motion = window
+                        .use_keyed_state((self.id.clone(), "rows"), cx, move |_, _| {
+                            Rc::new(std::cell::RefCell::new(RowsMotion {
+                                keys: None,
+                                rows: crate::motion::list_rows::ListRows::over(duration),
+                                flip: crate::motion::ListFlip::default(),
+                            }))
+                        })
+                        .read(cx)
+                        .clone();
+                    let mut rows = motion.borrow_mut();
+                    let new = keyed.keys.clone();
+                    if let Some(old) = rows.keys.clone()
+                        && old != new
+                    {
+                        rows.flip
+                            .replace(&state, |index| old.get(index).copied(), &new, window);
+                        rows.rows.replace(
+                            &old,
+                            &new,
+                            |_, _| Some(()),
+                            |index| Some(old[index]),
+                            cx,
+                        );
+                        if state.item_count() == count {
+                            state.reset(count);
+                        }
+                    }
+                    rows.keys = Some(new.clone());
+                    rows.rows.settle_list(&state, &new, cx);
+                    drop(rows);
+                    (motion, new, keyed.leaving)
+                });
                 if state.item_count() != count {
                     glide.cancel();
                     state.reset(count);
@@ -449,8 +525,38 @@ impl RenderOnce for VirtualList {
                 let width = bounds.size.width;
                 let row_width = (width > px(0.)).then(|| width - padding.left - padding.right);
                 width_probe = Some(width_probe_for(state.clone(), width));
+                let mut motion = motion;
                 let render = move |index, window: &mut Window, cx: &mut App| {
                     let row = render(index, window, cx);
+                    let row = match &mut motion {
+                        Some((motion, keys, leaving)) => match keys.get(index).copied() {
+                            Some(key) => {
+                                let around = motion.borrow().rows.around(key, cx);
+                                let mut left: std::collections::HashMap<u64, AnyElement> = around
+                                    .above
+                                    .iter()
+                                    .chain(&around.below)
+                                    .filter_map(|(key, _, _)| {
+                                        leaving(*key, window, cx).map(|row| (*key, row))
+                                    })
+                                    .collect();
+                                let row = around.draw(
+                                    "virtual-row",
+                                    key,
+                                    crate::motion::list_rows::Glide::Rest,
+                                    row,
+                                    |key, _| {
+                                        left.remove(key)
+                                            .unwrap_or_else(|| gpui::Empty.into_any_element())
+                                    },
+                                    window,
+                                );
+                                motion.borrow().flip.row(index, ("virtual-row", key), row)
+                            }
+                            None => row,
+                        },
+                        None => row,
+                    };
                     match row_width {
                         Some(width) => div().w(width).child(row).into_any_element(),
                         None => row,
@@ -916,5 +1022,83 @@ mod tests {
             (0, px(0.)),
             "the next gesture reaches the list"
         );
+    }
+
+    /// A filtered list: names shown, and the names a keystroke left.
+    struct Filtered(Vec<&'static str>);
+
+    fn name_key(name: &str) -> u64 {
+        name.bytes().fold(0, |key, byte| key * 31 + u64::from(byte))
+    }
+
+    impl Render for Filtered {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let names = self.0.clone();
+            let keys: Vec<u64> = names.iter().map(|name| name_key(name)).collect();
+            let row = |name: &'static str| {
+                div()
+                    .debug_selector(move || name.to_string())
+                    .h(px(20.))
+                    .flex_none()
+                    .into_any_element()
+            };
+            div().w(px(200.)).h(px(200.)).child(
+                VirtualList::measured(
+                    "filtered",
+                    names.len(),
+                    move |index, _, _| row(names[index]),
+                )
+                .keyed(keys, crate::motion::KEYSTROKE, move |key, _, _| {
+                    ["a", "b", "c"]
+                        .into_iter()
+                        .find(|name| name_key(name) == key)
+                        .map(row)
+                })
+                .w_full()
+                .max_h(px(200.)),
+            )
+        }
+    }
+
+    /// A keystroke that filters a row out folds it away while the row below
+    /// glides up into its place, and one that brings it back folds it in,
+    /// the row below making room as it does.
+    #[gpui::test]
+    fn a_filtered_list_folds_rows_out_and_in_and_glides_the_rest(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (view, cx) = cx.add_window_view(|_, _| Filtered(vec!["a", "b", "c"]));
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        crate::test_frames::draw_settled(cx);
+        let top = |name: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(name).map(|bounds| f32::from(bounds.top()))
+        };
+        let (b, c) = (top("b", cx).unwrap(), top("c", cx).unwrap());
+
+        view.update(cx, |view, cx| {
+            view.0 = vec!["a", "c"];
+            cx.notify();
+        });
+        crate::test_frames::draw(cx);
+        cx.executor().advance_clock(crate::motion::KEYSTROKE / 2);
+        crate::test_frames::draw(cx);
+        let gliding = top("c", cx).unwrap();
+        assert!(gliding > b && gliding < c, "c is on its way up: {gliding}");
+        assert!(top("b", cx).is_some(), "b is folding away");
+
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(top("c", cx), Some(b));
+        assert_eq!(top("b", cx), None);
+
+        view.update(cx, |view, cx| {
+            view.0 = vec!["a", "b", "c"];
+            cx.notify();
+        });
+        crate::test_frames::draw(cx);
+        cx.executor().advance_clock(crate::motion::KEYSTROKE / 2);
+        crate::test_frames::draw(cx);
+        let pushed = top("c", cx).unwrap();
+        assert!(pushed > b && pushed < c, "c makes room gradually: {pushed}");
+        crate::test_frames::draw_settled(cx);
+        assert_eq!((top("b", cx), top("c", cx)), (Some(b), Some(c)));
     }
 }

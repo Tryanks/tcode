@@ -62,6 +62,10 @@ pub(crate) fn lift(progress: f32) -> Pixels {
     LIFT * (1. - progress.clamp(0., 1.))
 }
 
+/// How long a list a keystroke refilters takes to fold its rows in and out:
+/// short enough to keep pace with typing.
+pub(crate) const KEYSTROKE: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// The house transition: [`crate::edge_back::SETTLE`].
 pub(crate) fn settle() -> Transition {
     Transition::new(crate::edge_back::SETTLE)

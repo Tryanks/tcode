@@ -4516,9 +4516,27 @@ impl AppShell {
     /// The hosts surface itself, without chrome: the same rows and the same
     /// pairing form at both widths. Compact pushes Pair onto the navigation
     /// stack; wide shows it in place, inside the Hosts route.
+    /// The machines and the pairing form, each in its own layer, so the one
+    /// left fades out under the one opened in its place.
     fn hosts_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let pairing = self.destination(cx) == Destination::Pair;
-        self.hosts_surface(pairing, window, cx)
+        let fade = crate::motion::CrossFade::new("hosts-body", usize::from(pairing), 2, window, cx);
+        let layers: Vec<(usize, AnyElement)> = (0..2)
+            .filter(|layer| fade.shows(*layer))
+            .map(|layer| {
+                let surface = self.hosts_surface(layer == 1, window, cx);
+                (
+                    layer,
+                    v_flex().size_full().child(surface).into_any_element(),
+                )
+            })
+            .collect();
+        fade.fill()
+            .render(layers)
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .into_any_element()
     }
 
     /// The hosts rows, or the pairing form when `pairing`; nothing in a
@@ -4564,14 +4582,27 @@ impl AppShell {
         };
         // Machines is a root the sidebar switches to; Pair is pushed over it,
         // so only Pair has somewhere to go back to.
-        let back = pairing.then(|| {
-            back_button("hosts-back", Destination::Hosts.back_label())
-                .debug_selector(|| "hosts-back".into())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.window_state
-                        .update(cx, |state, cx| state.close_pair(cx));
-                }))
-        });
+        let gap = cx.theme().tokens.spacing.xs;
+        let back = crate::motion::shown("hosts-back-shown", pairing.then_some(()), window, cx).map(
+            |shown| {
+                shown.fold_across_gap(
+                    gap,
+                    back_button("hosts-back", Destination::Hosts.back_label())
+                        .debug_selector(|| "hosts-back".into())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.window_state
+                                .update(cx, |state, cx| state.close_pair(cx));
+                        })),
+                )
+            },
+        );
+        let title = div().flex_1().min_w_0().child(crate::motion::cross_fade(
+            "hosts-title",
+            title,
+            window,
+            cx,
+            |title, _, cx| crate::material::bar_title(title.clone(), cx).into_any_element(),
+        ));
         window_drag_area(
             "hosts-header-drag",
             crate::settings_rows::content_header(
@@ -4585,14 +4616,12 @@ impl AppShell {
         .child(
             crate::settings_rows::content_header_column()
                 .items_center()
-                .gap(cx.theme().tokens.spacing.xs)
+                .gap(gap)
                 .when(hosts_caption, |column| {
                     column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
                 })
                 .children(back)
-                .child(window_caption::drag_region(crate::material::bar_title(
-                    title, cx,
-                ))),
+                .child(window_caption::drag_region(title)),
         )
         .children(hosts_caption.then(|| {
             div()
