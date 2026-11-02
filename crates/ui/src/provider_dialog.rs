@@ -38,7 +38,11 @@ use crate::settings::{ACCENT_PRESETS, EnvVar, provider_label};
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// One environment-variable row's live inputs and its draft flags.
+#[derive(Clone)]
 struct EnvRow {
+    /// Which variable the row is while the dialog is open, whatever its
+    /// place, so one removed leaves from where it was.
+    key: u64,
     name: Entity<InputState>,
     value: Entity<InputState>,
     sensitive: bool,
@@ -70,6 +74,7 @@ pub struct ProviderDialog {
     /// Draft accent (`#rrggbb`); applied on Save.
     accent: Option<String>,
     env_rows: Vec<EnvRow>,
+    next_env_key: u64,
     /// Names that held a persisted secret when the dialog opened. On Save, any
     /// that is no longer a sensitive row is cleared from `secrets.json`.
     original_secret_names: Vec<String>,
@@ -192,6 +197,7 @@ impl ProviderDialog {
             slug_error: None,
             accent: settings.accent_color.clone(),
             env_rows: Vec::new(),
+            next_env_key: 0,
             original_secret_names,
             custom_models: settings.custom_models.clone(),
             hidden_models: settings.hidden_models.clone(),
@@ -310,69 +316,76 @@ impl ProviderDialog {
     }
 
     fn rebuild_env_rows(&mut self, seeds: &[EnvSeed], window: &mut Window, cx: &mut Context<Self>) {
-        self.env_rows.clear();
-        for seed in seeds {
-            let name = cx.new(|cx| {
-                let mut input = InputState::new(window, cx)
-                    .placeholder(crate::tr!("providers.env.name_placeholder"));
-                input.set_value(seed.name.clone(), window, cx);
-                input
-            });
-            let show_stored = seed.sensitive && seed.stored && seed.value.is_empty();
-            let value = cx.new(|cx| {
-                let placeholder = if show_stored {
-                    crate::tr!("providers.env.stored_secret")
-                } else {
-                    crate::tr!("providers.env.value_placeholder")
-                };
-                let mut input = InputState::new(window, cx)
-                    .placeholder(placeholder)
-                    .masked(seed.sensitive);
-                input.set_value(seed.value.clone(), window, cx);
-                input
-            });
-            self.env_rows.push(EnvRow {
-                name,
-                value,
-                sensitive: seed.sensitive,
-                stored: seed.stored,
-            });
+        self.env_rows = seeds
+            .iter()
+            .map(|seed| self.env_row(seed, window, cx))
+            .collect();
+    }
+
+    fn env_row(&mut self, seed: &EnvSeed, window: &mut Window, cx: &mut Context<Self>) -> EnvRow {
+        let name = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .placeholder(crate::tr!("providers.env.name_placeholder"));
+            input.set_value(seed.name.clone(), window, cx);
+            input
+        });
+        let show_stored = seed.sensitive && seed.stored && seed.value.is_empty();
+        let value = cx.new(|cx| {
+            let placeholder = if show_stored {
+                crate::tr!("providers.env.stored_secret")
+            } else {
+                crate::tr!("providers.env.value_placeholder")
+            };
+            let mut input = InputState::new(window, cx)
+                .placeholder(placeholder)
+                .masked(seed.sensitive);
+            input.set_value(seed.value.clone(), window, cx);
+            input
+        });
+        self.next_env_key += 1;
+        EnvRow {
+            key: self.next_env_key,
+            name,
+            value,
+            sensitive: seed.sensitive,
+            stored: seed.stored,
         }
     }
 
     fn add_env_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut seeds = self.snapshot_env(cx);
         // New variables default to sensitive.
-        seeds.push(EnvSeed {
-            name: String::new(),
-            value: String::new(),
-            sensitive: true,
-            stored: false,
-        });
-        self.rebuild_env_rows(&seeds, window, cx);
+        let row = self.env_row(
+            &EnvSeed {
+                name: String::new(),
+                value: String::new(),
+                sensitive: true,
+                stored: false,
+            },
+            window,
+            cx,
+        );
+        self.env_rows.push(row);
         cx.notify();
     }
 
-    fn remove_env_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let mut seeds = self.snapshot_env(cx);
-        if index >= seeds.len() {
-            return;
+    fn remove_env_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.env_rows.len() {
+            self.env_rows.remove(index);
         }
-        seeds.remove(index);
-        self.rebuild_env_rows(&seeds, window, cx);
         cx.notify();
     }
 
     fn toggle_env_sensitive(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let mut seeds = self.snapshot_env(cx);
-        let Some(seed) = seeds.get_mut(index) else {
+        let Some(mut seed) = self.snapshot_env(cx).into_iter().nth(index) else {
             return;
         };
         seed.sensitive = !seed.sensitive;
         // Its state changed, so it is no longer the untouched stored secret; the
         // masked value (plaintext ↔ secret) rides along in the draft until Save.
         seed.stored = false;
-        self.rebuild_env_rows(&seeds, window, cx);
+        let key = self.env_rows[index].key;
+        let row = self.env_row(&seed, window, cx);
+        self.env_rows[index] = EnvRow { key, ..row };
         cx.notify();
     }
 
@@ -512,7 +525,7 @@ impl ProviderDialog {
         swatches.into_any_element()
     }
 
-    fn render_connection(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_connection(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let provider = self.provider;
         let mut blocks = vec![
             self.field_block(
@@ -536,7 +549,7 @@ impl ProviderDialog {
                 cx,
             ));
         }
-        blocks.push(self.render_env(cx));
+        blocks.push(self.render_env(window, cx));
         if provider.caps().launch_args {
             blocks.push(self.field_block(
                 crate::tr!("providers.launch_args").into_owned().into(),
@@ -577,8 +590,8 @@ impl ProviderDialog {
         .into_any_element()
     }
 
-    fn render_env(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut block = v_flex().w_full().gap_2().child(
+    fn render_env(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let block = v_flex().w_full().gap_2().child(
             h_flex()
                 .w_full()
                 .items_center()
@@ -600,42 +613,61 @@ impl ProviderDialog {
                 ),
         );
 
-        if self.env_rows.is_empty() {
-            block = block.child(
-                div()
-                    .text_secondary(false, cx)
-                    .child(crate::tr!("providers.env.empty_help")),
-            );
+        // The help is one more row, which leaves as the first variable is
+        // added and comes back once the last is removed.
+        let rows: Vec<(SharedString, Option<(usize, EnvRow)>)> = if self.env_rows.is_empty() {
+            vec![("env-empty".into(), None)]
         } else {
-            for (index, row) in self.env_rows.iter().enumerate() {
-                block = block.child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        .child(div().flex_1().min_w_0().child(Input::new(&row.name)))
-                        .child(div().flex_1().min_w_0().child(Input::new(&row.value)))
-                        .child(
-                            Switch::new(("env-sensitive", index))
-                                .checked(row.sensitive)
-                                .tooltip(crate::tr!("providers.env.sensitive"))
-                                .on_click(cx.listener(move |this, _: &bool, window, cx| {
-                                    this.toggle_env_sensitive(index, window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new(("env-remove", index))
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Delete)
-                                .tooltip(crate::tr!("providers.env.remove"))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.remove_env_row(index, window, cx);
-                                })),
-                        ),
-                );
-            }
-        }
+            self.env_rows
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, row)| {
+                    (
+                        SharedString::from(format!("env-{}", row.key)),
+                        Some((index, row)),
+                    )
+                })
+                .collect()
+        };
+        // Each row carries the gap above it, so the gap goes with it.
+        let rows = crate::motion::keyed("env-rows", rows, window, cx, |_, row, _, cx| {
+            let Some((index, row)) = row else {
+                return div()
+                    .pt_2()
+                    .text_secondary(false, cx)
+                    .child(crate::tr!("providers.env.empty_help"))
+                    .into_any_element();
+            };
+            let index = *index;
+            h_flex()
+                .w_full()
+                .pt_2()
+                .gap_2()
+                .items_center()
+                .child(div().flex_1().min_w_0().child(Input::new(&row.name)))
+                .child(div().flex_1().min_w_0().child(Input::new(&row.value)))
+                .child(
+                    Switch::new(("env-sensitive", index))
+                        .checked(row.sensitive)
+                        .tooltip(crate::tr!("providers.env.sensitive"))
+                        .on_click(cx.listener(move |this, _: &bool, window, cx| {
+                            this.toggle_env_sensitive(index, window, cx);
+                        })),
+                )
+                .child(
+                    Button::new(("env-remove", index))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Delete)
+                        .tooltip(crate::tr!("providers.env.remove"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_env_row(index, cx);
+                        })),
+                )
+                .into_any_element()
+        });
+        let block = block.child(rows.render(v_flex().w_full().mt(gpui::rems(-0.5))));
         block
             .child(
                 div()
@@ -666,9 +698,18 @@ impl ProviderDialog {
                         }),
                 );
 
-        for (index, row) in rows.iter().enumerate() {
-            block = block.child(self.render_model_row(index, row, window, cx));
-        }
+        let models = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (SharedString::from(row.id.clone()), (index, row.clone())));
+        let models = crate::motion::keyed(
+            "provider-models",
+            models,
+            window,
+            cx,
+            |_, (index, row), window, cx| self.render_model_row(*index, row, window, cx),
+        );
+        block = block.child(models.render(v_flex().w_full().gap_1()));
 
         block = block.child(
             h_flex()
@@ -739,9 +780,12 @@ impl ProviderDialog {
                 cx,
             ));
         }
-        if let Some(chip) =
-            crate::motion::shown(("model-hidden", index), hidden.then_some(()), window, cx)
-        {
+        if let Some(chip) = crate::motion::shown(
+            SharedString::from(format!("model-hidden-{}", row.id)),
+            hidden.then_some(()),
+            window,
+            cx,
+        ) {
             tags = tags.child(chip.fade(crate::material::semantic_chip(
                 crate::tr!("providers.models.hidden").into_owned(),
                 cx.theme().warning.opacity(0.12),
@@ -750,7 +794,7 @@ impl ProviderDialog {
             )));
         }
         let name_color = transition(
-            ElementId::from(("model-name", index)),
+            ElementId::from(SharedString::from(format!("model-name-{}", row.id))),
             if hidden { muted } else { cx.theme().foreground },
             crate::motion::settle(),
             window,
@@ -859,7 +903,7 @@ impl Render for ProviderDialog {
                     .w_full()
                     .gap(crate::material::section_gap(cx))
                     .child(self.render_identity(window, cx))
-                    .child(self.render_connection(cx))
+                    .child(self.render_connection(window, cx))
                     .child(self.render_models(window, cx)),
             )
     }
