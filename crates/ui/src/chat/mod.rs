@@ -158,8 +158,9 @@ pub struct ChatView {
     /// rows are only spliced during a frame, never between two frames.
     timeline_stale: bool,
     history_placeholder_height: gpui::Pixels,
-    /// Height of the phone row floating over the foot of the timeline, zero
-    /// while it is absent. The last row's padding holds it so the tail clears it.
+    /// Height of the phone row floating over the foot of the timeline, as
+    /// far as it has risen in: zero while it is absent. The last row's
+    /// padding holds it so the tail clears it.
     phone_strip_height: gpui::Pixels,
     /// Distance to scroll back once a page has filled the reservation the
     /// reader had scrolled into. Applied by the render after the frame that
@@ -688,14 +689,13 @@ impl ChatView {
         };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), agents.as_ref(), cx);
         let phone_strip = self.render_phone_strip(agents.as_ref(), window, cx);
-        let phone_strip_height = if phone_strip.is_some() {
+        let phone_strip_height = phone_strip.as_ref().map_or(px(0.), |(_, progress)| {
             px(crate::material::bar_height(
                 crate::material::Bar::Toolbar,
                 true,
-            ))
-        } else {
-            px(0.)
-        };
+            )) * *progress
+        });
+        let phone_strip = phone_strip.map(|(strip, _)| strip);
         if phone_strip_height != self.phone_strip_height {
             if let Some(last) = self.rows.len().checked_sub(1) {
                 self.list_state.remeasure_items(last..last + 1);
@@ -1153,6 +1153,107 @@ pub(in crate::chat) mod tests {
             }
         }
         driver.shutdown(cx, &store, &host);
+    }
+
+    /// On a phone the strip over the foot of the timeline rises in with the
+    /// thread's first agent and sinks out with its last, over several
+    /// frames, and the last row's room below grows to clear it and shrinks
+    /// back in step; with motion reduced both happen at once.
+    #[gpui::test]
+    fn the_phone_strip_rises_in_and_out_with_the_tail_clearing_it(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px};
+        use std::time::Duration;
+
+        let plain = synthetic_markdown_timeline(3);
+        let mut with_agent = plain.clone();
+        // In the first turn, away from the tail it is measured at.
+        with_agent.entries.insert(
+            1,
+            at_turn(
+                entry(
+                    "agent-1",
+                    EntryContent::Item(ItemContent::Subagent {
+                        agent_type: "Explore".into(),
+                        description: "Survey the code".into(),
+                        status: ItemStatus::InProgress,
+                        summary: None,
+                        model: None,
+                        effort: None,
+                    }),
+                ),
+                0,
+            ),
+        );
+        let (store, window_state, session_id) = seed_chat(cx, plain.clone());
+        window_state.update(cx, |state, _| state.compact = true);
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        let replace = |timeline: &Timeline, cx: &mut VisualTestContext| {
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx)
+            })
+        };
+        replace(&plain, cx);
+        draw_settled(cx);
+        assert!(cx.debug_bounds("phone-strip").is_none());
+        // Where the strip stands on a frame, and how tall the last row is.
+        let stand = |cx: &mut VisualTestContext| {
+            let last = view.read_with(cx, |chat, _| chat.rows.len() - 1);
+            (
+                cx.debug_bounds("phone-strip").map(|strip| strip.top()),
+                cx.debug_bounds(format!("timeline-row-{last}").leak())
+                    .expect("the last row")
+                    .size
+                    .height,
+            )
+        };
+        let one_way = |seen: &[gpui::Pixels], up: bool| {
+            seen.windows(2).all(|pair| {
+                if up {
+                    pair[1] <= pair[0]
+                } else {
+                    pair[1] >= pair[0]
+                }
+            })
+        };
+        for reduce in [false, true] {
+            cx.update(|_, cx| cx.set_reduce_motion(reduce));
+            for (timeline, arrives) in [(&with_agent, true), (&plain, false)] {
+                replace(timeline, cx);
+                crate::test_frames::draw(cx);
+                let mut frames = vec![stand(cx)];
+                for _ in 0..20 {
+                    cx.executor().advance_clock(Duration::from_millis(16));
+                    cx.update(|window, cx| window.simulate_next_frame(cx));
+                    crate::test_frames::draw(cx);
+                    frames.push(stand(cx));
+                }
+                draw_settled(cx);
+                let (strip, tail) = stand(cx);
+                assert_eq!(strip.is_some(), arrives);
+                let tails: Vec<_> = frames.iter().map(|(_, tail)| *tail).collect();
+                assert!(
+                    one_way(&tails, !arrives),
+                    "the tail stepped back: {tails:?}"
+                );
+                let moving = tails
+                    .iter()
+                    .filter(|at| **at != tails[0] && **at != tail)
+                    .count();
+                let strips: Vec<_> = frames.iter().filter_map(|(strip, _)| *strip).collect();
+                if reduce {
+                    assert_eq!(tails[0], tail, "the tail glided: {tails:?}");
+                    assert_eq!(strips.is_empty(), !arrives, "{strips:?}");
+                } else {
+                    assert!(moving >= 3, "the tail jumped: {tails:?}");
+                    // Rising in it moves up to its place; sinking out, down.
+                    assert!(one_way(&strips, arrives), "{strips:?}");
+                    assert!(strips.len() >= 3, "the strip popped: {strips:?}");
+                }
+            }
+        }
     }
 
     #[gpui::test]
