@@ -739,15 +739,25 @@ impl ChatView {
                 .min_h_0()
                 .relative()
                 .py(timeline_inset(cx))
-                .child(crate::scroll::page_viewport(
-                    "timeline-bounce",
-                    &self.list_state,
-                    SelectionArea::new(&self.selection, timeline)
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_h_0(),
-                ))
+                .child(
+                    self.motion
+                        .keep::<crate::motion::bounce::BounceState>("timeline-bounce")
+                        .render(
+                            "timeline-bounce",
+                            SelectionArea::new(&self.selection, timeline)
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_h_0(),
+                            |content| {
+                                crate::scroll::page_viewport(
+                                    "timeline-bounce",
+                                    &self.list_state,
+                                    content,
+                                )
+                            },
+                        ),
+                )
                 .when(!window.is_inspector_picking(cx), |timeline| {
                     timeline.child(Scrollbar::vertical(&self.list_state).id("timeline-scrollbar"))
                 })

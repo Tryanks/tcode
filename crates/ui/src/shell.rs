@@ -14310,6 +14310,90 @@ mod tests {
         );
     }
 
+    /// thread-1 as `turns` finished turns, each a short question and its
+    /// answer, the last answer `last`.
+    fn finished_timeline(turns: usize, last: &str) -> tcode_core::session::Timeline {
+        use crate::chat::tests::{assistant, entry, user_item};
+        let mut timeline = tcode_core::session::Timeline::default();
+        timeline.turns = vec![tcode_core::session::TurnMeta::default(); turns];
+        for turn in 0..turns {
+            let answer = if turn + 1 == turns {
+                last.to_string()
+            } else {
+                format!("Answer {turn}.")
+            };
+            for mut item in [
+                entry(
+                    &format!("ask-{turn}"),
+                    user_item(&format!("Question {turn}?")),
+                ),
+                entry(&format!("answer-{turn}"), assistant(&answer)),
+            ] {
+                std::sync::Arc::make_mut(&mut item).turn = turn;
+                timeline.entries.push(item);
+            }
+        }
+        timeline
+    }
+
+    /// The end of a long conversation pulled past its edge and let go: the
+    /// edge is on its way back when the pane is zoomed over the column, and
+    /// carries on back from where it was rather than snapping home.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+    #[gpui::test]
+    fn a_returning_timeline_edge_carries_on_when_its_pane_is_zoomed(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        show_timeline(&store, finished_timeline(30, "Done."), cx);
+        cx.simulate_keystrokes("secondary-d");
+        settle_frames(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        settle_frames(cx);
+        let _ = sent(&host);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        // How far the last question is drawn from the composer, which the
+        // bounce leaves where it is: what the edge is stretched by.
+        let stretch = |cx: &mut VisualTestContext| {
+            let question = cx
+                .debug_bounds("user-bubble-ask-29")
+                .expect("the last question");
+            let composer = cx.debug_bounds("chat-composer").expect("the composer");
+            question.top() - composer.top()
+        };
+        let rest = stretch(cx);
+        let timeline = cx
+            .debug_bounds("user-bubble-ask-29")
+            .expect("the last question");
+        let wheel = |delta: f32, phase: gpui::TouchPhase, cx: &mut VisualTestContext| {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: timeline.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
+                touch_phase: phase,
+                ..Default::default()
+            });
+            draw(cx);
+        };
+        // Past the end, held still, then let go.
+        wheel(0., gpui::TouchPhase::Started, cx);
+        for _ in 0..3 {
+            wheel(-100., gpui::TouchPhase::Moved, cx);
+        }
+        cx.executor().advance_clock(Duration::from_millis(100));
+        wheel(0., gpui::TouchPhase::Ended, cx);
+        display_frame(cx);
+        let returning = stretch(cx) - rest;
+        assert!(returning < px(-4.), "the edge is stretched: {returning:?}");
+
+        cx.simulate_keystrokes("secondary-shift-enter");
+        draw(cx);
+        assert!(cx.debug_bounds("zoomed-pane").is_some());
+        display_frame(cx);
+        assert_between("the returning edge", px(0.), returning, stretch(cx) - rest);
+        settle_frames(cx);
+        assert_eq!(stretch(cx), rest, "the edge came home");
+    }
+
     /// A control the keyboard is on keeps it, and with it its fading ring,
     /// which is kept by its focus handle, when its view is drawn under a new
     /// parent: a command's header in the left of two panes, as the pane is

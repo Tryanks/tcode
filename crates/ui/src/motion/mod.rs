@@ -30,6 +30,7 @@ pub(crate) use list_flip::ListFlip;
 pub(crate) use list_hover::ListHover;
 pub(crate) use list_scroll::{ListScroll, ScrollTarget};
 pub(crate) use size_glide::{GlideAxes, GlideState, SizeGlide, size_key};
+pub(crate) mod bounce;
 #[cfg(any(
     test,
     all(preview_backend, any(target_os = "macos", target_os = "ios"))
