@@ -17,9 +17,9 @@ use crate::widgets::copy::copy_button;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Display, Element, ElementId, Entity, EntityId,
-    FlexDirection, FontStyle, FontWeight, Global, GlobalElementId, HighlightStyle, Image,
-    ImageSource, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ListState,
-    MouseButton, ObjectFit, ParentElement as _, Pixels, Rems, Role, SharedString,
+    FlexDirection, FontStyle, FontWeight, Global, GlobalElementId, HighlightStyle,
+    InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ListState, MouseButton,
+    ObjectFit, ParentElement as _, Pixels, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, StyledText, TextLayout,
     Window, div, img, prelude::FluentBuilder as _, px, relative, rems, size,
 };
@@ -1517,25 +1517,17 @@ impl Element for CodeSliceMeasure {
     }
 }
 
-fn render_code_block(
+/// The lines `span` of `code`: laid out as one text while the document
+/// measures a block it never paints, and as selectable lines otherwise.
+fn code_lines(
     code: &CodeBlock,
-    span: Option<Range<usize>>,
+    span: Range<usize>,
     options: &RenderOptions,
     view: &Entity<MarkdownState>,
-    window: &Window,
     cx: &mut App,
 ) -> AnyElement {
-    let prepared = code.prepared();
-    let code_text = prepared.text.as_ref();
-    if mermaid::is_mermaid(code.lang.as_deref())
-        && let Some(image) = mermaid::diagram(code_text, cx.theme().mode.is_dark())
-    {
-        return render_diagram(image, code_text, options, view, cx);
-    }
-    let span = span.unwrap_or(0..prepared.lines.len());
-    let (first, last) = (span.start == 0, span.end == prepared.lines.len());
-    let lines = if let Some(measurement) = &options.measurement {
-        div()
+    match &options.measurement {
+        Some(measurement) => div()
             .w_full()
             .whitespace_normal()
             .font_family(cx.theme().mono_font_family.clone())
@@ -1543,14 +1535,40 @@ fn render_code_block(
             .child(CodeSliceMeasure {
                 measurement: measurement.clone(),
                 code: code.clone(),
-                span: span.clone(),
+                span,
                 path: options.path.clone(),
                 view: view.clone(),
             })
-            .into_any_element()
-    } else {
-        render_code_lines(code, span.clone(), &options.path, view, cx)
-    };
+            .into_any_element(),
+        None => render_code_lines(code, span, &options.path, view, cx),
+    }
+}
+
+fn render_code_block(
+    code: &CodeBlock,
+    span: Option<Range<usize>>,
+    options: &RenderOptions,
+    view: &Entity<MarkdownState>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let prepared = code.prepared();
+    let code_text = prepared.text.as_ref();
+    let span = span.unwrap_or(0..prepared.lines.len());
+    if mermaid::is_mermaid(code.lang.as_deref()) {
+        let lines = |cx: &mut App| code_lines(code, span.clone(), options, view, cx);
+        return mermaid::block(
+            code,
+            &options.path,
+            options.is_last,
+            lines,
+            view,
+            window,
+            cx,
+        );
+    }
+    let (first, last) = (span.start == 0, span.end == prepared.lines.len());
+    let lines = code_lines(code, span.clone(), options, view, cx);
     let radius = crate::material::radius_card(cx);
     // The whole fence, not the painted span: a long block is split across
     // list items and the menu copies the code a reader sees as one block.
@@ -1636,71 +1654,6 @@ fn render_code_block(
     } else {
         content
     }
-}
-
-/// A Mermaid fence whose source laid out: the picture replaces the code, and
-/// the context menu still copies the source a reader would otherwise see.
-fn render_diagram(
-    image: Arc<Image>,
-    source: &str,
-    options: &RenderOptions,
-    view: &Entity<MarkdownState>,
-    cx: &mut App,
-) -> AnyElement {
-    let whole_code = source.strip_suffix('\n').unwrap_or(source).to_string();
-    let context_view = view.clone();
-    let label: SharedString = crate::tr!("markdown.mermaid_diagram").into_owned().into();
-    let lightbox_label = label.clone();
-    let source = ImageSource::Image(image);
-    let lightbox_source = source.clone();
-    let diagram = crate::material::accessible_clickable(
-        img(source.clone()),
-        SharedString::from(format!("markdown-mermaid-{}", options.path)),
-        Role::Button,
-        label,
-        cx,
-    )
-    .object_fit(ObjectFit::Contain)
-    .cursor_pointer()
-    .on_click(move |_, window, cx| {
-        cx.stop_propagation();
-        crate::image_viewer::open(
-            lightbox_source.clone(),
-            lightbox_label.to_string(),
-            window,
-            cx,
-        );
-    });
-    let block = div()
-        .id(options.path.clone())
-        .when(!options.is_last, |block| block.pb(rems(1.)))
-        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
-            context_view.update(cx, |state, cx| {
-                state.set_pending_context(
-                    Some(PendingContextTarget::CodeBlock(whole_code.clone())),
-                    cx,
-                )
-            });
-        })
-        .child(
-            div()
-                .p_3()
-                .rounded(crate::material::radius_card(cx))
-                .bg(cx.theme().tokens.colors.muted)
-                .child(FittedImage::new(
-                    source,
-                    diagram,
-                    view,
-                    options.path.clone(),
-                    cx,
-                )),
-        );
-    #[cfg(test)]
-    let block = {
-        let path = options.path.clone();
-        block.debug_selector(move || format!("markdown-mermaid-{path}"))
-    };
-    block.into_any_element()
 }
 
 fn render_table(

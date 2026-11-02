@@ -14,7 +14,7 @@ use gpui::{
 
 use super::state::MarkdownState;
 
-const MAX_HEIGHT: Pixels = px(720.);
+pub(super) const MAX_HEIGHT: Pixels = px(720.);
 const MIN_SIDE: Pixels = px(15.);
 /// The size of the tile drawn for an image without a preview.
 const UNPREVIEWED: Size<Pixels> = Size {
@@ -164,9 +164,8 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
 /// The largest size with `intrinsic`'s aspect ratio that fits the available
 /// width and [`MAX_HEIGHT`], never larger than `intrinsic` itself. An image that has not
 /// loaded holds the tile drawn for an image without a preview, the size it keeps if it
-/// never loads; neither the host's preview nor a Mermaid picture reports its size before
-/// it is decoded.
-fn fit(intrinsic: Size<Pixels>, available_width: Option<Pixels>) -> Size<Pixels> {
+/// never loads; the host's preview does not report its size before it is decoded.
+pub(super) fn fit(intrinsic: Size<Pixels>, available_width: Option<Pixels>) -> Size<Pixels> {
     if intrinsic.width <= Pixels::ZERO || intrinsic.height <= Pixels::ZERO {
         return fit(UNPREVIEWED, available_width);
     }
