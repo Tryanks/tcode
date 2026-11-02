@@ -765,6 +765,30 @@ fn removing_project_cleans_only_managed_icons() {
 }
 
 #[test]
+fn replacing_a_project_icon_deletes_the_superseded_managed_copy() {
+    let dir = DataDir::new();
+    let root = dir.path();
+    let store = dir.store();
+    fs::create_dir(root.join("project-icons")).unwrap();
+    let mut project = Project::from_root(root.join("project"));
+    let first = root.join("project-icons/first.png");
+    let second = root.join("project-icons/second.png");
+    for path in [&first, &second] {
+        fs::write(path, b"stored image").unwrap();
+    }
+    project.icon_path = Some(first.clone());
+    store.upsert_project(&project).unwrap();
+    project.icon_path = Some(second.clone());
+    store.upsert_project(&project).unwrap();
+    assert!(!first.exists());
+    assert!(second.exists());
+    project.icon_path = None;
+    store.upsert_project(&project).unwrap();
+    assert!(!second.exists());
+    assert_eq!(store.read_file().unwrap().projects[0].icon_path, None);
+}
+
+#[test]
 fn command_cache_is_kept_per_native_home_and_acp_agent() {
     let dir = DataDir::new();
     let root = dir.path().to_path_buf();

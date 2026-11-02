@@ -2415,3 +2415,7 @@ pub(super) fn directory_within(root: &Path, dir: &Path) -> Option<bool> {
     let root = fs::canonicalize(root).ok()?;
     Some(dir.starts_with(root))
 }
+
+#[cfg(test)]
+#[path = "sessions_tests.rs"]
+mod tests;
