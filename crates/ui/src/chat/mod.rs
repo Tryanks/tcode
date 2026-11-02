@@ -1502,4 +1502,266 @@ pub(in crate::chat) mod tests {
         });
         (workspace_store, window_state, session_id, driver)
     }
+
+    use gpui::VisualTestContext;
+    use tcode_core::session::StoredEvent;
+    use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic};
+
+    /// A thread whose host is scripted: its window arrives as a snapshot,
+    /// then records stream in one at a time, as a host sends them.
+    pub(in crate::chat) struct ScriptedThread {
+        pub(in crate::chat) store: Entity<WorkspaceStore>,
+        pub(in crate::chat) incoming: async_channel::Sender<String>,
+        pub(in crate::chat) records: Vec<StoredEvent>,
+        /// The first record the window holds; the ones before it are history
+        /// pages.
+        pub(in crate::chat) held_from: usize,
+        pub(in crate::chat) status: tcode_protocol::SessionStatus,
+        pub(in crate::chat) outgoing: async_channel::Receiver<String>,
+        _pump: gpui::Task<()>,
+    }
+
+    pub(in crate::chat) const THREAD: &str = "scripted";
+
+    pub(in crate::chat) fn events_topic() -> Topic {
+        Topic::SessionEvents {
+            session_id: THREAD.into(),
+        }
+    }
+
+    pub(in crate::chat) fn user_event(id: &str, text: &str) -> agent::AgentEvent {
+        agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: agent::ItemContent::UserMessage {
+                text: text.into(),
+                context_len: None,
+                attachments: Vec::new(),
+            },
+        })
+    }
+
+    pub(in crate::chat) fn answer_event(id: &str, text: &str) -> agent::AgentEvent {
+        agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: agent::ItemContent::AssistantMessage {
+                text: text.into(),
+                summarized: false,
+            },
+        })
+    }
+
+    impl ScriptedThread {
+        /// The thread holding `events`, its window starting at record
+        /// `held_from`.
+        pub(in crate::chat) fn new(
+            cx: &mut TestAppContext,
+            events: Vec<agent::AgentEvent>,
+            held_from: usize,
+            running: bool,
+        ) -> Self {
+            use tcode_runtime::pipe::{HostServices, spawn_host};
+            use tcode_services::store::SessionStore;
+
+            cx.update(crate::theme::init);
+            cx.update(crate::markdown::init);
+            let data_root = crate::store::tests::scratch_root("chat-glide-test");
+            let host = spawn_host(
+                SessionStore::open_at(data_root.clone()).expect("test session store"),
+                HostServices::default(),
+            )
+            .expect("spawn test host");
+            let mut status = smol::block_on(host.update_state_for_test(|state, cx| {
+                let id = state.start_draft("glide".into(), std::env::temp_dir(), cx);
+                state.session_status_snapshot(&id).unwrap()
+            }))
+            .unwrap();
+            host.shutdown_blocking().unwrap();
+            let _ = std::fs::remove_dir_all(data_root);
+            status.session_id = THREAD.into();
+            status.draft = false;
+            let mut meta = tcode_core::project::SessionMeta::new(
+                agent::ProviderKind::Codex,
+                std::env::temp_dir(),
+                None,
+            );
+            meta.id = THREAD.into();
+
+            let (to_host, outgoing) = async_channel::unbounded::<String>();
+            let (incoming, from_host) = async_channel::unbounded::<String>();
+            let link = tcode_client::HostLink::new(to_host, from_host);
+            let executor = cx.background_executor.clone();
+            let pump = cx.background_executor.spawn({
+                let link = link.clone();
+                async move {
+                    link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                        .await;
+                }
+            });
+            let store = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    link,
+                    crate::store::WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    false,
+                    cx,
+                )
+            });
+            crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
+            store.update(cx, |store, cx| store.select_session(THREAD.into(), cx));
+            let mut thread = Self {
+                store,
+                incoming,
+                records: Vec::new(),
+                held_from,
+                status,
+                outgoing,
+                _pump: pump,
+            };
+            thread.event(
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            );
+            thread.event(
+                Topic::Index,
+                ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: vec![meta],
+                    projects: vec![],
+                }),
+            );
+            thread.send_window(events);
+            thread.set_running(running);
+            thread
+        }
+
+        pub(in crate::chat) fn event(&self, topic: Topic, event: ServerEvent) {
+            self.incoming
+                .try_send(
+                    tcode_protocol::encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+
+        pub(in crate::chat) fn turns(&self) -> u64 {
+            self.records
+                .iter()
+                .filter(|record| matches!(record.event, agent::AgentEvent::TurnStarted { .. }))
+                .count() as u64
+        }
+
+        /// The host's status for the thread: whether its last turn runs.
+        pub(in crate::chat) fn set_running(&mut self, running: bool) {
+            self.status.activity.turn_running = running;
+            self.status.running_turn = running.then(|| tcode_core::session::RunningTurn {
+                turn: self.turns() - 1,
+                started_at: None,
+            });
+            self.event(
+                Topic::SessionStatus {
+                    session_id: THREAD.into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(self.status.clone())),
+            );
+        }
+
+        /// The host sends its whole window, holding `events` after what it
+        /// sent before: what a client folds when it opens the thread, or
+        /// when it catches up on the records it missed.
+        pub(in crate::chat) fn send_window(&mut self, events: Vec<agent::AgentEvent>) {
+            self.records
+                .extend(events.into_iter().map(StoredEvent::from));
+            let end = self.records.len() as u64;
+            let total_turns = self.turns();
+            self.event(
+                events_topic(),
+                ServerEvent::SessionSnapshot {
+                    from: self.held_from as u64,
+                    end,
+                    records: self.records[self.held_from..].to_vec(),
+                    total: end,
+                    total_turns,
+                    truncated: false,
+                },
+            );
+        }
+
+        /// Answer the history page the client asked for with at most `records`
+        /// of the records before the window, and say where it ended. `None`
+        /// when it asked for none. A client keeps one page in flight.
+        pub(in crate::chat) fn answer_page(&mut self, records: usize) -> Option<u64> {
+            use tcode_protocol::{ClientPayload, Query, QueryResponse};
+            let asked: Vec<_> = std::iter::from_fn(|| self.outgoing.try_recv().ok())
+                .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+                .filter_map(|message| match message.payload {
+                    ClientPayload::Query(Query::SessionHistoryPage { before, .. }) => {
+                        Some((message.id, before))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(asked.len() <= 1, "one page in flight: {asked:?}");
+            let (id, before) = *asked.first()?;
+            let from = (before as usize).saturating_sub(records);
+            self.held_from = from;
+            self.incoming
+                .try_send(
+                    tcode_protocol::encode_line(&HostMessage::QueryResult {
+                        id,
+                        result: Ok(QueryResponse::SessionHistoryPage {
+                            records: self.records[from..before as usize].to_vec(),
+                            from: from as u64,
+                            end: before,
+                            truncated: false,
+                        }),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            Some(before)
+        }
+
+        /// The host records `event` and streams it, as it does while the
+        /// agent works.
+        pub(in crate::chat) fn live(&mut self, event: agent::AgentEvent) {
+            let record = StoredEvent::from(event);
+            self.records.push(record.clone());
+            self.event(events_topic(), ServerEvent::SessionEvent(record));
+        }
+
+        /// Deliver what the host sent.
+        pub(in crate::chat) fn deliver(&self, cx: &mut VisualTestContext) {
+            cx.run_until_parked();
+            self.store
+                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        }
+
+        /// A chat view on the thread, at desktop size.
+        pub(in crate::chat) fn open<'a>(
+            &self,
+            cx: &'a mut TestAppContext,
+        ) -> (Entity<ChatView>, &'a mut VisualTestContext) {
+            self.open_at(gpui::size(gpui::px(1_024.), gpui::px(700.)), cx)
+        }
+
+        pub(in crate::chat) fn open_at<'a>(
+            &self,
+            size: gpui::Size<gpui::Pixels>,
+            cx: &'a mut TestAppContext,
+        ) -> (Entity<ChatView>, &'a mut VisualTestContext) {
+            let store = self.store.clone();
+            let window_state = cx.new(|_| WindowState::new(false));
+            let (view, cx) =
+                cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+            cx.simulate_resize(size);
+            (view, cx)
+        }
+    }
 }
