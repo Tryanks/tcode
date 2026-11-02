@@ -1,8 +1,9 @@
 use std::borrow::BorrowMut;
 
 use gpui::{
-    AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Stateful, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Axis, Div, ElementId, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Size, Stateful, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::motion::{Presence, PresenceSample, Transition, TransitionId, transition};
 
@@ -13,12 +14,14 @@ mod scene;
 
 pub(crate) mod drag_ghost;
 pub(crate) mod keyed;
-pub(crate) use keyed::keyed;
+pub(crate) use keyed::{keyed, keyed_across};
 #[cfg(any(
     test,
     all(preview_backend, any(target_os = "macos", target_os = "ios"))
 ))]
 pub(crate) mod native_fade;
+pub(crate) mod reflow;
+pub(crate) use reflow::reflow;
 pub(crate) mod resize_glide;
 
 pub(crate) mod owned;
@@ -135,7 +138,20 @@ impl<T> Shown<T> {
         Reveal {
             id: child_id(&self.id, "fold"),
             progress: self.progress,
+            axis: Axis::Vertical,
             child: self.frame(content).w_full().into_any_element(),
+        }
+        .into_any_element()
+    }
+
+    /// Beside other content in a row: grows to its width and fades in,
+    /// shrinks and fades out, so what is beside it moves over as it does.
+    pub(crate) fn fold_across(&self, content: impl IntoElement) -> AnyElement {
+        Reveal {
+            id: child_id(&self.id, "fold-across"),
+            progress: self.progress,
+            axis: Axis::Horizontal,
+            child: self.frame(content).flex_none().into_any_element(),
         }
         .into_any_element()
     }
@@ -172,6 +188,8 @@ impl<T> Shown<T> {
 struct Reveal {
     id: ElementId,
     progress: f32,
+    /// The extent it folds: height in a column, width in a row.
+    axis: Axis,
     child: AnyElement,
 }
 
@@ -212,28 +230,33 @@ impl gpui::Element for Reveal {
         cx: &mut App,
     ) -> (gpui::LayoutId, RevealLayout) {
         let global_id = global_id.expect("Reveal has an id");
-        let measured = window.with_element_state(global_id, |height: Option<Pixels>, _| {
-            (height, height.unwrap_or_default())
+        let measured = window.with_element_state(global_id, |size: Option<Size<Pixels>>, _| {
+            (size, size.unwrap_or_default())
         });
+        let folded = |size: Size<Pixels>, progress: f32| {
+            let mut style = gpui::Style::default();
+            match self.axis {
+                Axis::Vertical => {
+                    style.size.width = gpui::relative(1.).into();
+                    style.size.height = (size.height * progress.clamp(0., 1.)).into();
+                }
+                Axis::Horizontal => {
+                    style.flex_shrink = 0.;
+                    style.size.width = (size.width * progress.clamp(0., 1.)).into();
+                    style.size.height = size.height.into();
+                }
+            }
+            style
+        };
         match measured {
-            Some(height) if self.progress < 1. => {
-                let mut style = gpui::Style::default();
-                style.size.width = gpui::relative(1.).into();
-                style.size.height = (height * self.progress.clamp(0., 1.)).into();
-                (
-                    window.request_layout(style, None, cx),
-                    RevealLayout::Clipped,
-                )
-            }
-            None if self.progress <= 0. => {
-                let mut style = gpui::Style::default();
-                style.size.width = gpui::relative(1.).into();
-                style.size.height = px(0.).into();
-                (
-                    window.request_layout(style, None, cx),
-                    RevealLayout::Clipped,
-                )
-            }
+            Some(size) if self.progress < 1. => (
+                window.request_layout(folded(size, self.progress), None, cx),
+                RevealLayout::Clipped,
+            ),
+            None if self.progress <= 0. => (
+                window.request_layout(folded(Size::default(), 0.), None, cx),
+                RevealLayout::Clipped,
+            ),
             _ => (self.child.request_layout(window, cx), RevealLayout::Plain),
         }
     }
@@ -248,31 +271,31 @@ impl gpui::Element for Reveal {
         cx: &mut App,
     ) {
         let global_id = global_id.expect("Reveal has an id");
-        let height = match layout {
+        let size = match layout {
             RevealLayout::Plain => {
                 self.child.prepaint(window, cx);
-                bounds.size.height
+                bounds.size
             }
             RevealLayout::Clipped => {
-                let height = self
-                    .child
-                    .layout_as_root(
-                        gpui::size(
-                            gpui::AvailableSpace::Definite(bounds.size.width),
-                            gpui::AvailableSpace::MinContent,
-                        ),
-                        window,
-                        cx,
-                    )
-                    .height;
+                let space = match self.axis {
+                    Axis::Vertical => gpui::size(
+                        gpui::AvailableSpace::Definite(bounds.size.width),
+                        gpui::AvailableSpace::MinContent,
+                    ),
+                    Axis::Horizontal => gpui::size(
+                        gpui::AvailableSpace::MaxContent,
+                        gpui::AvailableSpace::MinContent,
+                    ),
+                };
+                let size = self.child.layout_as_root(space, window, cx);
                 window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
                     self.child.prepaint_at(bounds.origin, window, cx);
                 });
-                height
+                size
             }
         };
-        let changed = window.with_element_state(global_id, |measured: Option<Pixels>, _| {
-            (measured != Some(height), height)
+        let changed = window.with_element_state(global_id, |measured: Option<Size<Pixels>>, _| {
+            (measured != Some(size), size)
         });
         if changed && matches!(layout, RevealLayout::Clipped) {
             window.request_animation_frame();

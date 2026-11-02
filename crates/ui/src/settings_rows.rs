@@ -68,6 +68,39 @@ pub fn settings_group(
         .child(crate::material::group(cx).children(rows))
 }
 
+/// Keyed rows of a [`crate::material::grouped`] card, each built by `build`
+/// and carrying the hairline above it, so a line comes, goes and moves with
+/// its row instead of appearing or vanishing between two that are moving
+/// ([`crate::motion::keyed`]). The first row's line sits under the card's
+/// top border, which clips it, so the row that becomes first slides its
+/// line out of sight as the one above it folds away.
+pub fn grouped_keyed<T: Clone + 'static, C: std::borrow::BorrowMut<App>>(
+    id: impl Into<gpui::ElementId>,
+    items: impl IntoIterator<Item = (SharedString, T)>,
+    window: &mut Window,
+    cx: &mut C,
+    mut build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
+) -> AnyElement {
+    crate::motion::keyed(id, items, window, cx, |key, value, window, cx| {
+        let row = build(key, value, window, cx);
+        hairlined(row, std::borrow::Borrow::<App>::borrow(&*cx))
+    })
+    .render(v_flex().w_full().mt(px(-1.)))
+}
+
+/// `row` with the hairline a [`crate::material::grouped`] card draws above
+/// it, for a row that comes and goes under another.
+pub fn hairlined(row: impl IntoElement, cx: &App) -> AnyElement {
+    v_flex()
+        .w_full()
+        .child(crate::material::row_hairline(
+            px(crate::material::CARD_INSET),
+            cx,
+        ))
+        .child(row)
+        .into_any_element()
+}
+
 /// The note under a [`settings_group`]'s card, aligned with its rows' text:
 /// what holds for the group as a whole.
 pub fn footnote(text: impl Into<SharedString>, compact: bool, cx: &App) -> gpui::Div {

@@ -17,7 +17,7 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Bounds, Div, ElementId, IntoElement, ParentElement as _, Pixels, Point,
+    AnyElement, App, Axis, Bounds, Div, ElementId, IntoElement, ParentElement as _, Pixels, Point,
     SharedString, Window,
 };
 use gpui_base::motion::{MotionStatus, spring, transition, transition_with_status};
@@ -111,9 +111,32 @@ pub(crate) fn keyed<T: Clone + 'static, C: BorrowMut<App>>(
     items: impl IntoIterator<Item = (SharedString, T)>,
     window: &mut Window,
     cx: &mut C,
+    build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
+) -> Keyed {
+    keyed_along(id.into(), Axis::Vertical, items, window, cx, build)
+}
+
+/// [`keyed`] for rows that sit side by side — chips, tabs, buttons in a row
+/// or a wrapping row: an arriving or leaving one folds along its width, so
+/// its neighbours move over as it does.
+pub(crate) fn keyed_across<T: Clone + 'static, C: BorrowMut<App>>(
+    id: impl Into<ElementId>,
+    items: impl IntoIterator<Item = (SharedString, T)>,
+    window: &mut Window,
+    cx: &mut C,
+    build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
+) -> Keyed {
+    keyed_along(id.into(), Axis::Horizontal, items, window, cx, build)
+}
+
+fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
+    id: ElementId,
+    axis: Axis,
+    items: impl IntoIterator<Item = (SharedString, T)>,
+    window: &mut Window,
+    cx: &mut C,
     mut build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> Keyed {
-    let id = id.into();
     let items: Vec<(SharedString, T)> = items.into_iter().collect();
     let app: &mut App = cx.borrow_mut();
     let state = window.use_keyed_state(super::child_id(&id, "keyed"), app, |_, _| ListState {
@@ -204,7 +227,10 @@ pub(crate) fn keyed<T: Clone + 'static, C: BorrowMut<App>>(
                     jumped,
                     bounds: bounds.clone(),
                     origin: origin.clone(),
-                    child: shown.fold(content),
+                    child: match axis {
+                        Axis::Vertical => shown.fold(content),
+                        Axis::Horizontal => shown.fold_across(content),
+                    },
                 }
                 .into_any_element(),
             )
@@ -449,5 +475,60 @@ mod tests {
         cx.update(|_, cx| cx.set_reduce_motion(true));
         reorder(vec!["a", "b"], cx);
         assert_eq!((top("a", cx), top("b", cx)), (first, second));
+    }
+
+    struct Chips(Vec<&'static str>);
+
+    impl Render for Chips {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let items = self.0.iter().map(|name| (SharedString::from(*name), *name));
+            let chips = super::keyed_across("chips", items, window, cx, |_, name, _, _| {
+                let name = *name;
+                div()
+                    .debug_selector(move || name.to_string())
+                    .w(px(40.))
+                    .h(px(20.))
+                    .into_any_element()
+            });
+            div()
+                .size_full()
+                .child(chips.render(div().flex().flex_row().flex_wrap()))
+        }
+    }
+
+    /// A chip that goes narrows away, so the chip after it moves over as it
+    /// does rather than jumping into its place; one that arrives widens in.
+    #[gpui::test]
+    fn a_chip_narrows_away_and_its_neighbour_moves_over(cx: &mut TestAppContext) {
+        let (chips, cx) = cx.add_window_view(|_, _| Chips(vec!["a", "b"]));
+        draw_settled(cx);
+        let left = |name: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(name).expect("the chip is drawn").left()
+        };
+        let (first, second) = (left("a", cx), left("b", cx));
+        let set = |order: Vec<&'static str>, cx: &mut VisualTestContext| {
+            chips.update(cx, |chips, cx| {
+                chips.0 = order;
+                cx.notify();
+            });
+            draw(cx);
+        };
+
+        set(vec!["b"], cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let moving = left("b", cx);
+        assert!(moving > first && moving < second, "b is on its way over");
+        draw_settled(cx);
+        assert!(cx.debug_bounds("a").is_none(), "gone once narrowed away");
+        assert_eq!(left("b", cx), first);
+
+        set(vec!["a", "b"], cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let pushed = left("b", cx);
+        assert!(pushed > first && pushed < second, "a widens in, pushing b");
+        draw_settled(cx);
+        assert_eq!(left("b", cx), second);
     }
 }
