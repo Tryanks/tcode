@@ -198,7 +198,9 @@ pub struct ChatView {
     /// Whole tool outputs fetched for the open session, by item id.
     full_outputs: HashMap<String, FullOutput>,
     session_key: Option<String>,
-    /// Turn selected from a command-palette content hit.
+    /// The turn the reader jumped to (a palette hit, a thread anchor),
+    /// marked until the thread changes, the keyboard is put to use
+    /// elsewhere, or a press lands inside it.
     highlighted_turn: Option<usize>,
     /// 1s ticker kept alive while an error card shows a scheduled resume.
     _limit_tick: Option<Task<()>>,
@@ -267,10 +269,11 @@ impl ChatView {
 
         let selection = transcript_selection(cx.entity().downgrade(), cx);
         let focus_handle = cx.focus_handle();
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
                 this.selection
                     .update(cx, |selection, cx| selection.clear(cx));
+                this.dismiss_highlight(cx);
             }),
             // A press on the view's blank space focuses the view itself; the
             // keyboard goes on to the composer, as it does from the pane.
@@ -301,6 +304,13 @@ impl ChatView {
             }),
         ];
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
+        // The drawer is inside the view: the keyboard entering it does not
+        // leave the view, but it does leave the transcript.
+        subscriptions.push(cx.on_focus_in(
+            &gpui::Focusable::focus_handle(terminal_drawer.read(cx), cx),
+            window,
+            |this, _, cx| this.dismiss_highlight(cx),
+        ));
         let pull_requests = cx.new(|cx| {
             crate::pull_requests::PullRequestsPanel::new(
                 workspace_store.clone(),
@@ -367,6 +377,13 @@ impl ChatView {
 
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// The jumped-to turn's mark goes; its colour transition fades it out.
+    fn dismiss_highlight(&mut self, cx: &mut Context<Self>) {
+        if self.highlighted_turn.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_edges(&mut self, edges: WindowEdges, cx: &mut Context<Self>) {
@@ -858,6 +875,14 @@ impl ChatView {
                     .debug_selector(|| "chat-composer".into())
                     .w_full()
                     .flex_none()
+                    // The keyboard rests in the composer while the reader
+                    // reads; a key or a press there puts it to use. Capture,
+                    // so the composer's own handling still runs and cannot
+                    // hide it.
+                    .capture_key_down(cx.listener(|this, _, _, cx| this.dismiss_highlight(cx)))
+                    .capture_any_mouse_down(
+                        cx.listener(|this, _, _, cx| this.dismiss_highlight(cx)),
+                    )
                     .child(composer),
             );
 
