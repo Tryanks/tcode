@@ -93,17 +93,112 @@ pub(crate) fn changed_files(
     } else {
         changes.len().min(3)
     };
-    let mut body = h_flex().w_full().px_1().gap_1p5().flex_wrap();
-    for (file_index, (change, on_click)) in changes.iter().zip(open_files).take(visible).enumerate()
-    {
-        let display = crate::workspace_walk::relativize_to_workspace(&change.path, cwd);
-        let name = Path::new(&display)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| display.clone());
-        let (added, deleted) = diff_stats(change.diff.as_deref());
-        let chip = Button::new(SharedString::from(format!(
-            "changed-file-chip-{index}-{file_index}"
+    // Showing them all adds chips to a row that wraps: each widens in, the
+    // control glides to the row's new end, and the row's height glides to
+    // the lines it gained; showing fewer takes them back.
+    let mut chips: Vec<(SharedString, Chip)> = changes
+        .iter()
+        .take(visible)
+        .map(|change| {
+            let display = crate::workspace_walk::relativize_to_workspace(&change.path, cwd);
+            let name = Path::new(&display)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| display.clone());
+            let (added, deleted) = diff_stats(change.diff.as_deref());
+            (
+                SharedString::from(format!("file-{}", change.path)),
+                Chip::File {
+                    name,
+                    display,
+                    path: change.path.clone(),
+                    added,
+                    deleted,
+                },
+            )
+        })
+        .collect();
+    if changes.len() > 3 {
+        chips.push((
+            SharedString::from("more"),
+            Chip::More(
+                if show_all {
+                    crate::tr!("chat.show_fewer_files")
+                } else {
+                    crate::tr!("chat.more_files", count = changes.len() - 3)
+                }
+                .into_owned()
+                .into(),
+            ),
+        ));
+    }
+    let mut handlers: std::collections::HashMap<SharedString, ClickHandler> = chips
+        .iter()
+        .map(|(key, _)| key.clone())
+        .zip(open_files)
+        .collect();
+    handlers.insert(SharedString::from("more"), toggle_more);
+    let count = chips.len() as u64;
+    let cwd = cwd.to_path_buf();
+    let body = crate::motion::Sampled::new(move |window, cx| {
+        let glide = crate::motion::GlideState::keyed(
+            SharedString::from(format!("changed-files-glide-{index}")),
+            window,
+            cx,
+        );
+        let row = crate::motion::keyed_across(
+            ("changed-files", index),
+            chips,
+            window,
+            cx,
+            |key, chip, _, cx| {
+                let on_click = handlers
+                    .remove(key)
+                    .unwrap_or_else(|| Box::new(|_, _, _| {}));
+                chip_element(index, &cwd, key, chip, on_click, cx)
+            },
+        )
+        .render(h_flex().w_full().px_1().gap_1p5().flex_wrap());
+        crate::motion::SizeGlide::new(&glide, row)
+            .on_change(count)
+            .into_any_element()
+    });
+    content = content.child(body);
+
+    content.into_any_element()
+}
+
+/// What one place in the files row holds.
+#[derive(Clone)]
+enum Chip {
+    File {
+        name: String,
+        display: String,
+        path: String,
+        added: u32,
+        deleted: u32,
+    },
+    /// The control that shows more files, or fewer.
+    More(SharedString),
+}
+
+fn chip_element(
+    index: usize,
+    cwd: &Path,
+    key: &SharedString,
+    chip: &Chip,
+    on_click: ClickHandler,
+    cx: &App,
+) -> AnyElement {
+    match chip {
+        Chip::File {
+            name,
+            display,
+            path,
+            added,
+            deleted,
+        } => Button::new(SharedString::from(format!(
+            "changed-file-chip-{index}-{key}"
         )))
         .ghost()
         .outline()
@@ -111,7 +206,7 @@ pub(crate) fn changed_files(
         .aria_label(format!("{}: {display}", crate::tr!("chat.view_diff")))
         .font_family(cx.theme().mono_font_family.clone())
         .text_token(&cx.theme().tokens.typography.xs)
-        .child(name)
+        .child(name.clone())
         .child(
             div()
                 .text_color(cx.theme().success)
@@ -121,49 +216,30 @@ pub(crate) fn changed_files(
             div()
                 .text_color(cx.theme().danger)
                 .child(format!("-{deleted}")),
-        );
-        body = body.child(
-            chip.on_click(on_click)
-                .context_menu({
-                    let path = change.path.clone();
-                    let cwd = cwd.to_path_buf();
-                    move |menu, _, _| {
-                        menu.menu(
-                            crate::tr!("chat.view_diff").into_owned(),
-                            Box::new(super::super::OpenFileDiff {
-                                turn: index,
-                                path: path.clone(),
-                            }),
-                        )
-                        .separator()
-                        .path_items(&path, Some(&cwd))
-                    }
-                })
-                .into_any_element(),
-        );
+        )
+        .on_click(on_click)
+        .context_menu({
+            let path = path.clone();
+            let cwd = cwd.to_path_buf();
+            move |menu, _, _| {
+                menu.menu(
+                    crate::tr!("chat.view_diff").into_owned(),
+                    Box::new(super::super::OpenFileDiff {
+                        turn: index,
+                        path: path.clone(),
+                    }),
+                )
+                .separator()
+                .path_items(&path, Some(&cwd))
+            }
+        })
+        .into_any_element(),
+        Chip::More(label) => {
+            quiet_control(("changed-files-more", index), label.clone(), on_click, cx)
+                .font_family(cx.theme().mono_font_family.clone())
+                .into_any_element()
+        }
     }
-    if changes.len() > 3 {
-        let hidden = changes.len() - 3;
-        body = body.child(
-            quiet_control(
-                ("changed-files-more", index),
-                if show_all {
-                    crate::tr!("chat.show_fewer_files")
-                } else {
-                    crate::tr!("chat.more_files", count = hidden)
-                }
-                .into_owned()
-                .into(),
-                toggle_more,
-                cx,
-            )
-            .font_family(cx.theme().mono_font_family.clone())
-            .into_any_element(),
-        );
-    }
-    content = content.child(body);
-
-    content.into_any_element()
 }
 
 pub(crate) fn quiet_control(

@@ -791,25 +791,20 @@ pub(in crate::chat) fn thumbnails_titled(
         return None;
     }
     let session_id = ctx.session_id();
-    let cx = ctx.app();
-    let tiles = (0..call.images.len()).map(|index| {
-        super::components::images::item_tile(
-            call.entry,
-            index,
-            format!("{title} · {}", index + 1),
-            None,
-            &session_id,
-            cx,
-        )
-    });
-    Some(
-        h_flex()
-            .w_full()
-            .gap_2()
-            .flex_wrap()
-            .children(tiles)
-            .into_any_element(),
-    )
+    let tiles: Vec<_> = (0..call.images.len())
+        .map(|index| {
+            let tile = super::components::images::Tile::of(
+                call.entry,
+                index,
+                format!("{title} · {}", index + 1),
+            );
+            (tile.key(), tile)
+        })
+        .collect();
+    let id = SharedString::from(format!("call-tiles-{}", call.id()));
+    Some(super::components::images::sampled_tile_row(
+        id, tiles, session_id,
+    ))
 }
 
 /// Code a call ran, folded to its size until asked for, then highlighted

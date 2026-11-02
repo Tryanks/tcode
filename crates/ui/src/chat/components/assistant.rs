@@ -178,7 +178,7 @@ pub(crate) fn assistant(
 
 /// Reserve action-row height so hover visibility never shifts the timeline.
 pub(crate) fn reserve_action_row(
-    actions: Div,
+    actions: impl IntoElement,
     group_key: SharedString,
     pinned: bool,
     compact: bool,

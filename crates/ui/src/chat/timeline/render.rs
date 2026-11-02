@@ -135,6 +135,7 @@ impl ChatView {
                         images,
                         cwd,
                         self.session_key.as_deref().unwrap_or_default(),
+                        window,
                         cx,
                     ));
                     for entry in images {
