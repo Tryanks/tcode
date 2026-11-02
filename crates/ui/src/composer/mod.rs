@@ -175,6 +175,11 @@ pub struct Composer {
     /// Whether the desktop control row was last rendered folded, so the
     /// frame that folds or unfolds it glides its controls to their places.
     control_row_folded: Option<bool>,
+    /// The composer's motion that must carry on when the window draws it
+    /// under another parent: the chat moves between the phone's thread page
+    /// and a pane as the window turns compact or wide, and that turn is what
+    /// brings in or takes away the parts only one layout has.
+    motion: crate::motion::owned::Owned,
     /// The inline trigger (`@`/`/`/`$`) active at the cursor, recomputed on every
     /// input change. Drives the trigger menu.
     active_trigger: Option<ComposerTrigger>,
@@ -392,6 +397,7 @@ impl Composer {
             model_picker_token: 0,
             control_row_narrow: Rc::default(),
             control_row_folded: None,
+            motion: Default::default(),
             active_trigger: None,
             menu_highlight: 0,
             menu_rows_seen: Rc::default(),
@@ -1251,13 +1257,16 @@ impl Composer {
     /// The id of a part's motion for the thread the composer is showing, so
     /// what one thread showed never folds away over another's.
     fn motion_id(&self, part: impl std::fmt::Display) -> gpui::ElementId {
-        gpui::ElementId::Name(
-            format!(
-                "composer:{}:{part}",
-                self.session_id.as_deref().unwrap_or_default()
-            )
-            .into(),
+        gpui::ElementId::Name(self.motion_key(part))
+    }
+
+    /// [`Self::motion_id`] as a key of the composer's own motion.
+    fn motion_key(&self, part: impl std::fmt::Display) -> gpui::SharedString {
+        format!(
+            "composer:{}:{part}",
+            self.session_id.as_deref().unwrap_or_default()
         )
+        .into()
     }
 
     /// The chip rows above the field: terminal contexts, review comments and
@@ -1486,16 +1495,19 @@ impl Render for Composer {
             && cx
                 .try_global::<crate::remote::ClientAttachment>()
                 .is_some_and(|client| client.host().supports_image_picker());
-        // It narrows away when the host goes offline, and widens back.
-        let attach_menu = crate::motion::shown(
-            self.motion_id("attach-menu"),
-            attach_shown.then_some(()),
-            window,
-            cx,
-        )
-        .map(|shown| {
-            shown.fold_across_gap(px(4.), div().flex_none().child(self.render_attach_menu(cx)))
-        });
+        // It narrows away when the host goes offline, and widens back, and
+        // as the window turns wide.
+        let attach_menu = self
+            .motion
+            .shown(
+                self.motion_key("attach-menu"),
+                attach_shown.then_some(()),
+                window,
+                cx,
+            )
+            .map(|shown| {
+                shown.fold_across_gap(px(4.), div().flex_none().child(self.render_attach_menu(cx)))
+            });
         // The model picker and the traits chip widen in once the thread has
         // a model (and the model traits), and narrow away as they go, drawn
         // with the name they last had.
@@ -1877,19 +1889,28 @@ impl Render for Composer {
             panels.push(column_fold(&shown, panel));
         }
         panels.extend(self.render_queue_strip(window, cx));
-        // The checkout row under the card carries the space above it.
-        let checkout = crate::motion::shown(
-            self.motion_id("checkout"),
-            composer_state
-                .checkout
-                .filter(|_| !self.compact && !readonly),
-            window,
-            cx,
-        )
-        .map(|shown| {
-            let row = self.render_checkout_row(&shown.value, cx);
-            shown.fold(div().w_full().pt_2().child(row))
-        });
+        // The checkout row under the card carries the space above it; it
+        // folds away as the window turns compact.
+        let checkout = self
+            .motion
+            .shown(
+                self.motion_key("checkout"),
+                composer_state
+                    .checkout
+                    .filter(|_| !self.compact && !readonly),
+                window,
+                cx,
+            )
+            .map(|shown| {
+                let row = self.render_checkout_row(&shown.value, cx);
+                shown.fold(
+                    div()
+                        .debug_selector(|| "composer-checkout".into())
+                        .w_full()
+                        .pt_2()
+                        .child(row),
+                )
+            });
 
         // Mirror the chat timeline's centered content column (same page
         // padding, same max width) so the composer lines up with the messages

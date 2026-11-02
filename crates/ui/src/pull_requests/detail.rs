@@ -211,6 +211,10 @@ pub struct PullRequestView {
     pub(super) file_filter: Option<(Entity<crate::widgets::input::InputState>, Subscription)>,
     /// The phone header's chip row, which scrolls sideways.
     chips_scroll: ScrollHandle,
+    /// The view's motion that must carry on when the window draws the view
+    /// under another parent: the shell's page as it turns compact, the
+    /// panel's tab as it turns wide.
+    pub(super) motion: crate::motion::owned::Owned,
     wake: Option<(u64, Task<()>)>,
     _subscriptions: [Subscription; 2],
 }
@@ -278,6 +282,7 @@ impl PullRequestView {
             file_column: true,
             file_filter: None,
             chips_scroll: ScrollHandle::new(),
+            motion: Default::default(),
             wake: None,
             _subscriptions: subscriptions,
         }
@@ -1397,14 +1402,14 @@ impl PullRequestView {
                 .is_some_and(|conversation| conversation.permissions.update);
         let editing = self.writes().and_then(|writes| writes.title.as_ref());
         // The editor and the title cross-fade where they stand.
-        let editor = gpui_base::motion::transition(
-            id("title-editing"),
+        let editor = self.motion.transition(
+            SharedString::from(id("title-editing").to_string()),
             if editing.is_some() && !compact {
                 1.
             } else {
                 0.
             },
-            crate::motion::settle(),
+            &crate::motion::owned::Curve::settle(),
             window,
             cx,
         );
@@ -2401,15 +2406,12 @@ impl Render for PullRequestView {
             ));
         }
         // Another pull request, a stack layer chosen from the map, fades in in this one's place.
-        let page = crate::motion::appear(
-            SharedString::from(format!("pr-detail-page-{}", key_id(self.current.as_ref()))),
-            true,
-            window,
-            cx,
-        );
+        let page = self
+            .motion
+            .entered("page", key_id(self.current.as_ref()), window, cx);
         v_flex()
             .size_full()
-            .opacity(page.progress)
+            .opacity(page)
             .min_w_0()
             .on_action(cx.listener(Self::change_link))
             .on_action(cx.listener(Self::change_watch))

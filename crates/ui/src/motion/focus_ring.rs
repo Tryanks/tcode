@@ -7,6 +7,11 @@
 //! whose handle Tcode holds, fading over `SETTLE` as the keyboard brings focus
 //! to it and takes it away. The fades are kept by focus handle for the whole
 //! app: at rest it holds the one focused control, whatever the windows draw.
+//!
+//! gpui-base's own controls (Button, Switch, Checkbox, Radio, Tab) draw
+//! their keyboard focus only through `focus_visible`, so Tcode's facades
+//! hand each its focus handle ([`handle`]) and draw the ring over it with
+//! [`Ringed`]. Remove both once gpui-base's controls fade their own ring.
 
 use std::cell::RefCell;
 
@@ -16,8 +21,9 @@ use std::time::Instant;
 use web_time::Instant;
 
 use gpui::{
-    AbsoluteLength, App, Bounds, BoxShadow, Corners, CornersRefinement, FocusHandle, Global,
-    Pixels, WeakFocusHandle, Window,
+    AbsoluteLength, AnyElement, App, Bounds, BoxShadow, Corners, CornersRefinement, ElementId,
+    FocusHandle, Global, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels,
+    WeakFocusHandle, Window,
 };
 
 /// A ring's fade: from where, to where, since when.
@@ -122,6 +128,134 @@ pub(crate) fn paint(
     );
 }
 
+/// The focus handle of the control `id`, kept under it, for a control that
+/// would otherwise keep its handle to itself; a tab stop.
+pub(crate) fn handle(id: &ElementId, window: &mut Window, cx: &mut App) -> FocusHandle {
+    window
+        .use_keyed_state(super::child_id(id, "focus"), cx, |_, cx| cx.focus_handle())
+        .read(cx)
+        .clone()
+        .tab_index(0)
+        .tab_stop(true)
+}
+
+/// `child`, a control that tracks `handle`, with its keyboard focus ring
+/// painted over it ([`paint`]), rounded by `corners`. It lays out as `child`
+/// does and adds nothing to the element path.
+pub(crate) struct Ringed {
+    child: Option<AnyElement>,
+    handle: FocusHandle,
+    ring: BoxShadow,
+    corners: CornersRefinement<AbsoluteLength>,
+}
+
+impl Ringed {
+    pub(crate) fn new(
+        child: impl IntoElement,
+        handle: &FocusHandle,
+        corners: CornersRefinement<AbsoluteLength>,
+        cx: &App,
+    ) -> Self {
+        Self {
+            child: Some(child.into_any_element()),
+            handle: handle.clone(),
+            ring: crate::material::focus_ring(cx),
+            corners,
+        }
+    }
+
+    /// The ring at `opacity` of its colour: a control dimmed as a whole
+    /// dims its ring with it.
+    pub(crate) fn opacity(mut self, opacity: f32) -> Self {
+        self.ring.color = self.ring.color.opacity(opacity);
+        self
+    }
+}
+
+/// The same radius at every corner.
+pub(crate) fn corners(radius: Pixels) -> CornersRefinement<AbsoluteLength> {
+    corners_of(Corners::all(radius))
+}
+
+/// A radius per corner.
+pub(crate) fn corners_of(corners: Corners<Pixels>) -> CornersRefinement<AbsoluteLength> {
+    let radius = |radius: Pixels| Some(AbsoluteLength::Pixels(radius));
+    CornersRefinement {
+        top_left: radius(corners.top_left),
+        top_right: radius(corners.top_right),
+        bottom_right: radius(corners.bottom_right),
+        bottom_left: radius(corners.bottom_left),
+    }
+}
+
+impl IntoElement for Ringed {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for Ringed {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, AnyElement) {
+        let mut child = self
+            .child
+            .take()
+            .expect("a ringed control is laid out once");
+        (child.request_layout(window, cx), child)
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        child: &mut AnyElement,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        child: &mut AnyElement,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        child.paint(window, cx);
+        paint(
+            &self.handle,
+            self.ring.clone(),
+            bounds,
+            &self.corners,
+            window,
+            cx,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -134,18 +268,38 @@ mod tests {
     use super::FocusRings;
     use crate::test_frames::{draw, draw_settled};
 
-    /// Two raw clickables, as `accessible_clickable` makes them.
-    struct Two;
+    /// A raw clickable, as `accessible_clickable` makes it, and each of
+    /// gpui-base's controls as Tcode's facades draw them.
+    struct Controls;
 
-    impl Render for Two {
+    /// How many tab stops [`Controls`] draws.
+    const STOPS: usize = 7;
+
+    impl Render for Controls {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let clickable = |id: &'static str| {
-                crate::material::accessible_clickable(div().size(px(40.)), id, Role::Button, id, cx)
+            use crate::widgets::{
+                Button, Checkbox, Switch,
+                choice::{Choice, ChoiceGroup},
+                tabs::{TabBar, TabItem},
             };
             div()
                 .size_full()
-                .child(clickable("first"))
-                .child(clickable("second"))
+                .child(crate::material::accessible_clickable(
+                    div().size(px(40.)),
+                    "clickable",
+                    Role::Button,
+                    "clickable",
+                    cx,
+                ))
+                .child(Button::new("button").label("Button"))
+                .child(Switch::new("switch").label("Switch"))
+                .child(Checkbox::new("checkbox").label("Checkbox"))
+                .child(
+                    TabBar::new("tabs")
+                        .item(TabItem::new("tab-a", "A").selected(true))
+                        .item(TabItem::new("tab-b", "B")),
+                )
+                .child(ChoiceGroup::new("choices").choice(Choice::new("choice", "Choice")))
         }
     }
 
@@ -175,23 +329,26 @@ mod tests {
         })
     }
 
-    /// The keyboard taking focus to a clickable fades its ring in over
+    /// The keyboard taking focus to a control fades its ring in over
     /// several frames, moving on fades it out as the next one's fades in,
     /// and letting focus go fades the last out; each time the window comes
-    /// to rest holding the focused control's ring alone, or none. With
-    /// motion reduced each change lands at once.
+    /// to rest holding the focused control's ring alone, or none. So for a
+    /// raw clickable and for every gpui-base control Tcode draws, whose own
+    /// ring would switch at once. With motion reduced each change lands at
+    /// once.
     #[gpui::test]
     fn a_focus_ring_fades_in_and_out_with_the_keyboard(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         for reduce in [false, true] {
-            let (_, cx) = cx.add_window_view(|_, _| Two);
+            let (_, cx) = cx.add_window_view(|_, _| Controls);
             cx.update(|_, cx| cx.set_reduce_motion(reduce));
             draw_settled(cx);
             // The keyboard is the last input, as when Tab moves focus.
             cx.simulate_keystrokes("a");
-            for (step, rings) in [(0, 1), (1, 1), (2, 0)] {
+            for step in 0..=STOPS {
+                let rings = usize::from(step < STOPS);
                 cx.update(|window, cx| {
-                    if step < 2 {
+                    if step < STOPS {
                         window.focus_next(cx);
                     } else {
                         window.blur(cx);

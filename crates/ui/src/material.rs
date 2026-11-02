@@ -879,16 +879,7 @@ impl<E: gpui::Element + gpui::InteractiveElement + Styled + 'static> gpui::Eleme
         let corners = inner.style().corner_radii.clone();
         let focus = match self.focus.clone() {
             Some(focus) => focus,
-            None => window
-                .use_keyed_state(
-                    ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "focus".into()),
-                    cx,
-                    |_, cx| cx.focus_handle(),
-                )
-                .read(cx)
-                .clone()
-                .tab_index(0)
-                .tab_stop(true),
+            None => crate::motion::focus_ring::handle(&self.id, window, cx),
         };
         let mut surface = inner.track_focus(&focus).into_any_element();
         let layout = surface.request_layout(window, cx);

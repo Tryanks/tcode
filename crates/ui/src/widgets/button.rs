@@ -91,6 +91,8 @@ pub struct Button {
     on_click: Option<ClickHandler>,
     on_hover: Option<super::ToggleHandler>,
     press_then: Option<super::popover::SheetToggle>,
+    /// The handle the caller tracks, when it keeps its own.
+    focus: Option<gpui::FocusHandle>,
 }
 
 pub(crate) type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -122,6 +124,7 @@ impl Button {
             on_click: None,
             on_hover: None,
             press_then: None,
+            focus: None,
         }
     }
     pub fn outline(mut self) -> Self {
@@ -161,7 +164,7 @@ impl Button {
     /// sample whether the keyboard has put focus on it: a control shown only
     /// on hover shows while it holds keyboard focus too.
     pub fn track_focus(mut self, handle: &gpui::FocusHandle) -> Self {
-        self.base = self.base.track_focus(handle);
+        self.focus = Some(handle.clone());
         self
     }
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
@@ -385,7 +388,14 @@ impl RenderOnce for Button {
         let fg = transition((self.id.clone(), "fg"), fg, settle(), window, cx);
         let border = transition((self.id.clone(), "border"), border, settle(), window, cx);
         let accessibility_label = self.aria_label.clone().or_else(|| self.label.clone());
-        let ring = crate::material::focus_ring(cx);
+        // gpui-base's Button keeps its own focus handle, leaving only GPUI's
+        // `focus_visible`, which switches at once, to show the keyboard's
+        // focus: it is handed this handle instead, and the ring fades in and
+        // out over it (`motion::focus_ring`).
+        let focus = match self.focus.take() {
+            Some(focus) => focus,
+            None => crate::motion::focus_ring::handle(&self.id, window, cx),
+        };
         let press = self
             .press_then
             .filter(|_| !self.disabled && !self.loading)
@@ -446,7 +456,9 @@ impl RenderOnce for Button {
                 })
                 .when_some(self.label, |this, label| this.child(label))
                 .children(self.children);
-        self.base
+        let button = self
+            .base
+            .track_focus(&focus)
             .disabled(self.disabled || self.loading)
             .selected(self.selected)
             .when_some(accessibility_label, |this, label| {
@@ -481,7 +493,6 @@ impl RenderOnce for Button {
                 this.min_w(px(crate::material::TOUCH_TARGET))
                     .min_h(px(crate::material::TOUCH_TARGET))
             })
-            .focus_visible(move |style| style.shadow(vec![ring]))
             .when(
                 matches!(self.variant, ButtonVariant::Default) || self.outline,
                 |this| this.border_1(),
@@ -512,6 +523,13 @@ impl RenderOnce for Button {
             .child(content)
             .when_some(self.tooltip, |this, text| {
                 this.with_tooltip(move |_, _| Tooltip::new(text.clone()))
-            })
+            });
+        crate::motion::focus_ring::Ringed::new(
+            button,
+            &focus,
+            crate::motion::focus_ring::corners_of(corners),
+            cx,
+        )
+        .opacity(dimmed)
     }
 }

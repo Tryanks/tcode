@@ -143,7 +143,14 @@ impl RenderOnce for Checkbox {
             window,
             cx,
         );
+        // gpui-base's Checkbox keeps its own focus handle, leaving only GPUI's
+        // `focus_visible`, which switches at once, to show the keyboard's
+        // focus: it is handed this handle instead, and the ring fades in and
+        // out over the box (`motion::focus_ring`).
+        let focus = crate::motion::focus_ring::handle(&self.id, window, cx);
+        let radius = cx.theme().tokens.radius.sm;
         self.base
+            .track_focus(&focus)
             .checked(checked)
             .disabled(self.disabled)
             .when_some(label.clone().or(self.aria_label), |this, label| {
@@ -161,14 +168,14 @@ impl RenderOnce for Checkbox {
             .line_height(relative(1.))
             .text_color(label_color)
             .refine_style(&self.style)
-            .child(
+            .child(crate::motion::focus_ring::Ringed::new(
                 CheckboxIndicator::new()
                     .checked(checked)
                     .disabled(self.disabled)
                     .size(indicator_size)
                     .flex_shrink_0()
                     .border_1()
-                    .rounded(cx.theme().tokens.radius.sm)
+                    .rounded(radius)
                     .bg(bg)
                     .border_color(border)
                     .opacity(1. - 0.5 * dim)
@@ -183,7 +190,10 @@ impl RenderOnce for Checkbox {
                                 ))),
                         )
                     }),
-            )
+                &focus,
+                crate::motion::focus_ring::corners(radius),
+                cx,
+            ))
             .when_some(label, |this, label| this.child(div().child(label)))
             .children(self.children)
     }

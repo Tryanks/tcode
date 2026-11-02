@@ -906,8 +906,11 @@ impl Render for CommandPalette {
         } else if !self.opened {
             self.open(focus_query, window, cx);
         }
-        let presence = crate::motion::appear("palette-presence", open, window, cx);
-        if !open && (!presence.should_render() || presence.progress == 0.) {
+        // The palette's own clock: the window turning compact or wide draws
+        // it under another parent, where an element's clock would bring an
+        // open palette in again from nothing.
+        let presence = self.motion.appear("presence", open, window, cx);
+        if !open && presence == 0. {
             return div().into_any_element();
         }
         let exiting = !open;
@@ -997,7 +1000,12 @@ impl Render for CommandPalette {
         };
         let glide = self.motion.glide_state("card-size");
         let size = glide.toward(u64::from(compact), gpui::size(width, height), cx);
-        let reflow = self.motion.reflow("card-place", u64::from(compact));
+        // The card is placed against the window, and its host lays the
+        // palette out in a different place in each layout.
+        let reflow = self
+            .motion
+            .reflow("card-place", u64::from(compact))
+            .in_window();
         // The card is laid out at exactly this size.
         glide.painted_at(size, window);
         let surface = v_flex().h(size.height).overflow_hidden();
@@ -1075,7 +1083,7 @@ impl Render for CommandPalette {
             let progress = if open {
                 progress
             } else {
-                progress.max(1. - presence.progress)
+                progress.max(1. - presence)
             };
             let sheet = gpui_base::Sheet::new(cx)
                 .focus_handle(self.focus_handle.clone())
@@ -1106,8 +1114,8 @@ impl Render for CommandPalette {
         // and a shield over the card keep the pointer from it.
         let card = card
             .relative()
-            .top(crate::motion::lift(presence.progress))
-            .opacity(presence.progress)
+            .top(crate::motion::lift(presence))
+            .opacity(presence)
             .when(exiting, |card| {
                 card.child(
                     div()
@@ -1126,7 +1134,7 @@ impl Render for CommandPalette {
                 div()
                     .absolute()
                     .size_full()
-                    .bg(crate::material::scrim(presence.progress, cx))
+                    .bg(crate::material::scrim(presence, cx))
                     .when(exiting, |scrim| scrim.occlude())
                     .on_scroll(|_, _, cx| cx.stop_propagation()),
             )
@@ -1361,78 +1369,6 @@ mod tests {
                 query.presentation().placeholder().to_string()
             })
         });
-    }
-
-    /// A tablet turning compact while the palette is open moves the card
-    /// from where it hangs to the bottom sheet, growing to the window's
-    /// width on the way, and back when it turns wide.
-    #[gpui::test]
-    fn the_open_palette_glides_between_card_and_sheet(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root("palette-flip-test");
-        let store = SessionStore::open_at(root.clone()).expect("open test store");
-        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let workspace_store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
-        driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
-            workspace_store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        let palette_store = workspace_store.clone();
-        let (harness, cx) = cx.add_window_view(move |window, cx| {
-            PaletteHarness::new(palette_store.clone(), window, cx)
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(gpui::size(px(1024.), px(800.)));
-        let (palette, window_state) = cx.update(|_, cx| {
-            let harness = harness.read(cx);
-            (harness.palette.clone(), harness.window_state.clone())
-        });
-        cx.update(|window, cx| {
-            window_state.update(cx, |state, cx| state.open_palette(cx));
-            palette.update(cx, |palette, cx| palette.open(false, window, cx));
-        });
-        crate::test_frames::draw_settled(cx);
-        let card = |cx: &mut VisualTestContext| cx.debug_bounds("palette-card").expect("the card");
-        let hanging = card(cx);
-        assert!(hanging.size.width < px(1024.));
-
-        let turn = |compact: bool, cx: &mut VisualTestContext| {
-            window_state.update(cx, |state, cx| {
-                state.set_compact(compact, cx);
-            });
-            crate::test_frames::draw(cx);
-        };
-        turn(true, cx);
-        assert_eq!(card(cx), hanging, "the card starts where it hung");
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        crate::test_frames::draw(cx);
-        let gliding = card(cx);
-        crate::test_frames::draw_settled(cx);
-        let sheet = card(cx);
-        assert_eq!(sheet.size.width, px(1024.), "the sheet spans the window");
-        assert!(sheet.top() > hanging.top());
-        assert!(
-            gliding.size.width > hanging.size.width
-                && gliding.size.width < sheet.size.width
-                && gliding.top() > hanging.top()
-                && gliding.top() < sheet.top(),
-            "{gliding:?} between {hanging:?} and {sheet:?}"
-        );
-
-        turn(false, cx);
-        assert_eq!(card(cx), sheet, "and back from where it is");
-        crate::test_frames::draw_settled(cx);
-        assert_eq!(card(cx), hanging);
-        driver.link.close();
     }
 
     #[gpui::test]

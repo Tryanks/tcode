@@ -792,12 +792,15 @@ fn open_shared(
         dialog
             .title(title)
             .content(move |content, window, cx| {
+                // The dialog is drawn under the same parent at both widths.
+                let reflow = crate::motion::reflow("space-shared-link", window, cx);
                 content.child(link_block(
                     &space,
                     accepting,
                     description.clone(),
                     true,
                     None,
+                    reflow,
                     compact,
                     window,
                     cx,
@@ -848,7 +851,8 @@ type Regenerate = Rc<dyn Fn(&mut Window, &mut App)>;
 /// A space's link: its QR beside `description`, with Copy where `copy` and
 /// Regenerate where `regenerate` is given — or, without a link, why not,
 /// with Regenerate when that is what brings it back. Losing or regaining the
-/// link folds one into the other.
+/// link folds one into the other. `reflow` places the QR beside or under
+/// the text.
 #[allow(clippy::too_many_arguments)]
 fn link_block(
     space: &SpaceInfo,
@@ -856,6 +860,7 @@ fn link_block(
     description: String,
     copy: bool,
     regenerate: Option<Regenerate>,
+    reflow: crate::motion::reflow::Reflow,
     compact: bool,
     window: &mut Window,
     cx: &mut App,
@@ -947,7 +952,7 @@ fn link_block(
             .child(div().text_secondary(compact, cx).child(description))
             .when(has_actions, |text| text.child(actions));
         shown.fold(
-            super::qr::beside_qr(id("qr-code"), text, &link, compact, window, cx)
+            super::qr::beside_qr(id("qr-code"), reflow, text, &link, compact, window, cx)
                 .debug_selector(|| "space-link".into()),
         )
     });
@@ -1282,12 +1287,15 @@ mod section {
                     report("spaces.failed", task, window, cx);
                 }
             });
+            // The space's dialog is drawn under the same parent at both widths.
+            let reflow = crate::motion::reflow("space-dialog-link", window, cx);
             let link = link_block(
                 space,
                 accepting,
                 quoted("spaces.link.description", &space.name),
                 true,
                 Some(regenerate),
+                reflow,
                 compact,
                 window,
                 cx,
@@ -1875,8 +1883,11 @@ mod machines {
     /// This machine's spaces on the Machines page, one group row each:
     /// the link's state, its QR on demand and Copy. A paused or dead link
     /// says so and offers the one action that brings it back.
+    /// `motion` is the page's, which the window draws under another parent
+    /// as it turns compact or wide.
     pub(in crate::remote) fn machine_links<V: 'static>(
         spaces: &Entity<Spaces>,
+        motion: &crate::motion::owned::Owned,
         open_qr: Option<&str>,
         toggle_qr: fn(&mut V, String, &mut Context<V>),
         compact: bool,
@@ -2027,6 +2038,12 @@ mod machines {
                             quoted("spaces.link.description", &space.name),
                             false,
                             None,
+                            motion.reflow_in(
+                                format!("machine-space-link-{id}"),
+                                u64::from(compact),
+                                window,
+                                cx,
+                            ),
                             compact,
                             window,
                             cx,

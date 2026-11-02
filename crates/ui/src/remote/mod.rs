@@ -882,6 +882,8 @@ impl RemotePanel {
                 link,
                 *remaining,
                 group.as_deref(),
+                self.motion
+                    .reflow_in("hosts-invite-qr", u64::from(compact), window, cx),
                 compact,
                 hosting::new_invitation(),
                 window,
@@ -954,6 +956,7 @@ impl RemotePanel {
         spaces.and_then(|spaces| {
             spaces::machine_links(
                 &spaces,
+                &self.motion,
                 self.space_qr.as_deref(),
                 |panel: &mut Self, id, cx| {
                     panel.space_qr = (panel.space_qr.as_deref() != Some(id.as_str())).then_some(id);

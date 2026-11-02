@@ -35,11 +35,14 @@ fn new_invitation_button(on_new: NewInvitation) -> Button {
 }
 
 /// The invitation a machine shows other devices: the QR to scan, the link to
-/// copy, how long it lasts and the way to a fresh one.
+/// copy, how long it lasts and the way to a fresh one. `reflow` places the
+/// QR beside or under the text.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn invitation_card(
     link: &str,
     remaining: u64,
     group: Option<&str>,
+    reflow: crate::motion::reflow::Reflow,
     compact: bool,
     on_new: NewInvitation,
     window: &mut Window,
@@ -80,10 +83,18 @@ pub(super) fn invitation_card(
                 )
                 .child(new_invitation_button(on_new).ghost().outline()),
         );
-    beside_qr("remote-invitation-qr", text, link, compact, window, cx)
-        .p(px(crate::material::CARD_INSET))
-        .debug_selector(|| "remote-invitation".into())
-        .into_any_element()
+    beside_qr(
+        "remote-invitation-qr",
+        reflow,
+        text,
+        link,
+        compact,
+        window,
+        cx,
+    )
+    .p(px(crate::material::CARD_INSET))
+    .debug_selector(|| "remote-invitation".into())
+    .into_any_element()
 }
 
 /// The invitation ran out: say so, next to the button that mints another.
@@ -185,6 +196,8 @@ impl AccessSection {
                 link,
                 *remaining,
                 group.as_deref(),
+                self.motion
+                    .reflow_in("remote-invitation-qr", u64::from(compact), window, cx),
                 compact,
                 on_new.clone(),
                 window,

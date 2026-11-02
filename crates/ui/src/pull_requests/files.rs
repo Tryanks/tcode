@@ -1425,10 +1425,10 @@ impl PullRequestView {
         let review_bar = self.review_bar(window, cx);
         // The file column widens in beside the diff and narrows away, laid out at its own width
         // and clipped meanwhile, so its rows do not reflow; one on its way out takes no input.
-        let column = gpui_base::motion::transition(
-            "pr-file-column",
+        let column = self.motion.transition(
+            "file-column",
             if wide { 1f32 } else { 0. },
-            crate::motion::settle(),
+            &crate::motion::owned::Curve::settle(),
             window,
             cx,
         );

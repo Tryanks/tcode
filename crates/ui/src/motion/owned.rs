@@ -157,6 +157,68 @@ impl Owned {
         })
     }
 
+    /// [`super::appear`]'s progress with its clock kept here: how far in,
+    /// from 0 to 1, something that comes and goes is, coming in from nothing
+    /// the first time it is present as gpui-base's presence does, and
+    /// carrying on when the view is drawn under a new parent.
+    pub(crate) fn appear(
+        &self,
+        key: impl Into<SharedString>,
+        present: bool,
+        window: &mut Window,
+        cx: &App,
+    ) -> f32 {
+        let key = (key.into(), 0);
+        let curve = Curve::settle();
+        self.0.borrow_mut().entry(key.clone()).or_insert_with(|| {
+            Box::new(Glide {
+                from: 0f32,
+                target: 0f32,
+                started_at: cx.background_executor().now(),
+                duration: curve.duration,
+                share: 1.,
+            })
+        });
+        self.sample(key, if present { 1. } else { 0. }, &curve, window, cx)
+    }
+
+    /// How far in, from 0 to 1, what `value` names is: a value other than
+    /// the last one asked about comes in over [`Curve::settle`], the first
+    /// is in at once. For something drawn in another's place (a section, a
+    /// page) that fades in, and carries on fading when the view is drawn
+    /// under a new parent, where [`super::appear`] would start it over.
+    pub(crate) fn entered<T: PartialEq + 'static>(
+        &self,
+        key: impl Into<SharedString>,
+        value: T,
+        window: &mut Window,
+        cx: &App,
+    ) -> f32 {
+        let key = key.into();
+        let mut values = self.0.borrow_mut();
+        let kept = values
+            .entry((key.clone(), 1))
+            .or_insert_with(|| Box::new(None::<T>))
+            .downcast_mut::<Option<T>>()
+            .expect("an entered value of one type");
+        let changed = kept.as_ref().is_some_and(|kept| *kept != value);
+        *kept = Some(value);
+        if changed {
+            values.insert(
+                (key.clone(), 0),
+                Box::new(Glide {
+                    from: 0f32,
+                    target: 0f32,
+                    started_at: cx.background_executor().now(),
+                    duration: Curve::settle().duration,
+                    share: 1.,
+                }),
+            );
+        }
+        drop(values);
+        self.sample((key, 0), 1f32, &Curve::settle(), window, cx)
+    }
+
     /// The handle kept under `key`: made the first time it is asked for,
     /// the same one every time after, for state a sampler shares through
     /// clones (a [`super::GlideState`], a [`super::reflow::ReflowState`]).

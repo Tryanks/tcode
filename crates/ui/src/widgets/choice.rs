@@ -4,7 +4,6 @@
 use crate::widgets::TooltipTrigger as _;
 use crate::{
     icon::{Icon, IconName},
-    material::focus_ring,
     theme::ActiveTheme as _,
     typography::TextRole as _,
     widgets::{
@@ -155,7 +154,7 @@ fn render_choice(
     glide: &Glide,
     window: &mut Window,
     cx: &mut App,
-) -> Radio {
+) -> crate::motion::focus_ring::Ringed {
     let Choice {
         id,
         label,
@@ -187,7 +186,11 @@ fn render_choice(
         window,
         cx,
     );
-    let ring = focus_ring(cx);
+    // gpui-base's Radio keeps its own focus handle, leaving only GPUI's
+    // `focus_visible`, which switches at once, to show the keyboard's focus: it
+    // is handed this handle instead, and the ring fades in and out over it
+    // (`motion::focus_ring`).
+    let focus = crate::motion::focus_ring::handle(&id, window, cx);
     let accessible: SharedString = if recommended {
         crate::tr!("choice.recommended_option", label = label.clone())
             .into_owned()
@@ -203,7 +206,7 @@ fn render_choice(
         .disabled(disabled)
         .set_position(ix + 1, count)
         .accessibility_label(accessible)
-        .focus_visible(move |style| style.shadow(vec![ring]))
+        .track_focus(&focus)
         .flex()
         .items_center()
         .px(px(if compact { 14. } else { 12. }))
@@ -223,5 +226,7 @@ fn render_choice(
             this.child(Icon::new(IconName::Star).flex_none())
                 .with_tooltip(|_, _| Tooltip::new(crate::tr!("choice.recommended")))
         });
-    glide.measure(key, segment(radio, hover_fill, compact, cx))
+    let mut radio = glide.measure(key, segment(radio, hover_fill, compact, cx));
+    let corners = radio.style().corner_radii.clone();
+    crate::motion::focus_ring::Ringed::new(radio, &focus, corners, cx)
 }
