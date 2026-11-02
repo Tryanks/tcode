@@ -81,12 +81,9 @@ pub struct PluginsSettingsPanel {
     view: View,
     /// Filters the Available view.
     search: Entity<InputState>,
-    list: ListState,
-    listed: Option<(String, Vec<(usize, String)>)>,
-    /// The available rows a search or an install brings in and takes away,
-    /// by entry id, drawn from their catalog index as they fold.
-    list_rows: crate::motion::list_rows::ListRows<(), usize>,
-    list_flip: crate::motion::ListFlip,
+    /// Each profile's Available list, so a profile leaving keeps drawing
+    /// its own while the next one's comes in.
+    lists: std::collections::HashMap<String, AvailableList>,
     /// `(profile id, entry id, catalog index)` rows whose details disclosure is open.
     expanded: HashSet<(String, String, usize)>,
     /// The challenge whose dialog is open.
@@ -136,10 +133,7 @@ impl PluginsSettingsPanel {
             selected: None,
             view: View::Installed,
             search,
-            list: ListState::new(0, ListAlignment::Top, px(120.)),
-            listed: None,
-            list_rows: crate::motion::list_rows::ListRows::over(crate::motion::KEYSTROKE),
-            list_flip: Default::default(),
+            lists: Default::default(),
             expanded: HashSet::new(),
             challenge: None,
             answered: HashSet::new(),
@@ -1093,37 +1087,32 @@ impl PluginsSettingsPanel {
             hasher.finish()
         };
         let keys: Rc<[u64]> = listed.iter().map(|(_, id)| row_key(id)).collect();
-        if self
-            .listed
-            .as_ref()
-            .is_none_or(|(profile, indices)| profile != profile_id || *indices != listed)
-        {
-            // Within one profile, a keystroke or an install folds rows in and
-            // out and glides the rest; another profile's list is in place.
-            match self.listed.as_ref() {
-                Some((profile, old)) if profile == profile_id => {
-                    let old_keys: Vec<u64> = old.iter().map(|(_, id)| row_key(id)).collect();
-                    let old_indices: Vec<usize> = old.iter().map(|(index, _)| *index).collect();
-                    self.list_flip.replace(
-                        &self.list,
-                        |index| old_keys.get(index).copied(),
-                        &keys,
-                        window,
-                    );
-                    self.list_rows.replace(
-                        &old_keys,
-                        &keys,
-                        |_, _| Some(()),
-                        |index| old_indices.get(index).copied(),
-                        cx,
-                    );
-                }
-                _ => self.list_rows.clear(),
+        let available = self.lists.entry(profile_id.to_string()).or_default();
+        if available.listed.as_ref() != Some(&listed) {
+            // A keystroke or an install folds rows in and out and glides the
+            // rest; the list first shown is in place.
+            if let Some(old) = available.listed.as_ref() {
+                let old_keys: Vec<u64> = old.iter().map(|(_, id)| row_key(id)).collect();
+                let old_indices: Vec<usize> = old.iter().map(|(index, _)| *index).collect();
+                available.flip.replace(
+                    &available.list,
+                    |index| old_keys.get(index).copied(),
+                    &keys,
+                    window,
+                );
+                available.rows.replace(
+                    &old_keys,
+                    &keys,
+                    |_, _| Some(()),
+                    |index| old_indices.get(index).copied(),
+                    cx,
+                );
             }
-            self.list.reset(matches.len());
-            self.listed = Some((profile_id.to_string(), listed));
+            available.list.reset(matches.len());
+            available.listed = Some(listed);
         }
-        self.list_rows.settle_list(&self.list, &keys, cx);
+        available.rows.settle_list(&available.list, &keys, cx);
+        let list_state = available.list.clone();
         // Listing cross-fades to what it found; which of those shows follows
         // the search keystrokes and does not.
         let listing = matches.is_empty() && catalog.loading && none_available;
@@ -1152,9 +1141,9 @@ impl PluginsSettingsPanel {
                 let profile_id = profile_id.to_string();
                 crate::scroll::page_viewport(
                     "plugins-available-bounce",
-                    &self.list,
+                    &list_state,
                     list(
-                        self.list.clone(),
+                        list_state.clone(),
                         cx.processor(move |this, ix: usize, window, cx| {
                             let index = matches[ix];
                             let row = this.available_row(
@@ -1176,7 +1165,10 @@ impl PluginsSettingsPanel {
                                         ))
                                     });
                             let key = keys[ix];
-                            let around = this.list_rows.around(key, cx);
+                            let Some(available) = this.lists.get(&profile_id) else {
+                                return row.into_any_element();
+                            };
+                            let around = available.rows.around(key, cx);
                             let mut left: std::collections::HashMap<usize, AnyElement> = around
                                 .above
                                 .iter()
@@ -1205,7 +1197,12 @@ impl PluginsSettingsPanel {
                                 },
                                 window,
                             );
-                            this.list_flip.row(ix, ("plugins-available-row", key), row)
+                            match this.lists.get(&profile_id) {
+                                Some(available) => {
+                                    available.flip.row(ix, ("plugins-available-row", key), row)
+                                }
+                                None => row,
+                            }
                         }),
                     )
                     .size_full(),
@@ -1240,13 +1237,15 @@ impl PluginsSettingsPanel {
                     .h(px(crate::overlay::DIALOG_LIST_HEIGHT))
                     .relative()
                     .child(body)
-                    .child(crate::scroll::list_height_hint(&self.list, px(100.)))
+                    .child(crate::scroll::list_height_hint(&list_state, px(100.)))
                     .child(
-                        ScrollableMask::new(Axis::Vertical, &self.list)
+                        ScrollableMask::new(Axis::Vertical, &list_state)
                             .id("plugins-available-mask"),
                     )
                     .when(!none_available && !window.is_inspector_picking(cx), |col| {
-                        col.child(Scrollbar::vertical(&self.list).id("plugins-available-scrollbar"))
+                        col.child(
+                            Scrollbar::vertical(&list_state).id("plugins-available-scrollbar"),
+                        )
                     }),
             )
             .into_any_element()
@@ -1569,6 +1568,27 @@ impl PluginsSettingsPanel {
     }
 }
 
+/// One profile's Available list: its rows as last listed, by catalog index
+/// and entry id, and the rows a search or an install brings in and takes
+/// away, drawn from their catalog index as they fold.
+struct AvailableList {
+    list: ListState,
+    listed: Option<Vec<(usize, String)>>,
+    rows: crate::motion::list_rows::ListRows<(), usize>,
+    flip: crate::motion::ListFlip,
+}
+
+impl Default for AvailableList {
+    fn default() -> Self {
+        Self {
+            list: ListState::new(0, ListAlignment::Top, px(120.)),
+            listed: None,
+            rows: crate::motion::list_rows::ListRows::over(crate::motion::KEYSTROKE),
+            flip: Default::default(),
+        }
+    }
+}
+
 impl Render for PluginsSettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.shown && self.store.read(cx).settings_hydrated() {
@@ -1602,13 +1622,34 @@ impl Render for PluginsSettingsPanel {
                 None => {
                     page.child(self.note_card(crate::tr!("providers.plugins.no_providers"), cx))
                 }
-                Some(profile) => page.child(
-                    v_flex()
-                        .w_full()
-                        .gap_3()
-                        .child(self.provider_tabs(&profiles, &profile.id, cx))
-                        .child(self.render_profile(&profile, window, cx)),
-                ),
+                Some(profile) => {
+                    // Each provider's body keeps a layer, so the one left
+                    // fades out under the one chosen.
+                    let current = profiles
+                        .iter()
+                        .position(|shown| shown.id == profile.id)
+                        .unwrap_or(0);
+                    let fade = crate::motion::CrossFade::new(
+                        "plugins-profile-body",
+                        current,
+                        profiles.len(),
+                        window,
+                        cx,
+                    );
+                    let bodies: Vec<(usize, AnyElement)> = profiles
+                        .iter()
+                        .enumerate()
+                        .filter(|(layer, _)| fade.shows(*layer))
+                        .map(|(layer, shown)| (layer, self.render_profile(shown, window, cx)))
+                        .collect();
+                    page.child(
+                        v_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(self.provider_tabs(&profiles, &profile.id, cx))
+                            .child(fade.span().render(bodies).w_full()),
+                    )
+                }
             })
     }
 }
