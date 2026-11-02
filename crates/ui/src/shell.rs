@@ -9931,6 +9931,9 @@ mod tests {
         let store = shell.read_with(cx, |shell, _| shell.store()).unwrap();
         crate::store::tests::seed_full_scope(&store, &local_incoming, Vec::new(), cx);
         open_machines(cx);
+        // The machine left is drawn beneath the new one while it rises, and
+        // the failure folds away there.
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("hosts-local-failure").is_none());
     }
 
