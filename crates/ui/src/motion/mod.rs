@@ -13,12 +13,12 @@ mod scene;
 
 pub(crate) mod keyed;
 pub(crate) use keyed::keyed;
-pub(crate) mod resize_glide;
 #[cfg(any(
     test,
     all(preview_backend, any(target_os = "macos", target_os = "ios"))
 ))]
 pub(crate) mod native_fade;
+pub(crate) mod resize_glide;
 
 pub(crate) mod owned;
 
