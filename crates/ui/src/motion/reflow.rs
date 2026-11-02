@@ -64,6 +64,8 @@ struct Frame {
     origin: Cell<Point<Pixels>>,
     /// How much the scope's width changed this frame, when it did.
     resized: Cell<Option<Pixels>>,
+    /// Whether its owner changed the layout this frame.
+    reflowed: Cell<bool>,
 }
 
 /// The reflow scope `id` of the view rendering it.
@@ -79,6 +81,15 @@ pub(crate) fn reflow(id: impl Into<ElementId>, window: &mut Window, cx: &mut App
 }
 
 impl Reflow {
+    /// Marks this frame as a reflow when `reflowed`, whatever the width did:
+    /// for an owner that chooses its layout from a width measured on an
+    /// earlier frame, so the new layout comes in on a frame the width does
+    /// not change. Every part it moved glides there.
+    pub(crate) fn reflowed(self, reflowed: bool) -> Self {
+        self.frame.reflowed.set(reflowed);
+        self
+    }
+
     /// `child`, as the part `key` of this layout: a reflow that moves it
     /// draws it, and hits it, where it was, gliding to where it is.
     pub(crate) fn part(&self, key: impl Into<SharedString>, child: impl IntoElement) -> AnyElement {
@@ -215,7 +226,8 @@ impl Part {
         // part held at the end of a row moves by exactly as much.
         let reflowed = frame.resized.get().is_some_and(|change| {
             moved.x.abs() > change.abs() + gpui::px(0.5) || moved.y.abs() > gpui::px(0.5)
-        });
+        }) || (frame.reflowed.get()
+            && (moved.x.abs() > gpui::px(0.5) || moved.y.abs() > gpui::px(0.5)));
         if reflowed {
             let from = carried + moved;
             state.glides.insert(
@@ -368,5 +380,63 @@ mod tests {
         cx.simulate_resize(size(px(400.), px(300.)));
         draw(cx);
         assert_eq!(at("field", cx), beside);
+    }
+
+    /// A row whose owner moves a part to its other end on a frame the width
+    /// does not change, as a layout chosen from last frame's width does.
+    struct Folding {
+        folded: bool,
+        last: Option<bool>,
+    }
+
+    impl Render for Folding {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let reflowed = self
+                .last
+                .replace(self.folded)
+                .is_some_and(|last| last != self.folded);
+            let reflow = super::reflow("folding", window, cx).reflowed(reflowed);
+            let meter = reflow.part(
+                "meter",
+                div()
+                    .debug_selector(|| "meter".to_string())
+                    .flex_none()
+                    .w(px(40.))
+                    .h(px(20.)),
+            );
+            let spacer = div().flex_1();
+            let row = if self.folded {
+                gpui_base::h_flex().w_full().child(spacer).child(meter)
+            } else {
+                gpui_base::h_flex().w_full().child(meter).child(spacer)
+            };
+            div().size_full().child(reflow.render(row))
+        }
+    }
+
+    /// The owner's reflow glides the part from where it was, though the width
+    /// held still.
+    #[gpui::test]
+    fn an_owners_reflow_glides_its_parts(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| Folding {
+            folded: false,
+            last: None,
+        });
+        cx.simulate_resize(size(px(400.), px(300.)));
+        draw_settled(cx);
+        let left = |cx: &mut VisualTestContext| cx.debug_bounds("meter").unwrap().left();
+        assert_eq!(left(cx), px(0.));
+        view.update(cx, |view, cx| {
+            view.folded = true;
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(left(cx), px(0.), "the meter starts where it was");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let gliding = left(cx);
+        assert!(gliding > px(0.) && gliding < px(360.), "{gliding:?}");
+        draw_settled(cx);
+        assert_eq!(left(cx), px(360.));
     }
 }
