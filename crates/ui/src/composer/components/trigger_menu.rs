@@ -348,14 +348,17 @@ impl Composer {
 
         let compact = self.compact;
         let list = if rows.is_empty() {
-            crate::material::empty_row(
-                if loading {
-                    crate::tr!("composer.searching").into_owned()
-                } else {
-                    empty_text
-                },
-                cx,
-            )
+            let text: gpui::SharedString = if loading {
+                crate::tr!("composer.searching").into_owned().into()
+            } else {
+                empty_text.into()
+            };
+            let id = self.motion_id("trigger-empty");
+            crate::motion::Sampled::new(move |window, cx| {
+                crate::motion::cross_fade(id, text, window, cx, |text, _, cx| {
+                    crate::material::empty_row(text.clone(), cx).into_any_element()
+                })
+            })
             .into_any_element()
         } else {
             // Group headers are not selectable: each opens the row that starts
@@ -372,6 +375,23 @@ impl Composer {
                 })
                 .collect();
             let count = rows.len();
+            let keys: Rc<[u64]> = rows.iter().map(menu_row_key).collect();
+            {
+                let mut seen = self.menu_rows_seen.borrow_mut();
+                for (key, row) in keys.iter().zip(&rows) {
+                    seen.entry(*key).or_insert_with(|| row.clone());
+                }
+            }
+            let leaving = {
+                let seen = self.menu_rows_seen.clone();
+                let composer = cx.entity();
+                move |key: u64, _: &mut Window, cx: &mut App| {
+                    let row = seen.borrow().get(&key).cloned()?;
+                    Some(composer.update(cx, |_, cx| {
+                        render_menu_row(&row, usize::MAX, false, compact, cx).into_any_element()
+                    }))
+                }
+            };
             let rows: Rc<[MenuRow]> = rows.into();
             crate::scroll::VirtualList::measured(
                 "composer-trigger-rows",
@@ -401,6 +421,9 @@ impl Composer {
                 }),
             )
             .reveal(Some(highlight))
+            // Each keystroke's results fold in and out as the rows that
+            // still match glide to their places.
+            .keyed(keys, crate::motion::KEYSTROKE, leaving)
             .w_full()
             // About ten rows before the list scrolls, so the menu never
             // covers the conversation; no owner sizes an in-flow menu. The
@@ -419,6 +442,14 @@ impl Composer {
             .child(list)
             .into_any_element()
     }
+}
+
+/// What a trigger menu row is known by from one keystroke to the next.
+fn menu_row_key(row: &MenuRow) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&row.primary, &row.secondary, row.group).hash(&mut hasher);
+    hasher.finish()
 }
 
 fn render_menu_row(
