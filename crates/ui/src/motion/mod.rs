@@ -637,6 +637,39 @@ pub(crate) fn hover_layer(rest: gpui::Hsla, hover: gpui::Hsla, radius: Pixels) -
     })
 }
 
+/// [`hover_layer`] with its fill's clock kept by `motion` under `key`, for
+/// an item its view draws under another parent (a list on a page the window
+/// re-parents as it turns compact or wide), whose fill would otherwise start
+/// over there. Whether the pointer is over it is still heard where it is
+/// drawn: the pointer moving is what says so.
+pub(crate) fn hover_layer_owned(
+    motion: &owned::Owned,
+    key: gpui::SharedString,
+    rest: gpui::Hsla,
+    hover: gpui::Hsla,
+    radius: Pixels,
+) -> Sampled {
+    let motion = motion.clone();
+    Sampled::new(move |window, cx| {
+        let (hovered, on_hover) = hovered("hover-layer", window, cx);
+        let fill = motion.transition(
+            format!("{key}/hover-fill"),
+            if hovered { hover } else { rest },
+            &owned::Curve::settle(),
+            window,
+            cx,
+        );
+        div()
+            .id("hover-layer")
+            .absolute()
+            .inset_0()
+            .rounded(radius)
+            .bg(fill)
+            .on_hover(on_hover)
+            .into_any_element()
+    })
+}
+
 /// Mutually exclusive states of one region (loading, loaded, failed) that
 /// cross-fade: each state draws in its own layer, so its element tree holds
 /// while it fades. The current layer is laid out; a leaving one is drawn

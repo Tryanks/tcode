@@ -1103,6 +1103,7 @@ impl PullRequestView {
                 file.path.clone(),
                 cx,
             ),
+            &self.motion,
             SharedString::from(format!("pr-file-fill-{in_popover}-{index}")),
             top == Some(index) && !in_popover,
             compact,
