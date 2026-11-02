@@ -113,6 +113,13 @@ impl RenderOnce for Switch {
             window,
             cx,
         );
+        let opacity = transition(
+            (self.id.clone(), "dim"),
+            if self.disabled { 0.5 } else { 1. },
+            settle(),
+            window,
+            cx,
+        );
         gpui_base::Switch::new(self.id.clone())
             .checked(checked)
             .disabled(self.disabled)
@@ -139,7 +146,7 @@ impl RenderOnce for Switch {
                     .border(inset)
                     .border_color(cx.theme().background.opacity(0.))
                     .bg(track_bg)
-                    .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                    .opacity(opacity)
                     .child(
                         SwitchThumb::new(checked)
                             .disabled(self.disabled)
