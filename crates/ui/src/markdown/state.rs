@@ -9,6 +9,7 @@ use std::{
     rc::Rc,
 };
 
+use crate::theme::ActiveTheme as _;
 use crate::widgets::copy::CopiedMark;
 use gpui::{
     Bounds, ClipboardItem, Context, FocusHandle, ImageSource, IntoElement, ListAlignment,
@@ -19,6 +20,7 @@ use gpui_base::{ElementExt as _, v_flex};
 
 use super::{
     link_target::{LinkTarget, LinkTargetCache},
+    mermaid,
     nodes::{BlockNode, TextPosition},
     render::{self, RootItem},
     selection::{Membership, RunOrigin, SelectionDocument},
@@ -75,6 +77,14 @@ pub struct MarkdownState {
     /// Keyed by the copied code block's root path.
     pub(super) copied: CopiedMark,
     pub(super) math_sources: std::collections::HashSet<String>,
+    /// The Mermaid fences a reader switched to their source.
+    pub(super) diagram_sources: std::collections::HashSet<String>,
+    /// The Mermaid fences' diagrams and the renders on their way.
+    pub(super) diagrams: mermaid::Diagrams,
+    /// The text is still arriving: an open fence is not yet its whole source.
+    pub(super) streaming: bool,
+    /// The latest append added more than appears gradually.
+    last_append_burst: bool,
     /// Window position of the last left mouse-down that landed on a link;
     /// a mouse-up nearby is a click, anything farther is a drag-selection.
     pub(super) link_press_origin: Option<Point<Pixels>>,
@@ -120,8 +130,12 @@ impl MarkdownState {
         cx: &mut Context<Self>,
     ) -> Self {
         let owner = cx.entity_id();
-        cx.on_release(move |_, cx| render::clear_code_measurements(owner, cx))
-            .detach();
+        cx.on_release(move |state, cx| {
+            render::clear_code_measurements(owner, cx);
+            state.diagrams = mermaid::Diagrams::default();
+            mermaid::release_retired(cx);
+        })
+        .detach();
         let parsed = parsed_document.root;
         let items = root_items(&parsed);
         Self {
@@ -134,6 +148,10 @@ impl MarkdownState {
             pending_context: None,
             copied: CopiedMark::default(),
             math_sources: Default::default(),
+            diagram_sources: Default::default(),
+            diagrams: mermaid::Diagrams::default(),
+            streaming: false,
+            last_append_burst: false,
             link_press_origin: None,
             text: text.to_string(),
             parsed: Rc::new(parsed),
@@ -174,12 +192,25 @@ impl MarkdownState {
         self.reparse_append(cx);
     }
 
+    /// Whether the text is still arriving. While it is, a Mermaid fence that
+    /// has not closed is drawn from its whole statements so far; once it is
+    /// not, every fence is drawn from its whole source.
+    pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {
+        if self.streaming == streaming {
+            return;
+        }
+        self.streaming = streaming;
+        cx.notify();
+    }
+
     /// Replace the canonical source and synchronously reparse it.
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if self.text == text {
             return;
         }
         self.math_sources.clear();
+        self.diagram_sources.clear();
+        self.diagrams = mermaid::Diagrams::default();
         self.text.clear();
         self.text.push_str(text);
         self.has_potential_link_reference_definition =
@@ -411,6 +442,34 @@ impl MarkdownState {
             ..self.items.partition_point(|item| item.block <= block)
     }
 
+    /// Switch Mermaid fence `path` between its diagram and its source.
+    pub(super) fn set_diagram_source(&mut self, path: &str, source: bool, cx: &mut Context<Self>) {
+        let showing_source = self.diagram_sources.contains(path);
+        if showing_source == source {
+            return;
+        }
+        // The fence's text becomes its code or its picture, so a selection's
+        // runs in it would land elsewhere.
+        if let Some(membership) = &self.selection {
+            membership
+                .document
+                .update(cx, |document, cx| document.clear(cx));
+        }
+        self.diagrams.toggle(
+            path,
+            showing_source,
+            cx.background_executor().now(),
+            cx.reduce_motion(),
+        );
+        if source {
+            self.diagram_sources.insert(path.into());
+        } else {
+            self.diagram_sources.remove(path);
+        }
+        let items = self.items_of(path);
+        self.remeasure(items, cx);
+    }
+
     /// Measure `items` again; the blocks after them move.
     fn remeasure(&mut self, items: Range<usize>, cx: &mut Context<Self>) {
         self.item_heights.borrow_mut().invalidate(items.clone());
@@ -498,14 +557,13 @@ impl MarkdownState {
         for (old, new) in old_suffix.iter().zip(&blocks[unchanged..]) {
             new.reuse_highlights(old);
         }
-        if self.drawn {
-            self.stream_fade.record(
+        self.last_append_burst = self.drawn
+            && self.stream_fade.record(
                 &old_suffix,
                 &blocks[unchanged..],
                 unchanged,
                 cx.background_executor().now(),
             );
-        }
 
         // An append can only affect the old trailing block and blocks added
         // after it. Keep the measured items before it, and those of its items
@@ -697,7 +755,30 @@ fn contains_potential_link_reference_definition(source: &str) -> bool {
 
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let first_draw = !self.drawn;
         self.drawn = true;
+        let root = self.parsed.clone();
+        let diagrams = self.diagrams.sync(
+            &root,
+            &mermaid::Env {
+                streaming: self.streaming,
+                dark: cx.theme().mode.is_dark(),
+                now: cx.background_executor().now(),
+                still: first_draw || cx.reduce_motion(),
+                burst: self.last_append_burst,
+                sources: &self.diagram_sources,
+            },
+            cx,
+        );
+        for path in diagrams.remeasure {
+            let items = self.items_of(&path);
+            self.item_heights.borrow_mut().invalidate(items.clone());
+            self.list_state.remeasure_items(items);
+        }
+        if diagrams.moving {
+            window.request_animation_frame();
+        }
+        mermaid::release_retired(cx);
         self.fade_frame = self
             .stream_fade
             .frame(cx.background_executor().now(), cx.reduce_motion());

@@ -1039,43 +1039,55 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_diagram_resolving_its_size_remeasures_only_its_block(cx: &mut TestAppContext) {
+    fn a_diagram_arriving_remeasures_only_its_block(cx: &mut TestAppContext) {
         const BLOCKS: usize = 400;
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let (root, cx) = cx.add_window_view(|_, cx| OuterListRoot::new("", cx));
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        let source = format!(
-            "```mermaid\nflowchart LR\n  A --> B\n```\n\n{}",
-            paragraphs(BLOCKS)
-        );
-        // The diagram is decoded off the main thread; the frames this update
-        // draws lay it out before it has a size.
-        root.update(cx, |root, cx| {
-            root.markdown.update(cx, |md, cx| md.set_text(&source, cx));
-            root.list_state.remeasure_items(0..1);
-        });
-        let pending = cx
-            .debug_bounds("markdown-mermaid-root-0")
-            .expect("the diagram block is painted")
+        let (root, cx) = open_timeline_row(&paragraphs(BLOCKS), cx);
+        let push = |text: &str, cx: &mut VisualTestContext| {
+            root.update(cx, |root, cx| {
+                root.markdown.update(cx, |md, cx| {
+                    md.set_streaming(true, cx);
+                    md.push_str(text, cx);
+                });
+                // The chat remeasures the row of a message that changed.
+                root.list_state.remeasure_items(0..1);
+            });
+        };
+        let frame = |cx: &mut VisualTestContext| {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                _ = window.draw(cx);
+            });
+        };
+        push("\n\n```mermaid\nflowchart TD\n  A --> B\n", cx);
+        scroll_to_end(&root, cx);
+        for _ in 0..30 {
+            frame(cx);
+        }
+        // The fence is root block BLOCKS.
+        let diagram = "markdown-mermaid-block-root-400";
+        let before = cx
+            .debug_bounds(diagram)
+            .expect("the diagram is painted")
             .size
             .height;
 
-        let work = layout_work(cx, |cx| cx.run_until_parked());
-        let resolved = cx
-            .debug_bounds("markdown-mermaid-root-0")
-            .expect("the diagram block is painted")
-            .size
-            .height;
-        assert!(
-            resolved != pending,
-            "the diagram resolved its size: {pending:?} -> {resolved:?}"
-        );
-        assert!(
-            work.measure_calls < BLOCKS as u64 / 4
-                && work.nodes_created + work.nodes_reused < BLOCKS as u64 / 2,
-            "resolving one diagram: {work:?}"
-        );
+        // A statement arrives; its picture replaces the shown one, gliding.
+        push("  B --> C\n", cx);
+        for _ in 0..30 {
+            // Each frame lays out what is visible and the diagram; one that
+            // lays out every block is work in proportion to the whole message.
+            let work = layout_work(cx, frame);
+            let nodes_per_frame = (work.nodes_created + work.nodes_reused) / work.frames.max(1);
+            assert!(
+                work.measure_calls < BLOCKS as u64 / 4 && nodes_per_frame < BLOCKS as u64 / 2,
+                "a frame of one diagram's swap: {work:?}"
+            );
+        }
+        let after = cx.debug_bounds(diagram).unwrap().size.height;
+        assert!(after > before, "the diagram grew: {before:?} -> {after:?}");
     }
 
     #[gpui::test]

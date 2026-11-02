@@ -139,6 +139,29 @@ impl BlockNode {
         self.walk_segments(&mut Vec::new(), f);
     }
 
+    /// Every code block of this block where it is root block `ix`, with its
+    /// render path (`root-3-1`).
+    pub(super) fn for_each_code_block_at(&self, ix: usize, f: &mut dyn FnMut(String, &CodeBlock)) {
+        fn walk(node: &BlockNode, path: &mut String, f: &mut dyn FnMut(String, &CodeBlock)) {
+            match node {
+                BlockNode::Root { children }
+                | BlockNode::Blockquote { children }
+                | BlockNode::List { children, .. }
+                | BlockNode::ListItem { children, .. } => {
+                    for (ix, child) in children.iter().enumerate() {
+                        let len = path.len();
+                        path.push_str(&format!("-{ix}"));
+                        walk(child, path, f);
+                        path.truncate(len);
+                    }
+                }
+                BlockNode::CodeBlock(code) => f(path.clone(), code),
+                _ => {}
+            }
+        }
+        walk(self, &mut format!("root-{ix}"), f);
+    }
+
     /// [`Self::for_each_segment`] of this block where it is root block `ix`.
     pub(super) fn for_each_segment_at(&self, ix: usize, f: &mut SegmentVisitor<'_>) {
         self.walk_segments(&mut vec![ix as u32], f);

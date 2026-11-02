@@ -66,13 +66,14 @@ impl StreamFade {
 
     /// Record what root blocks `new` render that `old` did not, both
     /// starting at root block `first_block`, as fades starting at `now`.
+    /// Whether the append was a burst, which appears at once.
     pub(super) fn record(
         &mut self,
         old: &[BlockNode],
         new: &[BlockNode],
         first_block: usize,
         now: Instant,
-    ) {
+    ) -> bool {
         let previous = leaf_texts(old, first_block);
         let current = leaf_texts(new, first_block);
         let prefixes: HashMap<&LeafKey, usize> = current
@@ -110,7 +111,7 @@ impl StreamFade {
             .map(|(_, text, prefix)| text.len() - prefix)
             .sum();
         if added_bytes > BURST_BYTES {
-            return;
+            return true;
         }
         for (key, text, prefix) in added {
             let units = fade_units(text, prefix, text.len());
@@ -125,6 +126,7 @@ impl StreamFade {
                 None => self.leaves.push((key.clone(), segments.collect())),
             }
         }
+        false
     }
 
     /// Sample every unfinished fade at `now`, dropping the finished ones.
