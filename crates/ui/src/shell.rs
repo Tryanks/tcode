@@ -14394,24 +14394,98 @@ mod tests {
         assert_eq!(stretch(cx), rest, "the edge came home");
     }
 
-    /// How far in the list hover fill painted over `row` is, from 0 to 1.
-    fn hover_fill(row: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> f32 {
+    /// How much of `fill` was painted over exactly `bounds` in the last
+    /// frame, from 0 (none) to 1 (all of it).
+    fn painted_share(
+        bounds: gpui::Bounds<Pixels>,
+        fill: impl FnOnce(&App) -> gpui::Hsla,
+        cx: &mut VisualTestContext,
+    ) -> f32 {
         cx.update(|window, cx| {
-            let hover = cx.theme().list_hover;
-            let row = row.scale(window.scale_factor());
+            let fill = fill(cx);
+            let bounds = bounds.scale(window.scale_factor());
             window
                 .painted_quads()
                 .iter()
                 .filter(|quad| {
-                    (quad.bounds.origin.x - row.origin.x).0.abs() < 1.
-                        && (quad.bounds.origin.y - row.origin.y).0.abs() < 1.
-                        && (quad.bounds.size.width - row.size.width).0.abs() < 1.
+                    (quad.bounds.origin.x - bounds.origin.x).0.abs() < 1.
+                        && (quad.bounds.origin.y - bounds.origin.y).0.abs() < 1.
+                        && (quad.bounds.size.width - bounds.size.width).0.abs() < 1.
+                        && (quad.bounds.size.height - bounds.size.height).0.abs() < 1.
                 })
                 .filter_map(|quad| quad.background.as_solid())
-                .filter(|fill| (fill.h - hover.h).abs() < 0.01 && (fill.l - hover.l).abs() < 0.01)
-                .map(|fill| fill.a / hover.a)
+                .filter(|painted| {
+                    (painted.h - fill.h).abs() < 0.01 && (painted.l - fill.l).abs() < 0.01
+                })
+                .map(|painted| painted.a / fill.a)
                 .fold(0., f32::max)
         })
+    }
+
+    /// How far in the list hover fill painted over `row` is, from 0 to 1.
+    fn hover_fill(row: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> f32 {
+        painted_share(row, |cx| cx.theme().list_hover, cx)
+    }
+
+    /// A formula's actions are revealed on hover over the block in a wide
+    /// window and pinned beside the formula in a compact one. A tablet
+    /// turning compact draws the conversation under a new parent: the pin
+    /// fades in and the actions move from over the block's end to beside it,
+    /// rather than appearing there at once; with motion reduced the way back
+    /// is at once.
+    #[gpui::test]
+    fn a_formulas_actions_glide_beside_it_when_the_window_turns_compact(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        as_mobile(cx);
+        resize(cx, 1024.);
+        let store = store_of(&shell, cx);
+        show_timeline(
+            &store,
+            finished_timeline(1, "The sum:\n\n```latex\n1+2=3\n```"),
+            cx,
+        );
+        settle_frames(cx);
+        let _ = sent(&host);
+        // How far in the actions are, and how far their end is from the
+        // block's.
+        let actions = |cx: &mut VisualTestContext| {
+            let block = cx
+                .debug_bounds("markdown-math-root-1")
+                .expect("the formula");
+            let actions = cx
+                .debug_bounds("markdown-math-actions-root-1")
+                .expect("its actions");
+            let shown = painted_share(actions, |cx| cx.theme().tokens.colors.muted, cx);
+            (shown, actions.right() - block.right())
+        };
+        let (hidden, over) = actions(cx);
+        assert_eq!(hidden, 0., "revealed on hover only");
+        assert!(over < px(-1.), "over the block's end: {over:?}");
+
+        cx.simulate_resize(size(px(899.), px(800.)));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 3);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(cx);
+        let (fading, moving) = actions(cx);
+        settle_frames(cx);
+        let (pinned, beside) = actions(cx);
+        assert_eq!(pinned, 1., "pinned on a compact window");
+        assert!(beside > over + px(1.), "beside the formula: {beside:?}");
+        assert!(
+            fading > 0.05 && fading < 0.95,
+            "the pin restarted under its new parent: {fading}"
+        );
+        assert_between("the actions", over, beside, moving);
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(size(px(1024.), px(800.)));
+        draw(cx);
+        assert_eq!(actions(cx), (0., over), "reduced motion: at once");
     }
 
     /// The pane beside an empty one closes: the empty pane shows the start

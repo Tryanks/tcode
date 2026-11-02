@@ -118,6 +118,9 @@ struct Frame {
     follows_width: Cell<bool>,
     /// Whether parts are placed against the window rather than the scope.
     in_window: Cell<bool>,
+    /// Whether parts are measured by their top-right corner against the
+    /// scope's.
+    at_end: Cell<bool>,
 }
 
 /// The reflow scope `id` of the view rendering it.
@@ -149,6 +152,15 @@ impl Reflow {
     /// happens to lay it out, and lays it out elsewhere in another layout.
     pub(crate) fn in_window(self) -> Self {
         self.frame.in_window.set(true);
+        self
+    }
+
+    /// Measures each part by its top-right corner against the scope's: for
+    /// parts held at the end of the row (a block's actions, over it or
+    /// beside it), so a reflow that also changes the scope's width or the
+    /// part's own glides it only as far as the layout moved its end.
+    pub(crate) fn at_end(self) -> Self {
+        self.frame.at_end.set(true);
         self
     }
 
@@ -220,6 +232,8 @@ impl gpui::Element for Scope {
         let frame = &self.reflow.frame;
         frame.origin.set(if frame.in_window.get() {
             Point::default()
+        } else if frame.at_end.get() {
+            bounds.top_right()
         } else {
             bounds.origin
         });
@@ -275,7 +289,12 @@ impl Part {
     fn offset(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &App) -> Point<Pixels> {
         let frame = &self.reflow.frame;
         let mut state = self.reflow.state.borrow_mut();
-        let moved = state.bounds.measure(&self.key, frame.origin.get(), bounds);
+        let corner = if frame.at_end.get() {
+            Bounds::new(bounds.top_right(), bounds.size)
+        } else {
+            bounds
+        };
+        let moved = state.bounds.measure(&self.key, frame.origin.get(), corner);
         let now = cx.background_executor().now();
         let still = |glide: &Glide| {
             let sample = Timing::new(GLIDE)

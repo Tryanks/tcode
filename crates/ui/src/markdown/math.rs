@@ -134,8 +134,15 @@ pub(super) fn block(
     // no hover or while the source shows. Faded rather than hidden: over its
     // own mouse-blocking hitbox the block no longer counts as hovered, so the
     // actions are a part of the block's hover. Pinned beside a rendered
-    // formula on a narrow screen, so it never covers the formula's end.
+    // formula on a narrow screen, so it never covers the formula's end; the
+    // pin fades and the actions glide there as the window turns compact.
     let beside = compact && tree.is_some() && !show_source;
+    let pinned = actions_pinned(view, path, compact, window, cx);
+    let reflow = view
+        .read(cx)
+        .motion()
+        .reflow(format!("{path}/actions"), u64::from(compact))
+        .at_end();
     let actions = h_flex()
         .id(SharedString::from(format!("math-actions-{path}")))
         .on_hover(hover.on_hover(hover_key.clone()))
@@ -154,9 +161,14 @@ pub(super) fn block(
         })
         .children(toggle)
         .child(copy)
-        .when(tree.is_some() && !show_source && !compact, |actions| {
-            actions.opacity(reveal)
+        .when(tree.is_some() && !show_source, |actions| {
+            actions.opacity(reveal + (1. - reveal) * pinned)
         });
+    #[cfg(test)]
+    let actions = {
+        let path = path.to_string();
+        actions.debug_selector(move || format!("markdown-math-actions-{path}"))
+    };
 
     // The actions sit on the box that shows: the formula, or its source.
     let shown = match &tree {
@@ -183,10 +195,10 @@ pub(super) fn block(
         .w_full()
         .items_start()
         .child(shown)
-        .child(actions);
+        .child(reflow.part("actions", actions));
     // Shown as its source or as the formula, the block's height glides
     // between the two, and the blocks after it follow.
-    let body = crate::motion::SizeGlide::new(&view.read(cx).glide(path), body)
+    let body = crate::motion::SizeGlide::new(&view.read(cx).glide(path), reflow.render(body))
         .on_change(show_source as u64);
     let block = div()
         .id(hover_key.clone())
@@ -210,6 +222,26 @@ pub(super) fn block(
         block.debug_selector(move || format!("markdown-math-{path}"))
     };
     block.into_any_element()
+}
+
+/// How far a block's hover actions are pinned by the window being compact,
+/// from 0 (wide: revealed on hover) to 1 (compact: always shown), on the
+/// document's clock under the block's `path`: a window turning compact or
+/// wide draws the block under a new parent.
+pub(super) fn actions_pinned(
+    view: &Entity<MarkdownState>,
+    path: &str,
+    compact: bool,
+    window: &mut Window,
+    cx: &App,
+) -> f32 {
+    view.read(cx).motion().transition(
+        format!("{path}/actions/compact"),
+        if compact { 1f32 } else { 0. },
+        &crate::motion::owned::Curve::settle(),
+        window,
+        cx,
+    )
 }
 
 pub(super) fn inline(
