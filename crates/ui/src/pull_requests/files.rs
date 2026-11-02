@@ -1094,7 +1094,8 @@ impl PullRequestView {
             .as_ref()
             .map(|previous| format!("{previous} → {}", file.path))
             .unwrap_or_else(|| file.path.clone());
-        material::selectable_row(
+        // The fill follows the scroll from one file to the next, gliding.
+        material::selectable_row_gliding(
             material::accessible_clickable(
                 h_flex(),
                 SharedString::from(format!("pr-file-row-{in_popover}-{index}")),
@@ -1102,6 +1103,7 @@ impl PullRequestView {
                 file.path.clone(),
                 cx,
             ),
+            SharedString::from(format!("pr-file-fill-{in_popover}-{index}")),
             top == Some(index) && !in_popover,
             compact,
             cx,

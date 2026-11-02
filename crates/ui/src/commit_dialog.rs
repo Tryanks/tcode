@@ -211,7 +211,14 @@ impl CommitDialog {
 }
 
 impl Render for CommitDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The message: a change the field's height follows.
+        let message_key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.message.read(cx).value().hash(&mut hasher);
+            hasher.finish()
+        };
         let muted = cx.theme().muted_foreground;
 
         let branch_label = self
@@ -351,7 +358,15 @@ impl Render for CommitDialog {
                 .w_full()
                 .gap_1()
                 .child(message_header)
-                .child(Textarea::new(&self.message)),
+                // The field grows to a generated message, and shrinks as it
+                // is cut, gliding; what is below it moves along.
+                .child(
+                    crate::motion::SizeGlide::new(
+                        &crate::motion::GlideState::keyed("commit-message-glide", window, cx),
+                        Textarea::new(&self.message),
+                    )
+                    .on_change(message_key),
+                ),
         );
 
         body
