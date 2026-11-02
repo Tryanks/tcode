@@ -266,18 +266,26 @@ impl SettingsPage {
                     ))
                     .into_any_element(),
             );
-            for project in &projects {
-                let own = control.project_overrides.get(&project.id);
-                let open = self.control.expanded_project.as_deref() == Some(project.id.as_str());
-                let toggle = project.id.clone();
-                let summary = crate::motion::shown(
-                    SharedString::from(format!("control-project-summary-{}", project.id)),
-                    own.map(crate::control::grant_summary),
-                    window,
-                    cx,
-                );
-                rows.push(
-                    crate::material::accessible_clickable(
+            let list = projects
+                .iter()
+                .map(|project| (SharedString::from(project.id.clone()), project.clone()));
+            let list = crate::motion::keyed(
+                "control-projects",
+                list,
+                window,
+                cx,
+                |_, project, window, cx| {
+                    let own = control.project_overrides.get(&project.id);
+                    let open =
+                        self.control.expanded_project.as_deref() == Some(project.id.as_str());
+                    let toggle = project.id.clone();
+                    let summary = crate::motion::shown(
+                        SharedString::from(format!("control-project-summary-{}", project.id)),
+                        own.map(crate::control::grant_summary),
+                        window,
+                        cx,
+                    );
+                    let row = crate::material::accessible_clickable(
                         crate::material::group_row(cx),
                         SharedString::from(format!("control-project-{}", project.id)),
                         Role::Button,
@@ -314,46 +322,48 @@ impl SettingsPage {
                                 Some(toggle.clone())
                             };
                         cx.notify();
-                    }))
-                    .into_any_element(),
-                );
-                // The open project's grant folds out under its row; the one
-                // it replaces folds away.
-                let fold_id = SharedString::from(format!("control-project-fold-{}", project.id));
-                let shown = crate::motion::shown(fold_id.clone(), open.then_some(()), window, cx);
-                let mut fold = crate::widgets::Collapsible::new(fold_id, open).w_full();
-                if shown.is_some() {
-                    let grant = own
-                        .cloned()
-                        .unwrap_or_else(|| control.default_grant.clone());
-                    let id = project.id.clone();
-                    let remove = crate::motion::shown(
-                        SharedString::from(format!("control-project-default-{}", project.id)),
-                        own.is_some().then_some(()),
-                        window,
-                        cx,
-                    );
-                    fold = fold.content(
-                        crate::material::group_row_stacked(cx)
-                            .child(crate::control::grant_editor(
-                                SharedString::from(format!("control-project-grant-{}", project.id)),
-                                &grant,
-                                &projects,
-                                true,
-                                self.project_grant_change(project.id.clone(), cx),
-                                cx,
-                            ))
-                            .when_some(remove, |row, remove| {
-                                row.child(
-                                    remove.fade(
-                                        Button::new(SharedString::from(format!(
-                                            "control-project-default-{}",
-                                            project.id
-                                        )))
-                                        .ghost()
-                                        .label(crate::tr!("control.settings.remove_override"))
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
+                    }));
+                    // The open project's grant folds out under its row; the one
+                    // it replaces folds away.
+                    let fold_id =
+                        SharedString::from(format!("control-project-fold-{}", project.id));
+                    let shown =
+                        crate::motion::shown(fold_id.clone(), open.then_some(()), window, cx);
+                    let mut fold = crate::widgets::Collapsible::new(fold_id, open).w_full();
+                    if shown.is_some() {
+                        let grant = own
+                            .cloned()
+                            .unwrap_or_else(|| control.default_grant.clone());
+                        let id = project.id.clone();
+                        let remove = crate::motion::shown(
+                            SharedString::from(format!("control-project-default-{}", project.id)),
+                            own.is_some().then_some(()),
+                            window,
+                            cx,
+                        );
+                        fold = fold.content(
+                            crate::material::group_row_stacked(cx)
+                                .child(crate::control::grant_editor(
+                                    SharedString::from(format!(
+                                        "control-project-grant-{}",
+                                        project.id
+                                    )),
+                                    &grant,
+                                    &projects,
+                                    true,
+                                    self.project_grant_change(project.id.clone(), cx),
+                                    cx,
+                                ))
+                                .when_some(remove, |row, remove| {
+                                    row.child(
+                                        remove.fade(
+                                            Button::new(SharedString::from(format!(
+                                                "control-project-default-{}",
+                                                project.id
+                                            )))
+                                            .ghost()
+                                            .label(crate::tr!("control.settings.remove_override"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
                                                 let id = id.clone();
                                                 this.dispatch_settings(
                                                     move |store| {
@@ -361,15 +371,16 @@ impl SettingsPage {
                                                     },
                                                     cx,
                                                 )
-                                            }),
+                                            })),
                                         ),
-                                    ),
-                                )
-                            }),
-                    );
-                }
-                rows.push(fold.into_any_element());
-            }
+                                    )
+                                }),
+                        );
+                    }
+                    v_flex().w_full().child(row).child(fold).into_any_element()
+                },
+            );
+            rows.push(list.render(v_flex().w_full()));
             return rows;
         }
         let options = projects
@@ -416,19 +427,25 @@ impl SettingsPage {
             },
             cx,
         ));
-        for project in projects
-            .iter()
-            .filter(|project| control.project_overrides.contains_key(&project.id))
-        {
+        let overrides = projects.iter().filter_map(|project| {
             let summary = control
                 .project_overrides
                 .get(&project.id)
-                .map(crate::control::grant_summary)
-                .unwrap_or_default();
-            let edit = project.clone();
-            let id = project.id.clone();
-            let store = self.store.clone();
-            rows.push(
+                .map(crate::control::grant_summary)?;
+            Some((
+                SharedString::from(project.id.clone()),
+                (project.clone(), summary),
+            ))
+        });
+        let list = crate::motion::keyed(
+            "control-overrides",
+            overrides,
+            window,
+            cx,
+            |_, (project, summary), _, cx| {
+                let edit = project.clone();
+                let id = project.id.clone();
+                let store = self.store.clone();
                 crate::material::group_row(cx)
                     .text_body(false, cx)
                     .child(crate::project_icon::artwork(project, 16.))
@@ -439,7 +456,7 @@ impl SettingsPage {
                             .overflow_hidden()
                             .child(crate::widgets::fade_text(project.name.clone())),
                     )
-                    .child(div().text_secondary(false, cx).child(summary))
+                    .child(div().text_secondary(false, cx).child(summary.clone()))
                     .child(
                         Button::new(SharedString::from(format!("edit-grant-{id}")))
                             .ghost()
@@ -463,9 +480,10 @@ impl SettingsPage {
                                 )
                             })),
                     )
-                    .into_any_element(),
-            );
-        }
+                    .into_any_element()
+            },
+        );
+        rows.push(list.render(v_flex().w_full()));
         rows
     }
 

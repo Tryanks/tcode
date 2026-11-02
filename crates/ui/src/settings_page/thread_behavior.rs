@@ -70,7 +70,11 @@ impl SettingsPage {
         }
     }
 
-    pub(super) fn render_threads(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn render_threads(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let settings = self.store.read(cx).settings();
         let delete_confirm_reset = crate::settings_rows::reset_action(
             "reset-delete-confirm",
@@ -91,7 +95,7 @@ impl SettingsPage {
                 |store, checked| store.set_skip_delete_confirmation(!checked),
             ),
         ];
-        let settling = self.settling_rows(&settings, cx);
+        let settling = self.settling_rows(&settings, window, cx);
         let panels = self.panel_rows(&settings, cx);
         let model_limits = self.model_limit_rows(&settings, cx);
         let compact = self.window_state.read(cx).compact;
@@ -247,7 +251,12 @@ impl SettingsPage {
     /// Auto-settle, its days and merge rules, and the per-project overrides:
     /// a phone lists every project as a link to its rules page; a wide window
     /// adds overrides from a menu and edits them in a dialog.
-    fn settling_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn settling_rows(
+        &mut self,
+        settings: &Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let reset = crate::settings_rows::reset_action(
             "reset-auto-settle",
             settings.auto_settle_after_days != Some(3.),
@@ -335,10 +344,17 @@ impl SettingsPage {
                     ))
                     .into_any_element(),
             );
-            for project in projects {
-                let summary = summary(&project);
-                let edit = project.clone();
-                rows.push(
+            let projects = projects
+                .into_iter()
+                .map(|project| (SharedString::from(project.id.clone()), project));
+            let list = crate::motion::keyed(
+                "project-rules",
+                projects,
+                window,
+                cx,
+                |_, project, _, cx| {
+                    let summary = summary(project);
+                    let edit = project.clone();
                     crate::material::accessible_clickable(
                         crate::material::group_row(cx),
                         SharedString::from(format!("project-rules-{}", project.id)),
@@ -349,7 +365,7 @@ impl SettingsPage {
                     .cursor_pointer()
                     .hover(|row| row.bg(cx.theme().list_hover))
                     .text_body(true, cx)
-                    .child(crate::project_icon::artwork(&project, 16.))
+                    .child(crate::project_icon::artwork(project, 16.))
                     .child(
                         div()
                             .flex_1()
@@ -364,9 +380,10 @@ impl SettingsPage {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.edit_project_rules(edit.clone(), window, cx)
                     }))
-                    .into_any_element(),
-                );
-            }
+                    .into_any_element()
+                },
+            );
+            rows.push(list.render(v_flex().w_full()));
         } else {
             let options = projects
                 .iter()
@@ -408,20 +425,30 @@ impl SettingsPage {
                 },
                 cx,
             ));
-            for project in projects.into_iter().filter(|project| {
-                settings
-                    .project_settlement_overrides
-                    .contains_key(&project.id)
-            }) {
-                let summary = summary(&project).unwrap_or_default();
-                let edit = project.clone();
-                let id = project.id.clone();
-                rows.push(
+            let overrides = projects
+                .into_iter()
+                .filter(|project| {
+                    settings
+                        .project_settlement_overrides
+                        .contains_key(&project.id)
+                })
+                .map(|project| {
+                    let summary = summary(&project).unwrap_or_default();
+                    (SharedString::from(project.id.clone()), (project, summary))
+                });
+            let list = crate::motion::keyed(
+                "settle-overrides",
+                overrides,
+                window,
+                cx,
+                |_, (project, summary), _, cx| {
+                    let edit = project.clone();
+                    let id = project.id.clone();
                     crate::material::group_row(cx)
                         .text_body(false, cx)
-                        .child(crate::project_icon::artwork(&project, 16.))
-                        .child(div().flex_1().child(project.name))
-                        .child(div().text_secondary(false, cx).child(summary))
+                        .child(crate::project_icon::artwork(project, 16.))
+                        .child(div().flex_1().child(project.name.clone()))
+                        .child(div().text_secondary(false, cx).child(summary.clone()))
                         .child(
                             Button::new(SharedString::from(format!("edit-rules-{id}")))
                                 .ghost()
@@ -444,9 +471,10 @@ impl SettingsPage {
                                     )
                                 })),
                         )
-                        .into_any_element(),
-                );
-            }
+                        .into_any_element()
+                },
+            );
+            rows.push(list.render(v_flex().w_full()));
         }
         rows
     }

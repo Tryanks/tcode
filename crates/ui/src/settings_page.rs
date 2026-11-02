@@ -1395,7 +1395,7 @@ impl SettingsPage {
         }
         let column = match self.section {
             Section::General => self.render_general(cx),
-            Section::Threads => self.render_threads(cx),
+            Section::Threads => self.render_threads(window, cx),
             Section::ProjectThreadRules => v_flex().children(self.project_rules_editor.clone()),
             Section::SourceControl => self.render_source_control(cx),
             Section::Providers => self.render_providers(window, cx),
@@ -2887,7 +2887,7 @@ impl SettingsPage {
             && self.window_state.read(cx).destination()
                 == crate::window_state::Destination::SettingsThreadRules
         {
-            let column = self.render_threads(cx);
+            let column = self.render_threads(window, cx);
             return self.render_content_column(column, &self.content_scroll, cx);
         }
         if self.section == Section::ProjectThreadRules
