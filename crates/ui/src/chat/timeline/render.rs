@@ -361,12 +361,19 @@ impl ChatView {
 
         // Changed-file evidence is the turn's settled summary: while the turn
         // still runs, the live per-file rows inside the work log carry this
-        // information, so the section appears only once the turn finishes.
+        // information, so the section folds in only once the turn finishes.
         let (changes, completeness) = self
             .workspace_store
             .read(cx)
             .chat_turn_changes_for(self.session_id.as_deref(), index);
-        if !turn.running && !changes.is_empty() {
+        let changes_fold = crate::motion::shown(
+            SharedString::from(format!("changed-files-fold-{index}")),
+            (!turn.running && !changes.is_empty()).then_some(()),
+            window,
+            cx,
+        )
+        .filter(|_| !changes.is_empty());
+        let changes = changes_fold.map(|fold| {
             let more_key = format!("changed-files-more-{index}");
             let show_all = self.expanded.contains(&more_key);
             let toggle_more_key = more_key;
@@ -387,21 +394,28 @@ impl ChatView {
                     })
                     .collect(),
             };
-            trailing = true;
-            column = column.child(components::changed_files::changed_files(
-                index,
-                cwd,
-                &changes,
-                completeness,
-                show_all,
-                handlers,
-                cx,
-            ));
-        }
+            // The gap below it folds with it.
+            fold.fold(
+                div()
+                    .pb(px(SEGMENT_GAP))
+                    .child(components::changed_files::changed_files(
+                        index,
+                        cwd,
+                        &changes,
+                        completeness,
+                        show_all,
+                        handlers,
+                        cx,
+                    )),
+            )
+        });
+        trailing |= changes.is_some();
 
         // The turn's liveness, bare after everything it produced: no fold can
         // reach it, so collapsing the last disclosure never hides that we work.
-        if turn.running {
+        // It cross-fades into the finished turn's time row as the turn ends.
+        let finished_at = turn.end_ts.or(entries.last().and_then(|e| e.ts));
+        if turn.running || finished_at.is_some() {
             let requested_model = self
                 .workspace_store
                 .read(cx)
@@ -409,29 +423,31 @@ impl ChatView {
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
                     .map(str::to_owned);
+            let turn = turn.clone();
             trailing = true;
-            column = column.child(
-                div()
-                    .id(("working-status", index))
-                    .debug_selector(move || format!("working-status-{index}"))
-                    .child(components::indicator::turn_working_indicator(
-                        index,
-                        turn.start_ts,
-                        served_model,
-                        cx,
-                    )),
-            );
-        } else if let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts)) {
-            let requested_model = self
-                .workspace_store
-                .read(cx)
-                .chat_requested_model_for(self.session_id.as_deref());
-            trailing = true;
-            column = column.child(components::indicator::finished_turn_time(
-                ts,
-                turn,
-                requested_model.as_deref(),
+            column = column.child(crate::motion::cross_fade(
+                SharedString::from(format!("turn-status-{index}")),
+                turn.running,
+                window,
                 cx,
+                move |running, _, cx| match (*running, finished_at) {
+                    (false, Some(ts)) => components::indicator::finished_turn_time(
+                        ts,
+                        &turn,
+                        requested_model.as_deref(),
+                        cx,
+                    ),
+                    _ => div()
+                        .id(("working-status", index))
+                        .debug_selector(move || format!("working-status-{index}"))
+                        .child(components::indicator::turn_working_indicator(
+                            index,
+                            turn.start_ts,
+                            served_model.clone(),
+                            cx,
+                        ))
+                        .into_any_element(),
+                },
             ));
         }
 
@@ -450,7 +466,12 @@ impl ChatView {
 
         RenderedRow {
             content,
-            trailer: trailing.then_some((column, !segments.is_empty())),
+            trailer: trailing.then(|| {
+                (
+                    v_flex().w_full().children(changes).child(column),
+                    !segments.is_empty(),
+                )
+            }),
         }
     }
 

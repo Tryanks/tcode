@@ -94,7 +94,9 @@ pub(crate) fn shimmer_label(id: SharedString, label: Cow<'static, str>, cx: &App
                 animation_id,
                 // On the app's clock, not the element's: a running turn's
                 // label moves to each new last row of the turn, whose fresh
-                // element state would restart the sweep.
+                // element state would restart the sweep. gpui-base's
+                // `animate_keyframes` keeps its start in element state and has
+                // no clock-synced repeat, so gpui's `repeat_synced` stands in.
                 Animation::new(Duration::from_millis(1400)).repeat_synced(),
                 move |element, delta| {
                     // Enter and leave outside the text so every glyph returns to muted.
@@ -174,6 +176,7 @@ pub(crate) fn turn_working_indicator(
     served_model: Option<String>,
     cx: &App,
 ) -> AnyElement {
+    let warning = cx.theme().warning;
     h_flex()
         .gap_2()
         .items_center()
@@ -183,19 +186,27 @@ pub(crate) fn turn_working_indicator(
             id: SharedString::from(format!("working-{turn}")).into(),
             started_at,
         })
-        .when_some(served_model, |row, served| {
-            let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
-            row.child(
-                h_flex()
-                    .id(SharedString::from(format!("served-model-{turn}")))
-                    .gap_1()
-                    .items_center()
-                    .text_color(cx.theme().warning)
-                    .child(crate::icon::Icon::new(crate::icon::IconName::TriangleAlert))
-                    .child(served)
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)),
-            )
-        })
+        .child(crate::motion::Sampled::new(move |window, cx| {
+            let id = SharedString::from(format!("served-model-{turn}"));
+            match crate::motion::shown(id.clone(), served_model, window, cx) {
+                Some(served) => {
+                    let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
+                    served.fade(
+                        h_flex()
+                            .id(id)
+                            .gap_1()
+                            .items_center()
+                            .text_color(warning)
+                            .child(crate::icon::Icon::new(crate::icon::IconName::TriangleAlert))
+                            .child(served.value.clone())
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            }),
+                    )
+                }
+                None => div().into_any_element(),
+            }
+        }))
         .into_any_element()
 }
 
