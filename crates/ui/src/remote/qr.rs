@@ -20,7 +20,8 @@ fn qr_modules(payload: &str) -> Option<(usize, Vec<bool>)> {
 /// A link's QR next to the text about it. Compact stacks the QR over the
 /// text rather than putting a fixed-size image beside text that then has
 /// nowhere to wrap; a wide layout too narrow for both wraps the QR under it.
-/// A new payload cross-fades from the code `id` showed before.
+/// A new payload cross-fades from the code `id` showed before; the QR and the
+/// text glide to where a change of window or a wrap puts them.
 pub(super) fn beside_qr(
     id: impl Into<ElementId>,
     text: impl gpui::IntoElement,
@@ -29,23 +30,30 @@ pub(super) fn beside_qr(
     window: &mut Window,
     cx: &mut App,
 ) -> gpui::Div {
+    let id = id.into();
+    let reflow = crate::motion::reflow(id.clone(), window, cx);
     let qr = qr_modules(payload).is_some().then(|| {
-        crate::motion::cross_fade(id, payload.to_owned(), window, cx, |payload, _, cx| {
+        let qr = crate::motion::cross_fade(id, payload.to_owned(), window, cx, |payload, _, cx| {
             qr_element(payload, compact, cx).unwrap_or_else(|| div().into_any_element())
-        })
+        });
+        reflow.part("qr", qr)
     });
     let layout = if compact {
-        v_flex().items_center().children(qr).child(text)
+        v_flex()
+            .items_center()
+            .children(qr)
+            .child(reflow.part("text", text))
     } else {
         h_flex()
             .flex_wrap()
             .items_start()
             // The narrowest the text column gets before the QR wraps under it;
             // a layout breakpoint, not a size any owner supplies.
-            .child(div().flex_1().min_w(px(200.)).child(text))
+            .child(reflow.part("text", div().flex_1().min_w(px(200.)).child(text)))
             .children(qr)
     };
-    layout.w_full().gap(crate::material::section_gap(cx))
+    let layout = layout.w_full().gap(crate::material::section_gap(cx));
+    div().w_full().child(reflow.render(layout))
 }
 
 /// Paint the matrix as one flex row per module row, collapsing consecutive

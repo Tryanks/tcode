@@ -1006,7 +1006,7 @@ pub(super) use machines::machine_links;
 mod section {
     use super::*;
     use crate::icon::IconName;
-    use crate::material::{group_caption, group_row, grouped};
+    use crate::material::{group_caption, group_row};
     use crate::scroll::ScrollableElement as _;
     use crate::settings_rows::{ToggleRow, row_frame, settings_group};
     use crate::sizing::Sizable as _;
@@ -1172,30 +1172,47 @@ mod section {
                 .debug_selector(|| "spaces-section".into())
                 .into_any_element();
             };
-            let list = spaces.read(cx).spaces().to_vec();
-            let mut rows = list
+            // A space made or deleted folds in or out where it is; the way to
+            // make one is the last row.
+            let list = spaces
+                .read(cx)
+                .spaces()
                 .iter()
-                .map(|space| self.space_row(space, compact, window, cx))
-                .collect::<Vec<_>>();
-            rows.push(
-                group_row(cx)
-                    .child(
-                        Button::new("spaces-new")
-                            .ghost()
-                            .compact()
-                            .icon(IconName::Plus)
-                            .label(crate::tr!("spaces.new"))
-                            .on_click(
-                                cx.listener(|section, _, window, cx| section.create(window, cx)),
-                            ),
+                .map(|space| {
+                    (
+                        SharedString::from(format!("space-{}", space.id)),
+                        Some(space.clone()),
                     )
-                    .into_any_element(),
-            );
+                })
+                .chain([(SharedString::from("spaces-new"), None)])
+                .collect::<Vec<_>>();
+            let rows =
+                crate::settings_rows::grouped_keyed(
+                    "spaces-rows",
+                    list,
+                    window,
+                    cx,
+                    |_, space, window, cx| match space {
+                        Some(space) => self.space_row(space, compact, window, cx),
+                        None => group_row(cx)
+                            .child(
+                                Button::new("spaces-new")
+                                    .ghost()
+                                    .compact()
+                                    .icon(IconName::Plus)
+                                    .label(crate::tr!("spaces.new"))
+                                    .on_click(cx.listener(|section, _, window, cx| {
+                                        section.create(window, cx)
+                                    })),
+                            )
+                            .into_any_element(),
+                    },
+                );
             v_flex()
                 .w_full()
                 .debug_selector(|| "spaces-section".into())
                 .child(group_caption(crate::tr!("spaces.section"), cx))
-                .child(grouped(rows, cx))
+                .child(crate::material::group(cx).child(rows))
                 .child(super::super::footnote_with_docs(
                     crate::tr!("spaces.intro"),
                     "shared-spaces",
@@ -1301,10 +1318,11 @@ mod section {
             space: &SpaceInfo,
             projects: Option<&[Project]>,
             compact: bool,
+            window: &mut Window,
             cx: &mut Context<Self>,
         ) -> AnyElement {
-            let mut chips = h_flex().w_full().gap_2().flex_wrap();
-            for project_id in &space.project_ids {
+            let space_id = space.id.clone();
+            let chip = |project_id: &String, cx: &mut Context<Self>| {
                 let known = projects.map(|projects| {
                     projects
                         .iter()
@@ -1327,34 +1345,74 @@ mod section {
                 } else {
                     cx.theme().foreground
                 };
-                chips = chips.child(
-                    crate::material::semantic_chip(
-                        label.clone(),
-                        cx.theme().secondary,
-                        foreground,
-                        cx,
-                    )
-                    .flex()
-                    .items_center()
-                    .gap(cx.theme().tokens.spacing.xs)
-                    .when(removed, |chip| chip.italic())
+                // Each chip carries the gap before it, so the gap goes with it.
+                div()
+                    .pr_2()
+                    .pb_2()
                     .child(
-                        Button::new(SharedString::from(format!(
-                            "space-unshare-{}-{project_id}",
-                            space.id
-                        )))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .aria_label(crate::tr!("spaces.projects.remove", name = label))
-                        .on_click(cx.listener(
-                            move |dialog, _, window, cx| {
-                                dialog.on_toggle_share(&action, window, cx);
-                            },
-                        )),
-                    ),
-                );
-            }
+                        crate::material::semantic_chip(
+                            label.clone(),
+                            cx.theme().secondary,
+                            foreground,
+                            cx,
+                        )
+                        .flex()
+                        .items_center()
+                        .gap(cx.theme().tokens.spacing.xs)
+                        .when(removed, |chip| chip.italic())
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "space-unshare-{space_id}-{project_id}"
+                            )))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .aria_label(crate::tr!("spaces.projects.remove", name = label))
+                            .on_click(cx.listener(
+                                move |dialog, _, window, cx| {
+                                    dialog.on_toggle_share(&action, window, cx);
+                                },
+                            )),
+                        ),
+                    )
+                    .into_any_element()
+            };
+            // The text saying there are none is one more row: it folds away
+            // as the first project is shared, the chips fold in, and back.
+            let shared = if space.project_ids.is_empty() {
+                vec![(SharedString::from("space-projects-empty"), None)]
+            } else {
+                vec![(
+                    SharedString::from("space-projects"),
+                    Some(space.project_ids.clone()),
+                )]
+            };
+            let shared = crate::motion::keyed(
+                SharedString::from(format!("space-projects-{space_id}")),
+                shared,
+                window,
+                cx,
+                |_, project_ids, window, cx| match project_ids {
+                    None => div()
+                        .pb_2()
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("spaces.projects.empty"))
+                        .into_any_element(),
+                    Some(project_ids) => {
+                        let chips = project_ids.iter().map(|project_id| {
+                            (SharedString::from(project_id.clone()), project_id.clone())
+                        });
+                        crate::motion::keyed_across(
+                            SharedString::from(format!("space-project-chips-{space_id}")),
+                            chips,
+                            window,
+                            cx,
+                            |_, project_id, _, cx| chip(project_id, cx),
+                        )
+                        .render(h_flex().w_full().flex_wrap())
+                    }
+                },
+            );
             // Without projects to offer the button stays, disabled, so the
             // empty text's "add one here" names a control that is there.
             let options: Vec<(String, String, bool)> = projects
@@ -1368,7 +1426,6 @@ mod section {
                     )
                 })
                 .collect();
-            let space_id = space.id.clone();
             let add = Button::new(SharedString::from(format!("space-add-project-{space_id}")))
                 .ghost()
                 .outline()
@@ -1393,16 +1450,7 @@ mod section {
                 Some(crate::tr!("spaces.projects.title").into_owned().into()),
                 cx,
             )
-            .when(space.project_ids.is_empty(), |section| {
-                section.child(
-                    div()
-                        .text_secondary(compact, cx)
-                        .child(crate::tr!("spaces.projects.empty")),
-                )
-            })
-            .when(!space.project_ids.is_empty(), |section| {
-                section.child(chips)
-            })
+            .child(shared.render(v_flex().w_full().mb(gpui::rems(-0.5))))
             .child(h_flex().child(add))
             .into_any_element()
         }
@@ -1415,115 +1463,138 @@ mod section {
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> AnyElement {
-            let mut rows = Vec::new();
-            for member in &space.members {
-                let status_color = gpui_base::motion::transition(
-                    (
-                        SharedString::from(format!("member-status-{}", member.id)),
-                        "color",
-                    ),
-                    match &member.path {
-                        Some(_) => cx.theme().success,
-                        None => cx.theme().muted_foreground,
-                    },
-                    crate::motion::settle(),
-                    window,
-                    cx,
-                );
-                let path = crate::motion::cross_fade(
-                    SharedString::from(format!("member-path-{}", member.id)),
-                    super::super::path_label(member.path.as_ref()),
-                    window,
-                    cx,
-                    move |label, _, cx| {
-                        div()
-                            .text_secondary(compact, cx)
-                            .text_color(status_color)
-                            .child(label.clone())
-                            .into_any_element()
-                    },
-                );
-                let move_to = (!others.is_empty()).then(|| {
-                    let device_id = member.id.clone();
-                    let others = others.to_vec();
-                    Button::new(SharedString::from(format!("member-move-{}", member.id)))
-                        .ghost()
-                        .compact()
-                        .label(crate::tr!("spaces.members.move"))
-                        .dropdown_menu(move |mut menu, _, _| {
-                            for (space_id, name) in &others {
-                                menu = menu.menu(
-                                    name.clone(),
-                                    Box::new(MoveMember {
-                                        device_id: device_id.clone(),
-                                        space_id: space_id.clone(),
-                                    }),
-                                );
-                            }
-                            menu
-                        })
-                });
-                let space_name = space.name.clone();
-                let (member_id, member_name) = (member.id.clone(), member.name.clone());
-                let controls = h_flex()
-                    .gap_2()
-                    .items_center()
-                    .when(compact, |controls| controls.w_full())
-                    .child(
-                        div()
-                            .flex_none()
-                            .when(compact, |status| status.flex_1())
-                            .child(path),
-                    )
-                    .children(move_to)
-                    .child(
-                        Button::new(SharedString::from(format!("member-remove-{}", member.id)))
-                            .debug_selector({
-                                let id = member.id.clone();
-                                move || format!("member-remove-{id}")
-                            })
+            // The empty row is one more row, which leaves as the first member
+            // joins and comes back once the last is removed.
+            let members = if space.members.is_empty() {
+                vec![(SharedString::from("space-members-empty"), None)]
+            } else {
+                space
+                    .members
+                    .iter()
+                    .map(|member| {
+                        (
+                            SharedString::from(format!("member-{}", member.id)),
+                            Some(member.clone()),
+                        )
+                    })
+                    .collect()
+            };
+            // On a compact window a member's controls go under its name.
+            let reflow = crate::motion::reflow(
+                SharedString::from(format!("space-members-{}", space.id)),
+                window,
+                cx,
+            );
+            let rows = crate::settings_rows::grouped_keyed(
+                SharedString::from(format!("space-members-{}", space.id)),
+                members,
+                window,
+                cx,
+                |_, member, window, cx| {
+                    let Some(member) = member else {
+                        return crate::material::empty_row(crate::tr!("spaces.members.empty"), cx)
+                            .into_any_element();
+                    };
+                    let status_color = gpui_base::motion::transition(
+                        (
+                            SharedString::from(format!("member-status-{}", member.id)),
+                            "color",
+                        ),
+                        match &member.path {
+                            Some(_) => cx.theme().success,
+                            None => cx.theme().muted_foreground,
+                        },
+                        crate::motion::settle(),
+                        window,
+                        cx,
+                    );
+                    let path = crate::motion::cross_fade(
+                        SharedString::from(format!("member-path-{}", member.id)),
+                        super::super::path_label(member.path.as_ref()),
+                        window,
+                        cx,
+                        move |label, _, cx| {
+                            div()
+                                .text_secondary(compact, cx)
+                                .text_color(status_color)
+                                .child(label.clone())
+                                .into_any_element()
+                        },
+                    );
+                    let move_to = (!others.is_empty()).then(|| {
+                        let device_id = member.id.clone();
+                        let others = others.to_vec();
+                        Button::new(SharedString::from(format!("member-move-{}", member.id)))
                             .ghost()
                             .compact()
-                            .danger()
-                            .label(crate::tr!("spaces.members.remove"))
-                            .on_click(cx.listener(move |dialog, _, window, cx| {
-                                open_remove_member(
-                                    dialog.spaces.clone(),
-                                    space_name.clone(),
-                                    member_id.clone(),
-                                    member_name.clone(),
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    );
-                let name = div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_body(compact, cx)
-                    .overflow_hidden()
-                    .child(crate::widgets::fade_text(super::super::device_label(
-                        &member.name,
-                        member.platform.as_deref(),
-                    )));
-                rows.push(
+                            .label(crate::tr!("spaces.members.move"))
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for (space_id, name) in &others {
+                                    menu = menu.menu(
+                                        name.clone(),
+                                        Box::new(MoveMember {
+                                            device_id: device_id.clone(),
+                                            space_id: space_id.clone(),
+                                        }),
+                                    );
+                                }
+                                menu
+                            })
+                    });
+                    let space_name = space.name.clone();
+                    let (member_id, member_name) = (member.id.clone(), member.name.clone());
+                    let controls = h_flex()
+                        .gap_2()
+                        .items_center()
+                        .when(compact, |controls| controls.w_full())
+                        .child(
+                            div()
+                                .flex_none()
+                                .when(compact, |status| status.flex_1())
+                                .child(path),
+                        )
+                        .children(move_to)
+                        .child(
+                            Button::new(SharedString::from(format!("member-remove-{}", member.id)))
+                                .debug_selector({
+                                    let id = member.id.clone();
+                                    move || format!("member-remove-{id}")
+                                })
+                                .ghost()
+                                .compact()
+                                .danger()
+                                .label(crate::tr!("spaces.members.remove"))
+                                .on_click(cx.listener(move |dialog, _, window, cx| {
+                                    open_remove_member(
+                                        dialog.spaces.clone(),
+                                        space_name.clone(),
+                                        member_id.clone(),
+                                        member_name.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        );
+                    let name = div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_body(compact, cx)
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(super::super::device_label(
+                            &member.name,
+                            member.platform.as_deref(),
+                        )));
                     row_frame(compact, cx)
                         .child(name)
-                        .child(controls)
-                        .into_any_element(),
-                );
-            }
-            if rows.is_empty() {
-                rows.push(
-                    crate::material::empty_row(crate::tr!("spaces.members.empty"), cx)
-                        .into_any_element(),
-                );
-            }
+                        .child(reflow.part(format!("controls-{}", member.id), controls))
+                        .into_any_element()
+                },
+            );
             crate::material::section(
                 Some(crate::tr!("spaces.members.title").into_owned().into()),
                 cx,
             )
-            .child(grouped(rows, cx))
+            .child(reflow.render(crate::material::group(cx).child(rows)))
             .into_any_element()
         }
     }
@@ -1558,7 +1629,13 @@ mod section {
                         .gap(crate::material::section_gap(cx))
                         .debug_selector(|| "space-detail".into())
                         .child(self.link_section(&space, accepting, compact, window, cx))
-                        .child(self.projects_section(&space, projects.as_deref(), compact, cx))
+                        .child(self.projects_section(
+                            &space,
+                            projects.as_deref(),
+                            compact,
+                            window,
+                            cx,
+                        ))
                         .child(self.members_section(&space, &others, compact, window, cx)),
                 )
                 .into_any_element()

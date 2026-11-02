@@ -318,6 +318,23 @@ pub(super) fn field_row(compact: bool, cx: &App) -> gpui::Div {
     }
 }
 
+/// A [`field_row`] of `labels` and `field`: the field glides to where a wrap
+/// under the labels, or a window turning compact, puts it.
+pub(super) fn reflowing_field_row(
+    id: impl Into<gpui::ElementId>,
+    labels: impl IntoElement,
+    field: impl IntoElement,
+    compact: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let reflow = crate::motion::reflow(id, window, cx);
+    let row = field_row(compact, cx)
+        .child(labels)
+        .child(reflow.part("field", field));
+    reflow.render(row)
+}
+
 /// The width a [`field_row`]'s label keeps before its field wraps under it.
 const FIELD_LABEL_BASIS: f32 = 200.;
 
@@ -514,28 +531,30 @@ impl HostingPanel {
                 }),
             )));
         }
-        rows.push(
-            field_row(compact, cx)
-                .child(field_labels(
-                    crate::tr!("remote.host_name.title").into_owned().into(),
-                    Some(
-                        crate::tr!("remote.host_name.description")
-                            .into_owned()
-                            .into(),
-                    ),
-                    compact,
-                    cx,
-                ))
-                .child(
-                    div()
-                        .when(compact, |field| field.w_full())
-                        .when(!compact, |field| {
-                            field.w(px(FIELD_WIDTH)).min_w_0().flex_shrink(1.)
-                        })
-                        .child(Input::new(&self.host_name_input)),
-                )
-                .into_any_element(),
+        let labels = field_labels(
+            crate::tr!("remote.host_name.title").into_owned().into(),
+            Some(
+                crate::tr!("remote.host_name.description")
+                    .into_owned()
+                    .into(),
+            ),
+            compact,
+            cx,
         );
+        let field = div()
+            .when(compact, |field| field.w_full())
+            .when(!compact, |field| {
+                field.w(px(FIELD_WIDTH)).min_w_0().flex_shrink(1.)
+            })
+            .child(Input::new(&self.host_name_input));
+        rows.push(reflowing_field_row(
+            "remote-host-name",
+            labels,
+            field,
+            compact,
+            window,
+            cx,
+        ));
         settings_group(crate::tr!("remote.host.section"), rows, cx).into_any_element()
     }
 }
