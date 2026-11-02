@@ -818,4 +818,90 @@ mod tests {
         assert!(cx.debug_bounds("section-body-1").is_none());
         assert_eq!(cx.debug_bounds("below").unwrap().top(), px(0.));
     }
+
+    /// A chip between two neighbours in a row with a gap.
+    struct Pill {
+        chip: bool,
+        clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for Pill {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let gap = px(8.);
+            let clicks = self.clicks.clone();
+            let chip = super::shown("pill-chip", self.chip.then_some(()), window, cx).map(|chip| {
+                chip.fold_across_gap(
+                    gap,
+                    div()
+                        .id("chip")
+                        .debug_selector(|| "chip".into())
+                        .w(px(50.))
+                        .h(px(20.))
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                )
+            });
+            div()
+                .flex()
+                .flex_row()
+                .gap(gap)
+                .child(div().w(px(30.)).h(px(20.)))
+                .children(chip)
+                .child(
+                    div()
+                        .debug_selector(|| "after".into())
+                        .w(px(30.))
+                        .h(px(20.)),
+                )
+        }
+    }
+
+    /// A chip that comes into a row widens into it, gap and all, so the
+    /// neighbour after it moves aside one way without a jump; going, it
+    /// narrows out the same way and takes no clicks.
+    #[gpui::test]
+    fn a_chip_widens_into_its_row_and_narrows_out(cx: &mut TestAppContext) {
+        use crate::test_frames::{draw, draw_settled};
+        let clicks = Rc::new(Cell::new(0));
+        let (pill, cx) = cx.add_window_view(|_, _| Pill {
+            chip: false,
+            clicks: clicks.clone(),
+        });
+        let after = |cx: &mut VisualTestContext| cx.debug_bounds("after").unwrap().left();
+        assert_eq!(after(cx), px(38.));
+        for (chip, from, to) in [(true, px(38.), px(96.)), (false, px(96.), px(38.))] {
+            pill.update(cx, |pill, cx| {
+                pill.chip = chip;
+                cx.notify();
+            });
+            draw(cx);
+            let mut seen = vec![after(cx)];
+            if !chip {
+                let leaving = cx.debug_bounds("chip").expect("drawn while it goes");
+                cx.simulate_click(leaving.center(), Default::default());
+            }
+            for _ in 0..16 {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| window.simulate_next_frame(cx));
+                draw(cx);
+                seen.push(after(cx));
+            }
+            draw_settled(cx);
+            seen.push(after(cx));
+            assert!((seen[0] - from).abs() <= px(1.), "{chip}: jumped: {seen:?}");
+            assert_eq!(*seen.last().unwrap(), to, "{chip}: {seen:?}");
+            assert!(
+                seen.windows(2).all(|pair| {
+                    (pair[1] - pair[0]).abs() < px(24.)
+                        && if to > from {
+                            pair[1] >= pair[0]
+                        } else {
+                            pair[1] <= pair[0]
+                        }
+                }),
+                "{chip}: the neighbour jumped or went back: {seen:?}"
+            );
+        }
+        assert_eq!(clicks.get(), 0, "a chip on its way out took a click");
+    }
 }

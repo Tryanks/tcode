@@ -49,7 +49,7 @@ pub(crate) struct BubbleData<'a> {
     pub(crate) rewind_menu: Option<RewindMenu>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct RewindMenu {
     pub(crate) turn: usize,
     pub(crate) disabled: bool,
@@ -195,7 +195,7 @@ pub(crate) fn user_bubble(
         rewind_menu,
     } = data;
     let BubbleHandlers { copy, images } = handlers;
-    let menu_items = bubble_menu_items(Arc::from(visible), rewind_menu);
+    let menu_items = bubble_menu_items(Arc::from(visible), rewind_menu.clone());
     let prose = cx.theme().tokens.typography.md;
     let spacing = &cx.theme().tokens.spacing;
     let text_style = window.text_style();
@@ -211,19 +211,30 @@ pub(crate) fn user_bubble(
     });
 
     let group_key = SharedString::from(format!("user-{entry_id}"));
-    let mut actions = h_flex().gap(px(2.)).items_center().justify_end();
-    if !visible.trim().is_empty() {
-        actions = actions.child(copy_button(
-            &format!("user:{entry_id}"),
-            copied,
-            compact,
-            copy,
-            cx,
-        ));
-    }
-    if let Some(rewind) = rewind {
-        actions = actions.child(rewind);
-    }
+    let copy = (!visible.trim().is_empty())
+        .then(|| copy_button(&format!("user:{entry_id}"), copied, compact, copy, cx));
+    // The rewind comes into the row beside Copy once the harness offers it,
+    // and goes as it was, inert, when it stops.
+    let rewind_id = SharedString::from(format!("rewind-fold-{entry_id}"));
+    let offered = rewind_menu.clone().filter(|_| rewind.is_some());
+    let mut rewind = rewind;
+    let actions = crate::motion::Sampled::new(move |window, cx| {
+        let gap = px(2.);
+        let rewind = crate::motion::shown(rewind_id, offered, window, cx).map(|shown| {
+            let button = match rewind.take() {
+                Some(button) if !shown.leaving() => button,
+                _ => native_rewind_button(shown.value.clone(), compact, Vec::new(), cx),
+            };
+            shown.fold_across_gap(gap, button)
+        });
+        h_flex()
+            .gap(gap)
+            .items_center()
+            .justify_end()
+            .children(copy)
+            .children(rewind)
+            .into_any_element()
+    });
 
     let thumbnails = (!attachments.is_empty()).then(|| {
         h_flex().gap_2().justify_end().flex_wrap().children(

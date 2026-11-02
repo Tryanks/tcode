@@ -125,10 +125,11 @@ impl ChatView {
                     .header
                     .label(call.status);
                 super::super::components::images::item_tile(
-                    call.entry,
-                    call.images.len() - 1,
-                    title,
-                    None,
+                    super::super::components::images::Tile::of(
+                        call.entry,
+                        call.images.len() - 1,
+                        title,
+                    ),
                     self.session_key.as_deref().unwrap_or_default(),
                     cx,
                 )

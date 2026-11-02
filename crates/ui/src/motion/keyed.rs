@@ -225,6 +225,7 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
                     id,
                     key,
                     jumped,
+                    wraps: axis == Axis::Horizontal,
                     bounds: bounds.clone(),
                     origin: origin.clone(),
                     child: match axis {
@@ -328,6 +329,9 @@ struct FlipRow {
     /// Whether the list's rows changed this frame, so a move is a jump to
     /// glide rather than a fold pushing it along.
     jumped: bool,
+    /// Rows side by side that may wrap: one a fold pushes onto another line
+    /// jumps there, so a move to another line glides whenever it happens.
+    wraps: bool,
     bounds: FlipBounds,
     origin: Rc<Cell<Point<Pixels>>>,
     child: AnyElement,
@@ -373,7 +377,11 @@ impl gpui::Element for FlipRow {
         cx: &mut App,
     ) {
         let moved = self.bounds.measure(&self.key, self.origin.get(), bounds);
-        let jump = if self.jumped { moved } else { Point::default() };
+        let jump = if self.jumped || (self.wraps && moved.y != Pixels::ZERO) {
+            moved
+        } else {
+            Point::default()
+        };
         let offset = flip_offset(self.id.clone(), jump, window, cx);
         window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
     }
@@ -530,5 +538,84 @@ mod tests {
         assert!(pushed > first && pushed < second, "a widens in, pushing b");
         draw_settled(cx);
         assert_eq!(left("b", cx), second);
+    }
+
+    struct WrappingChips {
+        order: Vec<&'static str>,
+    }
+
+    impl Render for WrappingChips {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let items = self
+                .order
+                .iter()
+                .map(|name| (SharedString::from(*name), *name));
+            let glide = crate::motion::GlideState::keyed("chips-glide", window, cx);
+            let chips = super::keyed_across("chips", items, window, cx, |_, name, _, _| {
+                let name = *name;
+                div()
+                    .debug_selector(move || name.to_string())
+                    .w(px(40.))
+                    .h(px(20.))
+                    .into_any_element()
+            })
+            .render(div().w(px(100.)).flex().flex_row().flex_wrap());
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    crate::motion::SizeGlide::new(&glide, chips).on_change(self.order.len() as u64),
+                )
+                .child(div().debug_selector(|| "below".into()).h(px(10.)))
+        }
+    }
+
+    /// A chip that arrives at the front of a row that wraps widens in; the
+    /// chip it pushes onto the next line glides there from where it was
+    /// rather than jumping when it wraps, and what is below the row moves
+    /// down with the row's height, one way, without a jump.
+    #[gpui::test]
+    fn a_chip_pushed_onto_the_next_line_glides_there(cx: &mut TestAppContext) {
+        let (chips, cx) = cx.add_window_view(|_, _| WrappingChips {
+            order: vec!["b", "c"],
+        });
+        let at = |name: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(name).expect("the chip is drawn").origin
+        };
+        draw_settled(cx);
+        let (b, c) = (at("b", cx), at("c", cx));
+        assert_eq!(cx.debug_bounds("below").unwrap().top(), px(20.));
+        chips.update(cx, |chips, cx| {
+            chips.order = vec!["a", "b", "c"];
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!((at("b", cx), at("c", cx)), (b, c), "the chips jumped");
+        let (mut below, mut wrapped) = (vec![cx.debug_bounds("below").unwrap().top()], vec![c]);
+        for _ in 0..24 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+            below.push(cx.debug_bounds("below").unwrap().top());
+            wrapped.push(at("c", cx));
+        }
+        assert!(
+            below.windows(2).all(|pair| pair[1] >= pair[0])
+                && below.windows(2).filter(|pair| pair[1] > pair[0]).count() >= 6,
+            "the row's height jumped: {below:?}"
+        );
+        assert!(
+            wrapped.windows(2).all(|pair| {
+                (pair[1].x - pair[0].x).abs() < px(30.) && (pair[1].y - pair[0].y).abs() < px(10.)
+            }),
+            "the wrapped chip jumped: {wrapped:?}"
+        );
+        draw_settled(cx);
+        assert_eq!(at("a", cx), b);
+        assert_eq!(at("b", cx), c);
+        assert_eq!(at("c", cx), gpui::point(b.x, b.y + px(20.)));
+        assert_eq!(cx.debug_bounds("below").unwrap().top(), px(40.));
     }
 }

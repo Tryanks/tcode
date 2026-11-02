@@ -649,7 +649,7 @@ impl ChatView {
                 .filter(|agents| !agents.is_empty())
         };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), agents.as_ref(), cx);
-        let phone_strip = self.render_phone_strip(agents.as_ref(), cx);
+        let phone_strip = self.render_phone_strip(agents.as_ref(), window, cx);
         let phone_strip_height = if phone_strip.is_some() {
             px(crate::material::bar_height(
                 crate::material::Bar::Toolbar,

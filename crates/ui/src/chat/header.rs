@@ -147,6 +147,22 @@ fn agents_cue_dot(
     )
 }
 
+/// The agents' cue inside the phone's Agents pill, widening it as it comes
+/// and narrowing it as it goes; its colour glides between running and
+/// waiting.
+fn cue_in_pill(cue: Option<gpui::Hsla>, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+    let shown = crate::motion::shown("agents-pill-cue", cue, window, cx)?;
+    let color = gpui_base::motion::transition(
+        "agents-pill-cue-color",
+        shown.value,
+        crate::motion::settle(),
+        window,
+        cx,
+    );
+    let gap = gpui::rems(0.25).to_pixels(window.rem_size());
+    Some(shown.fold_across_gap(gap, div().size(px(6.)).rounded_full().bg(color)))
+}
+
 /// The pane commands `panes` allows, as menu rows.
 fn pane_items(menu: PopupMenu, panes: crate::shell::PaneControls) -> PopupMenu {
     use crate::panes::{
@@ -208,17 +224,28 @@ impl ChatView {
     pub(super) fn render_phone_strip(
         &self,
         agents: Option<&crate::agents_panel::Agents>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !self.window_state.read(cx).compact {
             return None;
         }
-        let agents = agents.map(|agents| self.render_agents_pill(agents, cx));
-        let pull_requests = self.render_pull_request_pill(cx);
-        if agents.is_none() && pull_requests.is_none() {
+        let links = self
+            .active_pull_requests(cx)
+            .filter(|links| !links.is_empty());
+        if agents.is_none() && links.is_none() {
             return None;
         }
+        let gap = cx.theme().tokens.spacing.xs;
         let radius = crate::material::radius_chip(cx);
+        let agents = agents.map(|agents| self.render_agents_pill(agents, window, cx));
+        // A pull request linked while the strip shows the agents widens into
+        // it beside their pill, and narrows out when the last is unlinked.
+        let pull_requests =
+            crate::motion::shown("phone-pr-pill-fold", links, window, cx).and_then(|pill| {
+                let chip = self.render_pull_request_pill(&pill.value, cx)?;
+                Some(pill.fold_across_gap(gap, floating_backing(radius, cx).child(chip)))
+            });
         Some(
             crate::material::bar("phone-strip", crate::material::Bar::Toolbar, true, cx)
                 .debug_selector(|| "phone-strip".into())
@@ -233,12 +260,8 @@ impl ChatView {
                         .items_center()
                         .px(px(crate::material::COMPACT_PAGE_INSET))
                         .gap(cx.theme().tokens.spacing.xs)
-                        .children(
-                            agents
-                                .into_iter()
-                                .chain(pull_requests)
-                                .map(|chip| floating_backing(radius, cx).child(chip)),
-                        )
+                        .children(agents.map(|chip| floating_backing(radius, cx).child(chip)))
+                        .children(pull_requests)
                         .overflow_x_scroll_area(),
                 )
                 .into_any_element(),
@@ -250,6 +273,7 @@ impl ChatView {
     fn render_agents_pill(
         &self,
         agents: &crate::agents_panel::Agents,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let label: SharedString = match agents.count() {
@@ -268,9 +292,8 @@ impl ChatView {
             .text_body(false, cx)
             .icon(IconName::Bot)
             .label(label)
-            .when_some(cue, |pill, color| {
-                pill.child(div().size(px(6.)).rounded_full().bg(color))
-            });
+            // The cue widens the pill as it comes, and its label moves aside.
+            .children(cue_in_pill(cue, window, cx));
         crate::widgets::Popover::new("agents-sheet")
             .bottom_sheet(crate::tr!("agents.title"))
             .on_open_change(move |open, _, cx| {
@@ -341,10 +364,13 @@ impl ChatView {
 
     /// The phone's entry to the linked pull requests: one chip naming every
     /// number, which opens them in a bottom sheet.
-    fn render_pull_request_pill(&self, cx: &App) -> Option<AnyElement> {
-        let links = self.active_pull_requests(cx)?;
-        let numbers = crate::pull_requests::numbers(&links, cx)?;
-        let label = crate::pull_requests::badge_label(&links, cx)?;
+    fn render_pull_request_pill(
+        &self,
+        links: &[tcode_core::pull_request::ThreadPullRequestLink],
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let numbers = crate::pull_requests::numbers(links, cx)?;
+        let label = crate::pull_requests::badge_label(links, cx)?;
         let panel = self.pull_requests.clone();
         Some(
             crate::widgets::Popover::new("phone-pull-requests")
@@ -492,6 +518,31 @@ impl ChatView {
         let traffic_lights = window_caption::traffic_light_inset(window);
         // One cue for either tier, so a tier change leaves it as it was.
         let mut cue = agents_cue_dot(agents_cue.flatten(), window, cx);
+        // Controls that come and go with what the thread has widen into
+        // their rows, so the title and their neighbours move aside.
+        // Sampled in every tier and drawn only where the tier has room, so a
+        // change of tier is not a coming or going.
+        let badge = crate::motion::shown(
+            "header-pr-badge-fold",
+            self.active_pull_requests(cx)
+                .filter(|links| !links.is_empty()),
+            window,
+            cx,
+        )
+        .filter(|_| !overflow);
+        let toggle_gap = gpui::rems(0.25).to_pixels(window.rem_size());
+        let agents_toggle = crate::motion::shown(
+            "agents-toggle-fold",
+            agents_cue.is_some().then_some(()),
+            window,
+            cx,
+        );
+        let preview_toggle = crate::motion::shown(
+            "preview-toggle-fold",
+            self.workspace_store.read(cx).offers_preview().then_some(()),
+            window,
+            cx,
+        );
         let base = crate::material::bar("chat-header", crate::material::Bar::Strip, false, cx)
             .when(under_traffic_lights && traffic_lights > px(0.), |this| {
                 this.pl(traffic_lights)
@@ -642,44 +693,45 @@ impl ChatView {
                             .context_menu(title_menu),
                     )
                     .when_some(
-                        self.active_pull_requests(cx)
-                            .filter(|_| !overflow)
-                            .and_then(|links| {
-                                Some((
-                                    crate::pull_requests::numbers(&links, cx)?,
-                                    crate::pull_requests::badge_label(&links, cx)?,
-                                ))
-                            }),
-                        |header, (numbers, label)| {
+                        badge.and_then(|badge| {
+                            let numbers = crate::pull_requests::numbers(&badge.value, cx)?;
+                            let label = crate::pull_requests::badge_label(&badge.value, cx)?;
+                            Some((badge, numbers, label))
+                        }),
+                        |header, (badge, numbers, label)| {
                             // Every number shows until the numbers reach half the
                             // title's stretch; past that they clip, so the title
-                            // keeps the other half however many are linked.
+                            // keeps the other half however many are linked. A
+                            // badge that comes or goes widens into the row.
                             header.child(
-                                h_flex()
-                                    .flex_none()
-                                    .max_w(gpui::relative(0.5))
-                                    .overflow_hidden()
-                                    .child(
-                                        Button::new("header-pr-badge")
-                                            .debug_selector(|| "header-pr-badge".into())
-                                            .ghost()
-                                            .small()
-                                            .compact()
-                                            .selected(
-                                                right_panel_open
-                                                    && right_tab == RightTab::PullRequests,
-                                            )
-                                            .tooltip(crate::tr!("pull_requests.toggle"))
-                                            .aria_label(label)
-                                            .child(numbers)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.on_toggle_panel(
-                                                    &TogglePanel::PullRequests,
-                                                    window,
-                                                    cx,
+                                badge.fold_across_gap(
+                                    gpui::rems(0.5).to_pixels(window.rem_size()),
+                                    h_flex()
+                                        .flex_none()
+                                        .max_w(gpui::relative(0.5))
+                                        .overflow_hidden()
+                                        .child(
+                                            Button::new("header-pr-badge")
+                                                .debug_selector(|| "header-pr-badge".into())
+                                                .ghost()
+                                                .small()
+                                                .compact()
+                                                .selected(
+                                                    right_panel_open
+                                                        && right_tab == RightTab::PullRequests,
                                                 )
-                                            })),
-                                    ),
+                                                .tooltip(crate::tr!("pull_requests.toggle"))
+                                                .aria_label(label)
+                                                .child(numbers)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.on_toggle_panel(
+                                                        &TogglePanel::PullRequests,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                })),
+                                        ),
+                                ),
                             )
                         },
                     ),
@@ -750,8 +802,9 @@ impl ChatView {
                                         this.on_toggle_panel(&TogglePanel::Plan, window, cx)
                                     })),
                             )
-                            .when(agents_cue.is_some(), |row| {
-                                row.child(
+                            .children(agents_toggle.map(|toggle| {
+                                toggle.fold_across_gap(
+                                    toggle_gap,
                                     div()
                                         .relative()
                                         .child(
@@ -776,9 +829,10 @@ impl ChatView {
                                         )
                                         .children(cue.take()),
                                 )
-                            })
-                            .when(self.workspace_store.read(cx).offers_preview(), |row| {
-                                row.child(
+                            }))
+                            .children(preview_toggle.map(|toggle| {
+                                toggle.fold_across_gap(
+                                    toggle_gap,
                                     Button::new("preview-panel")
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
@@ -793,7 +847,7 @@ impl ChatView {
                                             this.on_toggle_panel(&TogglePanel::Preview, window, cx)
                                         })),
                                 )
-                            })
+                            }))
                             .child(
                                 Button::new("diff-panel")
                                     .debug_selector(|| "diff-panel".into())
