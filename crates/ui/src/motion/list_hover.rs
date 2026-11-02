@@ -14,7 +14,7 @@ use std::time::Instant;
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
 
-use gpui::{App, EntityId, SharedString, Window};
+use gpui::{App, SharedString, Window};
 
 /// The item of a list the pointer is over, owned by the list, and how far
 /// each item's hover reveal (a message's actions, a formula's tools) is in.
@@ -25,9 +25,8 @@ use gpui::{App, EntityId, SharedString, Window};
 #[derive(Clone)]
 pub(crate) struct ListHover(Rc<RefCell<Hover>>);
 
+#[derive(Default)]
 struct Hover {
-    /// The view that draws the list, notified when the hover moves.
-    view: Option<EntityId>,
     /// The item the pointer is over, and over how many of its parts: an item
     /// whose part blocks the pointer from the item (its actions over it)
     /// hands those parts the same handler, and the item stays hovered while
@@ -38,23 +37,9 @@ struct Hover {
 }
 
 impl ListHover {
-    /// The hover of a list `view` draws.
-    pub(crate) fn new(view: EntityId) -> Self {
-        Self(Rc::new(RefCell::new(Hover {
-            view: Some(view),
-            hovered: None,
-            fading: HashMap::new(),
-        })))
-    }
-
-    /// The hover of a list drawn outside a view that owns it (a gallery);
-    /// a move redraws the window.
-    pub(crate) fn detached() -> Self {
-        Self(Rc::new(RefCell::new(Hover {
-            view: None,
-            hovered: None,
-            fading: HashMap::new(),
-        })))
+    /// The hover of one list, nothing hovered.
+    pub(crate) fn new() -> Self {
+        Self(Rc::default())
     }
 
     /// The handler for the `on_hover` of `item`, or of one of its parts: the
@@ -102,7 +87,7 @@ impl ListHover {
     ) {
         let now = cx.background_executor().now();
         let reduce = cx.reduce_motion();
-        let view = {
+        {
             let mut hover = self.0.borrow_mut();
             for (item, to) in [(previous, 0f32), (next, 1.)] {
                 let Some(item) = item else { continue };
@@ -112,12 +97,11 @@ impl ListHover {
                     hover.fading.insert(item, (from, to, now));
                 }
             }
-            hover.view
-        };
-        match view {
-            Some(view) => cx.notify(view),
-            None => window.refresh(),
         }
+        // The pointer moved over the list, or the list under a still
+        // pointer: nothing the list holds changed, so it is redrawn rather
+        // than its view notified.
+        window.refresh();
     }
 
     /// How far `item`'s hover reveal is in, from 0 to 1, keeping frames
@@ -233,8 +217,8 @@ mod tests {
         let drawn = Rc::new(RefCell::new(HashMap::new()));
         let (_, cx) = cx.add_window_view({
             let drawn = drawn.clone();
-            |_, cx| Rows {
-                hover: ListHover::new(cx.entity_id()),
+            |_, _| Rows {
+                hover: ListHover::new(),
                 drawn,
             }
         });
