@@ -120,13 +120,17 @@ impl TouchSelectionOverlay {
     /// The elements to add to the owner: the handles, and the menu when it
     /// is open. Each floats in window coordinates.
     pub(crate) fn into_elements(self, window: &Window, cx: &App) -> Vec<AnyElement> {
-        let Some(snapshot) = (self.source)(window, cx) else {
-            return Vec::new();
-        };
         let mut elements = Vec::with_capacity(2);
+        // The handles stay mounted after the selection goes, to fade out.
         if let Some(on_drag) = self.on_drag {
-            elements.push(SelectionHandles::new(self.source, on_drag).into_any_element());
+            elements.push(
+                SelectionHandles::new(self.id.clone(), self.source.clone(), on_drag)
+                    .into_any_element(),
+            );
         }
+        let Some(snapshot) = (self.source)(window, cx) else {
+            return elements;
+        };
 
         // The menu stays mounted while there is a selection, so it fades in
         // as it opens and out as it closes (a pan sets it aside).
