@@ -355,9 +355,14 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
 
 /// The parsed theme for `mode`.
 fn themes(mode: ThemeMode, cx: &App) -> Theme {
+    palette(mode, cx).clone()
+}
+
+/// `mode`'s palette at rest: the one a glide toward `mode` ends on.
+pub(crate) fn palette(mode: ThemeMode, cx: &App) -> &Theme {
     match mode {
-        ThemeMode::Light => cx.global::<Themes>().light.clone(),
-        ThemeMode::Dark => cx.global::<Themes>().dark.clone(),
+        ThemeMode::Light => &cx.global::<Themes>().light,
+        ThemeMode::Dark => &cx.global::<Themes>().dark,
     }
 }
 

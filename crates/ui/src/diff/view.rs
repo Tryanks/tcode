@@ -152,6 +152,26 @@ struct RenderAppearance {
     whitespace_style: HighlightStyle,
 }
 
+impl RenderAppearance {
+    /// The colours a rendered file bakes into its text, from the shown
+    /// mode's palette at rest: the file is kept until the mode changes
+    /// again, so colours sampled while the theme glides would stay.
+    fn of(cx: &App) -> Self {
+        let theme = crate::theme::palette(cx.theme().mode, cx);
+        Self {
+            theme: theme.highlight_theme.clone(),
+            colors: DiffColors {
+                added_word_bg: theme.success.opacity(0.30),
+                removed_word_bg: theme.danger.opacity(0.28),
+            },
+            whitespace_style: HighlightStyle {
+                color: Some(theme.muted_foreground),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 struct GitPreview {
     session: String,
     scope: DiffScope,
@@ -577,17 +597,7 @@ impl DiffPanel {
                 || c.show_invisibles != self.show_invisibles
         });
         if fresh {
-            let appearance = RenderAppearance {
-                theme: cx.theme().highlight_theme.clone(),
-                colors: DiffColors {
-                    added_word_bg: cx.theme().success.opacity(0.30),
-                    removed_word_bg: cx.theme().danger.opacity(0.28),
-                },
-                whitespace_style: HighlightStyle {
-                    color: Some(cx.theme().muted_foreground),
-                    ..Default::default()
-                },
-            };
+            let appearance = RenderAppearance::of(cx);
             let (changes, texts) = match scope {
                 DiffScope::Turn(turn) => {
                     let changes = self
